@@ -139,6 +139,15 @@ describe("TC002 multi-asset pixel dashboard", () => {
     expect(formatAssetValue("usdcny", 7.1824)).toBe("7.182");
   });
 
+  test("keeps the digit one compact so a price cannot read like a clock time", () => {
+    const rendered = renderDashboard([markets[1]!], {
+      ...DEFAULT_SETTINGS,
+      assets: ["eth"],
+      showChange: false,
+    });
+    expect(rendered.frames[0]!.getPixel(4, 1)).not.toEqual([0, 0, 0]);
+  });
+
   test("renders six unique display-safe icon designs on true black", () => {
     const hashes = ASSET_IDS.map((assetId) => {
       const canvas = renderAssetIconTile(assetId);

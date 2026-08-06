@@ -1,64 +1,58 @@
 import { mkdir } from "node:fs/promises";
-import { ASSET_IDS } from "../src/assets.ts";
-import { loadRequestTimeoutMs } from "../src/config.ts";
-import {
-  createPreviewStrip,
-  createScaledPreview,
-  renderAssetIconTile,
-  renderDashboard,
-} from "../src/pixel-ui.ts";
+import { loadConfig } from "../src/config.ts";
+import { createPreviewStrip } from "../src/pixel-ui.ts";
 import { MarketDataClient } from "../src/price.ts";
-import { SettingsStore } from "../src/settings.ts";
+import { WorkspaceStore } from "../src/workspace.ts";
+import { WorkspaceController } from "../src/workspace-controller.ts";
+import { PixelAssetStore } from "../src/pixel-asset-store.ts";
 
-const requestTimeoutMs = loadRequestTimeoutMs();
-const settings = await new SettingsStore(".runtime/settings.json").load();
-const client = new MarketDataClient({ timeoutMs: requestTimeoutMs });
-const results = await Promise.allSettled(
-  settings.assets.map((assetId) => client.getAsset(assetId)),
+const config = loadConfig({
+  ...process.env,
+  CLOCK_HOST: process.env.CLOCK_HOST || "preview.invalid",
+});
+const workspaceStore = new WorkspaceStore(
+  ".runtime/workspace.json",
+  ".runtime/settings.json",
+  config.appName,
 );
-const markets = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-if (markets.length === 0) throw new Error("none of the selected assets returned market data");
-const frame = renderDashboard(markets, settings);
+const workspace = await workspaceStore.load();
+const controller = new WorkspaceController({
+  config,
+  workspace,
+  workspaceStore,
+  marketClient: new MarketDataClient({ timeoutMs: config.requestTimeoutMs }),
+  pushPayload: async () => ({ status: 200 }),
+  deleteApp: async () => ({ status: 200 }),
+  pixelAssetStore: new PixelAssetStore(".runtime/pixel-assets"),
+});
 
-await mkdir(".runtime", { recursive: true });
-const extension = frame.mimeType === "image/gif" ? "gif" : "png";
-const deviceImage = `.runtime/market-ui-52x16.${extension}`;
-await Bun.write(deviceImage, frame.image);
-await Promise.all(
-  frame.frames.map((canvas, index) =>
-    Bun.write(`.runtime/market-ui-frame-${index + 1}.png`, canvas.toPng()),
-  ),
-);
-await Promise.all(
-  frame.frames.map((canvas, index) =>
-    Bun.write(
-      `.runtime/market-ui-frame-${index + 1}-preview.png`,
-      createScaledPreview(canvas),
-    ),
-  ),
-);
-const previewImage = ".runtime/market-ui-preview-strip.png";
-const iconImage = ".runtime/asset-icons-preview.png";
-await Bun.write(previewImage, createPreviewStrip(frame.frames));
-await Bun.write(
-  iconImage,
-  createPreviewStrip(ASSET_IDS.map((assetId) => renderAssetIconTile(assetId)), 16, 16),
-);
-
-console.log(
-  JSON.stringify(
-    {
-      assets: frame.assetIds,
-      label: frame.label,
-      frames: frame.frames.length,
-      frameDelaysMs: frame.frameDelaysMs,
-      animationDurationMs: frame.animationDurationMs,
+await mkdir(".runtime/previews", { recursive: true });
+const results: unknown[] = [];
+for (const channel of workspace.channels) {
+  try {
+    const rendered = await controller.previewChannel(channel.id);
+    const extension = rendered.mimeType === "image/gif" ? "gif" : "png";
+    const deviceImage = `.runtime/previews/${channel.appName}.${extension}`;
+    const previewImage = `.runtime/previews/${channel.appName}-strip.png`;
+    await Bun.write(deviceImage, rendered.image);
+    await Bun.write(previewImage, createPreviewStrip(rendered.frames.slice(0, 12), 8, 8));
+    results.push({
+      channel: channel.name,
+      appName: channel.appName,
+      contentIds: rendered.contentIds,
+      frames: rendered.frames.length,
+      animationDurationMs: rendered.animationDurationMs,
       deviceImage,
       previewImage,
-      iconImage,
-      failures: results.filter((result) => result.status === "rejected").length,
-    },
-    null,
-    2,
-  ),
-);
+      contentErrors: rendered.contentErrors,
+    });
+  } catch (error) {
+    results.push({
+      channel: channel.name,
+      appName: channel.appName,
+      error: error instanceof Error ? error.message : "preview failed",
+    });
+  }
+}
+
+console.log(JSON.stringify({ channels: results }, null, 2));

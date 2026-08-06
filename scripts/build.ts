@@ -1,5 +1,6 @@
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { build as buildWeb } from "vite";
 
 const root = join(import.meta.dir, "..");
 const outdir = join(root, "dist");
@@ -11,6 +12,8 @@ const entrypoints = [
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
+
+await buildWeb({ configFile: join(root, "vite.config.ts") });
 
 for (const entrypoint of entrypoints) {
   const result = await Bun.build({
@@ -30,4 +33,4 @@ await copyFile(
   join(outdir, "assets/tc002-frame.png"),
 );
 
-console.log("Built service bundles and copied runtime assets to dist/");
+console.log("Built Cladd UI, service bundles, and runtime assets to dist/");

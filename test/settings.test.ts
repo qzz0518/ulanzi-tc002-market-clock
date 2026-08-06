@@ -22,13 +22,14 @@ afterEach(async () => {
 });
 
 describe("asset presets", () => {
-  test("defines six unique, addressable presets", () => {
+  test("defines ten unique, addressable presets including the four migrated stocks", () => {
     expect(ASSET_PRESETS.map((preset) => preset.id)).toEqual([...ASSET_IDS]);
-    expect(new Set(ASSET_PRESETS.map((preset) => preset.id)).size).toBe(6);
+    expect(new Set(ASSET_PRESETS.map((preset) => preset.id)).size).toBe(10);
     expect(isAssetId("usdcny")).toBe(true);
     expect(isAssetId("usdjpy")).toBe(false);
     expect(isAssetId("doge")).toBe(false);
     expect(getAssetPreset("gold").changePeriod).toBeUndefined();
+    expect(getAssetPreset("aapl")).toMatchObject({ kind: "stock", yahooSymbol: "AAPL" });
   });
 });
 

@@ -15,7 +15,7 @@ health_port="${HEALTH_PORT:-43820}"
 
 usage() {
   cat <<'USAGE'
-Build and start the Zerah Ulanzi TC002 market clock with Docker Compose.
+Build and start the Zerah Ulanzi TC002 Pixel Studio with Docker Compose.
 
 Usage:
   scripts/install-docker.sh [options]

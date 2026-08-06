@@ -1,13 +1,14 @@
 {
-  "name": "ulanzi-tc002-market-clock",
-  "version": "2.0.0",
+  "name": "ulanzi-tc002-content-studio",
+  "version": "3.0.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "author": "zerah",
-  "description": "Configurable multi-asset pixel market dashboard for the Ulanzi TC002, powered by Bun.",
+  "description": "Extensible multi-channel content studio for the Ulanzi TC002, powered by Bun.",
   "type": "module",
   "packageManager": "bun@1.3.14",
   "scripts": {
-    "start": "bun run src/service.ts",
+    "start": "bun run build && bun run dist/service.js",
     "build": "bun run scripts/build.ts",
     "preview": "bun run scripts/preview.ts",
     "status": "bun run scripts/status.ts",
@@ -19,10 +20,26 @@
     "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.3.14",
-    "typescript": "^7.0.2"
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
   },
   "dependencies": {
-    "gifenc": "^1.0.3"
+    "@cladd-ui/react": "^0.18.5",
+    "clsx": "^2.1.1",
+    "gifenc": "^1.0.3",
+    "gifuct-js": "^2.1.2",
+    "lucide-react": "^1.29.0",
+    "pngjs": "^7.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0",
+    "tw-animate-css": "^1.4.0"
   }
 }

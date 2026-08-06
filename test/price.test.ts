@@ -6,6 +6,7 @@ import {
   fetchGoldAsset,
   fetchKrakenAsset,
   fetchUsdCnyAsset,
+  fetchYahooStockAsset,
   type FetchLike,
 } from "../src/price.ts";
 
@@ -82,6 +83,33 @@ describe("multi-asset market data", () => {
       sourceTime: "2026-08-06",
     });
     expect(quote.changePercent).toBeCloseTo(-0.05566, 4);
+  });
+
+  test("parses the four PixDeck Yahoo stock presets with previous-close change", async () => {
+    const fetcher: FetchLike = async (input, init) => {
+      expect(String(input)).toContain("/v8/finance/chart/AAPL");
+      expect(new Headers(init?.headers).get("User-Agent")).toContain("ulanzi");
+      return jsonResponse({
+        chart: {
+          result: [{
+            meta: {
+              regularMarketPrice: 233.19,
+              chartPreviousClose: 230,
+              regularMarketTime: 1_785_993_590,
+            },
+          }],
+          error: null,
+        },
+      });
+    };
+    const quote = await fetchYahooStockAsset("aapl", fetcher, 100, NOW);
+    expect(quote).toMatchObject({
+      assetId: "aapl",
+      provider: "yahoo",
+      price: 233.19,
+      changePeriod: "1D",
+    });
+    expect(quote.changePercent).toBeCloseTo(1.3869, 3);
   });
 
   test("falls back to Kraken and reports a scoped aggregate failure", async () => {

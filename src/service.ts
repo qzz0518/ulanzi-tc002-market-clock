@@ -1,8 +1,14 @@
-import { readClockInfo, pushClockPayload } from "./clock-client.ts";
+import {
+  deleteClockApp,
+  pushClockPayloadNamed,
+  readClockInfo,
+} from "./clock-client.ts";
 import { loadConfig } from "./config.ts";
 import { createControlHandler } from "./control-api.ts";
-import { DashboardController } from "./controller.ts";
-import { DEFAULT_SETTINGS, SettingsStore } from "./settings.ts";
+import { WorkspaceStore, createDefaultWorkspace } from "./workspace.ts";
+import { WorkspaceController } from "./workspace-controller.ts";
+import { PixelAssetStore } from "./pixel-asset-store.ts";
+import { UlanziPixelAssetClient } from "./ulanzi-pixel-assets.ts";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown error";
@@ -13,23 +19,32 @@ function log(event: string, details: Record<string, unknown> = {}): void {
 }
 
 const config = loadConfig();
-const settingsStore = new SettingsStore(".runtime/settings.json");
-let settings = DEFAULT_SETTINGS;
+const workspaceStore = new WorkspaceStore(
+  ".runtime/workspace.json",
+  ".runtime/settings.json",
+  config.appName,
+);
+const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
+const ulanziPixelAssets = new UlanziPixelAssetClient({ timeoutMs: config.requestTimeoutMs });
+let workspace = createDefaultWorkspace(config.appName);
 try {
-  settings = await settingsStore.load();
+  workspace = await workspaceStore.load();
 } catch (error) {
-  log("settings_load_failed", { error: errorMessage(error), fallback: "defaults" });
+  log("workspace_load_failed", { error: errorMessage(error), fallback: "defaults" });
 }
 
-const controller = new DashboardController({
+const controller = new WorkspaceController({
   config,
-  settings,
-  settingsStore,
-  pushPayload: (payload) => pushClockPayload(config, payload),
+  workspace,
+  workspaceStore,
+  pushPayload: (appName, payload) => pushClockPayloadNamed(config, appName, payload),
+  deleteApp: (appName) => deleteClockApp(config, appName),
+  pixelAssetStore,
 });
 
 let stopping = false;
 let wakeSleep: (() => void) | undefined;
+const loggedUpdateCounts = new Map<string, number>();
 
 function interruptibleSleep(ms: number): Promise<void> {
   if (stopping) return Promise.resolve();
@@ -48,6 +63,7 @@ function interruptibleSleep(ms: number): Promise<void> {
 
 const controlHandler = createControlHandler(controller, {
   onSettingsChanged: () => wakeSleep?.(),
+  pixelAssetLibrary: { client: ulanziPixelAssets, store: pixelAssetStore },
 });
 const controlServer = Bun.serve({
   hostname: config.controlHost,
@@ -69,8 +85,10 @@ process.once("SIGTERM", () => beginShutdown("SIGTERM"));
 async function run(): Promise<void> {
   log("service_started", {
     clockHost: config.clockHost,
-    appName: config.appName,
-    selectedAssets: controller.getSettings().assets,
+    channels: controller.getWorkspace().channels.map((channel) => ({
+      appName: channel.appName,
+      items: channel.items.map((item) => item.contentId),
+    })),
     controlUrl: `http://${config.controlHost}:${config.healthPort}/`,
   });
 
@@ -84,24 +102,31 @@ async function run(): Promise<void> {
 
   while (!stopping) {
     try {
-      const state = await controller.pushNow("scheduled");
-      if (state.updateCount === 1 || state.updateCount % 10 === 0 || state.degraded) {
-        log("dashboard_pushed", {
-          assets: state.assets.map((asset) => asset.assetId),
-          providers: state.assets.map((asset) => asset.provider),
-          animationDurationMs: state.animationDurationMs,
-          updateCount: state.updateCount,
+      const state = await controller.pushDue();
+      const updatedChannels = state.channels.filter((channel) =>
+        channel.updateCount > (loggedUpdateCounts.get(channel.id) ?? 0)
+      );
+      for (const channel of updatedChannels) {
+        loggedUpdateCounts.set(channel.id, channel.updateCount);
+      }
+      if (updatedChannels.length > 0 || state.degraded) {
+        log("channels_checked", {
+          channels: updatedChannels.map((channel) => ({
+            appName: channel.appName,
+            updateCount: channel.updateCount,
+            animationDurationMs: channel.animationDurationMs,
+            degraded: channel.degraded,
+          })),
           degraded: state.degraded,
         });
       }
     } catch (error) {
       log("update_failed", {
         error: errorMessage(error),
-        consecutiveFailures: controller.getState().consecutiveFailures,
       });
     }
 
-    await interruptibleSleep(controller.getEffectiveRefreshIntervalMs());
+    await interruptibleSleep(controller.getNextWakeMs());
   }
 
   log("service_stopped");

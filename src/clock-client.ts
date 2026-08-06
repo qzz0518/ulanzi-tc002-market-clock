@@ -163,8 +163,24 @@ export async function pushClockPayload(
   payload: ClockPayload,
   fetcher?: FetchLike,
 ): Promise<{ status: number }> {
+  return pushClockPayloadNamed(config, config.appName, payload, fetcher);
+}
+
+function validateCustomAppName(appName: string): string {
+  if (!/^[a-zA-Z0-9_-]{1,32}$/.test(appName)) {
+    throw new ClockRequestError("custom app name is invalid");
+  }
+  return appName;
+}
+
+async function postCustomApp(
+  config: AppConfig,
+  appName: string,
+  body: ClockPayload | Record<string, never>,
+  fetcher?: FetchLike,
+): Promise<{ status: number }> {
   const url = new URL(`http://${config.clockHost}/api/custom`);
-  url.searchParams.set("name", config.appName);
+  url.searchParams.set("name", validateCustomAppName(appName));
   const response = await requestClock(
     url.toString(),
     config.requestTimeoutMs,
@@ -174,7 +190,7 @@ export async function pushClockPayload(
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
       proxy: config.clockHttpProxy,
     },
     fetcher,
@@ -183,4 +199,21 @@ export async function pushClockPayload(
     throw new ClockRequestError(`clock returned HTTP ${response.status}`, response.status);
   }
   return { status: response.status };
+}
+
+export async function pushClockPayloadNamed(
+  config: AppConfig,
+  appName: string,
+  payload: ClockPayload,
+  fetcher?: FetchLike,
+): Promise<{ status: number }> {
+  return postCustomApp(config, appName, payload, fetcher);
+}
+
+export async function deleteClockApp(
+  config: AppConfig,
+  appName: string,
+  fetcher?: FetchLike,
+): Promise<{ status: number }> {
+  return postCustomApp(config, appName, {}, fetcher);
 }

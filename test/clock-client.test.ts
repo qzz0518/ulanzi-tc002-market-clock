@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config.ts";
 import {
   curlClockRequest,
+  deleteClockApp,
   pushClockPayload,
+  pushClockPayloadNamed,
   readClockInfo,
 } from "../src/clock-client.ts";
 import { buildImagePayload } from "../src/display.ts";
@@ -87,5 +89,25 @@ describe("TC002 HTTP client", () => {
         fetcher,
       ),
     ).rejects.toThrow("HTTP 404");
+  });
+
+  test("targets independent knob apps and removes stale names with an empty object", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const fetcher: FetchLike = async (input, init) => {
+      requests.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+      return new Response("ok");
+    };
+    const payload = buildImagePayload(
+      renderOfflineDashboard().image,
+      renderOfflineDashboard().mimeType,
+      30,
+    );
+    await pushClockPayloadNamed(testConfig(), "stocks", payload, fetcher);
+    await deleteClockApp(testConfig(), "old_stocks", fetcher);
+    expect(requests[0]?.url).toBe("http://192.0.2.240/api/custom?name=stocks");
+    expect(requests[1]).toEqual({
+      url: "http://192.0.2.240/api/custom?name=old_stocks",
+      body: {},
+    });
   });
 });

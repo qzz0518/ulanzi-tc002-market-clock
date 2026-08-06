@@ -1,13 +1,16 @@
 import { deflateSync } from "node:zlib";
-import { GIFEncoder, applyPalette } from "gifenc";
+import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { getAssetPreset, type AssetId, type ChangePeriod } from "./assets.ts";
 import type { AssetMarketData } from "./price.ts";
 import type { DashboardSettings } from "./settings.ts";
+import { getStockIconSource, isStockIconId } from "./stock-icons.ts";
 
 export type Rgb = readonly [number, number, number];
 
-const WIDTH = 52;
-const HEIGHT = 16;
+export const DISPLAY_WIDTH = 52;
+export const DISPLAY_HEIGHT = 16;
+const WIDTH = DISPLAY_WIDTH;
+const HEIGHT = DISPLAY_HEIGHT;
 
 // Background RGB zero is intentional: black pixels must switch LEDs fully off.
 const COLORS = {
@@ -33,29 +36,6 @@ const COLORS = {
   goldOrange: [242, 156, 31] as Rgb,
 } as const;
 
-const GIF_PALETTE: number[][] = [
-  [...COLORS.background],
-  [...COLORS.price],
-  [...COLORS.green],
-  [...COLORS.red],
-  [...COLORS.neutral],
-  [...COLORS.offline],
-  [...COLORS.dim],
-  [...COLORS.btc],
-  [...COLORS.ethCircle],
-  [...COLORS.ethMid],
-  [...COLORS.ethDark],
-  [...COLORS.ethBlack],
-  [...COLORS.bnb],
-  [...COLORS.bnbMark],
-  [...COLORS.solPurple],
-  [...COLORS.solBlue],
-  [...COLORS.solGreen],
-  [...COLORS.gold],
-  [...COLORS.goldLight],
-  [...COLORS.goldOrange],
-];
-
 export class PixelCanvas {
   readonly pixels: Uint8Array;
 
@@ -77,6 +57,12 @@ export class PixelCanvas {
     this.pixels[offset + 1] = color[1];
     this.pixels[offset + 2] = color[2];
     this.pixels[offset + 3] = 255;
+  }
+
+  getPixel(x: number, y: number): Rgb {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return [0, 0, 0];
+    const offset = (y * this.width + x) * 4;
+    return [this.pixels[offset]!, this.pixels[offset + 1]!, this.pixels[offset + 2]!];
   }
 
   fillRect(x: number, y: number, width: number, height: number, color: Rgb): void {
@@ -337,6 +323,18 @@ function drawUsdCnyIcon(canvas: PixelCanvas, x: number, y: number): void {
   drawText(canvas, "CNY", ICON_FONT, x, y + 7, COLORS.red);
 }
 
+function drawStockIcon(canvas: PixelCanvas, assetId: AssetId, x: number, y: number): void {
+  if (!isStockIconId(assetId)) return;
+  const source = getStockIconSource(assetId);
+  for (let row = 0; row < source.mask.length; row += 1) {
+    const line = source.mask[row]!;
+    for (let column = 0; column < line.length; column += 1) {
+      const color = source.colors[line[column]!];
+      if (color) canvas.setPixel(x + column, y + row, color);
+    }
+  }
+}
+
 export function drawAssetIcon(
   canvas: PixelCanvas,
   assetId: AssetId,
@@ -344,6 +342,7 @@ export function drawAssetIcon(
   y = 2,
   dimmed = false,
 ): void {
+  if (isStockIconId(assetId)) return drawStockIcon(canvas, assetId, x - 1, y - 2);
   if (assetId === "btc") return drawBitcoinIcon(canvas, x, y, dimmed);
   if (dimmed) return drawBitcoinIcon(canvas, x, y, true);
   if (assetId === "eth") return drawEthereumIcon(canvas, x - 1, y - 1);
@@ -359,6 +358,10 @@ function assetAccent(assetId: AssetId): Rgb {
   if (assetId === "bnb") return COLORS.bnb;
   if (assetId === "sol") return COLORS.solGreen;
   if (assetId === "gold") return COLORS.goldLight;
+  if (assetId === "aapl") return COLORS.price;
+  if (assetId === "msft") return [0, 164, 239];
+  if (assetId === "nvda") return [118, 185, 0];
+  if (assetId === "googl") return [66, 133, 244];
   return COLORS.price;
 }
 
@@ -380,7 +383,7 @@ function drawSevenSegmentDigit(
   digit: string,
   x: number,
   y: number,
-  width: 5 | 6,
+  width: 2 | 5 | 6,
   color: Rgb,
 ): void {
   const segments = DIGIT_SEGMENTS[digit];
@@ -403,6 +406,7 @@ function drawSevenSegmentDigit(
 }
 
 function numericGlyphWidth(character: string, digitWidth: 5 | 6): number {
+  if (character === "1") return 2;
   if (/\d/.test(character)) return digitWidth;
   if (character === ".") return 2;
   throw new Error(`unsupported numeric glyph: ${character}`);
@@ -426,7 +430,7 @@ function drawNumericText(
   let cursor = x;
   for (const character of text) {
     if (character === ".") canvas.fillRect(cursor, y + 9, 2, 2, color);
-    else drawSevenSegmentDigit(canvas, character, cursor, y, digitWidth, color);
+    else drawSevenSegmentDigit(canvas, character, cursor, y, character === "1" ? 2 : digitWidth, color);
     cursor += numericGlyphWidth(character, digitWidth) + 1;
   }
 }
@@ -539,7 +543,35 @@ function renderChangeFrame(
   return canvas;
 }
 
-function encodeGif(
+function paletteForFrames(frames: readonly PixelCanvas[]): number[][] {
+  const colors: number[][] = [[0, 0, 0]];
+  const seen = new Set<number>([0]);
+  for (const frame of frames) {
+    for (let offset = 0; offset < frame.pixels.length; offset += 4) {
+      const packed = (frame.pixels[offset]! << 16)
+        | (frame.pixels[offset + 1]! << 8)
+        | frame.pixels[offset + 2]!;
+      if (seen.has(packed)) continue;
+      seen.add(packed);
+      colors.push([packed >> 16 & 255, packed >> 8 & 255, packed & 255]);
+      if (colors.length > 256) {
+        const combined = new Uint8Array(
+          frames.reduce((length, candidate) => length + candidate.pixels.length, 0),
+        );
+        let cursor = 0;
+        for (const candidate of frames) {
+          combined.set(candidate.pixels, cursor);
+          cursor += candidate.pixels.length;
+        }
+        return quantize(combined, 256);
+      }
+    }
+  }
+  if (colors.length === 1) colors.push([255, 255, 255]);
+  return colors;
+}
+
+export function encodePixelAnimation(
   frames: readonly PixelCanvas[],
   frameDelaysMs: readonly number[],
 ): Uint8Array {
@@ -548,12 +580,13 @@ function encodeGif(
     throw new Error("each GIF frame requires an explicit delay");
   }
   const gif = GIFEncoder();
+  const palette = paletteForFrames(frames);
   for (const [index, frame] of frames.entries()) {
     if (frame.width !== WIDTH || frame.height !== HEIGHT) {
       throw new Error(`GIF frame must be ${WIDTH}x${HEIGHT}`);
     }
-    gif.writeFrame(applyPalette(frame.pixels, GIF_PALETTE), WIDTH, HEIGHT, {
-      ...(index === 0 ? { palette: GIF_PALETTE, repeat: 0 } : {}),
+    gif.writeFrame(applyPalette(frame.pixels, palette), WIDTH, HEIGHT, {
+      ...(index === 0 ? { palette, repeat: 0 } : {}),
       delay: frameDelaysMs[index],
       dispose: 1,
     });
@@ -599,7 +632,9 @@ export function renderDashboard(
 
   if (frames.length === 0) throw new Error("no selected asset has market data");
   const animationDurationMs = frameDelaysMs.reduce((sum, delay) => sum + delay, 0);
-  const image = frames.length === 1 ? frames[0]!.toPng() : encodeGif(frames, frameDelaysMs);
+  const image = frames.length === 1
+    ? frames[0]!.toPng()
+    : encodePixelAnimation(frames, frameDelaysMs);
   return {
     frames,
     frameDelaysMs,
@@ -632,7 +667,7 @@ export function renderOfflineDashboard(): RenderedDashboard {
 
 export function renderAssetIconTile(assetId: AssetId): PixelCanvas {
   const canvas = new PixelCanvas(16, 16);
-  drawAssetIcon(canvas, assetId, 2, 2);
+  drawAssetIcon(canvas, assetId, isStockIconId(assetId) ? 1 : 2, 2);
   return canvas;
 }
 

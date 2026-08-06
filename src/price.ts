@@ -1,6 +1,6 @@
 import { getAssetPreset, type AssetId, type ChangePeriod } from "./assets.ts";
 
-export type PriceProvider = "coinbase" | "kraken" | "gold-api" | "frankfurter";
+export type PriceProvider = "coinbase" | "kraken" | "gold-api" | "frankfurter" | "yahoo";
 
 export interface AssetMarketData {
   assetId: AssetId;
@@ -22,6 +22,7 @@ const COINBASE_BASE_URL = "https://api.exchange.coinbase.com/products";
 const KRAKEN_BASE_URL = "https://api.kraken.com/0/public/Ticker";
 const GOLD_URL = "https://api.gold-api.com/price/XAU";
 const FRANKFURTER_BASE_URL = "https://api.frankfurter.dev/v2/rates";
+const YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
 const COINBASE_MAX_TRADE_AGE_MS = 5 * 60_000;
 const GOLD_MAX_AGE_MS = 60 * 60_000;
 
@@ -81,7 +82,7 @@ async function fetchJson(
     const response = await fetcher(url, {
       headers: {
         Accept: "application/json",
-        "User-Agent": "ulanzi-tc002-market-clock/2.0",
+        "User-Agent": "ulanzi-tc002-content-studio/3.0",
       },
       signal: controller.signal,
     });
@@ -279,6 +280,58 @@ export async function fetchUsdCnyAsset(
   };
 }
 
+export async function fetchYahooStockAsset(
+  assetId: AssetId,
+  fetcher: FetchLike = fetch,
+  timeoutMs = 5_000,
+  nowMs = Date.now(),
+): Promise<AssetMarketData> {
+  const preset = getAssetPreset(assetId);
+  if (!preset.yahooSymbol) {
+    throw new PriceSourceError(assetId, "yahoo", `Yahoo Finance does not support ${assetId}`);
+  }
+  const body = asRecord(
+    await fetchJson(
+      assetId,
+      "yahoo",
+      `${YAHOO_CHART_BASE_URL}/${encodeURIComponent(preset.yahooSymbol)}`,
+      fetcher,
+      timeoutMs,
+    ),
+  );
+  const chart = body ? asRecord(body.chart) : undefined;
+  const result = chart?.result;
+  const firstResult = Array.isArray(result) ? asRecord(result[0]) : undefined;
+  const meta = firstResult ? asRecord(firstResult.meta) : undefined;
+  if (!meta) {
+    throw new PriceSourceError(assetId, "yahoo", "yahoo returned no quote metadata");
+  }
+  const { price, rawPrice } = parsePositivePrice(
+    assetId,
+    "yahoo",
+    meta.regularMarketPrice,
+  );
+  const previous = parsePositivePrice(
+    assetId,
+    "yahoo",
+    meta.chartPreviousClose ?? meta.previousClose,
+  ).price;
+  const sourceTimeSeconds = Number(meta.regularMarketTime);
+  const sourceTime = Number.isFinite(sourceTimeSeconds) && sourceTimeSeconds > 0
+    ? new Date(sourceTimeSeconds * 1_000).toISOString()
+    : undefined;
+  return {
+    assetId,
+    provider: "yahoo",
+    price,
+    rawPrice,
+    fetchedAt: new Date(nowMs).toISOString(),
+    ...(sourceTime ? { sourceTime } : {}),
+    changePercent: percentageChange(price, previous),
+    changePeriod: "1D",
+  };
+}
+
 export interface MarketDataClientOptions {
   fetcher?: FetchLike;
   timeoutMs?: number;
@@ -298,6 +351,9 @@ export class MarketDataClient {
 
   async getAsset(assetId: AssetId): Promise<AssetMarketData> {
     const nowMs = this.now();
+    if (getAssetPreset(assetId).kind === "stock") {
+      return fetchYahooStockAsset(assetId, this.fetcher, this.timeoutMs, nowMs);
+    }
     if (assetId === "gold") {
       return fetchGoldAsset(this.fetcher, this.timeoutMs, nowMs);
     }

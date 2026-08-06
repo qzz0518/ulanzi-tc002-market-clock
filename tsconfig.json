@@ -3,12 +3,16 @@
     "target": "ES2023",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "lib": ["ES2023", "DOM"],
-    "types": ["bun"],
+    "types": ["bun", "vite/client"],
+    "paths": {
+      "@/*": ["./web/src/*"]
+    },
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "web/**/*.ts", "web/**/*.tsx", "vite.config.ts"]
 }

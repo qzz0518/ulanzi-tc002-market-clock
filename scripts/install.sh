@@ -15,7 +15,7 @@ health_port="${HEALTH_PORT:-43820}"
 
 usage() {
   cat <<'USAGE'
-Install and start the native macOS Zerah Ulanzi TC002 market clock service.
+Install and start the native macOS Zerah Ulanzi TC002 Pixel Studio service.
 
 Usage:
   scripts/install.sh [options]

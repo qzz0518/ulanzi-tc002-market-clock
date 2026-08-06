@@ -13,7 +13,7 @@ try {
   console.log(JSON.stringify(await response.json(), null, 2));
 } catch (error) {
   const message = error instanceof Error ? error.message : "unknown error";
-  console.error(`Market clock service is not available: ${message}`);
+  console.error(`Pixel Studio service is not available: ${message}`);
   process.exitCode = 1;
 } finally {
   clearTimeout(timer);

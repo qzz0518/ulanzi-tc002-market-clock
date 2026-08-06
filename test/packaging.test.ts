@@ -66,6 +66,8 @@ describe("service packaging", () => {
     expect(dockerfile).toContain("USER bun");
     expect(dockerfile).toContain("HEALTHCHECK");
     expect(dockerfile).toContain("apk add --no-cache curl");
+    expect(dockerfile).toContain("COPY web ./web");
+    expect(dockerfile).toContain("vite.config.ts");
     expect(compose).toContain('CONTROL_HOST: "0.0.0.0"');
     expect(compose).toContain('CLOCK_HOST: "${CLOCK_HOST:?');
     expect(compose).not.toContain("CLOCK_HOST:-192.168");

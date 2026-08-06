@@ -13,7 +13,7 @@ Usage:
   scripts/uninstall-docker.sh
 
 The local image, project, compiled files, logs, Docker configuration, and saved
-dashboard settings are preserved.
+content workspace settings are preserved.
 USAGE
 }
 
@@ -49,4 +49,4 @@ else
     --file "$compose_file" \
     down --remove-orphans
 fi
-printf 'Removed Docker containers and network; preserved image and .runtime settings.\n'
+printf 'Removed Docker containers and network; preserved image and .runtime workspace.\n'

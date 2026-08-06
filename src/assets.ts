@@ -1,7 +1,18 @@
-export const ASSET_IDS = ["btc", "eth", "bnb", "sol", "gold", "usdcny"] as const;
+export const ASSET_IDS = [
+  "btc",
+  "eth",
+  "bnb",
+  "sol",
+  "gold",
+  "usdcny",
+  "aapl",
+  "msft",
+  "nvda",
+  "googl",
+] as const;
 
 export type AssetId = (typeof ASSET_IDS)[number];
-export type AssetKind = "crypto" | "metal" | "fx";
+export type AssetKind = "crypto" | "metal" | "fx" | "stock";
 export type ChangePeriod = "24H" | "1D";
 
 export interface AssetPreset {
@@ -14,6 +25,7 @@ export interface AssetPreset {
   changePeriod?: ChangePeriod;
   coinbaseProduct?: string;
   krakenPair?: string;
+  yahooSymbol?: string;
   sourceLabel: string;
   sourceNote: string;
 }
@@ -79,7 +91,7 @@ export const ASSET_PRESETS: readonly AssetPreset[] = [
     kind: "metal",
     decimals: 0,
     sourceLabel: "Gold API",
-    sourceNote: "实时黄金现货参考价；无免费 24H 开盘字段",
+    sourceNote: "实时黄金现货参考价 · 不支持涨跌显示",
   },
   {
     id: "usdcny",
@@ -91,6 +103,54 @@ export const ASSET_PRESETS: readonly AssetPreset[] = [
     changePeriod: "1D",
     sourceLabel: "Frankfurter",
     sourceNote: "多家央行日参考汇率，并非逐笔外汇报价",
+  },
+  {
+    id: "aapl",
+    name: "Apple",
+    symbol: "AAPL",
+    pair: "AAPL / USD",
+    kind: "stock",
+    decimals: 2,
+    changePeriod: "1D",
+    yahooSymbol: "AAPL",
+    sourceLabel: "Yahoo Finance",
+    sourceNote: "美股常规交易时段最新价与前收盘价",
+  },
+  {
+    id: "msft",
+    name: "Microsoft",
+    symbol: "MSFT",
+    pair: "MSFT / USD",
+    kind: "stock",
+    decimals: 2,
+    changePeriod: "1D",
+    yahooSymbol: "MSFT",
+    sourceLabel: "Yahoo Finance",
+    sourceNote: "美股常规交易时段最新价与前收盘价",
+  },
+  {
+    id: "nvda",
+    name: "NVIDIA",
+    symbol: "NVDA",
+    pair: "NVDA / USD",
+    kind: "stock",
+    decimals: 2,
+    changePeriod: "1D",
+    yahooSymbol: "NVDA",
+    sourceLabel: "Yahoo Finance",
+    sourceNote: "美股常规交易时段最新价与前收盘价",
+  },
+  {
+    id: "googl",
+    name: "Alphabet",
+    symbol: "GOOGL",
+    pair: "GOOGL / USD",
+    kind: "stock",
+    decimals: 2,
+    changePeriod: "1D",
+    yahooSymbol: "GOOGL",
+    sourceLabel: "Yahoo Finance",
+    sourceNote: "美股常规交易时段最新价与前收盘价",
   },
 ] as const;
 

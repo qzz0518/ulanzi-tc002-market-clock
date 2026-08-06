@@ -1,0 +1,599 @@
+import type { AppConfig } from "./config.ts";
+import { getContentDefinition, type ContentRenderResult } from "./content-registry.ts";
+import { buildImagePayload, type ClockPayload } from "./display.ts";
+import {
+  DISPLAY_HEIGHT,
+  DISPLAY_WIDTH,
+  encodePixelAnimation,
+  type PixelCanvas,
+} from "./pixel-ui.ts";
+import { MarketDataClient, type AssetMarketData, type PriceProvider } from "./price.ts";
+import { SettingsValidationError, validateSettings, type DashboardSettings } from "./settings.ts";
+import type { AssetId } from "./assets.ts";
+import { isPixelAssetRef, type PixelAssetStore } from "./pixel-asset-store.ts";
+import {
+  WORKSPACE_LIMITS,
+  WorkspaceStore,
+  legacySettingsFromWorkspace,
+  migrateDashboardSettings,
+  validateWorkspace,
+  type ChannelConfig,
+  type WorkspaceSettings,
+} from "./workspace.ts";
+
+export interface RenderedChannel {
+  frames: readonly PixelCanvas[];
+  frameDelaysMs: readonly number[];
+  image: Uint8Array;
+  mimeType: "image/gif" | "image/png";
+  label: string;
+  contentIds: readonly string[];
+  assetIds: readonly AssetId[];
+  animationDurationMs: number;
+  contentErrors: Record<string, string>;
+}
+
+export interface ChannelRuntimeSnapshot {
+  id: string;
+  name: string;
+  appName: string;
+  enabled: boolean;
+  healthy: boolean;
+  degraded: boolean;
+  pushing: boolean;
+  effectiveRefreshIntervalMs: number;
+  animationDurationMs: number;
+  contentIds: string[];
+  contentErrors: Record<string, string>;
+  assetIds: AssetId[];
+  lastPushAt?: string;
+  lastError?: string;
+  updateCount: number;
+}
+
+export interface WorkspaceAssetSnapshot {
+  assetId: AssetId;
+  provider: PriceProvider;
+  price: number;
+  changePercent?: number;
+  changePeriod?: "24H" | "1D";
+  fetchedAt: string;
+  sourceTime?: string;
+}
+
+export interface WorkspaceRuntimeSnapshot {
+  service: "ulanzi-tc002-content-hub";
+  startedAt: string;
+  healthy: boolean;
+  degraded: boolean;
+  pushing: boolean;
+  deviceReachable: boolean;
+  deviceVersions?: { mcu?: string; app?: string };
+  workspace: WorkspaceSettings;
+  channels: ChannelRuntimeSnapshot[];
+  assets: WorkspaceAssetSnapshot[];
+  cleanupErrors: Record<string, string>;
+}
+
+interface MutableChannelRuntime {
+  pushing: boolean;
+  animationDurationMs?: number;
+  contentErrors: Record<string, string>;
+  assetIds: AssetId[];
+  lastPushAt?: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+  updateCount: number;
+}
+
+export interface WorkspaceControllerOptions {
+  config: AppConfig;
+  workspace: WorkspaceSettings;
+  workspaceStore: WorkspaceStore;
+  marketClient?: MarketDataClient;
+  pushPayload: (appName: string, payload: ClockPayload) => Promise<{ status: number }>;
+  deleteApp: (appName: string) => Promise<{ status: number }>;
+  pixelAssetStore?: PixelAssetStore;
+  now?: () => number;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown error";
+}
+
+const PREVIEW_CACHE_TTL_MS = 5_000;
+const PREVIEW_CACHE_LIMIT = 16;
+
+export class WorkspaceController {
+  private readonly config: AppConfig;
+  private readonly workspaceStore: WorkspaceStore;
+  private readonly marketClient: MarketDataClient;
+  private readonly pushPayload: WorkspaceControllerOptions["pushPayload"];
+  private readonly deleteApp: WorkspaceControllerOptions["deleteApp"];
+  private readonly pixelAssetStore?: PixelAssetStore;
+  private readonly now: () => number;
+  private readonly startedAt: string;
+  private workspace: WorkspaceSettings;
+  private readonly marketCache = new Map<AssetId, AssetMarketData>();
+  private readonly marketErrors = new Map<AssetId, string>();
+  private readonly channelRuntime = new Map<string, MutableChannelRuntime>();
+  private readonly previewCache = new Map<string, {
+    rendered: RenderedChannel;
+    expiresAt: number;
+  }>();
+  private readonly previewInFlight = new Map<string, Promise<RenderedChannel>>();
+  private cleanupErrors: Record<string, string> = {};
+  private deviceReachable = false;
+  private deviceVersions?: { mcu?: string; app?: string };
+  private activePushCount = 0;
+  private deviceQueue: Promise<void> = Promise.resolve();
+
+  constructor(options: WorkspaceControllerOptions) {
+    this.config = options.config;
+    this.workspaceStore = options.workspaceStore;
+    this.marketClient = options.marketClient ?? new MarketDataClient({
+      timeoutMs: options.config.requestTimeoutMs,
+    });
+    this.pushPayload = options.pushPayload;
+    this.deleteApp = options.deleteApp;
+    this.pixelAssetStore = options.pixelAssetStore;
+    this.now = options.now ?? Date.now;
+    this.startedAt = new Date(this.now()).toISOString();
+    this.workspace = this.validateKnownContent(options.workspace);
+    this.syncRuntime();
+  }
+
+  private validateKnownContent(value: unknown): WorkspaceSettings {
+    const workspace = validateWorkspace(value);
+    for (const channel of workspace.channels) {
+      for (const item of channel.items) {
+        try {
+          getContentDefinition(item.contentId);
+        } catch {
+          throw new SettingsValidationError(`unknown contentId: ${item.contentId}`);
+        }
+        if (item.contentId === "creative:canvas") {
+          const pixels = item.options.pixels;
+          if (!Array.isArray(pixels) || pixels.length !== WORKSPACE_LIMITS.maxCanvasPixels) {
+            throw new SettingsValidationError(
+              `canvas must contain exactly ${WORKSPACE_LIMITS.maxCanvasPixels} pixels`,
+            );
+          }
+          if (!pixels.every((pixel) =>
+            typeof pixel === "number"
+            && Number.isInteger(pixel)
+            && pixel >= 0
+            && pixel <= 0xffffff
+          )) {
+            throw new SettingsValidationError("canvas pixels must be RGB integers");
+          }
+        } else if (item.contentId === "creative:pixel-asset") {
+          if (!isPixelAssetRef(item.options.assetRef)) {
+            throw new SettingsValidationError("pixel asset must contain a valid local assetRef");
+          }
+          for (const key of ["officialId", "title", "author", "sourceUrl"] as const) {
+            const value = item.options[key];
+            if (typeof value !== "string" || value.length > 256) {
+              throw new SettingsValidationError(`pixel asset ${key} is invalid`);
+            }
+          }
+          if (!/^\d{1,20}$/.test(String(item.options.officialId))) {
+            throw new SettingsValidationError("pixel asset officialId is invalid");
+          }
+        }
+      }
+    }
+    return workspace;
+  }
+
+  private syncRuntime(): void {
+    const ids = new Set(this.workspace.channels.map((channel) => channel.id));
+    for (const id of this.channelRuntime.keys()) {
+      if (!ids.has(id)) this.channelRuntime.delete(id);
+    }
+    for (const channel of this.workspace.channels) {
+      if (!this.channelRuntime.has(channel.id)) {
+        this.channelRuntime.set(channel.id, {
+          pushing: false,
+          contentErrors: {},
+          assetIds: [],
+          updateCount: 0,
+        });
+      }
+    }
+  }
+
+  getWorkspace(): WorkspaceSettings {
+    return structuredClone(this.workspace);
+  }
+
+  getSettings(): DashboardSettings {
+    return legacySettingsFromWorkspace(this.workspace);
+  }
+
+  async saveWorkspace(value: unknown): Promise<WorkspaceSettings> {
+    const next = this.validateKnownContent(value);
+    const previous = this.workspace;
+    const saved = await this.workspaceStore.save(next);
+    this.workspace = saved;
+    this.syncRuntime();
+    for (const channel of saved.channels) {
+      const old = previous.channels.find((candidate) => candidate.id === channel.id);
+      if (
+        !old
+        || old.appName !== channel.appName
+        || old.enabled !== channel.enabled
+        || JSON.stringify(old.items) !== JSON.stringify(channel.items)
+      ) {
+        const runtime = this.channelRuntime.get(channel.id)!;
+        runtime.animationDurationMs = undefined;
+        runtime.contentErrors = {};
+        runtime.assetIds = [];
+        runtime.lastPushAt = undefined;
+        runtime.lastAttemptAt = undefined;
+        runtime.lastError = undefined;
+      }
+    }
+
+    const retainedApps = new Set(
+      saved.channels.filter((channel) => channel.enabled).map((channel) => channel.appName),
+    );
+    const staleApps = new Set(
+      previous.channels
+        .filter((channel) => channel.enabled && !retainedApps.has(channel.appName))
+        .map((channel) => channel.appName),
+    );
+    for (const appName of staleApps) {
+      try {
+        await this.queueDeviceWrite(() => this.deleteApp(appName));
+        delete this.cleanupErrors[appName];
+      } catch (error) {
+        this.cleanupErrors[appName] = errorMessage(error);
+      }
+    }
+    return this.getWorkspace();
+  }
+
+  async saveSettings(value: unknown): Promise<DashboardSettings> {
+    const settings = validateSettings(value);
+    await this.saveWorkspace(migrateDashboardSettings(settings, this.config.appName));
+    return this.getSettings();
+  }
+
+  setDeviceInfo(info: { mcuVersion?: string; appVersion?: string }): void {
+    this.deviceReachable = true;
+    this.deviceVersions = { mcu: info.mcuVersion, app: info.appVersion };
+  }
+
+  getEffectiveRefreshIntervalMs(channel: ChannelConfig): number {
+    const runtime = this.channelRuntime.get(channel.id);
+    const animationDurationMs = runtime?.animationDurationMs
+      ?? channel.items.reduce((sum, item) => sum + item.durationMs, 0);
+    return Math.max(channel.refreshIntervalMs, animationDurationMs);
+  }
+
+  getNextWakeMs(): number {
+    const now = this.now();
+    const dueIn = this.workspace.channels
+      .filter((channel) => channel.enabled)
+      .map((channel) => {
+        const runtime = this.channelRuntime.get(channel.id)!;
+        const lastActivity = runtime.lastPushAt ?? runtime.lastAttemptAt;
+        if (!lastActivity) return 0;
+        return Math.max(
+          0,
+          Date.parse(lastActivity) + this.getEffectiveRefreshIntervalMs(channel) - now,
+        );
+      });
+    const channelWake = dueIn.length === 0 ? 60_000 : Math.max(250, Math.min(...dueIn));
+    return Object.keys(this.cleanupErrors).length > 0 ? Math.min(channelWake, 60_000) : channelWake;
+  }
+
+  getState(): WorkspaceRuntimeSnapshot {
+    const now = this.now();
+    const channels = this.workspace.channels.map((channel): ChannelRuntimeSnapshot => {
+      const runtime = this.channelRuntime.get(channel.id)!;
+      const effectiveRefreshIntervalMs = this.getEffectiveRefreshIntervalMs(channel);
+      const lastPushMs = runtime.lastPushAt ? Date.parse(runtime.lastPushAt) : 0;
+      const healthy = !channel.enabled || (
+        lastPushMs > 0
+        && now - lastPushMs < Math.max(this.config.sourceStaleMs, effectiveRefreshIntervalMs * 2 + 5_000)
+        && !runtime.lastError
+      );
+      return {
+        id: channel.id,
+        name: channel.name,
+        appName: channel.appName,
+        enabled: channel.enabled,
+        healthy,
+        degraded: Object.keys(runtime.contentErrors).length > 0,
+        pushing: runtime.pushing,
+        effectiveRefreshIntervalMs,
+        animationDurationMs: runtime.animationDurationMs
+          ?? channel.items.reduce((sum, item) => sum + item.durationMs, 0),
+        contentIds: channel.items.map((item) => item.contentId),
+        contentErrors: { ...runtime.contentErrors },
+        assetIds: [...runtime.assetIds],
+        ...(runtime.lastPushAt ? { lastPushAt: runtime.lastPushAt } : {}),
+        ...(runtime.lastError ? { lastError: runtime.lastError } : {}),
+        updateCount: runtime.updateCount,
+      };
+    });
+    const enabled = channels.filter((channel) => channel.enabled);
+    return {
+      service: "ulanzi-tc002-content-hub",
+      startedAt: this.startedAt,
+      healthy: this.deviceReachable && enabled.length > 0 && enabled.every((channel) => channel.healthy),
+      degraded:
+        Object.keys(this.cleanupErrors).length > 0
+        || channels.some((channel) => channel.degraded || Boolean(channel.lastError)),
+      pushing: this.activePushCount > 0,
+      deviceReachable: this.deviceReachable,
+      ...(this.deviceVersions ? { deviceVersions: this.deviceVersions } : {}),
+      workspace: this.getWorkspace(),
+      channels,
+      assets: [...this.marketCache.values()].map((market) => ({
+        assetId: market.assetId,
+        provider: market.provider,
+        price: market.price,
+        ...(market.changePercent === undefined ? {} : { changePercent: market.changePercent }),
+        ...(market.changePeriod === undefined ? {} : { changePeriod: market.changePeriod }),
+        fetchedAt: market.fetchedAt,
+        ...(market.sourceTime ? { sourceTime: market.sourceTime } : {}),
+      })),
+      cleanupErrors: { ...this.cleanupErrors },
+    };
+  }
+
+  private async getMarket(assetId: AssetId, forceRefresh: boolean): Promise<AssetMarketData> {
+    const cached = this.marketCache.get(assetId);
+    if (!forceRefresh && cached) return cached;
+    try {
+      const market = await this.marketClient.getAsset(assetId);
+      this.marketCache.set(assetId, market);
+      this.marketErrors.delete(assetId);
+      return market;
+    } catch (error) {
+      const message = errorMessage(error);
+      this.marketErrors.set(assetId, message);
+      if (cached && this.now() - Date.parse(cached.fetchedAt) < this.config.sourceStaleMs) {
+        return cached;
+      }
+      throw error;
+    }
+  }
+
+  private validateRenderedItem(itemId: string, rendered: ContentRenderResult): void {
+    if (rendered.frames.length === 0 || rendered.frames.length !== rendered.frameDelaysMs.length) {
+      throw new Error(`${itemId} returned invalid frame timing`);
+    }
+    for (const [index, frame] of rendered.frames.entries()) {
+      if (frame.width !== DISPLAY_WIDTH || frame.height !== DISPLAY_HEIGHT) {
+        throw new Error(`${itemId} frame ${index} must be ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}`);
+      }
+      const delay = rendered.frameDelaysMs[index];
+      if (!Number.isInteger(delay) || delay! < 20 || delay! > 900_000) {
+        throw new Error(`${itemId} frame ${index} has an invalid delay`);
+      }
+    }
+  }
+
+  async previewChannel(value: string | ChannelConfig, forceRefresh = false): Promise<RenderedChannel> {
+    const channel = typeof value === "string"
+      ? this.workspace.channels.find((candidate) => candidate.id === value)
+      : this.validateKnownContent({ version: 3, channels: [value] }).channels[0];
+    if (!channel) throw new SettingsValidationError("channel not found");
+    const key = JSON.stringify(channel);
+    const now = this.now();
+
+    for (const [cacheKey, entry] of this.previewCache) {
+      if (entry.expiresAt <= now) this.previewCache.delete(cacheKey);
+    }
+    if (!forceRefresh) {
+      const cached = this.previewCache.get(key);
+      if (cached) return cached.rendered;
+    }
+
+    const inFlight = this.previewInFlight.get(key);
+    if (inFlight) return inFlight;
+
+    const rendering = this.renderChannel(channel, forceRefresh)
+      .then((rendered) => {
+        this.previewCache.delete(key);
+        this.previewCache.set(key, {
+          rendered,
+          expiresAt: this.now() + PREVIEW_CACHE_TTL_MS,
+        });
+        while (this.previewCache.size > PREVIEW_CACHE_LIMIT) {
+          const oldestKey = this.previewCache.keys().next().value;
+          if (oldestKey === undefined) break;
+          this.previewCache.delete(oldestKey);
+        }
+        return rendered;
+      })
+      .finally(() => {
+        if (this.previewInFlight.get(key) === rendering) {
+          this.previewInFlight.delete(key);
+        }
+      });
+    this.previewInFlight.set(key, rendering);
+    return rendering;
+  }
+
+  private async renderChannel(
+    channel: ChannelConfig,
+    forceRefresh: boolean,
+  ): Promise<RenderedChannel> {
+    const frames: PixelCanvas[] = [];
+    const frameDelaysMs: number[] = [];
+    const labels: string[] = [];
+    const contentIds: string[] = [];
+    const assetIds: AssetId[] = [];
+    const contentErrors: Record<string, string> = {};
+    const renderMarkets = new Map<AssetId, Promise<AssetMarketData>>();
+    const context = {
+      nowMs: this.now(),
+      forceRefresh,
+      getMarket: (assetId: AssetId, refresh: boolean) => {
+        let pending = renderMarkets.get(assetId);
+        if (!pending) {
+          pending = this.getMarket(assetId, refresh);
+          renderMarkets.set(assetId, pending);
+        }
+        return pending;
+      },
+      getPixelAsset: (assetRef: string, durationMs: number) => {
+        if (!this.pixelAssetStore) throw new Error("pixel asset store is unavailable");
+        return this.pixelAssetStore.render(assetRef, durationMs);
+      },
+    };
+
+    for (const item of channel.items) {
+      try {
+        const definition = getContentDefinition(item.contentId);
+        const rendered = await definition.render(context, item);
+        this.validateRenderedItem(item.id, rendered);
+        if (frames.length + rendered.frames.length > WORKSPACE_LIMITS.maxFramesPerChannel) {
+          throw new Error(
+            `channel exceeds the ${WORKSPACE_LIMITS.maxFramesPerChannel}-frame limit`,
+          );
+        }
+        frames.push(...rendered.frames);
+        frameDelaysMs.push(...rendered.frameDelaysMs);
+        labels.push(rendered.label);
+        contentIds.push(item.contentId);
+        assetIds.push(...rendered.assetIds ?? []);
+        for (const assetId of rendered.assetIds ?? []) {
+          const marketError = this.marketErrors.get(assetId);
+          if (marketError) contentErrors[item.id] = `cached market data: ${marketError}`;
+        }
+      } catch (error) {
+        contentErrors[item.id] = errorMessage(error);
+      }
+    }
+    if (frames.length === 0) {
+      throw new Error(Object.values(contentErrors)[0] ?? "channel rendered no frames");
+    }
+    const animationDurationMs = frameDelaysMs.reduce((sum, delay) => sum + delay, 0);
+    return {
+      frames,
+      frameDelaysMs,
+      image: frames.length === 1 ? frames[0]!.toPng() : encodePixelAnimation(frames, frameDelaysMs),
+      mimeType: frames.length === 1 ? "image/png" : "image/gif",
+      label: labels.join(" · "),
+      contentIds,
+      assetIds: [...new Set(assetIds)],
+      animationDurationMs,
+      contentErrors,
+    };
+  }
+
+  async pushChannel(channelId: string): Promise<WorkspaceRuntimeSnapshot> {
+    const channel = this.workspace.channels.find((candidate) => candidate.id === channelId);
+    if (!channel) throw new SettingsValidationError("channel not found");
+    if (!channel.enabled) throw new SettingsValidationError("disabled channels cannot be pushed");
+    const runtime = this.channelRuntime.get(channel.id)!;
+    runtime.pushing = true;
+    runtime.lastAttemptAt = new Date(this.now()).toISOString();
+    this.activePushCount += 1;
+    try {
+      const rendered = await this.renderChannel(channel, true);
+      const durationSeconds = Math.min(
+        86_400,
+        Math.max(
+          this.config.displayDurationSeconds,
+          Math.ceil(rendered.animationDurationMs / 1_000) + 30,
+        ),
+      );
+      await this.queueDeviceWrite(() =>
+        this.pushPayload(
+          channel.appName,
+          buildImagePayload(rendered.image, rendered.mimeType, durationSeconds),
+        )
+      );
+      runtime.animationDurationMs = rendered.animationDurationMs;
+      runtime.contentErrors = rendered.contentErrors;
+      runtime.assetIds = [...rendered.assetIds];
+      runtime.lastPushAt = new Date(this.now()).toISOString();
+      runtime.lastError = undefined;
+      runtime.updateCount += 1;
+      this.deviceReachable = true;
+    } catch (error) {
+      runtime.lastError = errorMessage(error);
+      if (Object.keys(runtime.contentErrors).length === 0) {
+        runtime.contentErrors = { channel: runtime.lastError };
+      }
+      throw error;
+    } finally {
+      runtime.pushing = false;
+      this.activePushCount -= 1;
+    }
+    return this.getState();
+  }
+
+  async pushAll(_reason: "scheduled" | "manual" = "manual"): Promise<WorkspaceRuntimeSnapshot> {
+    for (const channel of this.workspace.channels) {
+      if (!channel.enabled) continue;
+      try {
+        await this.pushChannel(channel.id);
+      } catch {
+        // Per-channel state contains the failure; continue independent channels.
+      }
+    }
+    return this.getState();
+  }
+
+  async pushDue(): Promise<WorkspaceRuntimeSnapshot> {
+    await this.retryCleanup();
+    const now = this.now();
+    for (const channel of this.workspace.channels) {
+      if (!channel.enabled) continue;
+      const runtime = this.channelRuntime.get(channel.id)!;
+      const lastActivity = runtime.lastPushAt ?? runtime.lastAttemptAt;
+      const due = !lastActivity
+        || now - Date.parse(lastActivity) >= this.getEffectiveRefreshIntervalMs(channel);
+      if (!due) continue;
+      try {
+        await this.pushChannel(channel.id);
+      } catch {
+        // Continue other channels; retry this channel after its configured interval.
+      }
+    }
+    return this.getState();
+  }
+
+  private async retryCleanup(): Promise<void> {
+    const retainedApps = new Set(
+      this.workspace.channels.filter((channel) => channel.enabled).map((channel) => channel.appName),
+    );
+    for (const appName of Object.keys(this.cleanupErrors)) {
+      if (retainedApps.has(appName)) {
+        delete this.cleanupErrors[appName];
+        continue;
+      }
+      try {
+        await this.queueDeviceWrite(() => this.deleteApp(appName));
+        delete this.cleanupErrors[appName];
+      } catch (error) {
+        this.cleanupErrors[appName] = errorMessage(error);
+      }
+    }
+  }
+
+  async pushNow(reason: "scheduled" | "manual" = "manual"): Promise<WorkspaceRuntimeSnapshot> {
+    return reason === "scheduled" ? this.pushDue() : this.pushAll(reason);
+  }
+
+  async preview(value?: unknown): Promise<RenderedChannel> {
+    if (value === undefined) return this.previewChannel(this.workspace.channels[0]!.id);
+    const settings = validateSettings(value);
+    const migrated = migrateDashboardSettings(settings, this.config.appName);
+    return this.renderChannel(migrated.channels[0]!, false);
+  }
+
+  private queueDeviceWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = this.deviceQueue.then(operation, operation);
+    this.deviceQueue = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
+}

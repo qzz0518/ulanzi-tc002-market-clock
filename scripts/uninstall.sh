@@ -5,12 +5,12 @@ readonly MACOS_LABEL="com.zerah.ulanzi-market-clock"
 
 usage() {
   cat <<'USAGE'
-Remove the native macOS Zerah Ulanzi TC002 market clock background service.
+Remove the native macOS Zerah Ulanzi TC002 Pixel Studio background service.
 
 Usage:
   scripts/uninstall.sh
 
-The project, compiled files, logs, and saved dashboard settings are preserved.
+The project, compiled files, logs, and saved content workspace are preserved.
 For Docker deployment, use scripts/uninstall-docker.sh instead.
 USAGE
 }
@@ -39,4 +39,4 @@ launchctl bootout "$domain/$MACOS_LABEL" >/dev/null 2>&1 || true
 rm -f "$target"
 printf 'Removed macOS LaunchAgent: %s\n' "$MACOS_LABEL"
 
-printf 'Preserved project data and .runtime settings.\n'
+printf 'Preserved project data and .runtime workspace.\n'

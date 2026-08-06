@@ -1,172 +1,103 @@
-# Ulanzi TC002 Pixel Market
+# Ulanzi TC002 Pixel Studio
 
 [简体中文](README.md) | English
 
-A configurable multi-asset pixel market dashboard maintained by zerah and powered by Bun. It fetches quotes from public, keyless data sources, renders native 52×16 pixel GIFs, and pushes them through the official TC002 Custom App HTTP API. The service supports a native macOS LaunchAgent and Docker Compose deployment.
+An extensible, Bun-powered multi-channel content studio for the Ulanzi TC002. Market data, notices, timers, visual animations, and a 52×16 canvas all implement one frame-rendering contract and are composed and pushed by a central scheduler.
 
-## Local control panel
+## Content model
 
-After the service starts, open:
+- A **channel** maps to one TC002 Custom App name and therefore one item selectable with the physical knob.
+- A **content item** is one segment inside a channel. One item is standalone; multiple ordered items become one animated GIF carousel.
+
+Renderers only return 52×16 frames and explicit delays. They cannot write to the clock or start background loops. The controller owns shared data caching, bounds validation, GIF encoding, serialized device writes, failure isolation, cleanup, and scheduling. See [ADR 0001](docs/adr/0001-extensible-content-channels.md).
+
+## Built-in catalog
+
+| Category | Content |
+| --- | --- |
+| Market | BTC, ETH, BNB, SOL, gold, USD/CNY, AAPL, MSFT, NVDA, GOOGL |
+| Tools | Notice board, interval timer column |
+| Visual | Langton's ant, aquarium, fire, flip clock, Matrix clock, maze, pixel pet, falling sand, starfield |
+| Creative | Persistent 52×16 canvas, plus Ulanzi community pixel assets imported through the dedicated library (PNG / GIF) |
+
+The four stocks use Yahoo Finance's public Chart endpoint. Their 16×16 marks preserve the exact PixDeck source PNG bytes and opaque pixel layouts; provenance and SHA-256 hashes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The canvas supports pen/eraser tools, colors, grid, undo/redo, ASCII pixel text, image pixelization, and PNG export. A saved canvas is a normal content item, so it can be standalone or part of a carousel.
+
+The top-level **Library** tab sits next to **Content** and **Canvas** and provides a wide workspace for browsing, searching, filtering, or importing a public Ulanzi community asset from a `ugc.ulanzistudio.com/contentView/...` link. The channel rail selects the destination for **Add to channel**, while any work can also become a standalone app.
+
+The upstream catalog is not hard-coded. Entering the Library, reloading, searching, changing filters, or paging requests the official API again, so upstream additions, removals, and edits appear on the next request. Imported media remains a stable local snapshot and is never silently replaced by later upstream changes. Assets are restored to 52×16 with nearest-neighbor sampling, GIF timing is preserved, and normalized media is stored under `.runtime/pixel-assets`, so later previews and pushes do not depend on the upstream site. The import endpoint only adds a channel item or creates a standalone app; it never bypasses the existing channel pipeline to write the device directly. Delivery then follows the project's existing scheduled and manual channel push behavior. Community artwork is not bundled, and author/source attribution is retained.
+
+## Control panel
+
+Start the service and open:
 
 ```text
 http://127.0.0.1:43820/
 ```
 
-The control panel lets you:
+The left rail manages clock channels, the center edits and previews the selected channel, and the right-side catalog is grouped by Market, Tools, Visual, and Creative. The top navigation exposes three first-class views: **Content**, **Canvas**, and the wide three-column **Library**.
 
-- Select any combination of BTC, ETH, BNB, SOL, gold, and USD/CNY in a fixed rotation order.
-- Configure the price-page duration, change-page duration, and minimum market refresh interval.
-- Enable or disable change pages and inspect a live preview matching the physical 52×16 display.
-- Save settings only, or use "Save and push" to update the clock immediately.
-- Inspect device versions, the last push time, data sources, and degraded-source status.
+The frontend uses React, Cladd UI, and Tailwind CSS v4. Cladd standardizes controls, tabs, selects, deletion confirmation, tooltips, toasts, and draggable numeric inputs while the product keeps its existing black, white, and green Pixel Market visual language. Motion respects `prefers-reduced-motion`.
 
-![Ulanzi TC002 pixel market control panel](docs/images/tc002-control-panel.png)
+Configuration is stored in `.runtime/workspace.json`. A legacy `.runtime/settings.json` is atomically migrated into one market channel on first launch without overwriting the legacy file. Disabled, removed, or renamed channels are cleaned from the clock by posting an empty object to their former Custom App names.
 
-Settings are persisted in the Git-ignored `.runtime/settings.json` file. The native macOS service listens only on `127.0.0.1`. The Docker container listens on all container interfaces for port forwarding, but Compose publishes the port only on the host's `127.0.0.1`. Neither deployment exposes the GUI or API to the LAN or public internet by default.
+## HTTP and MQTT
 
-## Asset presets and data semantics
+The implementation intentionally keeps the TC002-native `POST /api/custom?name=...` HTTP transport. For a local renderer writing complete Custom Apps to one LAN device, it needs no broker and has explicit update and delete semantics.
 
-| Asset | Price source | Change period | Pixel icon |
-| --- | --- | --- | --- |
-| BTC/USD | Coinbase, with Kraken fallback | 24H | Bitcoin roundel |
-| ETH/USD | Coinbase, with Kraken fallback | 24H | Ethereum diamond on a gray circle |
-| BNB/USD | Coinbase, with Kraken fallback | 24H | White cube on a yellow circle |
-| SOL/USD | Coinbase, with Kraken fallback | 24H | Solana tri-color bars |
-| XAU/USD | Gold API | Not shown | Three angled gold-bar faces |
-| USD/CNY | Frankfurter | 1D reference-rate change | Two-line USD / CNY mark |
+Transport is injected behind `pushPayload(appName, payload)`. An MQTT adapter can be added later for Home Assistant, remote buses, or multiple subscribers without changing any renderer; no broker dependency is required today.
 
-The free gold endpoint does not provide a reliable 24-hour open field, so the program shows only its current reference price instead of inventing change data. USD/CNY is a central-bank daily reference rate aggregated by Frankfurter, not a tick-by-tick FX quote.
+## Development
 
-## Rotation and refresh behavior
-
-Default settings:
-
-- Price page: 12.5 seconds.
-- Change page: 2.5 seconds.
-- Minimum market refresh interval: 15 seconds.
-- BTC/USD enabled by default.
-
-Selecting more assets makes a complete rotation longer. The effective refresh interval is the greater of the configured minimum and the complete rotation duration. This prevents a new push from resetting the GIF before later assets have appeared.
-
-Every background pixel is strict RGB `[0, 0, 0]`, which turns the corresponding LED fully off. Primary digits use two-pixel strokes and controlled brightness to reduce bloom through the TC002 faceplate.
-
-## Development and direct execution
-
-The project pins Bun 1.3.14 in `mise.toml`. With mise installed, run:
+`mise.toml` pins Bun 1.3.14:
 
 ```bash
 mise install
 mise run test
 mise run typecheck
 mise run build
-```
-
-You can also use the declared Bun version directly:
-
-```bash
-bun install
-bun test
-bun run typecheck
-bun run build
 CLOCK_HOST=192.168.1.50 bun start
 ```
 
-`bun run build` writes the service, status command, and preview command bundles to the Git-ignored `dist/` directory.
-
-Generate the current GIF, frame previews, and six-icon overview:
+Generate channel images and preview strips under `.runtime/previews/`:
 
 ```bash
 bun run preview
 ```
 
-Inspect the running service:
-
-```bash
-bun run status
-```
-
-## Native macOS installation
-
-The installer installs dependencies, builds the bundles, writes `.runtime/service.env` with owner-only permissions, and installs and starts a LaunchAgent. When mise is available, the script uses the Bun version pinned by `mise.toml`. Without mise, it accepts only Bun 1.3.14 so the background service is not built with an unverified runtime.
-
-```bash
-bash scripts/install.sh
-```
-
-The script prompts for the TC002 LAN IP address or hostname. In a non-interactive installation, supply it explicitly through `--host` or `CLOCK_HOST`:
+Install as a macOS LaunchAgent or Docker Compose service:
 
 ```bash
 bash scripts/install.sh --host 192.168.1.50
-```
-
-If the TC002 must be reached through an unauthenticated local HTTP proxy:
-
-```bash
-bash scripts/install.sh \
-  --host 192.168.1.50 \
-  --proxy http://127.0.0.1:6152
-```
-
-The service label is `com.zerah.ulanzi-market-clock`. It starts at login and restarts after an unexpected exit. Logs are stored in `.runtime/service.log` and `.runtime/service.error.log`.
-
-```bash
-launchctl print gui/$(id -u)/com.zerah.ulanzi-market-clock
-bash scripts/uninstall.sh
-```
-
-## Docker Compose installation
-
-The Docker deployment does not require Bun on the host. The installer builds an image using the pinned Bun version with a non-root user and read-only root filesystem, writes `.runtime/docker.env`, and starts the Compose service:
-
-```bash
-bash scripts/install-docker.sh
-```
-
-The Docker installer also prompts for the TC002 address. For non-interactive deployment:
-
-```bash
 bash scripts/install-docker.sh --host 192.168.1.50
 ```
 
-The Docker host must be able to route directly to that TC002 address. A public VPS cannot automatically discover or reach a `192.168.x.x` clock behind a home NAT. Establish a VPN or routed private network first. A DHCP reservation for the TC002 and a numeric LAN address are recommended.
+The control API remains loopback-only by default.
 
-Compose publishes the control panel at `http://127.0.0.1:43820/`; it is not exposed publicly by default. Inspect status and logs with:
-
-```bash
-docker compose --env-file .runtime/docker.env ps
-docker compose --env-file .runtime/docker.env logs -f market-clock
-```
-
-Run `scripts/install-docker.sh` again to reinstall or change the clock address. To remove the container and Compose network:
-
-```bash
-bash scripts/uninstall-docker.sh
-```
-
-The uninstall script preserves the local image, `.runtime/docker.env`, and `.runtime/settings.json`. The native macOS service and Docker use the same control-panel port by default and should not run at the same time.
-
-Shared configuration:
-
-| Name | Default | Description |
-| --- | --- | --- |
-| `CLOCK_HOST` | None; required | TC002 address without `http://` or a port; installers prompt when omitted |
-| `APP_NAME` | `btc` | TC002 Custom App name |
-| `REQUEST_TIMEOUT_MS` | `5000` | Market and device request timeout |
-| `SOURCE_STALE_MS` | `120000` | Maximum age of reusable cached market data |
-| `DISPLAY_DURATION_SECONDS` | `90` | Minimum Custom App lifetime; extended automatically for long rotations |
-| `HEALTH_PORT` | `43820` | Host port for the GUI, control API, and health endpoint |
-
-`CLOCK_HTTP_PROXY` applies only to native macOS access to the TC002. Docker reaches the LAN device directly by default. The deployment method manages `CONTROL_HOST`: macOS fixes it to `127.0.0.1`; Docker fixes it to `0.0.0.0` inside the container while Compose restricts the host-side bind address.
-
-## Local control API
+## API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/presets` | Six asset presets and source descriptions |
-| `GET` / `PUT` | `/api/settings` | Read or save display settings |
-| `GET` | `/api/state` | Device, market, and push state |
-| `POST` | `/api/preview` | Render draft settings without saving or pushing |
-| `POST` | `/api/push` | Push the saved settings immediately |
-| `GET` | `/health` | Health data consumed by the status command |
+| `GET` | `/api/catalog` | Categories, option schemas, and defaults |
+| `GET` / `PUT` | `/api/workspace` | Read or atomically save all channels |
+| `POST` | `/api/channels/preview` | Render a saved channel or draft |
+| `POST` | `/api/channels/push` | Push one channel |
+| `POST` | `/api/push` | Push every enabled channel |
+| `GET` | `/api/state`, `/health` | Device, channel, market, and cleanup status |
+| `GET` | `/api/library/ulanzi/pixel-assets` | Browse, search, filter, and page through official community assets |
+| `GET` | `/api/library/ulanzi/media` | Safely proxy official preview media |
+| `POST` | `/api/library/ulanzi/import` | Validate and import an official `contentView` link or work ID |
+| `GET` | `/api/library/ulanzi/imported/:ref` | Read a normalized local asset snapshot |
 
-Write operations require JSON and reject browser requests from a different Origin. The program needs no exchange API keys, reads no wallet or account data, and does not flash or modify TC002 firmware.
+Legacy `/api/presets` and `/api/settings` endpoints remain available. Writes require JSON and same-origin browser requests. Limits are 256 KiB per request, 24 channels, 48 items per channel, and 360 rendered frames per channel.
+
+## Extending the registry
+
+Add a trusted built-in `ContentDefinition` in `src/content-registry.ts`. A renderer receives a time snapshot, shared market reader, and item options, and returns `PixelCanvas[]`, matching delays, and a label. It must not start timers, retain unbounded state, or access the clock directly.
+
+The registry deliberately does not load arbitrary third-party JavaScript. An untrusted plugin system should use an out-of-process protocol and a separate ADR.
+
+## License
+
+This project is **GPL-3.0-only** because it adapts and modifies GPL-3.0 PixDeck material. Review [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before distributing source or binaries.
