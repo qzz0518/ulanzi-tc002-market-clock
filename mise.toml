@@ -1,0 +1,30 @@
+[tools]
+bun = "1.3.14"
+
+[tasks.build]
+description = "Bundle the service and helper commands"
+run = "bun run build"
+
+[tasks.test]
+description = "Run the Bun test suite"
+run = "bun test"
+
+[tasks.typecheck]
+description = "Type-check the TypeScript sources"
+run = "bun run typecheck"
+
+[tasks.install-macos]
+description = "Build and install the native macOS background service"
+run = "bash scripts/install.sh"
+
+[tasks.uninstall-macos]
+description = "Remove the native macOS background service"
+run = "bash scripts/uninstall.sh"
+
+[tasks.install-docker]
+description = "Build and start the Docker Compose service"
+run = "bash scripts/install-docker.sh"
+
+[tasks.uninstall-docker]
+description = "Stop and remove the Docker Compose service"
+run = "bash scripts/uninstall-docker.sh"

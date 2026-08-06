@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zerah.ulanzi-market-clock</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@BUN_BIN_XML@@</string>
+    <string>@@ENTRYPOINT_XML@@</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@PROJECT_DIR_XML@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLOCK_HOST</key>
+    <string>@@CLOCK_HOST_XML@@</string>
+    <key>CLOCK_HTTP_PROXY</key>
+    <string>@@CLOCK_HTTP_PROXY_XML@@</string>
+    <key>CONTROL_HOST</key>
+    <string>127.0.0.1</string>
+    <key>APP_NAME</key>
+    <string>@@APP_NAME_XML@@</string>
+    <key>REQUEST_TIMEOUT_MS</key>
+    <string>@@REQUEST_TIMEOUT_MS_XML@@</string>
+    <key>SOURCE_STALE_MS</key>
+    <string>@@SOURCE_STALE_MS_XML@@</string>
+    <key>DISPLAY_DURATION_SECONDS</key>
+    <string>@@DISPLAY_DURATION_SECONDS_XML@@</string>
+    <key>HEALTH_PORT</key>
+    <string>@@HEALTH_PORT_XML@@</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>NetworkState</key>
+    <true/>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>@@STDOUT_XML@@</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@STDERR_XML@@</string>
+</dict>
+</plist>

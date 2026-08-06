@@ -1,0 +1,28 @@
+{
+  "name": "ulanzi-tc002-market-clock",
+  "version": "2.0.0",
+  "private": true,
+  "author": "zerah",
+  "description": "Configurable multi-asset pixel market dashboard for the Ulanzi TC002, powered by Bun.",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "start": "bun run src/service.ts",
+    "build": "bun run scripts/build.ts",
+    "preview": "bun run scripts/preview.ts",
+    "status": "bun run scripts/status.ts",
+    "install-macos": "bash scripts/install.sh",
+    "uninstall-macos": "bash scripts/uninstall.sh",
+    "install-docker": "bash scripts/install-docker.sh",
+    "uninstall-docker": "bash scripts/uninstall-docker.sh",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "gifenc": "^1.0.3"
+  }
+}
