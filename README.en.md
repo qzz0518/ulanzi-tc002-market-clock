@@ -4,6 +4,8 @@
 
 An extensible, Bun-powered multi-channel content studio for the Ulanzi TC002. Market data, notices, timers, visual animations, and a 52×16 canvas all implement one frame-rendering contract and are composed and pushed by a central scheduler.
 
+![Ulanzi TC002 multi-channel content studio control panel](docs/images/tc002-control-panel.png)
+
 ## Content model
 
 - A **channel** maps to one TC002 Custom App name and therefore one item selectable with the physical knob.
