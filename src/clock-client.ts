@@ -1,4 +1,9 @@
 import type { AppConfig } from "./config.ts";
+import {
+  normalizeDeviceGeneralSettings,
+  validateDeviceGeneralSettings,
+  type DeviceGeneralSettings,
+} from "./device-settings.ts";
 import type { ClockPayload } from "./display.ts";
 import type { FetchLike } from "./price.ts";
 
@@ -156,6 +161,70 @@ export async function readClockInfo(
     mcuVersion: typeof body.mcuVer === "string" ? body.mcuVer : undefined,
     appVersion: typeof body.appVer === "string" ? body.appVer : undefined,
   };
+}
+
+export async function readClockGeneralSettings(
+  config: AppConfig,
+  fetcher?: FetchLike,
+): Promise<DeviceGeneralSettings> {
+  const response = await requestClock(
+    `http://${config.clockHost}/getConfig`,
+    config.requestTimeoutMs,
+    {
+      headers: {
+        Accept: "application/json",
+        "Cache-Control": "no-cache",
+      },
+      proxy: config.clockHttpProxy,
+    },
+    fetcher,
+  );
+  if (!response.ok) {
+    throw new ClockRequestError(`clock returned HTTP ${response.status}`, response.status);
+  }
+  try {
+    return normalizeDeviceGeneralSettings(JSON.parse(response.body));
+  } catch (error) {
+    if (error instanceof ClockRequestError) throw error;
+    const detail = error instanceof Error ? error.message : "unknown settings format";
+    throw new ClockRequestError(`clock returned invalid general settings: ${detail}`);
+  }
+}
+
+export async function writeClockGeneralSettings(
+  config: AppConfig,
+  value: unknown,
+  fetcher?: FetchLike,
+): Promise<DeviceGeneralSettings> {
+  const settings = validateDeviceGeneralSettings(value);
+  const response = await requestClock(
+    `http://${config.clockHost}/setConfig`,
+    config.requestTimeoutMs,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(settings),
+      proxy: config.clockHttpProxy,
+    },
+    fetcher,
+  );
+  if (!response.ok) {
+    throw new ClockRequestError(`clock returned HTTP ${response.status}`, response.status);
+  }
+  let result: Record<string, unknown>;
+  try {
+    result = JSON.parse(response.body) as Record<string, unknown>;
+  } catch {
+    throw new ClockRequestError("clock returned an invalid settings response");
+  }
+  if (result.code !== 200) {
+    const message = typeof result.message === "string" ? result.message.slice(0, 160) : "unknown error";
+    throw new ClockRequestError(`clock rejected general settings: ${message}`);
+  }
+  return settings;
 }
 
 export async function pushClockPayload(

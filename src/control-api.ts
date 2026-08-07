@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { ASSET_PRESETS, isAssetId, type AssetId } from "./assets.ts";
 import { getContentCatalog } from "./content-registry.ts";
 import type { DashboardController } from "./controller.ts";
+import {
+  DeviceSettingsValidationError,
+  validateDeviceGeneralSettings,
+  type DeviceGeneralSettings,
+} from "./device-settings.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
+import type { ControlAccessInfo } from "./network-access.ts";
+import { PWA_ICONS, PWA_MANIFEST, pwaServiceWorker } from "./pwa.ts";
 import { SettingsValidationError } from "./settings.ts";
 import { getStockIconPng, isStockIconId } from "./stock-icons.ts";
 import { controlPageHtml } from "./web-ui.ts";
@@ -30,6 +37,11 @@ const WEB_ASSETS = new Map([
 
 export interface ControlApiOptions {
   onSettingsChanged?: () => void;
+  controlAccess?: () => ControlAccessInfo | Promise<ControlAccessInfo>;
+  deviceGeneralSettings?: {
+    read: () => Promise<DeviceGeneralSettings>;
+    write: (settings: DeviceGeneralSettings) => Promise<DeviceGeneralSettings>;
+  };
   pixelAssetLibrary?: {
     client: UlanziPixelAssetClient;
     store: PixelAssetStore;
@@ -163,7 +175,9 @@ export function createControlHandler(
               "img-src 'self' blob:",
               "style-src 'self' 'unsafe-inline'",
               "script-src 'self'",
+              "worker-src 'self'",
               "connect-src 'self'",
+              "manifest-src 'self'",
               "base-uri 'none'",
               "frame-ancestors 'none'",
               "form-action 'self'",
@@ -171,6 +185,37 @@ export function createControlHandler(
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
+          },
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/manifest.webmanifest") {
+        return new Response(JSON.stringify(PWA_MANIFEST), {
+          headers: {
+            "Content-Type": "application/manifest+json; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/sw.js") {
+        return new Response(pwaServiceWorker(), {
+          headers: {
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Service-Worker-Allowed": "/",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
+
+      if (request.method === "GET" && PWA_ICONS.has(url.pathname)) {
+        return new Response(arrayBufferCopy(PWA_ICONS.get(url.pathname)!), {
+          headers: {
+            "Content-Type": "image/png",
+            "Cache-Control": "public, max-age=604800",
+            "X-Content-Type-Options": "nosniff",
           },
         });
       }
@@ -240,6 +285,13 @@ export function createControlHandler(
           ],
           contents: getContentCatalog(),
         });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/access") {
+        if (!options.controlAccess) {
+          return jsonResponse({ error: "control access information is unavailable" }, 404);
+        }
+        return jsonResponse({ access: await options.controlAccess() });
       }
 
       if (request.method === "GET" && url.pathname === "/api/library/ulanzi/pixel-assets") {
@@ -332,6 +384,22 @@ export function createControlHandler(
         return jsonResponse({ workspace: controller.getWorkspace() });
       }
 
+      if (request.method === "GET" && url.pathname === "/api/device/settings/general") {
+        if (!options.deviceGeneralSettings) {
+          return jsonResponse({ error: "device general settings are unavailable" }, 404);
+        }
+        return jsonResponse({ settings: await options.deviceGeneralSettings.read() });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/device/settings/general") {
+        if (!options.deviceGeneralSettings) {
+          return jsonResponse({ error: "device general settings are unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        const settings = validateDeviceGeneralSettings(await readJson(request));
+        return jsonResponse({ settings: await options.deviceGeneralSettings.write(settings) });
+      }
+
       if (request.method === "PUT" && url.pathname === "/api/workspace") {
         if (!supportsWorkspace(controller)) {
           return jsonResponse({ error: "workspace API is unavailable" }, 404);
@@ -407,7 +475,9 @@ export function createControlHandler(
       const message = error instanceof Error ? error.message : "unknown control error";
       return jsonResponse(
         { error: message },
-        error instanceof SettingsValidationError ? 400 : 503,
+        error instanceof SettingsValidationError || error instanceof DeviceSettingsValidationError
+          ? 400
+          : 503,
       );
     }
   };

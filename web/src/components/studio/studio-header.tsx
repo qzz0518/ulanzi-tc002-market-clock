@@ -1,6 +1,8 @@
-import { Circle, Images, LayoutGrid, Palette } from "lucide-react";
-import { Tab, Tabs, TabsList } from "@cladd-ui/react";
+import { useState } from "react";
+import { Circle, Images, LayoutGrid, Palette, Settings2 } from "lucide-react";
+import { Button, Tab, Tabs, TabsList, Tooltip } from "@cladd-ui/react";
 import type { RuntimeState, StudioView } from "@/types";
+import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
 
 interface StudioHeaderProps {
   view: StudioView;
@@ -17,6 +19,7 @@ function runtimeLabel(runtime: RuntimeState | null): string {
 }
 
 export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const tone = runtime?.healthy ? "is-good" : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
   return (
     <header className="studio-header">
@@ -36,10 +39,28 @@ export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps)
         </TabsList>
       </Tabs>
 
-      <div className={`device-status ${tone}`} role="status" aria-live="polite">
-        <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
-        <span>{runtimeLabel(runtime)}</span>
+      <div className="header-actions">
+        <div className={`device-status ${tone}`} role="status" aria-live="polite">
+          <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
+          <span>{runtimeLabel(runtime)}</span>
+        </div>
+        <Tooltip tooltip="常规设置">
+          <Button
+            type="button"
+            size="sm"
+            square
+            color="neutral"
+            variant="transparent"
+            outline={false}
+            className="device-settings-trigger"
+            aria-label="打开常规设置"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Settings2 />
+          </Button>
+        </Tooltip>
       </div>
+      <DeviceSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </header>
   );
 }

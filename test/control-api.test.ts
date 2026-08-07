@@ -3,6 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createControlHandler } from "../src/control-api.ts";
+import {
+  DEFAULT_DEVICE_GENERAL_SETTINGS,
+  type DeviceGeneralSettings,
+} from "../src/device-settings.ts";
 import { DEFAULT_SETTINGS } from "../src/settings.ts";
 import type { DashboardController } from "../src/controller.ts";
 import { renderOfflineDashboard } from "../src/pixel-ui.ts";
@@ -74,6 +78,8 @@ describe("local control API", () => {
     expect(pageHtml).toContain('id="root"');
     expect(pageHtml).toContain('href="/assets/studio.css"');
     expect(pageHtml).toContain('src="/assets/studio.js"');
+    expect(pageHtml).toContain('href="/manifest.webmanifest"');
+    expect(pageHtml).toContain('href="/icons/apple-touch-icon.png"');
     expect(pageHtml).not.toContain("status-progress");
     expect(page.headers.get("Content-Security-Policy")).toContain("script-src 'self'");
     expect(page.headers.get("Content-Security-Policy")).not.toContain("script-src 'unsafe-inline'");
@@ -99,6 +105,32 @@ describe("local control API", () => {
     expect(new Uint8Array(await icon.arrayBuffer()).subarray(0, 4)).toEqual(
       new Uint8Array([137, 80, 78, 71]),
     );
+
+    const manifest = await handler(new Request("http://127.0.0.1:43820/manifest.webmanifest"));
+    expect(manifest.headers.get("Content-Type")).toContain("application/manifest+json");
+    expect((await manifest.json()).display).toBe("standalone");
+    const serviceWorker = await handler(new Request("http://127.0.0.1:43820/sw.js"));
+    expect(serviceWorker.headers.get("Service-Worker-Allowed")).toBe("/");
+    expect(await serviceWorker.text()).toContain("/api/");
+    const pwaIcon = await handler(new Request("http://127.0.0.1:43820/icons/pwa-192.png"));
+    expect(new Uint8Array(await pwaIcon.arrayBuffer()).subarray(0, 4)).toEqual(
+      new Uint8Array([137, 80, 78, 71]),
+    );
+  });
+
+  test("reports the phone control URL supplied by the service", async () => {
+    const access = {
+      port: 43_820,
+      address: "192.0.2.12",
+      url: "http://192.0.2.12:43820/",
+      suggestedUrl: "http://192.0.2.12:43820/",
+      lanEnabled: true,
+      sameSubnetAsClock: true,
+    };
+    const handler = createControlHandler(fakeController(), { controlAccess: () => access });
+    const response = await handler(new Request("http://127.0.0.1:43820/api/access"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).access).toEqual(access);
   });
 
   test("persists same-origin JSON settings and rejects cross-origin writes", async () => {
@@ -122,6 +154,76 @@ describe("local control API", () => {
       }),
     );
     expect(rejected.status).toBe(400);
+  });
+
+  test("reads and writes every device general setting through a same-origin adapter", async () => {
+    let settings: DeviceGeneralSettings = structuredClone(DEFAULT_DEVICE_GENERAL_SETTINGS);
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      deviceGeneralSettings: {
+        read: async () => structuredClone(settings),
+        write: async (next) => {
+          settings = structuredClone(next);
+          return structuredClone(settings);
+        },
+      },
+    });
+    const current = await handler(new Request(
+      "http://127.0.0.1:43820/api/device/settings/general",
+    ));
+    expect(current.status).toBe(200);
+    expect((await current.json()).settings).toEqual(DEFAULT_DEVICE_GENERAL_SETTINGS);
+
+    const next: DeviceGeneralSettings = {
+      ...DEFAULT_DEVICE_GENERAL_SETTINGS,
+      brightness: { level: "high", low: 40, mid: 70, high: 95 },
+      volume: 5,
+      carouselSpeed: 30,
+      scrollSpeed: 2,
+      timezone: "UTC-5",
+      dateFormat: "DD/MM",
+      showWeek: false,
+      weekStart: 0,
+      lowBatteryAutoSleep: true,
+    };
+    const saved = await handler(new Request(
+      "http://127.0.0.1:43820/api/device/settings/general",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "http://127.0.0.1:43820",
+        },
+        body: JSON.stringify(next),
+      },
+    ));
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).settings).toEqual(next);
+
+    const invalid = await handler(new Request(
+      "http://127.0.0.1:43820/api/device/settings/general",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "http://127.0.0.1:43820",
+        },
+        body: JSON.stringify({
+          ...next,
+          brightness: { level: "high", low: 90, mid: 70, high: 95 },
+        }),
+      },
+    ));
+    expect(invalid.status).toBe(400);
+
+    const crossOrigin = await handler(new Request(
+      "http://127.0.0.1:43820/api/device/settings/general",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Origin: "https://example.com" },
+        body: JSON.stringify(next),
+      },
+    ));
+    expect(crossOrigin.status).toBe(400);
   });
 
   test("returns preview bytes and supports direct push", async () => {

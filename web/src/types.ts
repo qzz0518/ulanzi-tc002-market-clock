@@ -79,6 +79,41 @@ export interface ChannelRuntimeState {
   updateCount: number;
 }
 
+export type DeviceBrightnessLevel = "low" | "mid" | "high";
+export type DeviceCarouselSpeed = 0 | 10 | 20 | 30 | 40 | 50 | 60;
+export type DeviceTimezone =
+  | "UTC-12" | "UTC-11" | "UTC-10" | "UTC-9" | "UTC-8" | "UTC-7"
+  | "UTC-6" | "UTC-5" | "UTC-4" | "UTC-3" | "UTC-2" | "UTC-1"
+  | "UTC+0" | "UTC+1" | "UTC+2" | "UTC+3" | "UTC+4" | "UTC+5"
+  | "UTC+6" | "UTC+7" | "UTC+8" | "UTC+9" | "UTC+10" | "UTC+11"
+  | "UTC+12";
+
+export interface DeviceGeneralSettings {
+  brightness: {
+    level: DeviceBrightnessLevel;
+    low: number;
+    mid: number;
+    high: number;
+  };
+  volume: number;
+  carouselSpeed: DeviceCarouselSpeed;
+  scrollSpeed: number;
+  timezone: DeviceTimezone;
+  dateFormat: "MM/DD" | "DD/MM";
+  showWeek: boolean;
+  weekStart: 0 | 1;
+  lowBatteryAutoSleep: boolean;
+}
+
+export interface ControlAccessInfo {
+  port: number;
+  address: string | null;
+  url: string | null;
+  suggestedUrl: string | null;
+  lanEnabled: boolean;
+  sameSubnetAsClock: boolean;
+}
+
 export type StudioView = "console" | "canvas" | "library";
 export type PreviewScope = "item" | "channel";
 export type BusyAction = "preview" | "push" | null;

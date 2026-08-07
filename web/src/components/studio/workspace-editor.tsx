@@ -1,10 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
+  ChevronDown,
+  Eye,
+  EyeOff,
   GripVertical,
   Pause,
   Play,
+  Plus,
+  Settings2,
   Trash2,
 } from "lucide-react";
 import {
@@ -64,6 +69,7 @@ interface WorkspaceEditorProps {
   onRemoveItem: (itemId: string) => void;
   onTimerStart: (itemId: string) => void;
   onTimerPause: (itemId: string) => void;
+  onOpenCatalog: () => void;
   onPush: () => void;
 }
 
@@ -247,10 +253,13 @@ export function WorkspaceEditor({
   onRemoveItem,
   onTimerStart,
   onTimerPause,
+  onOpenCatalog,
   onPush,
 }: WorkspaceEditorProps) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const selectedItem = channel.items.find((item) => item.id === selectedItemId) ?? channel.items[0];
   const selectedDefinition = selectedItem
     ? catalog.find((definition) => definition.id === selectedItem.contentId)
@@ -261,9 +270,35 @@ export function WorkspaceEditor({
     ? selectedItem ? contentTitle(selectedItem, selectedDefinition) : "所选内容"
     : `完整轮播 · ${channel.items.length} 个内容`;
 
+  useEffect(() => {
+    setMobileSettingsOpen(false);
+    setMobilePreviewOpen(false);
+  }, [channel.id]);
+
   return (
     <main className="workspace-editor" id="workspace-editor">
-      <section className="channel-config" aria-label="频道设置">
+      <Button
+        type="button"
+        color="neutral"
+        variant="transparent"
+        outline={false}
+        className="mobile-channel-settings-trigger"
+        aria-expanded={mobileSettingsOpen}
+        aria-controls="channel-settings-panel"
+        onClick={() => setMobileSettingsOpen((current) => !current)}
+      >
+        <span className="mobile-channel-settings-trigger__copy">
+          <span><Settings2 />频道设置</span>
+          <small>{channel.appName} · {channel.enabled ? "已启用" : "未启用"} · 刷新 {seconds(channel.refreshIntervalMs)} 秒</small>
+        </span>
+        <ChevronDown className={cn("mobile-disclosure-chevron", mobileSettingsOpen && "is-open")} />
+      </Button>
+
+      <section
+        id="channel-settings-panel"
+        className={cn("channel-config", !mobileSettingsOpen && "is-mobile-collapsed")}
+        aria-label="频道设置"
+      >
         <div className="config-field config-field--name">
           <label htmlFor="channel-name">频道名称</label>
           <Input
@@ -331,6 +366,20 @@ export function WorkspaceEditor({
               </TabsList>
             </Tabs>
           )}
+          <Button
+            type="button"
+            color="neutral"
+            variant="transparent"
+            outline={false}
+            size="sm"
+            className="mobile-preview-toggle"
+            aria-expanded={mobilePreviewOpen}
+            aria-controls="channel-device-preview"
+            onClick={() => setMobilePreviewOpen((current) => !current)}
+          >
+            {mobilePreviewOpen ? <EyeOff /> : <Eye />}
+            {mobilePreviewOpen ? "收起预览" : "查看预览"}
+          </Button>
           <WorkspaceActions
             busy={busy}
             dirty={dirty}
@@ -342,7 +391,15 @@ export function WorkspaceEditor({
           />
         </div>
 
-        <div className={cn("device-stage", previewing && "is-rendering")} aria-busy={previewing}>
+        <div
+          id="channel-device-preview"
+          className={cn(
+            "device-stage",
+            previewing && "is-rendering",
+            !mobilePreviewOpen && "is-mobile-collapsed",
+          )}
+          aria-busy={previewing}
+        >
           <div className="clock-device" aria-label="Ulanzi TC002 预览">
             <div className="clock-screen">
               {previewUrl
@@ -394,8 +451,19 @@ export function WorkspaceEditor({
 
       <section className="playlist-section" aria-labelledby="playlist-title">
         <div className="subsection-heading">
-          <h2 id="playlist-title">播放顺序</h2>
-          <span>{channel.items.length} 个内容 · 共 {seconds(totalDuration)} 秒</span>
+          <div className="playlist-heading-copy">
+            <h2 id="playlist-title">播放顺序</h2>
+            <span>{channel.items.length} 个内容 · 共 {seconds(totalDuration)} 秒</span>
+          </div>
+          <Button
+            type="button"
+            color="brand"
+            size="sm"
+            className="mobile-add-content"
+            onClick={onOpenCatalog}
+          >
+            <Plus />添加内容
+          </Button>
         </div>
         <div className="playlist">
           {channel.items.map((item, index) => {
@@ -405,6 +473,7 @@ export function WorkspaceEditor({
             return (
               <div
                 key={item.id}
+                id={`playlist-item-${item.id}`}
                 className={cn(
                   "playlist-item",
                   active && "is-active",

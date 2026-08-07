@@ -5,8 +5,11 @@ import {
   deleteClockApp,
   pushClockPayload,
   pushClockPayloadNamed,
+  readClockGeneralSettings,
   readClockInfo,
+  writeClockGeneralSettings,
 } from "../src/clock-client.ts";
+import { DEFAULT_DEVICE_GENERAL_SETTINGS } from "../src/device-settings.ts";
 import { buildImagePayload } from "../src/display.ts";
 import { renderOfflineDashboard } from "../src/pixel-ui.ts";
 import type { FetchLike } from "../src/price.ts";
@@ -52,6 +55,57 @@ describe("TC002 HTTP client", () => {
       mcuVersion: "V1.0.17",
       appVersion: "1.0.5",
     });
+  });
+
+  test("reads only the public general settings from the device config", async () => {
+    const fetcher: FetchLike = async () => new Response(JSON.stringify({
+      ...DEFAULT_DEVICE_GENERAL_SETTINGS,
+      brightness: { level: "high", low: 50, mid: 80, high: 100 },
+      weekStart: "Mon",
+      wifiPassword: "must-not-leak",
+      deviceToken: "must-not-leak",
+    }));
+    const settings = await readClockGeneralSettings(testConfig(), fetcher);
+    expect(settings).toEqual({
+      ...DEFAULT_DEVICE_GENERAL_SETTINGS,
+      brightness: { level: "high", low: 50, mid: 80, high: 100 },
+      weekStart: 1,
+    });
+    expect(settings).not.toHaveProperty("wifiPassword");
+    expect(settings).not.toHaveProperty("deviceToken");
+  });
+
+  test("posts the exact validated general-settings payload", async () => {
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    const fetcher: FetchLike = async (input, init) => {
+      capturedUrl = String(input);
+      capturedInit = init;
+      return new Response(JSON.stringify({ code: 200, message: "success" }));
+    };
+    const settings = {
+      ...DEFAULT_DEVICE_GENERAL_SETTINGS,
+      brightness: { level: "high" as const, low: 40, mid: 70, high: 95 },
+      volume: 1,
+      carouselSpeed: 20 as const,
+      scrollSpeed: 4,
+      dateFormat: "DD/MM" as const,
+      showWeek: false,
+      weekStart: 0 as const,
+      lowBatteryAutoSleep: true,
+    };
+    await expect(writeClockGeneralSettings(testConfig(), settings, fetcher)).resolves.toEqual(settings);
+    expect(capturedUrl).toBe("http://192.0.2.240/setConfig");
+    expect(capturedInit?.method).toBe("POST");
+    expect(JSON.parse(String(capturedInit?.body))).toEqual(settings);
+  });
+
+  test("surfaces a device-side settings rejection", async () => {
+    const fetcher: FetchLike = async () =>
+      new Response(JSON.stringify({ code: 500, message: "invalid brightness" }));
+    await expect(
+      writeClockGeneralSettings(testConfig(), DEFAULT_DEVICE_GENERAL_SETTINGS, fetcher),
+    ).rejects.toThrow("invalid brightness");
   });
 
   test("posts the official custom app payload", async () => {

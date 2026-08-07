@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
-import { Button } from "@cladd-ui/react";
+import { ListOrdered, Plus, RefreshCw, RotateCw } from "lucide-react";
+import { Button, Tab, Tabs, TabsList } from "@cladd-ui/react";
 import { api, jsonApi } from "@/lib/api";
 import { createLatestTaskRunner } from "@/lib/latest-task-runner";
 import {
@@ -58,6 +58,7 @@ interface PreviewResult {
 }
 
 const PREVIEW_TIMEOUT_MS = 10_000;
+type MobileConsolePane = "compose" | "catalog";
 
 function newItem(definition: ContentCatalogEntry): ContentItemConfig {
   return {
@@ -126,6 +127,7 @@ export function App() {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [category, setCategory] = useState<ContentCategory>("market");
   const [view, setView] = useState<StudioView>("console");
+  const [mobileConsolePane, setMobileConsolePane] = useState<MobileConsolePane>("compose");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -169,6 +171,20 @@ export function App() {
     setPreviewFrameCount(null);
     setPreviewError(null);
   }, []);
+
+  const scrollToMobileSection = useCallback((id: string) => {
+    if (!window.matchMedia("(max-width: 52rem)").matches) return;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+  }, []);
+
+  const showMobileConsolePane = useCallback((pane: MobileConsolePane, focusId?: string) => {
+    setMobileConsolePane(pane);
+    scrollToMobileSection(focusId ?? (pane === "catalog" ? "market-title" : "playlist-title"));
+  }, [scrollToMobileSection]);
 
   const previewRunner = useMemo(() => createLatestTaskRunner<PreviewJob, PreviewResult>({
     async execute({ target, forceRefresh }) {
@@ -429,6 +445,7 @@ export function App() {
     }, selectedChannel.id);
     setSelectedItemId(item.id);
     setPreviewScope("item");
+    showMobileConsolePane("compose", `playlist-item-${item.id}`);
     toast.success(`已加入“${definition.title}”`);
   };
 
@@ -440,6 +457,7 @@ export function App() {
     setSelectedItemId(channel.items[0]?.id ?? null);
     setPreviewScope("item");
     setView("console");
+    showMobileConsolePane("compose");
     toast.success("已创建独立旋钮项");
   };
 
@@ -599,6 +617,7 @@ export function App() {
         }
       }
     }
+    if (nextView === "console") setMobileConsolePane("compose");
     setView(nextView);
   };
 
@@ -699,7 +718,7 @@ export function App() {
     ? "studio-layout is-canvas"
     : view === "library"
       ? "studio-layout is-library"
-      : "studio-layout";
+      : `studio-layout mobile-pane-${mobileConsolePane}`;
 
   return (
     <div className={pageClassName}>
@@ -712,6 +731,17 @@ export function App() {
         </div>
       </div>
 
+      {view === "canvas" && (
+        <section className="canvas-orientation-gate" aria-labelledby="canvas-orientation-title">
+          <span className="canvas-orientation-gate__icon" aria-hidden="true"><RotateCw /></span>
+          <div>
+            <span>52 × 16 PIXEL CANVAS</span>
+            <h2 id="canvas-orientation-title">请将手机横过来</h2>
+            <p>画板需要横屏空间来保证像素落点和工具操作准确；内容设置与素材库仍可竖屏使用。</p>
+          </div>
+        </section>
+      )}
+
       <div className={layoutClassName}>
         <ChannelSidebar
           channels={workspace.channels}
@@ -720,6 +750,27 @@ export function App() {
           onAdd={addChannel}
           onDelete={deleteChannel}
         />
+
+        {view === "console" && (
+          <nav className="mobile-console-navigation" aria-label="手机端内容工作区">
+            <Tabs
+              value={mobileConsolePane}
+              onValueChange={(value) => showMobileConsolePane(value as MobileConsolePane)}
+            >
+              <TabsList
+                className="mobile-console-tabs"
+                size="sm"
+                rounded
+                activeColor="brand"
+                activeVariant="solid-fill"
+                activeOutline={false}
+              >
+                <Tab value="compose"><ListOrdered />频道编排</Tab>
+                <Tab value="catalog"><Plus />添加内容</Tab>
+              </TabsList>
+            </Tabs>
+          </nav>
+        )}
 
         {view === "console" ? (
           <>
@@ -757,6 +808,7 @@ export function App() {
                 updateItem(itemId, (item) => { item.options.running = false; });
                 toast.success("计时器已暂停到起始画面");
               }}
+              onOpenCatalog={() => showMobileConsolePane("catalog")}
               onPush={() => void push()}
             />
             <ContentMarket

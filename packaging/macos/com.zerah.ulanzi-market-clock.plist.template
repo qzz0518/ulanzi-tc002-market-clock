@@ -21,7 +21,7 @@
     <key>CLOCK_HTTP_PROXY</key>
     <string>@@CLOCK_HTTP_PROXY_XML@@</string>
     <key>CONTROL_HOST</key>
-    <string>127.0.0.1</string>
+    <string>@@CONTROL_HOST_XML@@</string>
     <key>APP_NAME</key>
     <string>@@APP_NAME_XML@@</string>
     <key>REQUEST_TIMEOUT_MS</key>

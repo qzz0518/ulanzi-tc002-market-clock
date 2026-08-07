@@ -43,7 +43,10 @@ describe("service packaging", () => {
     expect(installer).toContain("Darwin");
     expect(installer).toContain("read -r clock_host");
     expect(installer).toContain('clock_host="${CLOCK_HOST:-}"');
+    expect(installer).toContain('control_host="${CONTROL_HOST:-0.0.0.0}"');
+    expect(installer).toContain("--control-host");
     expect(installer).not.toContain("CLOCK_HOST:-192.168");
+    expect(macos).toContain("@@CONTROL_HOST_XML@@");
     expect(installer).toContain('readonly REQUIRED_BUN_VERSION="1.3.14"');
     expect(installer).toContain("mise which bun");
     expect(installer).toContain('version="$("$candidate" --version');

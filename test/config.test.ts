@@ -46,7 +46,7 @@ describe("loadConfig", () => {
     })).toThrow();
     expect(() => loadConfig({
       CLOCK_HOST: "tc002.test",
-      CONTROL_HOST: "192.168.8.2",
+      CONTROL_HOST: "192.0.2.2",
     })).toThrow();
   });
 });

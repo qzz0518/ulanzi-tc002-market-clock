@@ -7,6 +7,7 @@ readonly REQUIRED_BUN_VERSION="1.3.14"
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 clock_host="${CLOCK_HOST:-}"
 clock_http_proxy="${CLOCK_HTTP_PROXY:-}"
+control_host="${CONTROL_HOST:-0.0.0.0}"
 app_name="${APP_NAME:-btc}"
 request_timeout_ms="${REQUEST_TIMEOUT_MS:-5000}"
 source_stale_ms="${SOURCE_STALE_MS:-120000}"
@@ -23,6 +24,7 @@ Usage:
 Options:
   --host HOST                 TC002 IPv4 address or hostname (prompted if omitted)
   --proxy URL                 Optional unauthenticated loopback HTTP proxy
+  --control-host HOST         Control listener: 0.0.0.0 for phone access (default)
   --app-name NAME             TC002 Custom App name (default: btc)
   --health-port PORT          Local control-panel port (default: 43820)
   --request-timeout-ms MS     Device and market request timeout
@@ -31,7 +33,7 @@ Options:
   -h, --help                  Show this help
 
 The same values can be supplied with CLOCK_HOST, CLOCK_HTTP_PROXY,
-APP_NAME, HEALTH_PORT, REQUEST_TIMEOUT_MS, SOURCE_STALE_MS, and
+CONTROL_HOST, APP_NAME, HEALTH_PORT, REQUEST_TIMEOUT_MS, SOURCE_STALE_MS, and
 DISPLAY_DURATION_SECONDS.
 
 For Docker deployment, use scripts/install-docker.sh instead.
@@ -59,6 +61,11 @@ while (($# > 0)); do
     --proxy)
       require_value "$1" "${2-}"
       clock_http_proxy="$2"
+      shift 2
+      ;;
+    --control-host)
+      require_value "$1" "${2-}"
+      control_host="$2"
       shift 2
       ;;
     --app-name)
@@ -120,6 +127,9 @@ validate_clock_host() {
 prompt_for_clock_host
 validate_clock_host "$clock_host"
 
+[[ "$control_host" == "127.0.0.1" || "$control_host" == "0.0.0.0" ]] || \
+  die "CONTROL_HOST must be 127.0.0.1 or 0.0.0.0"
+
 assert_single_line() {
   local name="$1"
   local value="$2"
@@ -129,6 +139,7 @@ assert_single_line() {
 for setting in \
   "CLOCK_HOST:$clock_host" \
   "CLOCK_HTTP_PROXY:$clock_http_proxy" \
+  "CONTROL_HOST:$control_host" \
   "APP_NAME:$app_name" \
   "REQUEST_TIMEOUT_MS:$request_timeout_ms" \
   "SOURCE_STALE_MS:$source_stale_ms" \
@@ -211,7 +222,7 @@ validate_configuration() {
     env \
       CLOCK_HOST="$clock_host" \
       CLOCK_HTTP_PROXY="$clock_http_proxy" \
-      CONTROL_HOST="127.0.0.1" \
+      CONTROL_HOST="$control_host" \
       APP_NAME="$app_name" \
       REQUEST_TIMEOUT_MS="$request_timeout_ms" \
       SOURCE_STALE_MS="$source_stale_ms" \
@@ -236,7 +247,7 @@ write_environment_file() {
     fi
     printf 'CLOCK_HOST=%q\n' "$clock_host"
     printf 'CLOCK_HTTP_PROXY=%q\n' "$clock_http_proxy"
-    printf 'CONTROL_HOST=%q\n' "127.0.0.1"
+    printf 'CONTROL_HOST=%q\n' "$control_host"
     printf 'APP_NAME=%q\n' "$app_name"
     printf 'REQUEST_TIMEOUT_MS=%q\n' "$request_timeout_ms"
     printf 'SOURCE_STALE_MS=%q\n' "$source_stale_ms"
@@ -256,6 +267,7 @@ render_macos_service() {
     '@@ENTRYPOINT_XML@@' "$(xml_escape "$project_dir/dist/service.js")" \
     '@@CLOCK_HOST_XML@@' "$(xml_escape "$clock_host")" \
     '@@CLOCK_HTTP_PROXY_XML@@' "$(xml_escape "$clock_http_proxy")" \
+    '@@CONTROL_HOST_XML@@' "$(xml_escape "$control_host")" \
     '@@APP_NAME_XML@@' "$(xml_escape "$app_name")" \
     '@@REQUEST_TIMEOUT_MS_XML@@' "$(xml_escape "$request_timeout_ms")" \
     '@@SOURCE_STALE_MS_XML@@' "$(xml_escape "$source_stale_ms")" \
@@ -326,4 +338,9 @@ write_environment_file
 install_macos
 
 printf 'Control panel: http://127.0.0.1:%s/\n' "$health_port"
+if [[ "$control_host" == "0.0.0.0" ]]; then
+  printf 'Phone access is enabled; open Settings to copy the same-network address.\n'
+else
+  printf 'Phone access is disabled because CONTROL_HOST is restricted to loopback.\n'
+fi
 printf 'Settings and generated service configuration remain in .runtime/.\n'

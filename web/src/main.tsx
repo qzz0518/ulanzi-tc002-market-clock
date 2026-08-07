@@ -24,3 +24,9 @@ createRoot(root).render(
     </div>
   </CladdProvider>,
 );
+
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  }, { once: true });
+}

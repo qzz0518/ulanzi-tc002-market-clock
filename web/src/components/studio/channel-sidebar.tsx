@@ -66,9 +66,17 @@ export function ChannelSidebar({ channels, selectedChannelId, onSelect, onAdd, o
               </div>
             );
           })}
+          <Button
+            type="button"
+            color="brand"
+            className="add-channel add-channel--mobile"
+            onClick={onAdd}
+          >
+            <Plus />新建频道
+          </Button>
         </div>
       </div>
-      <Button type="button" color="brand" className="add-channel" onClick={onAdd}>
+      <Button type="button" color="brand" className="add-channel add-channel--desktop" onClick={onAdd}>
         <Plus />新建频道
       </Button>
     </aside>

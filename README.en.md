@@ -38,7 +38,15 @@ Start the service and open:
 http://127.0.0.1:43820/
 ```
 
-The left rail manages clock channels, the center edits and previews the selected channel, and the right-side catalog is grouped by Market, Tools, Visual, and Creative. The top navigation exposes three first-class views: **Content**, **Canvas**, and the wide three-column **Library**.
+The left rail manages clock channels, the center edits and previews the selected channel, and the right-side catalog is grouped by Market, Tools, Visual, and Creative. The top navigation exposes three first-class views: **Content**, **Canvas**, and the wide three-column **Library**. The top-right **General settings** dialog reads and writes brightness, volume, paging, scrolling, timezone, date, weekday, and low-battery sleep settings. Its title-bar phone icon reveals the same-subnet QR code, current URL, and copy action only when needed instead of occupying the settings landing area.
+
+Phone portrait mode separates **Channel composition** from **Add content** so the catalog is never buried below the editor. Adding an item returns directly to the new playlist row, while channel settings and the large device preview stay collapsed until requested. Bottom navigation, the horizontal channel picker, and single-column forms are laid out for touch. The canvas asks phone users to rotate to landscape so the 52×16 surface and tools retain accurate targets. Desktop keeps the existing three-column composition.
+
+<p align="center">
+  <img src="docs/images/tc002-mobile-content.png" width="390" alt="Ulanzi TC002 Pixel Studio mobile channel composition">
+</p>
+
+The UI ships a Web App Manifest, home-screen icons, standalone metadata, and an offline static shell. A supporting browser can add it to the home screen for an app-like window. Full PWA installation and Service Worker offline caching require a trusted HTTPS origin; plain LAN HTTP still provides the responsive control panel and any home-screen shortcut mode offered by the browser.
 
 The frontend uses React, Cladd UI, and Tailwind CSS v4. Cladd standardizes controls, tabs, selects, deletion confirmation, tooltips, toasts, and draggable numeric inputs while the product keeps its existing black, white, and green Pixel Market visual language. Motion respects `prefers-reduced-motion`.
 
@@ -75,7 +83,7 @@ bash scripts/install.sh --host 192.168.1.50
 bash scripts/install-docker.sh --host 192.168.1.50
 ```
 
-The control API remains loopback-only by default.
+The native macOS installer listens on `0.0.0.0` by default so phones on the same LAN can connect. Open General settings and use its title-bar phone icon to scan or copy the selected same-subnet URL. Pass `--control-host 127.0.0.1` to keep it Mac-only. Docker Compose remains published to host loopback only.
 
 ## API
 
@@ -87,6 +95,8 @@ The control API remains loopback-only by default.
 | `POST` | `/api/channels/push` | Push one channel |
 | `POST` | `/api/push` | Push every enabled channel |
 | `GET` | `/api/state`, `/health` | Device, channel, market, and cleanup status |
+| `GET` / `PUT` | `/api/device/settings/general` | Read or write TC002 general settings |
+| `GET` | `/api/access` | Report the same-subnet phone URL and listener status |
 | `GET` | `/api/library/ulanzi/pixel-assets` | Browse, search, filter, and page through official community assets |
 | `GET` | `/api/library/ulanzi/media` | Safely proxy official preview media |
 | `POST` | `/api/library/ulanzi/import` | Validate and import an official `contentView` link or work ID |

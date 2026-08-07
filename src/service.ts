@@ -1,10 +1,13 @@
 import {
   deleteClockApp,
   pushClockPayloadNamed,
+  readClockGeneralSettings,
   readClockInfo,
+  writeClockGeneralSettings,
 } from "./clock-client.ts";
 import { loadConfig } from "./config.ts";
 import { createControlHandler } from "./control-api.ts";
+import { discoverControlAccess } from "./network-access.ts";
 import { WorkspaceStore, createDefaultWorkspace } from "./workspace.ts";
 import { WorkspaceController } from "./workspace-controller.ts";
 import { PixelAssetStore } from "./pixel-asset-store.ts";
@@ -26,6 +29,11 @@ const workspaceStore = new WorkspaceStore(
 );
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
 const ulanziPixelAssets = new UlanziPixelAssetClient({ timeoutMs: config.requestTimeoutMs });
+const controlAccess = discoverControlAccess({
+  clockHost: config.clockHost,
+  controlHost: config.controlHost,
+  port: config.healthPort,
+});
 let workspace = createDefaultWorkspace(config.appName);
 try {
   workspace = await workspaceStore.load();
@@ -63,6 +71,11 @@ function interruptibleSleep(ms: number): Promise<void> {
 
 const controlHandler = createControlHandler(controller, {
   onSettingsChanged: () => wakeSleep?.(),
+  controlAccess: () => controlAccess,
+  deviceGeneralSettings: {
+    read: () => readClockGeneralSettings(config),
+    write: (settings) => writeClockGeneralSettings(config, settings),
+  },
   pixelAssetLibrary: { client: ulanziPixelAssets, store: pixelAssetStore },
 });
 const controlServer = Bun.serve({
