@@ -391,13 +391,15 @@ function drawSevenSegmentDigit(
   if (!segments) throw new Error(`unsupported numeric glyph: ${digit}`);
   const horizontalWidth = width - 2;
   const rightX = x + width - 2;
+  // 竖段在中线（y+5）彼此相接：七段字若留缝，7/1 的竖笔会断成两截，
+  // 0/8 的外侧列也会在中段出现空洞，在 LED 上看着支离破碎。
   const definitions: Record<string, readonly [number, number, number, number]> = {
     a: [x + 1, y, horizontalWidth, 2],
-    b: [rightX, y + 1, 2, 4],
-    c: [rightX, y + 6, 2, 4],
+    b: [rightX, y + 1, 2, 5],
+    c: [rightX, y + 5, 2, 5],
     d: [x + 1, y + 9, horizontalWidth, 2],
-    e: [x, y + 6, 2, 4],
-    f: [x, y + 1, 2, 4],
+    e: [x, y + 5, 2, 5],
+    f: [x, y + 1, 2, 5],
     g: [x + 1, y + 4, horizontalWidth, 2],
   };
   for (const segment of segments) {

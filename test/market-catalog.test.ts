@@ -198,7 +198,10 @@ describe("zero-key market discovery", () => {
     expect(registered.canonicalKey).toBe("stock:NMS:TSLA");
     expect(registered.routes).toEqual([{ provider: "yahoo", symbol: "TSLA" }]);
     expect(registered.changePeriod).toBe("1D");
-    expect(icons.get(registered.iconRef)?.mode).toBe("fallback");
+    expect(icons.get(registered.iconRef)).toMatchObject({
+      mode: "fallback",
+      pipelineVersion: "fallback-v2",
+    });
     expect((await catalog.register(result.results[0]!.candidateRef)).ref).toBe(registered.ref);
   });
 
@@ -320,6 +323,96 @@ describe("zero-key market discovery", () => {
     const reloaded = new InstrumentStore(join(directory, "instruments"));
     await reloaded.load();
     expect(reloaded.get(ref)?.iconRef).toBe(refreshed.iconRef);
+  });
+
+  test("refreshes legacy fallback-v1 icons to the v2 badge design", async () => {
+    const { createHash } = await import("node:crypto");
+    const { mkdir } = await import("node:fs/promises");
+    const { PixelCanvas } = await import("../src/pixel-ui.ts");
+    const { renderInstrumentFallbackIcon } = await import("../src/market/fallback-icon.ts");
+    const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-market-fallback-refresh-"));
+    directories.push(directory);
+    const draft: MarketInstrumentDraft = {
+      canonicalKey: "stock:NMS:MU",
+      kind: "stock",
+      displayName: "Micron Technology, Inc.",
+      displaySymbol: "MU",
+      baseCode: "MU",
+      quoteCode: "USD",
+      decimals: 2,
+      changePeriod: "1D",
+      routes: [{ provider: "yahoo", symbol: "MU" }],
+      sourceNote: "Yahoo Finance 公开行情（NASDAQ），价格可能延迟，仅供展示。",
+    };
+    const ref = "ins_bbbbbbbbbbbbbbbbbbbbbbbb";
+
+    // 忠实还原 v1 时代的产物：老设计像素 + fallback-v1 派生键推导出的 ref。
+    const legacyCanvas = new PixelCanvas(16, 16);
+    legacyCanvas.fillRect(0, 0, 2, 1, [50, 87, 143]);
+    legacyCanvas.fillRect(3, 12, 10, 1, [50, 87, 143]);
+    const legacyPng = legacyCanvas.toPng();
+    const legacyPixelSha = sha256(legacyCanvas.pixels);
+    const legacyBlobRef = sha256(legacyPng);
+    const legacyDerivationKey = sha256(`${draft.canonicalKey}:fallback-v1:16x16`);
+    const legacyIconRef = `ico_${sha256(`${ref}:${legacyPixelSha}:${legacyDerivationKey}`).slice(0, 32)}`;
+    await mkdir(join(directory, "icons", "manifests"), { recursive: true });
+    await mkdir(join(directory, "icons", "blobs"), { recursive: true });
+    await Bun.write(join(directory, "icons", "blobs", `${legacyBlobRef}.png`), legacyPng);
+    await Bun.write(
+      join(directory, "icons", "manifests", `${legacyIconRef}.json`),
+      `${JSON.stringify({
+        version: 1,
+        ref: legacyIconRef,
+        instrumentRef: ref,
+        mode: "fallback",
+        pipelineVersion: "fallback-v1",
+        sourceType: "fallback",
+        licensePolicy: "generated-local",
+        reviewStatus: "auto",
+        width: 16,
+        height: 16,
+        pixelSha256: legacyPixelSha,
+        blobRef: legacyBlobRef,
+        derivationKey: legacyDerivationKey,
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }, null, 2)}\n`,
+    );
+    await mkdir(join(directory, "instruments"), { recursive: true });
+    await Bun.write(
+      join(directory, "instruments", `${ref}.json`),
+      `${JSON.stringify({
+        ...draft,
+        version: 1,
+        ref,
+        iconRef: legacyIconRef,
+        createdAt: "2026-08-01T00:00:00.000Z",
+        updatedAt: "2026-08-01T00:00:00.000Z",
+      }, null, 2)}\n`,
+    );
+
+    const instruments = new InstrumentStore(join(directory, "instruments"), { now: () => 1_000 });
+    const icons = new MarketIconStore(join(directory, "icons"), { now: () => 1_000 });
+    await Promise.all([instruments.load(), icons.load()]);
+    expect(instruments.getIssues()).toEqual([]);
+    expect(icons.getIssues()).toEqual([]);
+    const catalog = new MarketCatalogService({
+      instruments,
+      icons,
+      search: new MarketSearchService({ fetcher: async () => json([]) }),
+    });
+
+    expect(await catalog.reconcileGeneratedIcons()).toEqual([ref]);
+    const refreshed = instruments.get(ref)!;
+    expect(refreshed.iconRef).not.toBe(legacyIconRef);
+    expect(icons.get(refreshed.iconRef)).toMatchObject({
+      mode: "fallback",
+      pipelineVersion: "fallback-v2",
+    });
+    const refreshedCanvas = await icons.getCanvas(refreshed.iconRef);
+    expect(refreshedCanvas.pixels).toEqual(renderInstrumentFallbackIcon(draft).pixels);
+    expect(await catalog.reconcileGeneratedIcons()).toEqual([]);
   });
 });
 

@@ -1,4 +1,8 @@
-import { MarketIconStore, type MarketIconManifest } from "./icon-store.ts";
+import {
+  FALLBACK_PIPELINE_VERSION,
+  MarketIconStore,
+  type MarketIconManifest,
+} from "./icon-store.ts";
 import {
   InstrumentStore,
   type MarketInstrument,
@@ -100,7 +104,13 @@ export class MarketCatalogService {
         && current.pipelineVersion === LOGO_PIPELINE_VERSION
         && current.variantId === AUTOMATIC_LOGO_VARIANT_ID
       ) continue;
-      const replacement = await this.createCatalogIcon(instrument, instrument.ref);
+      let replacement = await this.createCatalogIcon(instrument, instrument.ref);
+      if (
+        !replacement
+        && (!current || (current.mode === "fallback" && current.pipelineVersion !== FALLBACK_PIPELINE_VERSION))
+      ) {
+        replacement = await this.icons.saveFallback(instrument);
+      }
       if (!replacement || replacement.ref === instrument.iconRef) continue;
       await this.instruments.replaceGeneratedIcon(
         instrument.ref,

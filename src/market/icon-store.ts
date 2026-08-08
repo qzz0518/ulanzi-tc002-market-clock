@@ -30,9 +30,11 @@ interface MarketIconManifestBase {
   createdAt: string;
 }
 
+export const FALLBACK_PIPELINE_VERSION = "fallback-v2" as const;
+
 export interface FallbackIconManifest extends MarketIconManifestBase {
   mode: "fallback";
-  pipelineVersion: "fallback-v1";
+  pipelineVersion: "fallback-v1" | typeof FALLBACK_PIPELINE_VERSION;
   sourceType: "fallback";
   licensePolicy: "generated-local";
   reviewStatus: "auto";
@@ -71,7 +73,7 @@ function validateManifest(value: unknown): MarketIconManifest {
   }
   if (input.mode === "fallback") {
     if (
-      input.pipelineVersion !== "fallback-v1"
+      !["fallback-v1", FALLBACK_PIPELINE_VERSION].includes(String(input.pipelineVersion))
       || input.sourceType !== "fallback"
       || input.licensePolicy !== "generated-local"
       || input.reviewStatus !== "auto"
@@ -218,7 +220,7 @@ export class MarketIconStore {
     const png = canvas.toPng();
     const pixelSha256 = hash(canvas.pixels);
     const blobRef = hash(png);
-    const derivationKey = hash(`${instrument.canonicalKey}:fallback-v1:16x16`);
+    const derivationKey = hash(`${instrument.canonicalKey}:${FALLBACK_PIPELINE_VERSION}:16x16`);
     const ref = `ico_${hash(`${instrument.ref}:${pixelSha256}:${derivationKey}`).slice(0, 32)}`;
     const existing = this.manifests.get(ref);
     if (existing) return structuredClone(existing);
@@ -227,7 +229,7 @@ export class MarketIconStore {
       ref,
       instrumentRef: instrument.ref,
       mode: "fallback",
-      pipelineVersion: "fallback-v1",
+      pipelineVersion: FALLBACK_PIPELINE_VERSION,
       sourceType: "fallback",
       licensePolicy: "generated-local",
       reviewStatus: "auto",
