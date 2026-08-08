@@ -1,6 +1,7 @@
 import { Button, Chip, ColorPicker, ToggleButton, ToggleGroup } from "@cladd-ui/react";
 import { AudioLines, Monitor, MoveHorizontal, Radar, Radio, Rows3 } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { FULL_WIDTH_CELL, GLYPH_HEIGHT, glyphCellWidth, glyphRows } from "@/lib/pixel-glyphs";
 import {
   beatKick,
   cascadeBandY,
@@ -74,16 +75,12 @@ export function skinPrimaryHex(skin: MusicSkin): string {
   return PALETTES[skin].primary;
 }
 
-const PIXEL_FONT_FAMILY = "Fusion Pixel 12px Monospaced SC";
-const PIXEL_FONT_SPEC = `12px "${PIXEL_FONT_FAMILY}"`;
-const PIXEL_TEXT_HEIGHT = 12;
-// The font's em box is 10px ascent + 2px descent; drawing the alphabetic
-// baseline at 10 keeps all glyph ink inside the 12px band without clipping.
-const PIXEL_TEXT_BASELINE = 10;
+const PIXEL_TEXT_HEIGHT = GLYPH_HEIGHT;
 const PIXEL_TEXT_VIEWPORT_X = 2;
 const PIXEL_TEXT_VIEWPORT_WIDTH = 48;
 const PIXEL_TEXT_Y = 2;
-const PIXEL_GLYPH_CELL = 12;
+// Scrolling steps by whole full-width cells, matching LyricsPage::scrollOffsetFor.
+const PIXEL_GLYPH_CELL = FULL_WIDTH_CELL;
 const LYRIC_SCROLL_START = 0.08;
 const LYRIC_SCROLL_END = 0.92;
 const BITMAP_CACHE_LIMIT = 256;
@@ -101,80 +98,51 @@ interface PixelTextBitmap {
 }
 
 const bitmapCache = new Map<string, PixelTextBitmap>();
-let pixelFontLoaded = false;
 
 function normalizedCopy(value: string): string {
   const characters = Array.from(value.replace(/\s+/g, " ").trim() || "· · ·");
   return characters.slice(0, 160).join("");
 }
 
+/**
+ * Lays a line out exactly as `LyricsPage::layoutRow` does on the panel: cells
+ * butted together with no tracking, ASCII half-width, everything else
+ * full-width, and characters outside the generated charset left blank rather
+ * than substituted.
+ */
 function bitmapForText(value: string): PixelTextBitmap {
   const copy = normalizedCopy(value);
   const cached = bitmapCache.get(copy);
   if (cached) return cached;
 
-  const scratch = document.createElement("canvas");
-  const measuringContext = scratch.getContext("2d");
-  if (!measuringContext) {
-    return {
-      width: 1,
-      height: PIXEL_TEXT_HEIGHT,
-      on: new Uint8Array(PIXEL_TEXT_HEIGHT),
-      focusSpans: [],
-    };
-  }
-  measuringContext.font = PIXEL_FONT_SPEC;
-  measuringContext.fontKerning = "none";
-  const glyphs = Array.from(copy).map((character) => {
-    const measuredWidth = Math.max(
-      1,
-      Math.round(measuringContext.measureText(character).width),
-    );
-    return {
-      character,
-      measuredWidth,
-      cellWidth: Math.max(
-        PIXEL_GLYPH_CELL,
-        Math.ceil(measuredWidth / PIXEL_GLYPH_CELL) * PIXEL_GLYPH_CELL,
-      ),
-    };
+  const cells = Array.from(copy).map((character) => {
+    const codepoint = character.codePointAt(0)!;
+    return { character, codepoint, cellWidth: glyphCellWidth(codepoint) };
   });
   const width = Math.max(
-    PIXEL_GLYPH_CELL,
-    glyphs.reduce((total, glyph) => total + glyph.cellWidth, 0),
+    FULL_WIDTH_CELL,
+    cells.reduce((total, cell) => total + cell.cellWidth, 0),
   );
 
-  scratch.width = width;
-  scratch.height = PIXEL_TEXT_HEIGHT;
-  const bitmapContext = scratch.getContext("2d", { willReadFrequently: true });
-  if (!bitmapContext) {
-    return {
-      width,
-      height: PIXEL_TEXT_HEIGHT,
-      on: new Uint8Array(width * PIXEL_TEXT_HEIGHT),
-      focusSpans: [],
-    };
-  }
-  bitmapContext.clearRect(0, 0, width, PIXEL_TEXT_HEIGHT);
-  bitmapContext.font = PIXEL_FONT_SPEC;
-  bitmapContext.fontKerning = "none";
-  bitmapContext.fillStyle = "#ffffff";
-  bitmapContext.textBaseline = "alphabetic";
-  let glyphX = 0;
-  const focusSpans: PixelGlyphSpan[] = [];
-  for (const glyph of glyphs) {
-    const drawX = glyphX + Math.floor((glyph.cellWidth - glyph.measuredWidth) / 2);
-    bitmapContext.fillText(glyph.character, drawX, PIXEL_TEXT_BASELINE);
-    if (glyph.character.trim().length > 0) {
-      focusSpans.push({ start: glyphX, end: glyphX + glyph.cellWidth });
-    }
-    glyphX += glyph.cellWidth;
-  }
-
-  const rgba = bitmapContext.getImageData(0, 0, width, PIXEL_TEXT_HEIGHT).data;
   const on = new Uint8Array(width * PIXEL_TEXT_HEIGHT);
-  for (let pixel = 0; pixel < on.length; pixel += 1) {
-    on[pixel] = rgba[pixel * 4 + 3]! >= 96 ? 1 : 0;
+  const focusSpans: PixelGlyphSpan[] = [];
+  let cellX = 0;
+  for (const cell of cells) {
+    const rows = glyphRows(cell.codepoint);
+    if (rows) {
+      for (let row = 0; row < PIXEL_TEXT_HEIGHT; row += 1) {
+        const mask = rows[row]!;
+        for (let column = 0; column < cell.cellWidth; column += 1) {
+          if ((mask >> (cell.cellWidth - 1 - column)) & 1) {
+            on[row * width + cellX + column] = 1;
+          }
+        }
+      }
+    }
+    if (cell.character.trim().length > 0) {
+      focusSpans.push({ start: cellX, end: cellX + cell.cellWidth });
+    }
+    cellX += cell.cellWidth;
   }
 
   const bitmap = { width, height: PIXEL_TEXT_HEIGHT, on, focusSpans };
@@ -633,12 +601,6 @@ export function PixelLyricsPreview({
     };
 
     animationFrame = window.requestAnimationFrame(render);
-    void document.fonts?.load(PIXEL_FONT_SPEC, normalizedCopy(currentText)).then(() => {
-      if (pixelFontLoaded) return;
-      pixelFontLoaded = true;
-      bitmapCache.clear();
-      lastSignature = "";
-    });
     return () => {
       window.cancelAnimationFrame(animationFrame);
       motionPreference.removeEventListener("change", handleMotionPreference);

@@ -144,7 +144,10 @@ a full track.
 
 The preview and the device share one theme system: four display modes (ticker / skyline /
 spotlight / cascade) × four palettes (signal green / tape orange / blueprint / arcade red),
-plus a color-picker accent override.
+plus a color-picker accent override. They also share one font: rather than rasterising a
+webfont at runtime, the browser reads the firmware's own offline-generated tables — 12×12
+CJK and 6×12 half-width ASCII — so the preview, the frames pushed to the stock firmware,
+and the native firmware are identical pixel for pixel.
 
 Two complementary paths put lyrics on the clock:
 

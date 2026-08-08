@@ -34,7 +34,6 @@
   },
   "dependencies": {
     "@cladd-ui/react": "^0.18.5",
-    "@fontsource/fusion-pixel-12px-monospaced-sc": "5.3.0",
     "clsx": "^2.1.1",
     "gifenc": "^1.0.3",
     "gifuct-js": "^2.1.2",

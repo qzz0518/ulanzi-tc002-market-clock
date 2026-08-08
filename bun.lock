@@ -6,7 +6,6 @@
       "name": "ulanzi-tc002-content-studio",
       "dependencies": {
         "@cladd-ui/react": "^0.18.5",
-        "@fontsource/fusion-pixel-12px-monospaced-sc": "5.3.0",
         "clsx": "^2.1.1",
         "gifenc": "^1.0.3",
         "gifuct-js": "^2.1.2",
@@ -35,8 +34,6 @@
   },
   "packages": {
     "@cladd-ui/react": ["@cladd-ui/react@0.18.5", "", { "dependencies": { "clsx": "^2.1.1", "tailwind-merge": "^3.5.0" }, "peerDependencies": { "react": ">=19", "react-day-picker": ">=10", "react-dom": ">=19" }, "optionalPeers": ["react-day-picker"] }, "sha512-FzyQydhK1orNwGva5mH2deK8Uu/sbYzd11Vy5b9JWIfbXeAAu4Jjn/7QoY2oinR/Zy7anYP1bnf+QWMMuAk04A=="],
-
-    "@fontsource/fusion-pixel-12px-monospaced-sc": ["@fontsource/fusion-pixel-12px-monospaced-sc@5.3.0", "", {}, "sha512-IA5+uSWTxPi/LE7aZJIlFQ9DRxhfBQD7G5FlqUlK7MpI1crZP/9ILwD5lVv4nVf9AwTM/cMCjkL863NLM3g03g=="],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 

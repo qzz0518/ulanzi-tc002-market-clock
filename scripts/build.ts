@@ -37,14 +37,6 @@ await copyFile(
   join(root, "src/assets/demo-audio.mp3"),
   join(outdir, "assets/demo-audio.mp3"),
 );
-await copyFile(
-  join(
-    root,
-    "node_modules/@fontsource/fusion-pixel-12px-monospaced-sc/files/fusion-pixel-12px-monospaced-sc-latin-400-normal.woff2",
-  ),
-  join(outdir, "assets/fusion-pixel-12px-monospaced-sc.woff2"),
-);
-
 const cryptoIconsSource = join(root, "node_modules/cryptocurrency-icons");
 const cryptoIconsOutput = join(outdir, "assets/crypto-icons");
 await mkdir(join(cryptoIconsOutput, "128"), { recursive: true });

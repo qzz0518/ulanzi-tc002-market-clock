@@ -94,17 +94,19 @@ flow; this repository provides its own server boundary and interface.
 
 ## Fusion Pixel 12px Monospaced SC
 
-The 52×16 lyrics preview uses the Simplified Chinese, 12-pixel monospaced build
-of Fusion Pixel Font, version `5.3.0`:
+The 52×16 lyrics renderer draws from the Simplified Chinese, 12-pixel
+monospaced build of Fusion Pixel Font:
 
 - Upstream project: https://github.com/TakWolf/fusion-pixel-font
-- Package: https://www.npmjs.com/package/@fontsource/fusion-pixel-12px-monospaced-sc
 - Copyright: TakWolf and upstream font contributors
 - License: SIL Open Font License 1.1
 
-The package includes the applicable license text. The font is used unmodified
-as a web font; the lyric renderer rasterizes it at its native 12×12 pixel
-grid.
+No font file ships in the build. The font was rasterized offline at its native
+12×12 grid into fixed glyph tables — `device/tc002-lyrics-player/app/src/visual/
+CjkFont.h` and `LatinFont.h` for the firmware, mirrored into
+`web/src/lib/pixel-glyph-data.ts` for the preview — so device and browser
+render the same bitmaps. These tables are a derivative of the font and remain
+under the OFL.
 
 ## cryptocurrency-icons
 

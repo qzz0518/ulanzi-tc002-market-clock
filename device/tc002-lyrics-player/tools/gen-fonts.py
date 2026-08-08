@@ -24,7 +24,16 @@ is lossless for this grid-aligned pixel font (verified: the 3755 original hanzi
 come back bit-identical).
 
 Only gen-fonts.py, CjkFont.h and LatinFont.h are touched; no .cpp is modified.
-Usage: python3 gen-fonts.py [path/to/fusion-pixel-12px-monospaced-sc.woff2]
+Usage: python3 gen-fonts.py path/to/fusion-pixel-12px-monospaced-sc.woff2
+
+IMPORTANT: pass the *full* Simplified Chinese build, downloaded from the
+upstream release page. The @fontsource npm package publishes the latin subset
+only -- feed it in and every hanzi is silently reported as missing from the
+cmap, leaving CjkFont.h with nothing but ASCII.
+
+After regenerating, re-run `bun run scripts/gen-web-glyphs.ts` at the repo root
+so the web preview's mirror of these tables stays in step; test/pixel-glyphs.
+test.ts fails if it drifts.
 """
 
 import os
@@ -53,22 +62,18 @@ SAMPLE_LATIN = "Ag5?"
 
 
 def find_woff2() -> Path:
-    if len(sys.argv) > 1:
-        p = Path(sys.argv[1]).resolve()
-        if not p.exists():
-            sys.exit("woff2 not found: %s" % p)
-        return p
-    name = "fusion-pixel-12px-monospaced-sc.woff2"
-    for base in (REPO_ROOT, APP_DIR, SCRIPT_DIR):
-        cand = base / "dist" / "assets" / name
-        if cand.exists():
-            return cand
-    # last resort: walk up looking for dist/assets/<name>
-    for base in [SCRIPT_DIR, *SCRIPT_DIR.parents]:
-        cand = base / "dist" / "assets" / name
-        if cand.exists():
-            return cand
-    sys.exit("could not locate %s (pass its path as an argument)" % name)
+    """The font path, which the caller must supply.
+
+    No font ships in this repo or in the build: the glyph tables are the
+    artifact, so there is nothing to auto-discover. Point this at a full SC
+    build (see the note at the top of this file about the latin-only package)."""
+    if len(sys.argv) <= 1:
+        sys.exit("usage: gen-fonts.py path/to/fusion-pixel-12px-monospaced-sc.woff2\n"
+                 "       (must be the full Simplified Chinese build, not a latin subset)")
+    p = Path(sys.argv[1]).resolve()
+    if not p.exists():
+        sys.exit("woff2 not found: %s" % p)
+    return p
 
 
 def woff2_to_ttf(woff2: Path) -> str:
@@ -198,6 +203,14 @@ def emit_cjk(font, cps, cmap):
         "struct CjkGlyph { uint32_t cp; uint16_t rows[12]; };",
         "static const CjkGlyph kCjkGlyphs[] = {",
     ]
+    # A subsetted font reports nearly every hanzi as absent. Rather than write a
+    # header that is quietly missing its entire charset, refuse the run.
+    missing = [cp for cp in cps if cp not in cmap]
+    if len(missing) > len(cps) // 100:
+        sys.exit("font covers only %d of %d requested codepoints -- this looks like a\n"
+                 "subset build. Use the full Simplified Chinese font; %s was not written."
+                 % (len(cps) - len(missing), len(cps), CJK_HEADER.name))
+
     emitted = 0
     skipped = []
     for cp in cps:

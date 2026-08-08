@@ -83,14 +83,22 @@ socket）。每轮循环先拉状态、再发心跳，然后 `sleep(2)`：
 ## 字体管线
 
 ```bash
-python3 tools/gen-fonts.py   # 需要 fontTools + brotli + Pillow
+python3 tools/gen-fonts.py <完整 SC 字体.woff2>   # 需要 fontTools + brotli + Pillow
 ```
 
-从 `@fontsource/fusion-pixel-12px-monospaced-sc` 的 woff2 离线光栅化生成
-`app/src/visual/CjkFont.h`（全宽 12×12，按码点严格升序，运行期二分查找）和
-`LatinFont.h`（半宽 6×12，ASCII 连续存储 O(1) 索引）。位图约定与
-`LyricsPage.cpp` 一致：CJK 每行一个 12 位掩码、bit11 为最左列；Latin 每行只用
-低 6 位、bit5 为最左列。字体许可见仓库根 `THIRD_PARTY_NOTICES.md`。
+从 Fusion Pixel 12px 的 woff2 离线光栅化生成 `app/src/visual/CjkFont.h`
+（全宽 12×12，按码点严格升序，运行期二分查找）和 `LatinFont.h`（半宽 6×12，
+ASCII 连续存储 O(1) 索引）。位图约定与 `LyricsPage.cpp` 一致：CJK 每行一个
+12 位掩码、bit11 为最左列；Latin 每行只用低 6 位、bit5 为最左列。
+
+必须传**完整**的简体中文字体（上游 release 下载）。`@fontsource` 的 npm 包
+只发布 latin 子集，用它跑生成器会把 5000 多个汉字全部当作「字体里没有」跳过——
+脚本现在会直接报错拒绝写出残缺字模。
+
+字模是唯一产物，仓库和构建产物里都不含字体文件。生成后需在仓库根重跑
+`bun run scripts/gen-web-glyphs.ts`，把同一份字模同步给网页预览
+（`test/pixel-glyphs.test.ts` 会逐位校验两边一致）。字体许可见仓库根
+`THIRD_PARTY_NOTICES.md`。
 
 ## 构建
 

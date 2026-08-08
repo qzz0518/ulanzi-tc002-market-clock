@@ -50,13 +50,6 @@ const WEB_ASSETS = new Map([
     url: new URL("../dist/assets/studio.js", import.meta.url),
     type: "text/javascript; charset=utf-8",
   }],
-  ["/assets/fusion-pixel-12px-monospaced-sc.woff2", {
-    url: new URL(
-      "../dist/assets/fusion-pixel-12px-monospaced-sc.woff2",
-      import.meta.url,
-    ),
-    type: "font/woff2",
-  }],
 ]);
 
 export interface ControlApiOptions {
