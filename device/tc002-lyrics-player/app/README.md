@@ -6,8 +6,11 @@ power-cycle restores the official firmware.
 
 ## What runs today (verified on real hardware)
 
-- **Boot splash** (`pages/SplashPage`): ~2.4s 52×16 animation — spectrum bars
-  rise, a note icon blooms, the "MUSIC" wordmark fades in.
+- **Boot splash** (`pages/SplashPage`): a ~6s five-scene 52×16 animation — a
+  CRT power-on scanline, "PIXEL" dropping in and bouncing, a shine-swept
+  "MUSIC" wordmark, a spectrum rise with the note icon, then a fade-out.
+  After boot the lyrics page idles on the same "选择歌曲" hint as the web
+  preview; the loading pulse only shows while a track download is in flight.
 - **Lyrics page** (`pages/LyricsPage`): four display modes (ticker / skyline /
   spotlight / cascade) rendered fully on-device with offline-rasterised Fusion
   Pixel glyphs (`visual/CjkFont.h`, ~5200 12×12 CJK glyphs, plus 6×12 ASCII in
@@ -28,7 +31,7 @@ power-cycle restores the official firmware.
 - `src/Main.cpp` — `onStartupApp` → `lyricsActivity`.
 - `src/activity/lyricsActivity.*` — IDE-style activity (includes the logic .cc).
 - `src/logic/lyricsLogic.cc` — page registration, poll/heartbeat thread, key
-  dispatch, compile-time service origin.
+  dispatch, service-origin resolution.
 - `src/pages/{SplashPage,LyricsPage,VolumePage}.*` — the pages; draw via
   `Surface`+`sendLedData`.
 - `src/managers/AudioManager.*` — local-path playback (play/pause/seek).
@@ -52,7 +55,9 @@ Build & sideload: `../flythings-build/` (plain `make` — the default
   millisecond `seekTo`, verified end-to-end. Chain: `audio-utility` →
   `base-json` → `ffmpeg` → `z` → device `libmi_ao`.
 - **HTTP** — `net/NetClient` over raw libc sockets, plain HTTP only; the
-  service origin is a compile-time constant in `lyricsLogic.cc`.
+  service origin is read at startup from `/tmp/tc002-music/service.origin`
+  (written by the installer at sideload time), falling back to the
+  compile-time default in `lyricsLogic.cc`.
 
 Protocol fields, build pitfalls, deployment and recovery are documented in the
 [player README](../README.md).

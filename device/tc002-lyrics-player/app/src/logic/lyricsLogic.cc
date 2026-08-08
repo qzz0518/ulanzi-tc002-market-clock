@@ -44,15 +44,41 @@ void applyVolume() {
 }
 
 // LAN Pixel Studio service. All calls block, so they run off the UI thread.
+// The installer writes the current service origin next to the pushed bundle
+// at sideload time, so the same binary works on any network; the compile-time
+// default only matters for bare manual adb pushes without that file.
 #ifndef PIXEL_STUDIO_ORIGIN
 #define PIXEL_STUDIO_ORIGIN "http://PIXEL_STUDIO_HOST:43820"
 #endif
-const char* kServiceStateUrl  = PIXEL_STUDIO_ORIGIN "/api/music/device/state";
-const char* kServiceReportUrl = PIXEL_STUDIO_ORIGIN "/api/music/device/report";
-const char* kServiceHeartbeatUrl = PIXEL_STUDIO_ORIGIN "/api/music/device/heartbeat";
-const char* kServiceNowUrl    = PIXEL_STUDIO_ORIGIN "/api/music/device/now";
-const char* kServiceAudioUrl  = PIXEL_STUDIO_ORIGIN "/api/music/device/audio";
+const char* kServiceOriginFile = "/tmp/tc002-music/service.origin";
 const char* kLocalTrackPath   = "/tmp/track.mp3";
+
+std::string readServiceOrigin() {
+	FILE* f = fopen(kServiceOriginFile, "r");
+	if (f == NULL) return PIXEL_STUDIO_ORIGIN;
+	char buffer[256] = {0};
+	size_t n = fread(buffer, 1, sizeof(buffer) - 1, f);
+	fclose(f);
+	std::string origin(buffer, n);
+	while (!origin.empty()) {
+		char last = origin[origin.size() - 1];
+		if (last != '\n' && last != '\r' && last != ' ' && last != '\t') break;
+		origin.erase(origin.size() - 1);
+	}
+	if (origin.compare(0, 7, "http://") != 0 || origin.size() < 10 || origin.size() > 200) {
+		return PIXEL_STUDIO_ORIGIN;
+	}
+	return origin;
+}
+
+const std::string& serviceOrigin() {
+	static const std::string origin = readServiceOrigin();
+	return origin;
+}
+
+std::string serviceUrl(const char* path) {
+	return serviceOrigin() + path;
+}
 
 volatile bool sPolling = true;
 
@@ -81,7 +107,7 @@ int skinToInt(const std::string& s) {
 // blocking POST can't stall key handling.
 void* reportThread(void* arg) {
 	std::string* json = (std::string*)arg;
-	pixelnet::httpPost(kServiceReportUrl, *json);
+	pixelnet::httpPost(serviceUrl("/api/music/device/report"), *json);
 	delete json;
 	return NULL;
 }
@@ -93,18 +119,23 @@ void reportChange(const std::string& json) {
 }
 
 // Load the currently selected track's lyrics + audio and start playback.
+// setFetching() switches the screen from the idle hint to the loading pulse
+// for the whole (blocking, ~5-7s) download.
 void loadAndPlaySelection() {
+	LyricsPage* fetchingPage = lyricsPage();
+	if (fetchingPage) fetchingPage->setFetching(true);
 	std::string body;
-	if (pixelnet::httpGet(kServiceNowUrl, body) && !body.empty()) {
+	if (pixelnet::httpGet(serviceUrl("/api/music/device/now"), body) && !body.empty()) {
 		LyricsPage* lp = lyricsPage();
 		if (lp) lp->loadRemoteLyrics(body);
 	}
 	awtrix::AudioManager::getInstance().stopAudio();
-	if (pixelnet::downloadFile(kServiceAudioUrl, kLocalTrackPath)) {
+	if (pixelnet::downloadFile(serviceUrl("/api/music/device/audio"), kLocalTrackPath)) {
 		awtrix::AudioManager::getInstance().playAudio(kLocalTrackPath);
 		LyricsPage* lp = lyricsPage();
 		if (lp) lp->startPlayback();
 	}
+	if (fetchingPage) fetchingPage->setFetching(false);
 }
 
 // Pull one "KEY\tVALUE" field out of the plain-text /state body.
@@ -134,7 +165,7 @@ void* pollThread(void*) {
 	long lastSeekApplied = -1;
 	while (sPolling) {
 		std::string body;
-		if (pixelnet::httpGet(kServiceStateUrl, body) && !body.empty()) {
+		if (pixelnet::httpGet(serviceUrl("/api/music/device/state"), body) && !body.empty()) {
 			int seq = atoi(stateField(body, "SEQ").c_str());
 			if (seq != lastSeq) {
 				lastSeq = seq;
@@ -178,7 +209,7 @@ void* pollThread(void*) {
 				snprintf(hb, sizeof(hb), "{\"trackId\":%s,\"playheadMs\":%u,\"playing\":%s}",
 					lastTrackId.c_str(), (unsigned)lp->getPlayheadMs(),
 					lp->getPlaying() ? "true" : "false");
-				pixelnet::httpPost(kServiceHeartbeatUrl, hb);
+				pixelnet::httpPost(serviceUrl("/api/music/device/heartbeat"), hb);
 			}
 		}
 		sleep(2);

@@ -54,6 +54,7 @@ public:
 	// Called off the UI thread once the LAN fetch completes.
 	void loadRemoteLyrics(const std::string& body);  // "DUR\t<ms>\n<startMs>\t<text>\n"...
 	void startPlayback();                            // audio began: run the lyric clock
+	void setFetching(bool fetching);                 // a track download is in flight
 
 private:
 	int remoteLineAt(uint32_t ms) const;             // index whose startMs<=ms (mMutex held)
@@ -86,7 +87,8 @@ private:
 	void paintSpotlight(Surface&, const FrameCtx&);
 	void paintCascade(Surface&, const FrameCtx&);
 	void cueRow(Surface&, const Palette&, int y, float progress, int trailPx);
-	void drawLoading(Surface&, const Palette&, float animMs);  // waiting for a track
+	void drawLoading(Surface&, const Palette&, float animMs);  // a track is downloading
+	void drawIdle(Surface&, const Palette&, float animMs);     // no track selected yet
 
 	// Remote timeline.
 	struct RemoteLine { uint32_t startMs; std::string text; };
@@ -94,6 +96,7 @@ private:
 	uint32_t mRemoteDurationMs;
 	uint32_t mPlayheadMs;
 	bool mHasRemote;
+	bool mFetching;
 	bool mStarted;                                   // false until audio playback starts
 
 	// Demo fallback.

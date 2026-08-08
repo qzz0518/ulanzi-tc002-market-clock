@@ -22,7 +22,7 @@ const int VIEW_X = 2, VIEW_W = 48;
 
 LyricsPage::LyricsPage(const std::string& name)
 	: PageBase(name), mRemoteDurationMs(0), mPlayheadMs(0), mHasRemote(false),
-	  mStarted(false), mLineElapsedMs(0), mLineIndex(0), mPlaying(true),
+	  mFetching(false), mStarted(false), mLineElapsedMs(0), mLineIndex(0), mPlaying(true),
 	  mSkin(SKIN_SIGNAL), mMode(MODE_SPOTLIGHT), mAccentRgb(0), mHasAccent(false), mAnimMs(0) {
 	pthread_mutex_init(&mMutex, NULL);
 }
@@ -209,12 +209,13 @@ void LyricsPage::paintCascade(Surface& s, const FrameCtx& f) {
 void LyricsPage::draw() {
 	std::string text;
 	float prog = 0.f, track = 0.f, animMs = 0.f;
-	bool playing = true, hasLyric = false;
+	bool playing = true, hasLyric = false, fetching = false;
 	int skin = SKIN_SIGNAL, mode = MODE_SPOTLIGHT;
 	uint32_t accentRgb = 0;
 	bool hasAccent = false;
 
 	pthread_mutex_lock(&mMutex);
+	fetching = mFetching;
 	playing = mPlaying;
 	skin = mSkin;
 	mode = mMode;
@@ -250,7 +251,10 @@ void LyricsPage::draw() {
 	Surface s(52, 16, Color(0, 0, 0));
 
 	if (!ready) {
-		drawLoading(s, pal, animMs);
+		// A download in flight shows the loading pulse; plain boot idles on the
+		// same "pick a song" hint the web preview shows.
+		if (fetching) drawLoading(s, pal, animMs);
+		else drawIdle(s, pal, animMs);
 	} else {
 		Cell cells[96];
 		int totalW = 0;
@@ -308,6 +312,36 @@ void LyricsPage::drawLoading(Surface& s, const Palette& pal, float animMs) {
 	}
 }
 
+// Idle screen while nothing is selected: the same "选择歌曲" hint the web
+// preview shows, with sparse sparkles along the free rows. Distinct from
+// drawLoading, which means a track download is actually in flight.
+void LyricsPage::drawIdle(Surface& s, const Palette& pal, float animMs) {
+	const uint32_t chars[4] = { 0x9009, 0x62E9, 0x6B4C, 0x66F2 };  // 选 择 歌 曲
+	for (int k = 0; k < 4; ++k) {
+		const CjkGlyph* g = cjkGlyph(chars[k]);
+		if (!g) continue;
+		// Slow per-character brightness wave, alternating primary/secondary.
+		float wave = 0.6f + 0.4f * sinf(animMs * 0.0025f - k * 0.9f);
+		const Color& base = (k % 2 == 0) ? pal.primary : pal.secondary;
+		int inten = int(wave * 255.f);
+		for (int row = 0; row < 12; ++row)
+			for (int col = 0; col < 12; ++col)
+				if (g->rows[row] & (1 << (11 - col))) {
+					int px = 2 + k * 12 + col;
+					if (px >= 0 && px < 52) s.setPixel(px, 2 + row, scaled(base, inten));
+				}
+	}
+	// Deterministic sparkles twinkling in the free top/bottom rows.
+	for (int i = 0; i < 6; ++i) {
+		uint32_t slot = (uint32_t)(animMs / 400.f) + (uint32_t)i * 97u;
+		uint32_t h = slot * 2654435761u + (uint32_t)i * 40503u;
+		int x = (int)(h % 52u);
+		int y = ((h >> 8) & 1u) ? (int)(h % 2u) : 14 + (int)(h % 2u);
+		float tw = 0.5f + 0.5f * sinf(animMs * 0.004f + i * 1.3f);
+		if (x >= 0 && x < 52 && y >= 0 && y < 16) s.setPixel(x, y, scaled(pal.secondary, int(tw * 140.f)));
+	}
+}
+
 // ---- clock + remote timeline -----------------------------------------------
 
 int LyricsPage::remoteLineAt(uint32_t ms) const {
@@ -316,6 +350,12 @@ int LyricsPage::remoteLineAt(uint32_t ms) const {
 		if (mRemote[i].startMs <= ms) idx = i; else break;
 	}
 	return idx;
+}
+
+void LyricsPage::setFetching(bool fetching) {
+	pthread_mutex_lock(&mMutex);
+	mFetching = fetching;
+	pthread_mutex_unlock(&mMutex);
 }
 
 void LyricsPage::tick() {
