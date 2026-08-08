@@ -1,5 +1,10 @@
 import { ASSET_PRESETS, type AssetId } from "./assets.ts";
-import { renderDashboard, type PixelCanvas } from "./pixel-ui.ts";
+import {
+  renderDashboard,
+  renderRuntimeMarketDashboard,
+  type PixelCanvas,
+  type Rgb,
+} from "./pixel-ui.ts";
 import type { AssetMarketData } from "./price.ts";
 import {
   renderCanvasContent,
@@ -12,6 +17,8 @@ import {
   type VisualEffectId,
 } from "./visual-effects.ts";
 import type { RenderedPixelAsset } from "./pixel-asset-store.ts";
+import type { MarketInstrument } from "./market/instruments.ts";
+import type { RuntimeMarketData } from "./market/quotes.ts";
 import { createContentItem, type ContentItemConfig, type JsonValue } from "./workspace.ts";
 
 export type ContentCategory = "market" | "tools" | "visual" | "creative";
@@ -39,12 +46,17 @@ export interface ContentRenderResult {
   frameDelaysMs: number[];
   label: string;
   assetIds?: AssetId[];
+  instrumentRefs?: string[];
 }
 
 export interface ContentRenderContext {
   nowMs: number;
   forceRefresh: boolean;
   getMarket(assetId: AssetId, forceRefresh: boolean): Promise<AssetMarketData>;
+  getInstrumentMarket(
+    instrumentRef: string,
+    forceRefresh: boolean,
+  ): Promise<{ instrument: MarketInstrument; market: RuntimeMarketData; icon: PixelCanvas }>;
   getPixelAsset(assetRef: string, durationMs: number): Promise<RenderedPixelAsset>;
 }
 
@@ -101,6 +113,22 @@ const MARKET_OPTIONS: readonly ContentOptionField[] = [
   },
 ];
 
+function accentFromIcon(icon: PixelCanvas): Rgb {
+  let brightest: Rgb = [90, 155, 255];
+  let score = 0;
+  for (let y = 0; y < icon.height; y += 1) {
+    for (let x = 0; x < icon.width; x += 1) {
+      const color = icon.getPixel(x, y);
+      const next = color[0] + color[1] + color[2];
+      if (next > score) {
+        score = next;
+        brightest = color;
+      }
+    }
+  }
+  return brightest;
+}
+
 function marketDefinition(assetId: AssetId): ContentDefinition {
   const preset = ASSET_PRESETS.find((candidate) => candidate.id === assetId)!;
   return {
@@ -139,6 +167,59 @@ function marketDefinition(assetId: AssetId): ContentDefinition {
     },
   };
 }
+
+const RUNTIME_MARKET_DEFINITION: ContentDefinition = {
+  id: "market:instrument",
+  title: "运行时资产",
+  category: "market",
+  description: "通过搜索添加的股票、数字货币、汇率或金属。",
+  defaultDurationMs: 15_000,
+  preferredRefreshIntervalMs: 15_000,
+  availableInMarket: false,
+  options: [
+    { key: "instrumentRef", label: "资产引用", type: "hidden", default: "" },
+    ...MARKET_OPTIONS,
+  ],
+  async render(context, item) {
+    const instrumentRef = typeof item.options.instrumentRef === "string"
+      ? item.options.instrumentRef
+      : "";
+    const { instrument, market, icon } = await context.getInstrumentMarket(
+      instrumentRef,
+      context.forceRefresh,
+    );
+    const requestedChangeDuration = Math.round(
+      valueNumber(item.options.changeDurationMs, 2_500, 500, 30_000) / 100,
+    ) * 100;
+    const showChange = item.options.showChange !== false
+      && market.changePercent !== undefined
+      && market.changePeriod !== undefined
+      && item.durationMs >= 1_500;
+    const changeDurationMs = showChange
+      ? Math.min(requestedChangeDuration, item.durationMs - 1_000)
+      : 500;
+    const rendered = renderRuntimeMarketDashboard(
+      market,
+      {
+        symbol: instrument.displaySymbol,
+        decimals: instrument.decimals,
+        accent: accentFromIcon(icon),
+        icon,
+      },
+      {
+        priceDurationMs: item.durationMs - (showChange ? changeDurationMs : 0),
+        changeDurationMs,
+        showChange,
+      },
+    );
+    return {
+      frames: [...rendered.frames],
+      frameDelaysMs: [...rendered.frameDelaysMs],
+      label: rendered.label,
+      instrumentRefs: [instrument.ref],
+    };
+  },
+};
 
 const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description: string }>> = {
   ant: { title: "兰顿蚂蚁", description: "简单转向规则演化出的元胞自动机轨迹。" },
@@ -301,6 +382,7 @@ const PIXEL_ASSET_DEFINITION: ContentDefinition = {
 
 export const CONTENT_DEFINITIONS: readonly ContentDefinition[] = [
   ...ASSET_PRESETS.map((preset) => marketDefinition(preset.id)),
+  RUNTIME_MARKET_DEFINITION,
   NOTICE_DEFINITION,
   TIMER_DEFINITION,
   ...VISUAL_EFFECT_IDS.map(visualDefinition),

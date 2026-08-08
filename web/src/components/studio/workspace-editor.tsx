@@ -30,17 +30,25 @@ import type {
   ContentCatalogEntry,
   ContentItemConfig,
   JsonValue,
+  MarketInstrument,
   PreviewScope,
 } from "@/types";
 import { ContentIcon } from "./content-icon";
 import { WorkspaceActions } from "./workspace-actions";
 
-function contentTitle(item: ContentItemConfig, definition?: ContentCatalogEntry): string {
+function contentTitle(
+  item: ContentItemConfig,
+  definition?: ContentCatalogEntry,
+  instrument?: MarketInstrument,
+): string {
   if (
     item.contentId === "creative:pixel-asset"
     && typeof item.options.title === "string"
     && item.options.title.trim()
   ) return item.options.title.trim();
+  if (item.contentId === "market:instrument") {
+    return instrument?.displaySymbol ?? "不可用的运行时资产";
+  }
   return definition?.title ?? item.contentId;
 }
 
@@ -48,6 +56,7 @@ interface WorkspaceEditorProps {
   channel: ChannelConfig;
   selectedItemId: string | null;
   catalog: ContentCatalogEntry[];
+  instruments: MarketInstrument[];
   previewUrl: string | null;
   previewing: boolean;
   previewError: string | null;
@@ -76,6 +85,7 @@ interface WorkspaceEditorProps {
 interface OptionEditorProps {
   item: ContentItemConfig;
   definition: ContentCatalogEntry;
+  instrument?: MarketInstrument;
   onChange: (key: string, value: JsonValue) => void;
   onTimerStart: () => void;
   onTimerPause: () => void;
@@ -123,7 +133,14 @@ function NumberInput({
   );
 }
 
-function OptionEditor({ item, definition, onChange, onTimerStart, onTimerPause }: OptionEditorProps) {
+function OptionEditor({
+  item,
+  definition,
+  instrument,
+  onChange,
+  onTimerStart,
+  onTimerPause,
+}: OptionEditorProps) {
   const visibleFields = definition.options.filter((field) => field.type !== "hidden");
   const titleId = `content-options-${item.id}`;
 
@@ -132,7 +149,7 @@ function OptionEditor({ item, definition, onChange, onTimerStart, onTimerPause }
       <div className="subsection-heading">
         <div>
           <h3 id={titleId}>内容设置</h3>
-          <p>{contentTitle(item, definition)}</p>
+          <p>{contentTitle(item, definition, instrument)}</p>
         </div>
         {visibleFields.length === 0 && item.contentId !== "tools:timer" && (
           <span>此内容无需额外设置</span>
@@ -224,6 +241,17 @@ function OptionEditor({ item, definition, onChange, onTimerStart, onTimerPause }
           )}
         </div>
       )}
+      {item.contentId === "market:instrument" && (
+        <div className="pixel-asset-metadata">
+          {instrument
+            ? <>
+              <span>{instrument.displayName}</span>
+              <span>{instrument.kind.toUpperCase()} · {instrument.baseCode}/{instrument.quoteCode}</span>
+              <span>{instrument.sourceNote}</span>
+            </>
+            : <span>这个资产的本地身份记录不可用；频道仍会保留，但无法预览或推送。</span>}
+        </div>
+      )}
     </section>
   );
 }
@@ -232,6 +260,7 @@ export function WorkspaceEditor({
   channel,
   selectedItemId,
   catalog,
+  instruments,
   previewUrl,
   previewing,
   previewError,
@@ -261,13 +290,18 @@ export function WorkspaceEditor({
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const selectedItem = channel.items.find((item) => item.id === selectedItemId) ?? channel.items[0];
+  const instrumentsByRef = new Map(instruments.map((instrument) => [instrument.ref, instrument]));
+  const instrumentFor = (item: ContentItemConfig): MarketInstrument | undefined =>
+    item.contentId === "market:instrument" && typeof item.options.instrumentRef === "string"
+      ? instrumentsByRef.get(item.options.instrumentRef)
+      : undefined;
   const selectedDefinition = selectedItem
     ? catalog.find((definition) => definition.id === selectedItem.contentId)
     : undefined;
   const totalDuration = channel.items.reduce((sum, item) => sum + item.durationMs, 0);
   const effectiveRefresh = Math.max(channel.refreshIntervalMs, totalDuration);
   const previewLabel = previewScope === "item"
-    ? selectedItem ? contentTitle(selectedItem, selectedDefinition) : "所选内容"
+    ? selectedItem ? contentTitle(selectedItem, selectedDefinition, instrumentFor(selectedItem)) : "所选内容"
     : `完整轮播 · ${channel.items.length} 个内容`;
 
   useEffect(() => {
@@ -427,7 +461,7 @@ export function WorkspaceEditor({
             <div className="preview-dots" aria-label="选择要预览的内容">
               {channel.items.map((item, index) => {
                 const definition = catalog.find((entry) => entry.id === item.contentId);
-                const title = contentTitle(item, definition);
+                const title = contentTitle(item, definition, instrumentFor(item));
                 const active = item.id === selectedItem?.id && previewScope === "item";
                 return (
                   <button
@@ -468,7 +502,8 @@ export function WorkspaceEditor({
         <div className="playlist">
           {channel.items.map((item, index) => {
             const definition = catalog.find((entry) => entry.id === item.contentId);
-            const title = contentTitle(item, definition);
+            const instrument = instrumentFor(item);
+            const title = contentTitle(item, definition, instrument);
             const active = item.id === selectedItem?.id;
             return (
               <div
@@ -529,6 +564,8 @@ export function WorkspaceEditor({
                     <ContentIcon
                       contentId={item.contentId}
                       assetRef={typeof item.options.assetRef === "string" ? item.options.assetRef : undefined}
+                      iconUrl={instrument?.iconUrl}
+                      fallbackLabel={instrument?.baseCode}
                     />
                     <span className="playlist-name">
                       <strong>{title}</strong>
@@ -570,6 +607,7 @@ export function WorkspaceEditor({
                   <OptionEditor
                     item={item}
                     definition={definition}
+                    instrument={instrument}
                     onChange={(key, value) => onOptionChange(item.id, key, value)}
                     onTimerStart={() => onTimerStart(item.id)}
                     onTimerPause={() => onTimerPause(item.id)}

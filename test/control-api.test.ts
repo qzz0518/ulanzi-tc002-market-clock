@@ -17,6 +17,11 @@ import { PixelAssetStore } from "../src/pixel-asset-store.ts";
 import { PixelCanvas } from "../src/pixel-ui.ts";
 import type { UlanziPixelAssetClient } from "../src/ulanzi-pixel-assets.ts";
 import type { Tc002MusicInstaller } from "../src/tc002-music-installer.ts";
+import { InstrumentStore } from "../src/market/instruments.ts";
+import { MarketIconStore } from "../src/market/icon-store.ts";
+import { MarketSearchService } from "../src/market/search.ts";
+import { MarketCatalogService } from "../src/market/catalog-service.ts";
+import { BundledCryptoLogoCatalog } from "../src/market/logo-catalog.ts";
 
 const directories: string[] = [];
 
@@ -414,7 +419,7 @@ describe("local control API", () => {
     const handler = createControlHandler(fakeWorkspaceController(previewCalls));
     const catalog = await handler(new Request("http://127.0.0.1:43820/api/catalog"));
     const catalogBody = await catalog.json();
-    expect(catalogBody.contents).toHaveLength(23);
+    expect(catalogBody.contents).toHaveLength(24);
     expect(catalogBody.categories.map((category: { id: string }) => category.id)).toEqual([
       "market", "tools", "visual", "creative",
     ]);
@@ -502,5 +507,83 @@ describe("local control API", () => {
     expect(new Uint8Array(await localMedia.arrayBuffer()).subarray(0, 4)).toEqual(
       new Uint8Array([137, 80, 78, 71]),
     );
+  });
+
+  test("searches, registers, lists, and serves runtime market instruments", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-control-market-"));
+    directories.push(directory);
+    const instruments = new InstrumentStore(join(directory, "instruments"));
+    const icons = new MarketIconStore(join(directory, "icons"));
+    await Promise.all([instruments.load(), icons.load()]);
+    const marketCatalog = new MarketCatalogService({
+      instruments,
+      icons,
+      search: new MarketSearchService({
+        fetcher: async (input) => {
+          if (String(input).endsWith("/products")) {
+            return Response.json([{
+              id: "DOGE-USD",
+              base_currency: "DOGE",
+              quote_currency: "USD",
+              display_name: "DOGE/USD",
+              status: "online",
+              quote_increment: "0.0001",
+            }]);
+          }
+          if (String(input).endsWith("/currencies")) {
+            return Response.json([{
+              id: "DOGE",
+              name: "Dogecoin",
+              default_network: "dogecoin",
+              supported_networks: [],
+            }]);
+          }
+          return Response.json([]);
+        },
+      }),
+      logos: new BundledCryptoLogoCatalog(join(
+        import.meta.dir,
+        "../node_modules/cryptocurrency-icons",
+      )),
+    });
+    const handler = createControlHandler(fakeWorkspaceController(), { marketCatalog });
+    const search = await handler(new Request(
+      "http://127.0.0.1:43820/api/market/search?q=doge&kind=crypto",
+    ));
+    expect(search.status).toBe(200);
+    const candidate = (await search.json()).results[0];
+    expect(candidate.pair).toBe("DOGE/USD");
+
+    const created = await handler(new Request("http://127.0.0.1:43820/api/market/instruments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ candidateRef: candidate.candidateRef }),
+    }));
+    expect(created.status).toBe(201);
+    const instrument = (await created.json()).instrument;
+    expect(instrument.iconUrl).toContain("/api/market/icons/ico_");
+    expect(instrument.iconMode).toBe("catalog");
+
+    const listed = await handler(new Request("http://127.0.0.1:43820/api/market/instruments"));
+    expect((await listed.json()).instruments).toHaveLength(1);
+    const icon = await handler(new Request(new URL(instrument.iconUrl, "http://127.0.0.1:43820")));
+    expect(icon.status).toBe(200);
+    expect(icon.headers.get("Cache-Control")).toContain("immutable");
+    const etag = icon.headers.get("ETag");
+    expect(etag).toMatch(/^"[a-f0-9]{64}"$/);
+    const unchanged = await handler(new Request(
+      new URL(instrument.iconUrl, "http://127.0.0.1:43820"),
+      { headers: { "If-None-Match": etag! } },
+    ));
+    expect(unchanged.status).toBe(304);
+    const removedUploadEndpoint = await handler(new Request(
+      `http://127.0.0.1:43820/api/market/logo-uploads?instrumentRef=${instrument.ref}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+        body: "{}",
+      },
+    ));
+    expect(removedUploadEndpoint.status).toBe(404);
   });
 });

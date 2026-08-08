@@ -8,6 +8,7 @@ import {
 import { getStockIconPng } from "../src/stock-icons.ts";
 import type { AssetMarketData } from "../src/price.ts";
 import { PixelCanvas } from "../src/pixel-ui.ts";
+import { renderInstrumentFallbackIcon } from "../src/market/fallback-icon.ts";
 
 describe("built-in content registry", () => {
   test("ships all market, tool, visual, and creative content through one renderer contract", async () => {
@@ -25,6 +26,38 @@ describe("built-in content registry", () => {
           fetchedAt: "2026-08-06T06:00:00Z",
           changePercent: 1.25,
           changePeriod: "1D",
+        };
+      },
+      async getInstrumentMarket() {
+        const instrument = {
+          version: 1 as const,
+          ref: "ins_aaaaaaaaaaaaaaaaaaaaaaaa",
+          iconRef: `ico_${"1".repeat(32)}`,
+          canonicalKey: "crypto:COINBASE:ABC-USD",
+          kind: "crypto" as const,
+          displayName: "ABC / US Dollar",
+          displaySymbol: "ABC",
+          baseCode: "ABC",
+          quoteCode: "USD",
+          decimals: 2,
+          changePeriod: "24H" as const,
+          routes: [{ provider: "coinbase" as const, symbol: "ABC-USD" }],
+          sourceNote: "Fixture.",
+          createdAt: "2026-08-06T06:00:00Z",
+          updatedAt: "2026-08-06T06:00:00Z",
+        };
+        return {
+          instrument,
+          market: {
+            instrumentRef: instrument.ref,
+            provider: "coinbase" as const,
+            price: 12.34,
+            rawPrice: "12.34",
+            fetchedAt: "2026-08-06T06:00:00Z",
+            changePercent: 2.5,
+            changePeriod: "24H" as const,
+          },
+          icon: renderInstrumentFallbackIcon(instrument),
         };
       },
       async getPixelAsset(_assetRef: string, durationMs: number) {
@@ -46,7 +79,7 @@ describe("built-in content registry", () => {
         };
       },
     };
-    expect(CONTENT_DEFINITIONS).toHaveLength(23);
+    expect(CONTENT_DEFINITIONS).toHaveLength(24);
     expect(new Set(getContentCatalog().map((entry) => entry.category))).toEqual(
       new Set(["market", "tools", "visual", "creative"]),
     );

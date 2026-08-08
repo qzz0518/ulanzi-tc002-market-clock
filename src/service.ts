@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {
   deleteClockApp,
   pushClockPayloadNamed,
@@ -14,6 +15,12 @@ import { WorkspaceController } from "./workspace-controller.ts";
 import { PixelAssetStore } from "./pixel-asset-store.ts";
 import { UlanziPixelAssetClient } from "./ulanzi-pixel-assets.ts";
 import { MusicPlayerBundleStore, Tc002MusicInstaller } from "./tc002-music-installer.ts";
+import { InstrumentStore } from "./market/instruments.ts";
+import { MarketIconStore } from "./market/icon-store.ts";
+import { MarketSearchService } from "./market/search.ts";
+import { MarketCatalogService } from "./market/catalog-service.ts";
+import { DynamicMarketDataClient } from "./market/quotes.ts";
+import { BundledCryptoLogoCatalog } from "./market/logo-catalog.ts";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown error";
@@ -30,6 +37,23 @@ const workspaceStore = new WorkspaceStore(
   config.appName,
 );
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
+const instrumentStore = new InstrumentStore(".runtime/market-instruments");
+const marketIconStore = new MarketIconStore(".runtime/market-icons");
+await Promise.all([instrumentStore.load(), marketIconStore.load()]);
+const dynamicMarketClient = new DynamicMarketDataClient({ timeoutMs: config.requestTimeoutMs });
+const marketCatalog = new MarketCatalogService({
+  instruments: instrumentStore,
+  icons: marketIconStore,
+  search: new MarketSearchService({ timeoutMs: config.requestTimeoutMs }),
+  logos: new BundledCryptoLogoCatalog(fileURLToPath(new URL("./assets/crypto-icons", import.meta.url))),
+});
+const refreshedMarketIcons = await marketCatalog.reconcileGeneratedIcons();
+if (refreshedMarketIcons.length > 0) {
+  log("market_icons_refreshed", { instruments: refreshedMarketIcons });
+}
+for (const issue of marketCatalog.getIssues()) {
+  log("market_store_issue", { error: issue });
+}
 const ulanziPixelAssets = new UlanziPixelAssetClient({ timeoutMs: config.requestTimeoutMs });
 const music = new NeteaseMusicService({
   sessionStore: new MusicSessionStore(".runtime/music-session.json"),
@@ -58,6 +82,9 @@ const controller = new WorkspaceController({
   pushPayload: (appName, payload) => pushClockPayloadNamed(config, appName, payload),
   deleteApp: (appName) => deleteClockApp(config, appName),
   pixelAssetStore,
+  instrumentStore,
+  marketIconStore,
+  dynamicMarketClient,
 });
 const musicInstaller = new Tc002MusicInstaller({
   clockHost: config.clockHost,
@@ -110,6 +137,7 @@ const controlHandler = createControlHandler(controller, {
     push: (payload) => queueMusicMirror(() => pushClockPayloadNamed(config, MUSIC_MIRROR_APP, payload)),
     clear: () => queueMusicMirror(() => deleteClockApp(config, MUSIC_MIRROR_APP)),
   },
+  marketCatalog,
 });
 const controlServer = Bun.serve({
   // 0.0.0.0 so the TC002 on the LAN can reach the device-facing endpoints

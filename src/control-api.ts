@@ -34,6 +34,11 @@ import {
   type UlanziPixelAssetSort,
   type UlanziPixelAssetClient,
 } from "./ulanzi-pixel-assets.ts";
+import type { MarketCatalogService } from "./market/catalog-service.ts";
+import {
+  type MarketInstrument,
+  type MarketInstrumentKind,
+} from "./market/instruments.ts";
 
 const CLOCK_FRAME_FILE = Bun.file(new URL("./assets/tc002-frame.png", import.meta.url));
 const WEB_ASSETS = new Map([
@@ -71,6 +76,7 @@ export interface ControlApiOptions {
     push: (payload: ClockPayload) => Promise<{ status: number }>;
     clear: () => Promise<{ status: number }>;
   };
+  marketCatalog?: MarketCatalogService;
 }
 
 // The device's live music control state. The web UI mutates it via /control (and
@@ -237,6 +243,18 @@ async function readJson(request: Request): Promise<unknown> {
   } catch {
     throw new SettingsValidationError("request body must contain valid JSON");
   }
+}
+
+function marketInstrumentPayload(
+  catalog: MarketCatalogService,
+  instrument: MarketInstrument,
+): MarketInstrument & { iconUrl: string; iconMode: "fallback" | "catalog" | null } {
+  const icon = catalog.icons.get(instrument.iconRef);
+  return {
+    ...instrument,
+    iconUrl: `/api/market/icons/${instrument.iconRef}.png${icon ? `?v=${icon.pixelSha256.slice(0, 12)}` : ""}`,
+    iconMode: icon?.mode ?? null,
+  };
 }
 
 type ControlController = DashboardController | WorkspaceController;
@@ -443,6 +461,33 @@ export function createControlHandler(
         });
       }
 
+      const marketIconMatch = url.pathname.match(/^\/api\/market\/icons\/(ico_[a-f0-9]{32})\.png$/);
+      if (request.method === "GET" && marketIconMatch) {
+        if (!options.marketCatalog) return jsonResponse({ error: "market catalog is unavailable" }, 404);
+        const manifest = options.marketCatalog.icons.get(marketIconMatch[1]!);
+        if (!manifest) return jsonResponse({ error: "market icon not found" }, 404);
+        const etag = `"${manifest.pixelSha256}"`;
+        if (request.headers.get("If-None-Match") === etag) {
+          return new Response(null, {
+            status: 304,
+            headers: {
+              ETag: etag,
+              "Cache-Control": "public, max-age=31536000, immutable",
+              "X-Content-Type-Options": "nosniff",
+            },
+          });
+        }
+        const bytes = await options.marketCatalog.icons.getPng(manifest.ref);
+        return new Response(arrayBufferCopy(bytes), {
+          headers: {
+            "Content-Type": "image/png",
+            "Cache-Control": "public, max-age=31536000, immutable",
+            ETag: etag,
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/presets") {
         return jsonResponse({
           presets: ASSET_PRESETS.map((preset) => ({
@@ -462,6 +507,50 @@ export function createControlHandler(
           ],
           contents: getContentCatalog(),
         });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/market/instruments") {
+        if (!options.marketCatalog) return jsonResponse({ error: "market catalog is unavailable" }, 404);
+        return jsonResponse({
+          instruments: options.marketCatalog.list().map((instrument) =>
+            marketInstrumentPayload(options.marketCatalog!, instrument)
+          ),
+          issues: options.marketCatalog.getIssues(),
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/market/search") {
+        if (!options.marketCatalog) return jsonResponse({ error: "market catalog is unavailable" }, 404);
+        const query = (url.searchParams.get("q") ?? "").trim();
+        if (query.length < 1 || query.length > 48) {
+          throw new SettingsValidationError("q must contain 1-48 characters");
+        }
+        const rawKind = url.searchParams.get("kind");
+        if (rawKind !== null && !["crypto", "fx", "metal", "stock"].includes(rawKind)) {
+          throw new SettingsValidationError("kind is invalid");
+        }
+        return jsonResponse(await options.marketCatalog.search(
+          query,
+          rawKind as MarketInstrumentKind | undefined,
+        ));
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/market/instruments") {
+        if (!options.marketCatalog) return jsonResponse({ error: "market catalog is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { candidateRef?: unknown };
+        if (typeof input.candidateRef !== "string" || !/^cand_[a-f0-9]{32}$/.test(input.candidateRef)) {
+          throw new SettingsValidationError("candidateRef is invalid");
+        }
+        let instrument;
+        try {
+          instrument = await options.marketCatalog.register(input.candidateRef);
+        } catch (error) {
+          throw new SettingsValidationError(error instanceof Error ? error.message : "candidate could not be registered");
+        }
+        return jsonResponse({
+          instrument: marketInstrumentPayload(options.marketCatalog, instrument),
+        }, 201);
       }
 
       if (request.method === "GET" && url.pathname === "/api/access") {

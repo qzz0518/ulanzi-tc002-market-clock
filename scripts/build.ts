@@ -1,4 +1,4 @@
-import { copyFile, mkdir, rm } from "node:fs/promises";
+import { copyFile, cp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { build as buildWeb } from "vite";
 
@@ -44,5 +44,18 @@ await copyFile(
   ),
   join(outdir, "assets/fusion-pixel-12px-monospaced-sc.woff2"),
 );
+
+const cryptoIconsSource = join(root, "node_modules/cryptocurrency-icons");
+const cryptoIconsOutput = join(outdir, "assets/crypto-icons");
+await mkdir(join(cryptoIconsOutput, "128"), { recursive: true });
+await Promise.all([
+  copyFile(join(cryptoIconsSource, "manifest.json"), join(cryptoIconsOutput, "manifest.json")),
+  copyFile(join(cryptoIconsSource, "LICENSE.md"), join(cryptoIconsOutput, "LICENSE.md")),
+  cp(
+    join(cryptoIconsSource, "128/color"),
+    join(cryptoIconsOutput, "128/color"),
+    { recursive: true },
+  ),
+]);
 
 console.log("Built Cladd UI, service bundles, and runtime assets to dist/");

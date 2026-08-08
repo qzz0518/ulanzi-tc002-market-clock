@@ -9,6 +9,9 @@ import { WorkspaceStore, type WorkspaceSettings } from "../src/workspace.ts";
 import { WorkspaceController } from "../src/workspace-controller.ts";
 import { PixelAssetStore } from "../src/pixel-asset-store.ts";
 import { PixelCanvas, encodePixelAnimation } from "../src/pixel-ui.ts";
+import { InstrumentStore, canonicalInstrumentKey } from "../src/market/instruments.ts";
+import { MarketIconStore } from "../src/market/icon-store.ts";
+import { DynamicMarketDataClient } from "../src/market/quotes.ts";
 
 const directories: string[] = [];
 const NOW = Date.parse("2026-08-06T06:00:00Z");
@@ -187,5 +190,64 @@ describe("multi-channel workspace controller", () => {
     expect(reused).toBe(first);
     expect(refreshed).not.toBe(first);
     expect(await inFlightSecond).toBe(await inFlightFirst);
+  });
+
+  test("renders a persisted runtime instrument and protects it from the legacy settings API", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-controller-runtime-market-"));
+    directories.push(directory);
+    const instrumentStore = new InstrumentStore(join(directory, "instruments"), { now: () => NOW });
+    const marketIconStore = new MarketIconStore(join(directory, "icons"), { now: () => NOW });
+    await Promise.all([instrumentStore.load(), marketIconStore.load()]);
+    const draft = {
+      canonicalKey: canonicalInstrumentKey({ kind: "fx" as const, base: "EUR", quote: "USD" }),
+      kind: "fx" as const,
+      displayName: "Euro / US Dollar",
+      displaySymbol: "EUR/USD",
+      baseCode: "EUR",
+      quoteCode: "USD",
+      decimals: 4,
+      changePeriod: "1D" as const,
+      routes: [{ provider: "frankfurter" as const, symbol: "EUR/USD" }],
+      sourceNote: "Frankfurter reference rates.",
+    };
+    const ref = instrumentStore.allocateRef();
+    const icon = await marketIconStore.saveFallback({ ...draft, ref });
+    const instrument = await instrumentStore.save({ ...draft, ref, iconRef: icon.ref });
+    const workspace = fixtureWorkspace();
+    workspace.channels[0]!.items = [{
+      id: "eurusd",
+      contentId: "market:instrument",
+      durationMs: 15_000,
+      options: { instrumentRef: instrument.ref, showChange: true, changeDurationMs: 2_500 },
+    }];
+    const controller = new WorkspaceController({
+      config: loadConfig({ CLOCK_HOST: "tc002.test" }),
+      workspace,
+      workspaceStore: new WorkspaceStore(join(directory, "workspace.json")),
+      instrumentStore,
+      marketIconStore,
+      dynamicMarketClient: new DynamicMarketDataClient({
+        now: () => NOW,
+        fetcher: async () => Response.json([
+          { date: "2026-08-05", base: "EUR", quote: "USD", rate: 1.16 },
+          { date: "2026-08-06", base: "EUR", quote: "USD", rate: 1.17 },
+        ]),
+      }),
+      marketClient: {} as never,
+      pushPayload: async () => ({ status: 200 }),
+      deleteApp: async () => ({ status: 200 }),
+      now: () => NOW,
+    });
+    const rendered = await controller.previewChannel("mixed");
+    expect(rendered.label).toBe("EUR/USD 1.1700");
+    expect(rendered.frames).toHaveLength(2);
+    expect(() => controller.getSettings()).toThrow("legacy settings API cannot represent runtime instruments");
+    await expect(controller.saveSettings({})).rejects.toThrow(
+      "legacy settings API cannot represent runtime instruments",
+    );
+
+    const missing = structuredClone(workspace);
+    missing.channels[0]!.items[0]!.options.instrumentRef = "ins_ffffffffffffffffffffffff";
+    await expect(controller.saveWorkspace(missing)).rejects.toThrow("instrument is unavailable");
   });
 });

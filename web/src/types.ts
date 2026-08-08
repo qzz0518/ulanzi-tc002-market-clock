@@ -59,6 +59,40 @@ export interface ContentCategoryEntry {
   label: string;
 }
 
+export type MarketInstrumentKind = "crypto" | "fx" | "metal" | "stock";
+
+export interface MarketInstrument {
+  version: 1;
+  ref: string;
+  iconRef: string;
+  iconUrl: string;
+  iconMode: "fallback" | "catalog" | null;
+  canonicalKey: string;
+  kind: MarketInstrumentKind;
+  displayName: string;
+  displaySymbol: string;
+  baseCode: string;
+  quoteCode: string;
+  decimals: number;
+  changePeriod?: "24H" | "1D";
+  sourceNote: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MarketSearchCandidate {
+  candidateRef: string;
+  canonicalKey: string;
+  kind: MarketInstrumentKind;
+  displayName: string;
+  displaySymbol: string;
+  baseCode: string;
+  quoteCode: string;
+  pair: string;
+  sourceLabel: string;
+  sourceNote: string;
+}
+
 export interface RuntimeState {
   healthy?: boolean;
   degraded?: boolean;

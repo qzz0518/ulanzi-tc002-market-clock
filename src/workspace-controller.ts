@@ -14,12 +14,23 @@ import { isPixelAssetRef, type PixelAssetStore } from "./pixel-asset-store.ts";
 import {
   WORKSPACE_LIMITS,
   WorkspaceStore,
+  assertLegacySettingsCompatible,
   legacySettingsFromWorkspace,
   migrateDashboardSettings,
   validateWorkspace,
   type ChannelConfig,
   type WorkspaceSettings,
 } from "./workspace.ts";
+import {
+  INSTRUMENT_REF_PATTERN,
+  type InstrumentStore,
+  type MarketInstrument,
+} from "./market/instruments.ts";
+import type { MarketIconStore } from "./market/icon-store.ts";
+import {
+  DynamicMarketDataClient,
+  type RuntimeMarketData,
+} from "./market/quotes.ts";
 
 export interface RenderedChannel {
   frames: readonly PixelCanvas[];
@@ -94,6 +105,9 @@ export interface WorkspaceControllerOptions {
   pushPayload: (appName: string, payload: ClockPayload) => Promise<{ status: number }>;
   deleteApp: (appName: string) => Promise<{ status: number }>;
   pixelAssetStore?: PixelAssetStore;
+  instrumentStore?: InstrumentStore;
+  marketIconStore?: MarketIconStore;
+  dynamicMarketClient?: DynamicMarketDataClient;
   now?: () => number;
 }
 
@@ -111,11 +125,16 @@ export class WorkspaceController {
   private readonly pushPayload: WorkspaceControllerOptions["pushPayload"];
   private readonly deleteApp: WorkspaceControllerOptions["deleteApp"];
   private readonly pixelAssetStore?: PixelAssetStore;
+  private readonly instrumentStore?: InstrumentStore;
+  private readonly marketIconStore?: MarketIconStore;
+  private readonly dynamicMarketClient: DynamicMarketDataClient;
   private readonly now: () => number;
   private readonly startedAt: string;
   private workspace: WorkspaceSettings;
   private readonly marketCache = new Map<AssetId, AssetMarketData>();
   private readonly marketErrors = new Map<AssetId, string>();
+  private readonly dynamicMarketCache = new Map<string, RuntimeMarketData>();
+  private readonly dynamicMarketErrors = new Map<string, string>();
   private readonly channelRuntime = new Map<string, MutableChannelRuntime>();
   private readonly previewCache = new Map<string, {
     rendered: RenderedChannel;
@@ -137,13 +156,21 @@ export class WorkspaceController {
     this.pushPayload = options.pushPayload;
     this.deleteApp = options.deleteApp;
     this.pixelAssetStore = options.pixelAssetStore;
+    this.instrumentStore = options.instrumentStore;
+    this.marketIconStore = options.marketIconStore;
+    this.dynamicMarketClient = options.dynamicMarketClient ?? new DynamicMarketDataClient({
+      timeoutMs: options.config.requestTimeoutMs,
+    });
     this.now = options.now ?? Date.now;
     this.startedAt = new Date(this.now()).toISOString();
-    this.workspace = this.validateKnownContent(options.workspace);
+    this.workspace = this.validateKnownContent(options.workspace, true);
     this.syncRuntime();
   }
 
-  private validateKnownContent(value: unknown): WorkspaceSettings {
+  private validateKnownContent(
+    value: unknown,
+    allowUnavailableRuntimeInstrument = false,
+  ): WorkspaceSettings {
     const workspace = validateWorkspace(value);
     for (const channel of workspace.channels) {
       for (const item of channel.items) {
@@ -152,7 +179,23 @@ export class WorkspaceController {
         } catch {
           throw new SettingsValidationError(`unknown contentId: ${item.contentId}`);
         }
-        if (item.contentId === "creative:canvas") {
+        if (item.contentId === "market:instrument") {
+          const instrumentRef = item.options.instrumentRef;
+          if (typeof instrumentRef !== "string" || !INSTRUMENT_REF_PATTERN.test(instrumentRef)) {
+            throw new SettingsValidationError("runtime market item must contain a valid instrumentRef");
+          }
+          const instrument = this.instrumentStore?.get(instrumentRef);
+          if (!allowUnavailableRuntimeInstrument && !instrument) {
+            throw new SettingsValidationError(`runtime market instrument is unavailable: ${instrumentRef}`);
+          }
+          const icon = instrument ? this.marketIconStore?.get(instrument.iconRef) : undefined;
+          if (!allowUnavailableRuntimeInstrument && instrument && !icon) {
+            throw new SettingsValidationError(`runtime market icon is unavailable: ${instrument.iconRef}`);
+          }
+          if (!allowUnavailableRuntimeInstrument && instrument && icon?.instrumentRef !== instrument.ref) {
+            throw new SettingsValidationError(`runtime market icon provenance is invalid: ${instrument.iconRef}`);
+          }
+        } else if (item.contentId === "creative:canvas") {
           const pixels = item.options.pixels;
           if (!Array.isArray(pixels) || pixels.length !== WORKSPACE_LIMITS.maxCanvasPixels) {
             throw new SettingsValidationError(
@@ -208,6 +251,7 @@ export class WorkspaceController {
   }
 
   getSettings(): DashboardSettings {
+    assertLegacySettingsCompatible(this.workspace, this.config.appName);
     return legacySettingsFromWorkspace(this.workspace);
   }
 
@@ -255,6 +299,7 @@ export class WorkspaceController {
   }
 
   async saveSettings(value: unknown): Promise<DashboardSettings> {
+    assertLegacySettingsCompatible(this.workspace, this.config.appName);
     const settings = validateSettings(value);
     await this.saveWorkspace(migrateDashboardSettings(settings, this.config.appName));
     return this.getSettings();
@@ -363,6 +408,39 @@ export class WorkspaceController {
     }
   }
 
+  private async getInstrumentMarket(
+    instrumentRef: string,
+    forceRefresh: boolean,
+  ): Promise<{ instrument: MarketInstrument; market: RuntimeMarketData; icon: PixelCanvas }> {
+    const instrument = this.instrumentStore?.get(instrumentRef);
+    if (!instrument) throw new Error(`runtime market instrument is unavailable: ${instrumentRef}`);
+    if (!this.marketIconStore) throw new Error("runtime market icon store is unavailable");
+    const iconManifest = this.marketIconStore.get(instrument.iconRef);
+    if (!iconManifest || iconManifest.instrumentRef !== instrument.ref) {
+      throw new Error(`runtime market icon is unavailable or has invalid provenance: ${instrument.iconRef}`);
+    }
+    const cached = this.dynamicMarketCache.get(instrumentRef);
+    let market = cached;
+    if (forceRefresh || !market) {
+      try {
+        market = await this.dynamicMarketClient.getInstrument(instrument);
+        this.dynamicMarketCache.set(instrumentRef, market);
+        this.dynamicMarketErrors.delete(instrumentRef);
+      } catch (error) {
+        this.dynamicMarketErrors.set(instrumentRef, errorMessage(error));
+        if (!cached || this.now() - Date.parse(cached.fetchedAt) >= this.config.sourceStaleMs) {
+          throw error;
+        }
+        market = cached;
+      }
+    }
+    return {
+      instrument,
+      market,
+      icon: await this.marketIconStore.getCanvas(instrument.iconRef),
+    };
+  }
+
   private validateRenderedItem(itemId: string, rendered: ContentRenderResult): void {
     if (rendered.frames.length === 0 || rendered.frames.length !== rendered.frameDelaysMs.length) {
       throw new Error(`${itemId} returned invalid frame timing`);
@@ -383,7 +461,14 @@ export class WorkspaceController {
       ? this.workspace.channels.find((candidate) => candidate.id === value)
       : this.validateKnownContent({ version: 3, channels: [value] }).channels[0];
     if (!channel) throw new SettingsValidationError("channel not found");
-    const key = JSON.stringify(channel);
+    const iconVersions = channel.items.flatMap((item) => {
+      if (item.contentId !== "market:instrument" || typeof item.options.instrumentRef !== "string") {
+        return [];
+      }
+      const instrument = this.instrumentStore?.get(item.options.instrumentRef);
+      return [`${item.options.instrumentRef}:${instrument?.iconRef ?? "missing"}`];
+    });
+    const key = JSON.stringify({ channel, iconVersions });
     const now = this.now();
 
     for (const [cacheKey, entry] of this.previewCache) {
@@ -442,6 +527,8 @@ export class WorkspaceController {
         }
         return pending;
       },
+      getInstrumentMarket: (instrumentRef: string, refresh: boolean) =>
+        this.getInstrumentMarket(instrumentRef, refresh),
       getPixelAsset: (assetRef: string, durationMs: number) => {
         if (!this.pixelAssetStore) throw new Error("pixel asset store is unavailable");
         return this.pixelAssetStore.render(assetRef, durationMs);

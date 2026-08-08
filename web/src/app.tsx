@@ -18,6 +18,7 @@ import type {
   ContentCategoryEntry,
   ContentItemConfig,
   JsonValue,
+  MarketInstrument,
   PreviewScope,
   RuntimeState,
   StudioView,
@@ -41,6 +42,10 @@ interface CatalogResponse {
 
 interface WorkspaceResponse {
   workspace: WorkspaceSettings;
+}
+
+interface InstrumentsResponse {
+  instruments: MarketInstrument[];
 }
 
 interface SaveResponse extends WorkspaceResponse {
@@ -87,6 +92,18 @@ function importedPixelAssetItem(
   return item;
 }
 
+function runtimeInstrumentItem(
+  definition: ContentCatalogEntry,
+  instrument: MarketInstrument,
+): ContentItemConfig {
+  const item = newItem(definition);
+  item.options = {
+    ...item.options,
+    instrumentRef: instrument.ref,
+  };
+  return item;
+}
+
 function uniqueAppName(workspace: WorkspaceSettings, seed: string): string {
   const base = seed.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 26) || "pixel";
   const used = new Set(workspace.channels.map((channel) => channel.appName));
@@ -106,7 +123,8 @@ function newChannel(
   appName: string,
   item?: ContentItemConfig,
 ): ChannelConfig {
-  const first = item ?? newItem(catalog[0]!);
+  const firstDefinition = catalog.find((entry) => entry.availableInMarket !== false) ?? catalog[0]!;
+  const first = item ?? newItem(firstDefinition);
   const definition = catalog.find((entry) => entry.id === first.contentId);
   return {
     id: uid("channel"),
@@ -123,6 +141,7 @@ export function App() {
   const [catalog, setCatalog] = useState<ContentCatalogEntry[]>([]);
   const [categories, setCategories] = useState<ContentCategoryEntry[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceSettings | null>(null);
+  const [instruments, setInstruments] = useState<MarketInstrument[]>([]);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -149,6 +168,10 @@ export function App() {
   const selectedChannel = useMemo(
     () => workspace?.channels.find((channel) => channel.id === selectedChannelId) ?? workspace?.channels[0] ?? null,
     [selectedChannelId, workspace],
+  );
+  const instrumentsByRef = useMemo(
+    () => new Map(instruments.map((instrument) => [instrument.ref, instrument])),
+    [instruments],
   );
   const selectedItem = selectedChannel?.items.find((item) => item.id === selectedItemId) ?? selectedChannel?.items[0] ?? null;
   const canvasItem = selectedItem?.contentId === "creative:canvas" ? selectedItem : null;
@@ -239,10 +262,11 @@ export function App() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [catalogResult, workspaceResult, runtimeResult] = await Promise.all([
+      const [catalogResult, workspaceResult, runtimeResult, instrumentsResult] = await Promise.all([
         jsonApi<CatalogResponse>("/api/catalog"),
         jsonApi<WorkspaceResponse>("/api/workspace"),
         jsonApi<RuntimeState>("/api/state"),
+        jsonApi<InstrumentsResponse>("/api/market/instruments"),
       ]);
       const firstChannel = workspaceResult.workspace.channels[0];
       setCatalog(catalogResult.contents);
@@ -250,6 +274,7 @@ export function App() {
       setWorkspace(workspaceResult.workspace);
       workspaceRef.current = workspaceResult.workspace;
       setRuntime(runtimeResult);
+      setInstruments(instrumentsResult.instruments);
       setSelectedChannelId(firstChannel?.id ?? null);
       setSelectedItemId(firstChannel?.items[0]?.id ?? null);
       setDirty(false);
@@ -420,7 +445,11 @@ export function App() {
       if (channel) channel.items = nextItems;
     }, selectedChannel.id);
     if (selectedItemId === itemId) setSelectedItemId(nextItems[Math.max(0, index - 1)]?.id ?? null);
-    toast.success(`已移除“${catalog.find((entry) => entry.id === removed.contentId)?.title ?? removed.contentId}”`, {
+    const runtimeInstrument = removed.contentId === "market:instrument"
+      && typeof removed.options.instrumentRef === "string"
+      ? instrumentsByRef.get(removed.options.instrumentRef)
+      : undefined;
+    toast.success(`已移除“${runtimeInstrument?.displaySymbol ?? catalog.find((entry) => entry.id === removed.contentId)?.title ?? removed.contentId}”`, {
       action: {
         label: "撤销",
         onClick: () => {
@@ -460,6 +489,65 @@ export function App() {
     setView("console");
     showMobileConsolePane("compose");
     toast.success("已创建独立旋钮项");
+  };
+
+  const rememberInstrument = (instrument: MarketInstrument) => {
+    setInstruments((current) => {
+      const index = current.findIndex((candidate) => candidate.ref === instrument.ref);
+      if (index < 0) return [...current, instrument];
+      const next = [...current];
+      next[index] = instrument;
+      return next;
+    });
+  };
+
+  const addRuntimeInstrument = (instrument: MarketInstrument) => {
+    if (!selectedChannel) return;
+    rememberInstrument(instrument);
+    if (selectedChannel.items.some((item) =>
+      item.contentId === "market:instrument" && item.options.instrumentRef === instrument.ref
+    )) {
+      toast.error("这个资产已经在当前频道中");
+      return;
+    }
+    const definition = catalog.find((entry) => entry.id === "market:instrument");
+    if (!definition) {
+      toast.error("通用资产渲染器尚未载入");
+      return;
+    }
+    const item = runtimeInstrumentItem(definition, instrument);
+    changeWorkspace((draft) => {
+      draft.channels.find((channel) => channel.id === selectedChannel.id)?.items.push(item);
+    }, selectedChannel.id);
+    setSelectedItemId(item.id);
+    setPreviewScope("item");
+    showMobileConsolePane("compose", `playlist-item-${item.id}`);
+    toast.success(`已加入“${instrument.displaySymbol}”`);
+  };
+
+  const createStandaloneRuntimeInstrument = (instrument: MarketInstrument) => {
+    if (!workspace) return;
+    rememberInstrument(instrument);
+    const definition = catalog.find((entry) => entry.id === "market:instrument");
+    if (!definition) {
+      toast.error("通用资产渲染器尚未载入");
+      return;
+    }
+    const item = runtimeInstrumentItem(definition, instrument);
+    const channel = newChannel(
+      workspace,
+      catalog,
+      instrument.displaySymbol.slice(0, 48),
+      instrument.baseCode.toLowerCase(),
+      item,
+    );
+    changeWorkspace((draft) => { draft.channels.push(channel); }, channel.id);
+    setSelectedChannelId(channel.id);
+    setSelectedItemId(item.id);
+    setPreviewScope("item");
+    setView("console");
+    showMobileConsolePane("compose");
+    toast.success(`已创建“${instrument.displaySymbol}”独立 App`);
   };
 
   const addImportedPixelAsset = (asset: ImportedPixelAsset) => {
@@ -791,6 +879,7 @@ export function App() {
               channel={selectedChannel}
               selectedItemId={selectedItem?.id ?? null}
               catalog={catalog}
+              instruments={instruments}
               previewUrl={previewUrl}
               previewing={previewing}
               previewError={previewError}
@@ -828,10 +917,18 @@ export function App() {
               categories={categories}
               catalog={catalog}
               category={category}
+              instruments={instruments}
               addedContentIds={selectedChannel.items.map((item) => item.contentId)}
+              addedInstrumentRefs={selectedChannel.items.flatMap((item) =>
+                item.contentId === "market:instrument" && typeof item.options.instrumentRef === "string"
+                  ? [item.options.instrumentRef]
+                  : []
+              )}
               onCategoryChange={setCategory}
               onAdd={addToChannel}
               onStandalone={createStandalone}
+              onAddInstrument={addRuntimeInstrument}
+              onStandaloneInstrument={createStandaloneRuntimeInstrument}
             />
           </>
         ) : view === "canvas" ? (

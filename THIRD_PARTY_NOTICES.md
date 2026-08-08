@@ -97,3 +97,19 @@ of Fusion Pixel Font, version `5.3.0`:
 The package includes the applicable license text. The font is used unmodified
 as a web font; the lyric renderer rasterizes it at its native 12×12 pixel
 grid.
+
+## cryptocurrency-icons
+
+The build bundles the 128px color PNG catalog from `cryptocurrency-icons`
+for conservative, identity-matched cryptocurrency Logo generation:
+
+- Project: https://github.com/spothq/cryptocurrency-icons
+- Fixed package version: `0.18.1`
+- License: CC0-1.0
+- Bundled license copy: `dist/assets/crypto-icons/LICENSE.md`
+
+The catalog license applies to the packaged artwork and metadata. It does not
+grant trademark rights or guarantee that every underlying brand has approved a
+particular use. The application therefore requires both a unique symbol and an
+exact normalized asset-name match; uncertain identities use a generated local
+fallback instead.

@@ -376,6 +376,7 @@ const DIGIT_SEGMENTS: Record<string, readonly string[]> = {
   "7": ["a", "b", "c"],
   "8": ["a", "b", "c", "d", "e", "f", "g"],
   "9": ["a", "b", "c", "d", "f", "g"],
+  E: ["a", "f", "g", "e", "d"],
 };
 
 function drawSevenSegmentDigit(
@@ -407,8 +408,9 @@ function drawSevenSegmentDigit(
 
 function numericGlyphWidth(character: string, digitWidth: 5 | 6): number {
   if (character === "1") return 2;
-  if (/\d/.test(character)) return digitWidth;
+  if (/\d/.test(character) || character === "E") return digitWidth;
   if (character === ".") return 2;
+  if (character === "-") return 3;
   throw new Error(`unsupported numeric glyph: ${character}`);
 }
 
@@ -430,9 +432,50 @@ function drawNumericText(
   let cursor = x;
   for (const character of text) {
     if (character === ".") canvas.fillRect(cursor, y + 9, 2, 2, color);
+    else if (character === "-") canvas.fillRect(cursor, y + 4, 3, 2, color);
     else drawSevenSegmentDigit(canvas, character, cursor, y, character === "1" ? 2 : digitWidth, color);
     cursor += numericGlyphWidth(character, digitWidth) + 1;
   }
+}
+
+const MAX_PRICE_WIDTH_WITH_ICON = 35;
+
+function scientificNumericLabel(price: number, fractionDigits: number): string {
+  const [mantissa = "", exponent = "0"] = price.toExponential(fractionDigits).split("e");
+  const compactMantissa = mantissa.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  return `${compactMantissa}E${Number(exponent)}`;
+}
+
+function fitNumericLabel(price: number, initialLabel: string): {
+  label: string;
+  digitWidth: 5 | 6;
+  width: number;
+} {
+  const decimals = initialLabel.split(".")[1]?.length ?? 0;
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: string) => {
+    if (/^[0-9.E-]+$/.test(candidate) && !seen.has(candidate)) {
+      seen.add(candidate);
+      candidates.push(candidate);
+    }
+  };
+  for (let remaining = decimals; remaining >= 0; remaining -= 1) {
+    const fixed = price.toFixed(remaining);
+    if (Number(fixed) <= 0) continue;
+    add(fixed);
+    if (fixed.startsWith("0.")) add(fixed.slice(1));
+  }
+  for (let fractionDigits = 2; fractionDigits >= 0; fractionDigits -= 1) {
+    add(scientificNumericLabel(price, fractionDigits));
+  }
+  for (const label of candidates) {
+    for (const digitWidth of [6, 5] as const) {
+      const width = measureNumericText(label, digitWidth);
+      if (width <= MAX_PRICE_WIDTH_WITH_ICON) return { label, digitWidth, width };
+    }
+  }
+  throw new Error("price cannot be fitted beside its icon");
 }
 
 function formatPercent(value: number): string {
@@ -518,15 +561,16 @@ export function formatAssetValue(assetId: AssetId, price: number): string {
 
 function renderPriceFrame(market: AssetMarketData): PixelCanvas {
   const canvas = new PixelCanvas(WIDTH, HEIGHT);
-  let label = formatAssetValue(market.assetId, market.price);
-  let digitWidth: 5 | 6 = measureNumericText(label, 6) <= 35 ? 6 : 5;
-  let width = measureNumericText(label, digitWidth);
-  while (width > 50 && label.includes(".")) {
-    label = Number(label).toFixed(Math.max(0, label.split(".")[1]!.length - 1));
-    width = measureNumericText(label, digitWidth);
-  }
-  if (width <= 35) drawAssetIcon(canvas, market.assetId);
-  drawNumericText(canvas, label, Math.max(1, WIDTH - 1 - width), 3, digitWidth, COLORS.price);
+  const fitted = fitNumericLabel(market.price, formatAssetValue(market.assetId, market.price));
+  drawAssetIcon(canvas, market.assetId);
+  drawNumericText(
+    canvas,
+    fitted.label,
+    WIDTH - 1 - fitted.width,
+    3,
+    fitted.digitWidth,
+    COLORS.price,
+  );
   return canvas;
 }
 
@@ -603,6 +647,91 @@ export interface RenderedDashboard {
   label: string;
   assetIds: readonly AssetId[];
   animationDurationMs: number;
+}
+
+export interface RuntimeMarketDisplay {
+  symbol: string;
+  decimals: number;
+  accent: Rgb;
+  icon: PixelCanvas;
+}
+
+export interface RuntimeMarketValue {
+  price: number;
+  changePercent?: number;
+  changePeriod?: ChangePeriod;
+}
+
+export interface RuntimeMarketRenderSettings {
+  priceDurationMs: number;
+  changeDurationMs: number;
+  showChange: boolean;
+}
+
+export interface RenderedRuntimeMarket {
+  frames: readonly PixelCanvas[];
+  frameDelaysMs: readonly number[];
+  label: string;
+  animationDurationMs: number;
+}
+
+export function formatRuntimeMarketValue(price: number, decimals: number): string {
+  if (!Number.isFinite(price) || price <= 0) throw new Error("price must be positive");
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 8) {
+    throw new Error("decimals must be an integer between 0 and 8");
+  }
+  return price.toFixed(price >= 10_000 ? 0 : decimals);
+}
+
+function drawRuntimeIcon(target: PixelCanvas, icon: PixelCanvas): void {
+  if (icon.width !== 16 || icon.height !== 16) throw new Error("runtime market icon must be 16x16");
+  for (let y = 0; y < 16; y += 1) {
+    for (let x = 0; x < 16; x += 1) {
+      target.setPixel(x, y, icon.getPixel(x, y));
+    }
+  }
+}
+
+export function renderRuntimeMarketDashboard(
+  market: RuntimeMarketValue,
+  display: RuntimeMarketDisplay,
+  settings: RuntimeMarketRenderSettings,
+): RenderedRuntimeMarket {
+  const priceFrame = new PixelCanvas(WIDTH, HEIGHT);
+  const fitted = fitNumericLabel(
+    market.price,
+    formatRuntimeMarketValue(market.price, display.decimals),
+  );
+  drawRuntimeIcon(priceFrame, display.icon);
+  drawNumericText(
+    priceFrame,
+    fitted.label,
+    WIDTH - 1 - fitted.width,
+    3,
+    fitted.digitWidth,
+    COLORS.price,
+  );
+
+  const frames = [priceFrame];
+  const frameDelaysMs = [settings.priceDurationMs];
+  if (
+    settings.showChange
+    && market.changePercent !== undefined
+    && market.changePeriod !== undefined
+  ) {
+    const changeFrame = new PixelCanvas(WIDTH, HEIGHT);
+    drawText(changeFrame, market.changePeriod, PERIOD_FONT, 1, 3, display.accent, 1, 2);
+    const trend = formatPercent(market.changePercent);
+    drawTrendText(changeFrame, trend, WIDTH - 1 - measureTrendText(trend), 3, trendColor(market.changePercent));
+    frames.push(changeFrame);
+    frameDelaysMs.push(settings.changeDurationMs);
+  }
+  return {
+    frames,
+    frameDelaysMs,
+    label: `${display.symbol} ${fitted.label}`,
+    animationDurationMs: frameDelaysMs.reduce((sum, delay) => sum + delay, 0),
+  };
 }
 
 export function renderDashboard(

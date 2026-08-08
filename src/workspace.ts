@@ -268,6 +268,26 @@ export function legacySettingsFromWorkspace(workspace: WorkspaceSettings): Dashb
   };
 }
 
+export function assertLegacySettingsCompatible(
+  workspace: WorkspaceSettings,
+  expectedAppName = workspace.channels[0]?.appName ?? "btc",
+): void {
+  if (workspace.channels.some((channel) =>
+    channel.items.some((item) => item.contentId === "market:instrument")
+  )) {
+    throw new SettingsValidationError(
+      "legacy settings API cannot represent runtime instruments; use /api/workspace",
+    );
+  }
+  const projected = legacySettingsFromWorkspace(workspace);
+  const canonical = migrateDashboardSettings(projected, expectedAppName);
+  if (JSON.stringify(workspace) !== JSON.stringify(canonical)) {
+    throw new SettingsValidationError(
+      "legacy settings API cannot losslessly represent this workspace; use /api/workspace",
+    );
+  }
+}
+
 export class WorkspaceStore {
   constructor(
     readonly path: string,
