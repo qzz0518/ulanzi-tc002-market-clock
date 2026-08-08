@@ -4,3 +4,5 @@ dist/
 .DS_Store
 npm-debug.log*
 output/
+device/tc002-lyrics-player/release/bundle/
+device/tc002-lyrics-player/release/manifest.json

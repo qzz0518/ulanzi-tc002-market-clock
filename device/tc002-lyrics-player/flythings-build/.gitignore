@@ -1,0 +1,13 @@
+upstream/
+toolchain/
+packages/
+*.tar.gz
+build/
+libzkgui.so
+main.js
+biz.js
+node_modules/
+package-lock.json
+app/
+device-dump/
+libzkgui.full.so
