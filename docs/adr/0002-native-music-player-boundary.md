@@ -9,6 +9,10 @@
   (`flythings-build/`, no Windows or FlyThings IDE required), and standalone tmpfs
   operation (UI, `AudioManager`, LED, keys) was verified end-to-end on real hardware
   on 2026-08-08 — the reversible-flash fallback in Consequences was never needed.
+- Amended: 2026-08-09 — the sideload session now deploys the player into the framework's
+  `/tmp` load path and restarts `zkswe` on it (decision 5's "temporary process while the
+  official UI service is paused" describes the earlier probe-era session model); a session
+  counts as alive while `/tmp/EasyUI.cfg` exists and `zkswe` is running.
 
 ## Context
 

@@ -152,24 +152,29 @@ Two complementary paths put lyrics on the clock:
   60 frames, ~15fps) through the stock firmware's Custom App channel; audio plays in the
   browser.
 - **Native music firmware (non-persistent sideload)**: the repository contains a complete
-  FlyThings C++ player — cross-compiled in Docker, no Windows IDE — that downloads the audio
-  on-device, plays it through the speaker with millisecond seeking, and drives the LED matrix
-  with offline-rasterised 12×12 Chinese and Japanese glyphs. Web and firmware stay in **bidirectional
+  FlyThings C++ player — cross-compiled in Docker, no Windows IDE — sideloaded with one
+  click from the web page; the service address is injected onto the device at sideload
+  time, so a new network never requires a rebuild. The firmware downloads the audio
+  on-device, plays it through the speaker with millisecond seeking, drives the LED matrix
+  with offline-rasterised 12×12 Chinese and Japanese glyphs, and ships a six-second boot
+  animation plus a "pick a song" idle screen. Web and firmware stay in **bidirectional
   real-time sync** over a control-sequence + heartbeat protocol: web-side
-  select/pause/theme/seek reaches the device within 2 s, device keys flow back instantly, and
-  the preview clock anchors to the real playhead; in this mode the web page is a silent
-  remote, and the UI switches over automatically when the firmware is online. The stock
-  firmware has no player that decodes network audio — speaker output requires a device-side
-  app calling `AudioManager`, which is exactly why the sideloaded firmware exists (MQTT can
-  carry control messages but cannot replace it).
+  select/pause/theme/seek reaches the device within 2 s, device keys flow back instantly,
+  and the preview clock anchors to the real playhead. Within seconds of the firmware
+  coming online the studio switches into remote mode and locks Content / Canvas / Library
+  and General settings (they ride the stock-firmware channel, which is gone during the
+  session); restoring the official firmware unlocks them again. The stock firmware has no
+  player that decodes network audio — speaker output requires a device-side app calling
+  `AudioManager`, which is exactly why the sideloaded firmware exists (MQTT can carry
+  control messages but cannot replace it).
 
 <p align="center">
   <img src="docs/images/tc002-music-firmware-preview.png" width="720" alt="The 52×16 pixel lyric screen — the preview and the music firmware share one rendering algorithm">
 </p>
 
-Sideloading is always non-persistent: a session only pushes the player into the device
-tmpfs, and ending the session — or any power cycle — restores the official firmware because
-flash is never written. Starting a session requires the bundle to match its per-file SHA-256
+Sideloading is always non-persistent: the firmware only ever runs from the device tmpfs, and
+hitting **Restore official firmware** — or any power cycle — brings the stock firmware back
+because flash is never written. Sideloading requires the bundle to match its per-file SHA-256
 manifest, the official HTTP API and Wi-Fi ADB to both identify the device, and an explicit
 restore acknowledgement. Firmware sources, the protocol, build, and deployment live in
 [device/tc002-lyrics-player](device/tc002-lyrics-player/README.md).
@@ -216,7 +221,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `POST` | `/api/music/qr`, `/api/music/qr/check`, `/api/music/logout` | Server-held QR session; logout deletes the local credential |
 | `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks |
 | `GET` | `/api/music/tracks/:id`, `/api/music/tracks/:id/stream` | Track metadata + timed lyrics; same-origin audio proxy (Range) |
-| `GET` / `POST` | `/api/music/device-app/*` | Validate the bundle, probe the device, start/stop tmpfs sessions |
+| `GET` / `POST` | `/api/music/device-app/*` | Validate the firmware bundle, probe the device, sideload / restore (tmpfs session) |
 | `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤60) to a stock-firmware Custom App (device mirror) |
 | `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |
 | `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll |
