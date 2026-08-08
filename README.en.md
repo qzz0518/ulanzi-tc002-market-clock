@@ -38,7 +38,7 @@ Start the service and open:
 http://127.0.0.1:43820/
 ```
 
-The left rail manages clock channels, the center edits and previews the selected channel, and the right-side catalog is grouped by Market, Tools, Visual, and Creative. The top navigation exposes three first-class views: **Content**, **Canvas**, and the wide three-column **Library**. The top-right **General settings** dialog reads and writes brightness, volume, paging, scrolling, timezone, date, weekday, and low-battery sleep settings. Its title-bar phone icon reveals the same-subnet QR code, current URL, and copy action only when needed instead of occupying the settings landing area.
+The left rail manages clock channels, the center edits and previews the selected channel, and the right-side catalog is grouped by Market, Tools, Visual, and Creative. The top navigation exposes four first-class views: **Content**, **Canvas**, **Library**, and **Music**. The top-right **General settings** dialog reads and writes brightness, volume, paging, scrolling, timezone, date, weekday, and low-battery sleep settings. Its title-bar phone icon reveals the same-subnet QR code, current URL, and copy action only when needed instead of occupying the settings landing area.
 
 Phone portrait mode separates **Channel composition** from **Add content** so the catalog is never buried below the editor. Adding an item returns directly to the new playlist row, while channel settings and the large device preview stay collapsed until requested. Bottom navigation, the horizontal channel picker, and single-column forms are laid out for touch. The canvas asks phone users to rotate to landscape so the 52×16 surface and tools retain accurate targets. Desktop keeps the existing three-column composition.
 
@@ -51,6 +51,46 @@ The UI ships a Web App Manifest, home-screen icons, standalone metadata, and an 
 The frontend uses React, Cladd UI, and Tailwind CSS v4. Cladd standardizes controls, tabs, selects, deletion confirmation, tooltips, toasts, and draggable numeric inputs while the product keeps its existing black, white, and green Pixel Market visual language. Motion respects `prefers-reduced-motion`.
 
 Configuration is stored in `.runtime/workspace.json`. A legacy `.runtime/settings.json` is atomically migrated into one market channel on first launch without overwriting the legacy file. Disabled, removed, or renamed channels are cleaned from the clock by posting an empty object to their former Custom App names.
+
+## Pixel lyrics player
+
+The first-class **Music** workspace is a complete music console: NetEase Music QR login, search
+with 20-per-page pagination, signed-in playlists, timed lyrics with translations, a same-origin
+audio proxy, and a live 52×16 pixel lyric preview. The login cookie stays only in
+`.runtime/music-session.json` with mode `0600`; neither the browser nor the TC002 receives the raw
+credential, and logout removes the file. Playback remains subject to account, subscription,
+copyright, and regional availability. A 45-second preview is presented as a preview rather than a
+full track.
+
+The preview and the device share one theme system: four display modes (ticker / skyline /
+spotlight / cascade) × four palettes (signal green / tape orange / blueprint / arcade red), plus a
+color-picker accent override.
+
+Two complementary paths put lyrics on the clock:
+
+- **Device mirror (stock firmware, no flashing)**: pushes the rendered 52×16 lyric frames (up to
+  60 frames, ~15fps) through the stock firmware's Custom App channel; audio plays in the browser.
+- **Native music firmware (non-persistent sideload)**: the repository contains a complete
+  FlyThings C++ player — cross-compiled in Docker, no Windows IDE required — that downloads the
+  audio on-device, plays it through the speaker with millisecond seeking, and drives the LED matrix
+  directly using offline-rasterised 12×12 CJK glyphs (Chinese + Japanese kana/kanji). Web and
+  firmware stay in **bidirectional real-time sync** over a control-sequence + heartbeat protocol:
+  web-side select/pause/theme/seek reaches the device within 2 s, device-side key presses flow back
+  instantly, and the preview clock anchors to the real playhead. In this mode the web page is a
+  silent remote. The UI detects the firmware automatically.
+
+Sideloading is always non-persistent: the TC002 normally runs the official firmware, a session
+only pushes the player into the device tmpfs, and ending the session — or any power cycle —
+restores the official firmware because flash is never written. Starting a session still requires
+the bundle to match its per-file SHA-256 manifest, the official HTTP API and Wi-Fi ADB to both
+identify the device, and the user to acknowledge the restore path. Firmware sources, the protocol,
+build, and deployment live in
+[device/tc002-lyrics-player](device/tc002-lyrics-player/README.md); the architecture boundary is
+[ADR 0002](docs/adr/0002-native-music-player-boundary.md).
+
+MQTT alone cannot make the stock firmware play music: it can carry control messages, but only a
+native device application can invoke `AudioManager` / `MediaPlayer` — which is exactly what the
+sideloaded firmware does.
 
 ## HTTP and MQTT
 
@@ -85,6 +125,8 @@ bash scripts/install-docker.sh --host 192.168.1.50
 
 The native macOS installer listens on `0.0.0.0` by default so phones on the same LAN can connect. Open General settings and use its title-bar phone icon to scan or copy the selected same-subnet URL. Pass `--control-host 127.0.0.1` to keep it Mac-only. Docker Compose remains published to host loopback only.
 
+The installer also records the absolute `adb` executable as `ADB_BIN`, because a LaunchAgent does not inherit the interactive shell's Homebrew path. Use `--adb-bin /absolute/path/to/adb` or set `ADB_BIN` to override auto-detection.
+
 ## API
 
 | Method | Path | Purpose |
@@ -101,6 +143,17 @@ The native macOS installer listens on `0.0.0.0` by default so phones on the same
 | `GET` | `/api/library/ulanzi/media` | Safely proxy official preview media |
 | `POST` | `/api/library/ulanzi/import` | Validate and import an official `contentView` link or work ID |
 | `GET` | `/api/library/ulanzi/imported/:ref` | Read a normalized local asset snapshot |
+| `GET` | `/api/music/session`, `/api/music/avatar` | Read the sanitized NetEase login state and proxied avatar |
+| `POST` | `/api/music/qr`, `/api/music/qr/check`, `/api/music/logout` | Create/confirm a server-held QR session; log out and delete the local credential |
+| `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks |
+| `GET` | `/api/music/tracks/:id` | Read track metadata and timed lyrics |
+| `GET` | `/api/music/tracks/:id/stream` | Same-origin, allowlisted audio proxy with Range support |
+| `GET` / `POST` | `/api/music/device-app/*` | Validate the bundle, probe the device, and start/stop tmpfs debug sessions |
+| `POST` / `DELETE` | `/api/music/mirror` | Push 52×16 lyric frames (≤60) to a stock-firmware Custom App slot (device mirror) |
+| `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches (play/theme/palette/accent/seek) |
+| `GET` | `/api/music/device/state` | Plain-text control state polled by the music firmware (sequence + live echo) |
+| `POST` | `/api/music/device/report`, `/api/music/device/heartbeat` | Firmware key-action reports and playhead heartbeats |
+| `GET` | `/api/music/device/now`, `/api/music/device/audio` | Firmware-side lyric fetch and audio download |
 
 Legacy `/api/presets` and `/api/settings` endpoints remain available. Writes require JSON and same-origin browser requests. Limits are 256 KiB per request, 24 channels, 48 items per channel, and 360 rendered frames per channel.
 

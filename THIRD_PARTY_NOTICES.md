@@ -56,3 +56,44 @@ Imported community PNG assets are decoded with `pngjs`:
 
 These libraries process user-requested assets at runtime. No Ulanzi community
 artwork is bundled or redistributed with this repository.
+
+## NetEase Cloud Music API Alger
+
+The music workspace calls `netease-cloud-music-api-alger` version `4.30.0` as
+a runtime dependency for QR login, search, playlists, track metadata, lyrics,
+and permitted playback URLs:
+
+- Package: `netease-cloud-music-api-alger@4.30.0`
+- Upstream author field: binaryify
+- License: MIT
+
+The dependency's MIT license applies to that package only. Pixel Studio keeps
+the resulting account cookie on the local server and does not bundle songs,
+album artwork, or lyrics in this repository.
+
+## AlgerMusicPlayer reference
+
+The product flow and endpoint selection were checked against AlgerMusicPlayer:
+
+- Project: https://github.com/algerkong/AlgerMusicPlayer
+- Fixed source revision reviewed: `187ce573a4b7359dbbec9ca6d5d834b4f148434f`
+- Copyright: Alger and contributors
+- License: MIT
+
+No AlgerMusicPlayer UI or source file is copied into Pixel Studio. Its public
+implementation was used as a behavioral reference for the QR/search/lyric/audio
+flow; this repository provides its own server boundary and interface.
+
+## Fusion Pixel 12px Monospaced SC
+
+The 52×16 lyrics preview uses the Simplified Chinese, 12-pixel monospaced build
+of Fusion Pixel Font, version `5.3.0`:
+
+- Upstream project: https://github.com/TakWolf/fusion-pixel-font
+- Package: https://www.npmjs.com/package/@fontsource/fusion-pixel-12px-monospaced-sc
+- Copyright: TakWolf and upstream font contributors
+- License: SIL Open Font License 1.1
+
+The package includes the applicable license text. The font is used unmodified
+as a web font; the lyric renderer rasterizes it at its native 12×12 pixel
+grid.

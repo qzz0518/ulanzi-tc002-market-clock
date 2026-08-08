@@ -18,7 +18,7 @@ SDK 编写、交叉编译为 `libzkgui.so` 的 C++ 播放器。它在真机上�
 | 四套配色 + 自定义主色 | 信号绿 / 磁带橙 / 蓝晒 / 街机红；网页可再覆盖一个十六进制主色（`ACCENT`） |
 | 中日英字模 | Fusion Pixel 12px 离线光栅化：GB2312 一级汉字 + 平假名/片假名（含 ー、・）+ JIS X 0208 一级汉字 + 全角标点，共约 5200 个 12×12 字形，二分查找；ASCII 用 6×12 半宽字模 |
 | 双向实时同步 | 网页选歌/播放/暂停/换主题/拖进度 → 设备 2 秒内应用；设备按键操作 → 心跳/上报回流网页，预览时钟跟随真机播放头 |
-| 实体按键 | 中键：播放/暂停；左右键：上一句/下一句歌词（音频同步跳转）；旋钮：循环切换显示形式 |
+| 实体按键 | 中键：播放/暂停；左右键：上一句/下一句歌词（音频同步跳转）；旋钮旋转：调音量（0–6，弹出音量气泡）；旋钮按下：循环切换显示形式 |
 | 开机与加载动画 | 频谱扫光开机动画；换曲下载期间显示「加载中」呼吸频谱 |
 
 ## 目录结构
@@ -42,7 +42,9 @@ device/tc002-lyrics-player/
 
 ## 与服务端的协议
 
-固件内置两个后台线程，全部走官方固件同款 HTTP 栈（`curl-cxx`）：
+固件用一个常驻后台线程完成全部同步。HTTP 是刻意最小化的**裸 socket
+HTTP/1.0**（`app/src/net/NetClient.cpp`，不依赖 curl/openssl，只用 libc
+socket）。每轮循环先拉状态、再发心跳，然后 `sleep(2)`：
 
 1. **控制轮询**（每 2s）：`GET /api/music/device/state`，纯文本 `KEY\tVALUE`：
 
@@ -56,11 +58,15 @@ device/tc002-lyrics-player/
    | `ACCENT` | 覆盖主色的 `rrggbb`，`-` 表示跟随配色 |
    | `SEEK` | 目标毫秒；固件按值去重，服务端换曲时重置为 `-1` |
 
-2. **心跳上报**（每次轮询后）：`POST /api/music/device/heartbeat`，上报
-   `trackId / playheadMs / playing`。网页据此判定「音乐固件在线」（10 秒窗口，
-   覆盖换曲时 5–7 秒的阻塞下载），并把预览动画锚定到真机播放头。
+2. **心跳上报**（同一轮询循环内、选定曲目后开始）：
+   `POST /api/music/device/heartbeat`，上报 `trackId / playheadMs / playing`。
+   注意固件在收到第一个曲目（`TID` 不为 `-`）之前不发心跳，此前网页不会显示
+   「音乐固件在线」。上线后网页按 10 秒窗口判定在线（覆盖换曲时 5–7 秒的阻塞
+   下载），并把预览动画锚定到真机播放头。
 
-设备端按键动作通过 `POST /api/music/device/report` 即时回传，网页界面随之更新。
+改变共享状态的按键会通过 `POST /api/music/device/report` 即时回传（中键的
+播放/暂停、旋钮按下的主题切换）；左右键跳句不单独上报，由下一次心跳的
+`playheadMs` 回流到网页，音量属于设备本地状态、不回传。
 
 > **服务器地址是编译期常量**：`app/src/logic/lyricsLogic.cc` 顶部的
 > `kService*Url` 写死了运行 Pixel Studio 的主机地址（默认
@@ -69,14 +75,14 @@ device/tc002-lyrics-player/
 ## 字体管线
 
 ```bash
-python3 tools/gen-fonts.py   # 需要 fontTools + brotli
+python3 tools/gen-fonts.py   # 需要 fontTools + brotli + Pillow
 ```
 
 从 `@fontsource/fusion-pixel-12px-monospaced-sc` 的 woff2 离线光栅化生成
 `app/src/visual/CjkFont.h`（全宽 12×12，按码点严格升序，运行期二分查找）和
-`LatinFont.h`（半宽 6×12，ASCII 连续存储 O(1) 索引）。每行一个 12 位掩码，
-bit11 为最左列，与 `LyricsPage.cpp` 的绘制约定一致。字体许可见仓库根
-`THIRD_PARTY_NOTICES.md`。
+`LatinFont.h`（半宽 6×12，ASCII 连续存储 O(1) 索引）。位图约定与
+`LyricsPage.cpp` 一致：CJK 每行一个 12 位掩码、bit11 为最左列；Latin 每行只用
+低 6 位、bit5 为最左列。字体许可见仓库根 `THIRD_PARTY_NOTICES.md`。
 
 ## 构建
 
@@ -102,7 +108,12 @@ docker run --rm --platform linux/amd64 \
 
 ## 旁载部署与恢复
 
-日常应通过网页「设备与固件」面板走校验过的调试会话。手动等价步骤：
+两条部署路径服务不同目的：
+
+- **网页「设备与固件」面板的调试会话**：推送经清单校验的 `release/bundle/`
+  到 `/tmp/tc002-music` 并执行其入口（`ctl.stop zkswe` 暂停官方界面）。适合
+  跑独立可执行产物（当前 staged 的是传输链路探针）。
+- **FlyThings 播放器（本目录的主角）走框架加载路径**，开发期直接 adb 操作：
 
 ```bash
 adb connect <device-ip>:5555
@@ -124,13 +135,14 @@ adb shell 'setprop ctl.restart zkswe'   # 框架从 /tmp 加载播放器
 ## 发布产物
 
 ```bash
-bun run music-release        # = scripts/create-music-release.ts
+bun run music-release -- /path/to/bundle-source-dir 0.1.0 [entry]
 ```
 
-把 FlyThings 构建产物整理进 `release/bundle/` 并生成逐文件 SHA-256 的
-`manifest.json`（schema v3）。网页端只有在旁载包与清单完全一致、官方 HTTP 接口
-与 Wi-Fi ADB 双重确认是真机、且用户勾选「知道如何恢复」之后才允许启动会话。
-`bundle/` 与 `manifest.json` 是生成物，不入库。
+把指定目录（你整理好的构建产物）复制为 `release/bundle/` 并生成逐文件
+SHA-256 的 `manifest.json`（schema v3，源目录与 semver 版本为必填参数）。
+网页端只有在旁载包与清单完全一致、官方 HTTP 接口与 Wi-Fi ADB 双重确认是
+真机、且用户勾选「知道如何恢复」之后才允许启动会话。`bundle/` 与
+`manifest.json` 是生成物，不入库。
 
 ## 主机自测
 
