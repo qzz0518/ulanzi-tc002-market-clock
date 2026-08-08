@@ -94,6 +94,14 @@ const musicInstaller = new Tc002MusicInstaller({
     const info = await readClockInfo(config);
     return { mcuVersion: info.mcuVersion, appVersion: info.appVersion };
   },
+  serviceOrigin: async () => {
+    const access = await discoverControlAccess({
+      clockHost: config.clockHost,
+      controlHost: config.controlHost,
+      port: config.healthPort,
+    });
+    return access.address ? `http://${access.address}:${config.healthPort}` : null;
+  },
 });
 
 const MUSIC_MIRROR_APP = "music_lyrics";

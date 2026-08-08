@@ -44,7 +44,7 @@ async function releaseFixture(): Promise<{ directory: string; bundleId: string }
 
 function fakeRunner(calls: string[][], overrides?: {
   failOn?: (args: string[]) => boolean;
-  sessionCheckOutput?: string;
+  respond?: (args: string[]) => string | undefined;
 }): ProcessRunner {
   return {
     which: (command) => command === "adb" ? "/tools/adb" : null,
@@ -53,14 +53,18 @@ function fakeRunner(calls: string[][], overrides?: {
       if (overrides?.failOn?.(args)) {
         return { exitCode: 1, stdout: "", stderr: "boom" };
       }
+      const responded = overrides?.respond?.(args);
+      if (responded !== undefined) {
+        return { exitCode: 0, stdout: responded, stderr: "" };
+      }
       if (args.at(-1) === "ro.product.model") {
         return { exitCode: 0, stdout: "Ulanzi TC002\n", stderr: "" };
       }
       if (args.at(-1) === "ro.product.platform") {
         return { exitCode: 0, stdout: "Z21\n", stderr: "" };
       }
-      if (args.at(-1)?.includes("kill -0")) {
-        return { exitCode: 0, stdout: overrides?.sessionCheckOutput ?? "", stderr: "" };
+      if (args.at(-1)?.includes("echo running")) {
+        return { exitCode: 0, stdout: "running\n", stderr: "" };
       }
       return { exitCode: 0, stdout: "connected\n", stderr: "" };
     },
@@ -148,6 +152,7 @@ describe("TC002 music sideload session", () => {
         verified = true;
         return { mcuVersion: "T1.0.13", appVersion: "0.2.9" };
       },
+      settleDelayMs: 0,
     });
 
     const result = await installer.startSession({
@@ -161,13 +166,14 @@ describe("TC002 music sideload session", () => {
       "/tools/adb", "-s", "192.0.2.20:5555", "push",
       `${join(fixture.directory, "bundle")}/.`, "/tmp/tc002-music/",
     ]);
-    expect(calls.slice(-6).map((call) => call.at(-1))).toEqual([
-      "rm -rf /tmp/tc002-music",
+    expect(calls.slice(-7).map((call) => call.at(-1))).toEqual([
+      '[ -f /tmp/tc002-music/session.pid ] && kill "$(cat /tmp/tc002-music/session.pid)" 2>/dev/null; setprop ctl.stop zkswe',
+      "rm -rf /tmp/tc002-music /tmp/ui; rm -f /tmp/track.mp3 /tmp/EasyUI.cfg /tmp/libzkgui.so",
       "mkdir -p /tmp/tc002-music",
       "/tmp/tc002-music/",
       "chmod +x /tmp/tc002-music/player",
-      "setprop ctl.stop zkswe",
       "(cd /tmp/tc002-music && ./player </dev/null >/tmp/tc002-music/session.log 2>&1 & echo $! > /tmp/tc002-music/session.pid)",
+      '[ -f /tmp/EasyUI.cfg ] && [ "$(getprop init.svc.zkswe)" = "running" ] && echo running',
     ]);
     const flat = calls.map((call) => call.join(" ")).join("\n");
     expect(flat).not.toContain("zkupgrade");
@@ -175,6 +181,26 @@ describe("TC002 music sideload session", () => {
     expect(flat).not.toContain("tar");
     expect(flat).not.toContain("nohup");
     expect((await installer.status()).session.active).toBe(true);
+  });
+
+  test("injects the current service origin next to the pushed bundle", async () => {
+    const fixture = await releaseFixture();
+    const calls: string[][] = [];
+    const installer = new Tc002MusicInstaller({
+      clockHost: "192.0.2.20",
+      bundleStore: new MusicPlayerBundleStore(fixture.directory),
+      processRunner: fakeRunner(calls),
+      verifyClock: async () => ({}),
+      serviceOrigin: async () => "http://192.0.2.5:43820",
+      settleDelayMs: 0,
+    });
+    await installer.startSession({
+      confirmation: MUSIC_SESSION_CONFIRMATION,
+      expectedBundleId: fixture.bundleId,
+    });
+    expect(calls.map((call) => call.at(-1))).toContain(
+      "echo 'http://192.0.2.5:43820' > /tmp/tc002-music/service.origin",
+    );
   });
 
   test("restarts the official UI when the player fails to launch", async () => {
@@ -187,14 +213,52 @@ describe("TC002 music sideload session", () => {
         failOn: (args) => typeof args.at(-1) === "string" && args.at(-1)!.includes("./player </dev/null"),
       }),
       verifyClock: async () => ({}),
+      settleDelayMs: 0,
     });
 
     await expect(installer.startSession({
       confirmation: MUSIC_SESSION_CONFIRMATION,
       expectedBundleId: fixture.bundleId,
     })).rejects.toBeInstanceOf(MusicInstallerError);
-    expect(calls.at(-1)?.at(-1)).toBe("setprop ctl.start zkswe");
+    expect(calls.at(-1)?.at(-1)).toBe("rm -f /tmp/EasyUI.cfg; setprop ctl.start zkswe");
     expect((await installer.status()).session.active).toBe(false);
+  });
+
+  test("rolls back when the framework does not come up on the sideloaded config", async () => {
+    const fixture = await releaseFixture();
+    const calls: string[][] = [];
+    const installer = new Tc002MusicInstaller({
+      clockHost: "192.0.2.20",
+      bundleStore: new MusicPlayerBundleStore(fixture.directory),
+      processRunner: fakeRunner(calls, {
+        respond: (args) => args.at(-1)?.includes("echo running") ? "" : undefined,
+      }),
+      verifyClock: async () => ({}),
+      settleDelayMs: 0,
+    });
+    await expect(installer.startSession({
+      confirmation: MUSIC_SESSION_CONFIRMATION,
+      expectedBundleId: fixture.bundleId,
+    })).rejects.toBeInstanceOf(MusicInstallerError);
+    expect(calls.at(-1)?.at(-1)).toBe("rm -f /tmp/EasyUI.cfg; setprop ctl.start zkswe");
+    expect((await installer.status()).session.active).toBe(false);
+  });
+
+  test("rejects a stale page bundleId with a conflict", async () => {
+    const fixture = await releaseFixture();
+    const calls: string[][] = [];
+    const installer = new Tc002MusicInstaller({
+      clockHost: "192.0.2.20",
+      bundleStore: new MusicPlayerBundleStore(fixture.directory),
+      processRunner: fakeRunner(calls),
+      verifyClock: async () => ({}),
+      settleDelayMs: 0,
+    });
+    await expect(installer.startSession({
+      confirmation: MUSIC_SESSION_CONFIRMATION,
+      expectedBundleId: "a".repeat(64),
+    })).rejects.toMatchObject({ status: 409 });
+    expect(calls).toHaveLength(0);
   });
 
   test("stops the session by killing the player and restoring the official UI", async () => {
@@ -205,6 +269,7 @@ describe("TC002 music sideload session", () => {
       bundleStore: new MusicPlayerBundleStore(fixture.directory),
       processRunner: fakeRunner(calls),
       verifyClock: async () => ({}),
+      settleDelayMs: 0,
     });
     await installer.startSession({
       confirmation: MUSIC_SESSION_CONFIRMATION,
@@ -215,8 +280,8 @@ describe("TC002 music sideload session", () => {
     expect(result.state).toBe("official");
     expect(calls.slice(-3).map((call) => call.at(-1))).toEqual([
       '[ -f /tmp/tc002-music/session.pid ] && kill "$(cat /tmp/tc002-music/session.pid)" 2>/dev/null; killall player 2>/dev/null; true',
-      "rm -rf /tmp/tc002-music",
-      "setprop ctl.start zkswe",
+      "rm -rf /tmp/tc002-music /tmp/ui; rm -f /tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/track.mp3",
+      "setprop ctl.restart zkswe",
     ]);
     expect((await installer.status()).session.active).toBe(false);
   });
@@ -224,16 +289,22 @@ describe("TC002 music sideload session", () => {
   test("marks the session inactive when a power cycle already restored the device", async () => {
     const fixture = await releaseFixture();
     const calls: string[][] = [];
+    let started = false;
     const installer = new Tc002MusicInstaller({
       clockHost: "192.0.2.20",
       bundleStore: new MusicPlayerBundleStore(fixture.directory),
-      processRunner: fakeRunner(calls, { sessionCheckOutput: "" }),
+      processRunner: fakeRunner(calls, {
+        respond: (args) =>
+          args.at(-1)?.includes("echo running") ? (started ? "" : "running\n") : undefined,
+      }),
       verifyClock: async () => ({}),
+      settleDelayMs: 0,
     });
     await installer.startSession({
       confirmation: MUSIC_SESSION_CONFIRMATION,
       expectedBundleId: fixture.bundleId,
     });
+    started = true;
     expect((await installer.status()).session.active).toBe(true);
 
     const probe = await installer.probe();

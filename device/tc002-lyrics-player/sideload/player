@@ -1,0 +1,20 @@
+#!/bin/sh
+# TC002 music firmware sideload entry. The web installer has already pushed
+# the bundle to /tmp/tc002-music and stopped the official UI service (zkswe).
+# This script moves the FlyThings player into the framework's /tmp load path,
+# starts the service (which then loads /tmp/EasyUI.cfg -> /tmp/libzkgui.so)
+# and exits. NOTE: the device busybox has no `sleep`, so nothing here may loop
+# or wait — the installer defines "session alive" as /tmp/EasyUI.cfg existing
+# while zkswe runs, and verifies exactly that after launch. Everything lives
+# in tmpfs: restoring the official firmware or any power cycle undoes all of
+# it; flash is never touched.
+set -e
+BUNDLE=/tmp/tc002-music
+
+rm -f /tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/track.mp3
+rm -rf /tmp/ui
+mv "$BUNDLE/libzkgui.so" /tmp/libzkgui.so
+mv "$BUNDLE/ui" /tmp/ui
+mv "$BUNDLE/EasyUI.cfg" /tmp/EasyUI.cfg
+
+setprop ctl.start zkswe
