@@ -57,6 +57,14 @@ Imported community PNG assets are decoded with `pngjs`:
 These libraries process user-requested assets at runtime. No Ulanzi community
 artwork is bundled or redistributed with this repository.
 
+## gifenc
+
+Rendered pixel frames are encoded to animated GIFs with `gifenc`:
+
+- Project: https://github.com/mattdesl/gifenc
+- Copyright: © 2017 Matt DesLauriers
+- License: MIT
+
 ## NetEase Cloud Music API Alger
 
 The music workspace calls `netease-cloud-music-api-alger` version `4.30.0` as
@@ -110,6 +118,6 @@ for conservative, identity-matched cryptocurrency Logo generation:
 
 The catalog license applies to the packaged artwork and metadata. It does not
 grant trademark rights or guarantee that every underlying brand has approved a
-particular use. The application therefore requires both a unique symbol and an
-exact normalized asset-name match; uncertain identities use a generated local
-fallback instead.
+particular use. The application therefore only adopts a catalog image when, for the
+asset's symbol, exactly one catalog entry matches the normalized asset name;
+uncertain identities use a generated local fallback instead.

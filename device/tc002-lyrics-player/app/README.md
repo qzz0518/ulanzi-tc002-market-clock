@@ -8,47 +8,51 @@ power-cycle restores the official firmware.
 
 - **Boot splash** (`pages/SplashPage`): ~2.4s 52×16 animation — spectrum bars
   rise, a note icon blooms, the "MUSIC" wordmark fades in.
-- **Lyrics page** (`pages/LyricsPage`): a scrolling, karaoke-highlighted lyric
-  line (sung / current / upcoming tiers) with a top progress cursor and a
-  bottom play/track cursor. Lines are **built-in ASCII demo text** for now.
-- **Keys** (`logic/lyricsLogic.cc`): middle = play/pause, left/right = prev/next
-  line, rotary = cycle the 4 skins (signal/tape/blueprint/arcade), matching web.
+- **Lyrics page** (`pages/LyricsPage`): four display modes (ticker / skyline /
+  spotlight / cascade) rendered fully on-device with offline-rasterised Fusion
+  Pixel glyphs (`visual/CjkFont.h`, ~5200 12×12 CJK glyphs, plus 6×12 ASCII in
+  `LatinFont.h`). Lyrics and audio come from the LAN Pixel Studio service
+  (`/api/music/device/now` + `/api/music/device/audio`), downloaded to
+  `/tmp/track.mp3` and played through the speaker.
+- **Keys** (`logic/lyricsLogic.cc`): middle = play/pause (reported to the
+  service), left/right = previous/next lyric line with audio seek, knob turn =
+  volume 0–6 (boba-cup overlay, `pages/VolumePage`), knob press = cycle the 4
+  display modes (reported). Palettes (skins) and the accent color are switched
+  from the web side via `/state`.
+- **Sync loop**: one background thread polls `GET /api/music/device/state`
+  every 2 s, applies track/play/mode/skin/accent/seek changes, and posts
+  playhead heartbeats.
 
 ## Structure
 
 - `src/Main.cpp` — `onStartupApp` → `lyricsActivity`.
 - `src/activity/lyricsActivity.*` — IDE-style activity (includes the logic .cc).
-- `src/logic/lyricsLogic.cc` — page registration, tick loop, key dispatch.
-- `src/pages/{SplashPage,LyricsPage}.*` — the two pages; draw via
+- `src/logic/lyricsLogic.cc` — page registration, poll/heartbeat thread, key
+  dispatch, compile-time service origin.
+- `src/pages/{SplashPage,LyricsPage,VolumePage}.*` — the pages; draw via
   `Surface`+`sendLedData`.
-- `src/visual/{Palette,PixelFont,Spectrum,Icons}.h` — skins, 3×5 ASCII font,
-  pseudo-spectrum, note icon (mirrors the web preview's design).
+- `src/managers/AudioManager.*` — local-path playback (play/pause/seek).
+- `src/net/NetClient.*` — hand-written raw-socket HTTP/1.0 client
+  (`httpGet` / `httpPost` / `downloadFile`); deliberately avoids curl/openssl.
+- `src/visual/{Palette,PixelFont,CjkFont,LatinFont,LyricModes,Spectrum,Icons}.h`
+  — skins, 3×5 ASCII UI font, generated 12×12 CJK + 6×12 Latin lyric glyphs,
+  mode metadata, pseudo-spectrum, note icon (mirrors the web preview's design).
 - Reused device infra from pixel-pet: `PageBase`, `Surface`, `McuManager`,
   `KeyManager`, `PageManager`, `uart/*`, `mcuProtocol/*`.
 
-Build & sideload: `../flythings-build/` (`make APP=/app`, then push to `/tmp` +
-`EasyUI.cfg` + `ctl.restart zkswe`).
+Build & sideload: `../flythings-build/` (plain `make` — the default
+`APP=../app` already points here — then push to `/tmp` + `EasyUI.cfg` +
+`ctl.restart zkswe`; the exact push order is in the
+[player README](../README.md)).
 
-## Capabilities now working on real hardware
+## Capabilities on real hardware
 
 - **LED display** — `Surface` + `sendLedData` (splash, lyrics, volume cup).
-- **Keys** — middle play/pause, left/right skip, knob turn = volume, knob press =
-  skin.
-- **Audio** — `AudioManager::playAudio(localPath)` through MI_AO, verified with a
-  1KHz tone. Chain: `audio-utility` → `base-json` → `ffmpeg` → `z` → device
-  `libmi_ao`. Volume 0–6 via the boba-cup overlay (`pages/VolumePage`).
-- **HTTP** — `net/NetClient` (`downloadFile` / `httpGet`) over `base-http-client`
-  → `curl` (static, built-in resolver) + device `libssl`/`libcrypto`.
+- **Audio** — `AudioManager::playAudio(localPath)` through MI_AO with
+  millisecond `seekTo`, verified end-to-end. Chain: `audio-utility` →
+  `base-json` → `ffmpeg` → `z` → device `libmi_ao`.
+- **HTTP** — `net/NetClient` over raw libc sockets, plain HTTP only; the
+  service origin is a compile-time constant in `lyricsLogic.cc`.
 
-## Next stage — wire it together (LAN service integration)
-
-1. **Service endpoints** (Pixel Studio `control-api`): device-facing routes for
-   the current track (audio URL + duration + play state) and its lyric frames.
-2. **Device fetch loop**: a background thread polls state, `downloadFile`s the
-   audio to `/tmp`, `playAudio`s it, and pulls pre-rendered 52×16 CJK lyric
-   frames (service renders the 4 modes + Fusion Pixel font — no on-device CJK
-   font), synced to playback position.
-3. **Polish**: connecting/empty/error states, endurance + restore tests.
-
-All four device capabilities above are proven; this stage is integration +
-on-device iteration.
+Protocol fields, build pitfalls, deployment and recovery are documented in the
+[player README](../README.md).

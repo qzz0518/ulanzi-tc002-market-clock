@@ -7,17 +7,17 @@
     "width": 52,
     "height": 16
   },
-  "sourceState": "core-prototype",
-  "releaseState": "not-built",
+  "sourceState": "verified-on-hardware",
+  "releaseState": "built-not-bundled",
   "requiredFlyThingsPackages": [
     "easyui",
     "log",
     "zkhardware",
-    "zknet",
     "base-utility",
     "transfer-protocols",
     "audio-utility",
+    "base-json",
     "ffmpeg",
-    "base-json"
+    "z"
   ]
 }

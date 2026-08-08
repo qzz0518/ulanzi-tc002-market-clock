@@ -122,6 +122,10 @@ interface MarketLogoIdentity {
 
 这为下一阶段的 Web3Icons 合约地址匹配保留了稳定插入点。
 
+股票搜索（2026-08-09 起）读取 Yahoo Finance 公开 `v1/finance/search`，身份为
+`exchange + symbol`，报价复用 Yahoo v8 Chart 路由；搜索结果不带上市币种，因此只放行
+内置「交易所 → 币种」映射中报价币种无歧义的市场（伦敦便士报价、OTC 粉单不产生候选）。
+
 ### 3.3 自动 Logo 管线
 
 注册资产时执行：
@@ -213,7 +217,7 @@ PUT  /api/market/instruments/:ref/icon
 - 当前开放 PNG 目录只有 483 张，且年代较旧；长尾或新币会显示程序化标识。
 - 名称完全一致是故意保守的 gate，可能产生 false negative，但避免 false positive。
 - Coinbase 搜索覆盖不等于全球所有数字货币覆盖。
-- 零 key 基线仍不提供任意股票搜索；股票需要未来的 BYOK 行情 adapter，Logo 还要单独取得权利。
+- 股票搜索/报价走 Yahoo Finance 免 key 公开接口，且只覆盖内置「交易所 → 币种」映射内的市场；股票品牌 Logo 仍需单独取得权利，当前一律程序化标识。
 - FX 与金属不会显示所谓“官方品牌 Logo”。
 - MIT/CC0 解决仓库作品的版权许可边界，不自动授予底层品牌商标权；商业发布前仍需复核。
 
@@ -230,7 +234,8 @@ PUT  /api/market/instruments/:ref/icon
 
 ### P3：股票来源
 
-1. 先完成股票 search/quote BYOK adapter，与 Logo adapter 分离。
+1. 股票 search/quote 已于 2026-08-09 转为免 key 实现（Yahoo Finance 公开搜索 +
+   既有 Yahoo Chart 报价），与 Logo adapter 依旧分离；BYOK adapter 不再是前置项。
 2. 为已许可 provider 建 `deny | ephemeral-only | persist` 策略；只有 `persist` 能进入 IconStore。
 3. 可选增加逐图核验的 Simple Icons/品牌白名单，保存单项 license、brand guideline 和身份映射。
 4. 没有明确授权时继续使用 ticker fallback。

@@ -4,6 +4,11 @@
 - Date: 2026-08-07
 - Amended: 2026-08-08 — installation switched from persistent `update.img` flashing to
   non-persistent ADB sideload sessions (Path A); official firmware stays on flash.
+- Amended: 2026-08-09 — the "future FlyThings adapter" below now exists
+  (`device/tc002-lyrics-player/`). It is cross-compiled headlessly in Docker
+  (`flythings-build/`, no Windows or FlyThings IDE required), and standalone tmpfs
+  operation (UI, `AudioManager`, LED, keys) was verified end-to-end on real hardware
+  on 2026-08-08 — the reversible-flash fallback in Consequences was never needed.
 
 ## Context
 

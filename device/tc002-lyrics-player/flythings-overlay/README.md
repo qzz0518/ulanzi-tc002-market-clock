@@ -1,5 +1,10 @@
 # FlyThings adapter boundary
 
+> **Status (2026-08-09):** historical planning note, kept for the record. The shipped
+> player did not take the overlay route — it is the standalone [`../app/`](../app/)
+> project, built headlessly by [`../flythings-build/`](../flythings-build/), which
+> provides (and verified on hardware) every piece listed below.
+
 This is intentionally an overlay, not a generated FlyThings IDE project. Start from Ulanzi's
 official `Z21_TC002_Demo`, then add the pure C++ core from the parent directory.
 

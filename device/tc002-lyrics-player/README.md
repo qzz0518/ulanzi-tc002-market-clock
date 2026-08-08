@@ -32,6 +32,7 @@ device/tc002-lyrics-player/
 │   ├── src/managers/     # AudioManager（play/pause/seek）、KeyManager、McuManager
 │   ├── src/visual/       # CjkFont.h / LatinFont.h（生成物）、调色板、图标、频谱
 │   └── ui/               # FlyThings 资源目录（随旁载一起推送）
+├── app.manifest.json     # 应用元数据：平台、分辨率、依赖包清单
 ├── core/                 # 与 FlyThings 无关的歌词时间轴/版式核心（可在主机用 C++11 自测）
 ├── tools/gen-fonts.py    # 离线字体光栅化器：woff2 → CjkFont.h + LatinFont.h
 ├── flythings-build/      # 无 IDE 的 Docker 交叉编译环境（见其 README）
@@ -57,6 +58,9 @@ socket）。每轮循环先拉状态、再发心跳，然后 `sleep(2)`：
    | `SKIN` | `signal/tape/blueprint/arcade` 配色 |
    | `ACCENT` | 覆盖主色的 `rrggbb`，`-` 表示跟随配色 |
    | `SEEK` | 目标毫秒；固件按值去重，服务端换曲时重置为 `-1` |
+
+   响应还带 `HBAGE` / `DTRACK` / `DPLAY` / `DPLAYING` 四个设备回报字段：固件
+   忽略它们，网页用来判定「音乐固件在线」并把预览锚定到真机播放头。
 
 2. **心跳上报**（同一轮询循环内、选定曲目后开始）：
    `POST /api/music/device/heartbeat`，上报 `trackId / playheadMs / playing`。
@@ -93,7 +97,7 @@ python3 tools/gen-fonts.py   # 需要 fontTools + brotli + Pillow
 
 ```bash
 cd device/tc002-lyrics-player/flythings-build
-./fetch-deps.sh                     # 工具链 + z21 依赖包（一次性）
+./fetch-deps.sh                     # 工具链 + 基础依赖包；播放器额外包需手动补齐，见 flythings-build/README.md
 docker build --platform linux/amd64 -t flythings-build .
 docker run --rm --platform linux/amd64 \
   -v "$PWD/..":/work -w /work/flythings-build flythings-build make

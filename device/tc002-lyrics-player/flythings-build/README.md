@@ -13,7 +13,12 @@ ELF32-ARM shared object.
 - `Makefile` — the `.cproject` managed build reversed into plain GNU Make:
   cross `g++`, C++11 `-fPIC -O3`, the documented compile/link flags, per-package
   include/lib paths, output `libzkgui.so`.
-- `fetch-deps.sh` — downloads the toolchain + z21 dependency packages.
+- `fetch-deps.sh` — downloads the toolchain + the five base z21 packages
+  (easyui / log / zkhardware / base-utility / transfer-protocols). The extra
+  packages the lyrics player links against (`audio-utility`, `base-json`,
+  `ffmpeg`, `z` — see the Makefile's `DEP_INC`) are fetched manually from the
+  same registry API, and `packages/device-audio/lib` holds MI/media `.so`s
+  pulled from a real device (`libmi_ao` etc.).
 - `capture.js` — Playwright script that reverse-engineered the package
   registry's real API (`/api/platforms/z21/packages/<pkg>/versions/<ver>/archive`).
 - `upstream/` — clone of `UlanziTechnology/Ulanzi-U-Clock-TC002` (gitignored).
@@ -22,7 +27,7 @@ ELF32-ARM shared object.
 ## Build
 
 ```sh
-./fetch-deps.sh                              # toolchain + z21 packages
+./fetch-deps.sh                              # toolchain + base packages（播放器额外包见 What's here）
 [ -d upstream ] || git clone --depth 1 \
   https://github.com/UlanziTechnology/Ulanzi-U-Clock-TC002 upstream
 docker build --platform linux/amd64 -t flythings-build .
