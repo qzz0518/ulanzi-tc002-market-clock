@@ -1,6 +1,6 @@
 import { PixelCanvas } from "./pixel-ui.ts";
 
-export const PWA_CACHE_NAME = "pixel-market-v3.1";
+export const PWA_CACHE_NAME = "pixel-market-v3.2";
 
 export const PWA_MANIFEST = {
   id: "/",
@@ -75,7 +75,10 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   event.respondWith(fetch(request).then((response) => {
-    if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+    if (response.ok) {
+      const copy = response.clone();
+      caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+    }
     return response;
   }).catch(() => caches.match(request)));
 });

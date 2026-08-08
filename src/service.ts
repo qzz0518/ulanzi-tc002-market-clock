@@ -7,11 +7,13 @@ import {
 } from "./clock-client.ts";
 import { loadConfig } from "./config.ts";
 import { createControlHandler } from "./control-api.ts";
+import { MusicSessionStore, NeteaseMusicService } from "./netease-music.ts";
 import { discoverControlAccess } from "./network-access.ts";
 import { WorkspaceStore, createDefaultWorkspace } from "./workspace.ts";
 import { WorkspaceController } from "./workspace-controller.ts";
 import { PixelAssetStore } from "./pixel-asset-store.ts";
 import { UlanziPixelAssetClient } from "./ulanzi-pixel-assets.ts";
+import { MusicPlayerBundleStore, Tc002MusicInstaller } from "./tc002-music-installer.ts";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown error";
@@ -29,6 +31,14 @@ const workspaceStore = new WorkspaceStore(
 );
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
 const ulanziPixelAssets = new UlanziPixelAssetClient({ timeoutMs: config.requestTimeoutMs });
+const music = new NeteaseMusicService({
+  sessionStore: new MusicSessionStore(".runtime/music-session.json"),
+});
+try {
+  await music.initialize();
+} catch (error) {
+  log("music_session_load_failed", { error: errorMessage(error), fallback: "signed_out" });
+}
 const controlAccess = discoverControlAccess({
   clockHost: config.clockHost,
   controlHost: config.controlHost,
@@ -49,6 +59,23 @@ const controller = new WorkspaceController({
   deleteApp: (appName) => deleteClockApp(config, appName),
   pixelAssetStore,
 });
+const musicInstaller = new Tc002MusicInstaller({
+  clockHost: config.clockHost,
+  adbPath: process.env.ADB_BIN,
+  bundleStore: new MusicPlayerBundleStore("device/tc002-lyrics-player/release"),
+  verifyClock: async () => {
+    const info = await readClockInfo(config);
+    return { mcuVersion: info.mcuVersion, appVersion: info.appVersion };
+  },
+});
+
+const MUSIC_MIRROR_APP = "music_lyrics";
+let musicMirrorQueue: Promise<unknown> = Promise.resolve();
+function queueMusicMirror<T>(operation: () => Promise<T>): Promise<T> {
+  const next = musicMirrorQueue.then(operation, operation);
+  musicMirrorQueue = next.catch(() => undefined);
+  return next;
+}
 
 let stopping = false;
 let wakeSleep: (() => void) | undefined;
@@ -77,9 +104,17 @@ const controlHandler = createControlHandler(controller, {
     write: (settings) => writeClockGeneralSettings(config, settings),
   },
   pixelAssetLibrary: { client: ulanziPixelAssets, store: pixelAssetStore },
+  music,
+  musicInstaller,
+  musicMirror: {
+    push: (payload) => queueMusicMirror(() => pushClockPayloadNamed(config, MUSIC_MIRROR_APP, payload)),
+    clear: () => queueMusicMirror(() => deleteClockApp(config, MUSIC_MIRROR_APP)),
+  },
 });
 const controlServer = Bun.serve({
-  hostname: config.controlHost,
+  // 0.0.0.0 so the TC002 on the LAN can reach the device-facing endpoints
+  // (e.g. /api/music/device/audio); localhost clients still work.
+  hostname: "0.0.0.0",
   port: config.healthPort,
   fetch: controlHandler,
 });

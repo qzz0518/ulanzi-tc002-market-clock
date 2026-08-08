@@ -20,6 +20,7 @@ for (const entrypoint of entrypoints) {
     entrypoints: [join(root, entrypoint)],
     outdir,
     target: "bun",
+    external: ["netease-cloud-music-api-alger"],
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
@@ -31,6 +32,17 @@ await mkdir(join(outdir, "assets"), { recursive: true });
 await copyFile(
   join(root, "src/assets/tc002-frame.png"),
   join(outdir, "assets/tc002-frame.png"),
+);
+await copyFile(
+  join(root, "src/assets/demo-audio.mp3"),
+  join(outdir, "assets/demo-audio.mp3"),
+);
+await copyFile(
+  join(
+    root,
+    "node_modules/@fontsource/fusion-pixel-12px-monospaced-sc/files/fusion-pixel-12px-monospaced-sc-latin-400-normal.woff2",
+  ),
+  join(outdir, "assets/fusion-pixel-12px-monospaced-sc.woff2"),
 );
 
 console.log("Built Cladd UI, service bundles, and runtime assets to dist/");

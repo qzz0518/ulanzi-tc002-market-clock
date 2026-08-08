@@ -10,11 +10,13 @@ import {
 import { DEFAULT_SETTINGS } from "../src/settings.ts";
 import type { DashboardController } from "../src/controller.ts";
 import { renderOfflineDashboard } from "../src/pixel-ui.ts";
+import { MusicServiceError, type NeteaseMusicService } from "../src/netease-music.ts";
 import { createDefaultWorkspace } from "../src/workspace.ts";
 import type { WorkspaceController } from "../src/workspace-controller.ts";
 import { PixelAssetStore } from "../src/pixel-asset-store.ts";
 import { PixelCanvas } from "../src/pixel-ui.ts";
 import type { UlanziPixelAssetClient } from "../src/ulanzi-pixel-assets.ts";
+import type { Tc002MusicInstaller } from "../src/tc002-music-installer.ts";
 
 const directories: string[] = [];
 
@@ -83,6 +85,7 @@ describe("local control API", () => {
     expect(pageHtml).not.toContain("status-progress");
     expect(page.headers.get("Content-Security-Policy")).toContain("script-src 'self'");
     expect(page.headers.get("Content-Security-Policy")).not.toContain("script-src 'unsafe-inline'");
+    expect(page.headers.get("Content-Security-Policy")).toContain("img-src 'self' blob:");
     expect(page.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
 
     const frame = await handler(new Request("http://127.0.0.1:43820/assets/tc002-frame.png"));
@@ -224,6 +227,168 @@ describe("local control API", () => {
       },
     ));
     expect(crossOrigin.status).toBe(400);
+  });
+
+  test("keeps music login writes same-origin and exposes only sanitized session state", async () => {
+    let avatarRequests = 0;
+    const music = {
+      status: () => ({
+        loggedIn: true,
+        profile: {
+          userId: 42,
+          nickname: "像素听众",
+          avatarUrl: "https://p1.music.126.net/avatar.jpg",
+        },
+      }),
+      avatar: async () => {
+        avatarRequests += 1;
+        return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+          headers: { "Content-Type": "image/jpeg" },
+        });
+      },
+      createQrLogin: async () => ({
+        id: "00000000-0000-4000-8000-000000000000",
+        qrUrl: "https://music.163.com/login?codekey=test",
+        expiresAt: "2026-08-07T00:03:00.000Z",
+      }),
+      search: async () => [{
+        id: 123,
+        title: "夜航",
+        artists: ["像素乐队"],
+        album: "十六行",
+        durationMs: 180_000,
+      }],
+    } as unknown as NeteaseMusicService;
+    const handler = createControlHandler(fakeWorkspaceController(), { music });
+
+    const session = await handler(new Request("http://127.0.0.1:43820/api/music/session"));
+    expect(await session.json()).toEqual({
+      session: {
+        loggedIn: true,
+        profile: {
+          userId: 42,
+          nickname: "像素听众",
+          avatarUrl: "https://p1.music.126.net/avatar.jpg",
+        },
+      },
+    });
+
+    const avatar = await handler(new Request("http://127.0.0.1:43820/api/music/avatar"));
+    expect(avatar.status).toBe(200);
+    expect(avatar.headers.get("Content-Type")).toBe("image/jpeg");
+    expect(new Uint8Array(await avatar.arrayBuffer())).toEqual(
+      new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+    );
+    expect(avatarRequests).toBe(1);
+
+    const failedAvatarHandler = createControlHandler(fakeWorkspaceController(), {
+      music: {
+        avatar: async () => {
+          throw new MusicServiceError("头像格式无效", 502);
+        },
+      } as unknown as NeteaseMusicService,
+    });
+    const failedAvatar = await failedAvatarHandler(
+      new Request("http://127.0.0.1:43820/api/music/avatar"),
+    );
+    expect(failedAvatar.status).toBe(502);
+    expect(await failedAvatar.json()).toEqual({ error: "头像格式无效" });
+
+    const rejected = await handler(new Request("http://127.0.0.1:43820/api/music/qr", {
+      method: "POST",
+      headers: { Origin: "https://example.com" },
+    }));
+    expect(rejected.status).toBe(400);
+
+    const created = await handler(new Request("http://127.0.0.1:43820/api/music/qr", {
+      method: "POST",
+      headers: { Origin: "http://127.0.0.1:43820" },
+    }));
+    expect(created.status).toBe(201);
+    expect(JSON.stringify(await created.json())).not.toContain("cookie");
+
+    const search = await handler(new Request(
+      "http://127.0.0.1:43820/api/music/search?query=%E5%A4%9C%E8%88%AA",
+    ));
+    expect((await search.json()).tracks[0].title).toBe("夜航");
+  });
+
+  test("does not allow cross-origin sideload session requests", async () => {
+    let started = false;
+    const installer = {
+      status: async () => ({
+        artifact: { state: "missing", appId: "tc002-lyrics-player", message: "missing" },
+        adb: "missing",
+        busy: false,
+        session: { active: false },
+        restore: { title: "恢复", steps: [] },
+      }),
+      startSession: async () => {
+        started = true;
+        return { state: "running" };
+      },
+    } as unknown as Tc002MusicInstaller;
+    const handler = createControlHandler(fakeWorkspaceController(), { musicInstaller: installer });
+    const response = await handler(new Request(
+      "http://127.0.0.1:43820/api/music/device-app/session/start",
+      {
+        method: "POST",
+        headers: {
+          Origin: "https://example.com",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ confirmation: "x", expectedBundleId: "a".repeat(64) }),
+      },
+    ));
+    expect(response.status).toBe(400);
+    expect(started).toBe(false);
+  });
+
+  test("encodes mirror frames into one custom-app push and supports clearing", async () => {
+    const payloads: { duration: number; image: { data: string }[] }[] = [];
+    let cleared = 0;
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      musicMirror: {
+        push: async (payload) => {
+          payloads.push(payload as never);
+          return { status: 200 };
+        },
+        clear: async () => {
+          cleared += 1;
+          return { status: 200 };
+        },
+      },
+    });
+
+    const pixels = Buffer.alloc(52 * 16 * 3, 32).toString("base64");
+    const pushed = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        frames: [
+          { delayMs: 400, pixels },
+          { delayMs: 400, pixels },
+        ],
+      }),
+    }));
+    expect(pushed.status).toBe(200);
+    expect((await pushed.json()).mirror.frames).toBe(2);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]!.image[0]!.data.startsWith("data:image/gif;base64,")).toBe(true);
+    expect(payloads[0]!.duration).toBeGreaterThanOrEqual(5);
+
+    const badFrame = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frames: [{ delayMs: 400, pixels: "short" }] }),
+    }));
+    expect(badFrame.status).toBe(400);
+
+    const clearedResponse = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
+      method: "DELETE",
+    }));
+    expect(clearedResponse.status).toBe(200);
+    expect(cleared).toBe(1);
   });
 
   test("returns preview bytes and supports direct push", async () => {
