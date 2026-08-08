@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "appId": "tc002-lyrics-player",
+  "name": "Pixel Lyrics Player",
+  "platform": "Z21",
+  "display": {
+    "width": 52,
+    "height": 16
+  },
+  "sourceState": "core-prototype",
+  "releaseState": "not-built",
+  "requiredFlyThingsPackages": [
+    "easyui",
+    "log",
+    "zkhardware",
+    "zknet",
+    "base-utility",
+    "transfer-protocols",
+    "audio-utility",
+    "ffmpeg",
+    "base-json"
+  ]
+}

@@ -1,0 +1,42 @@
+#!/bin/sh
+# TC002 sideload probe: validates the non-persistent session pipeline and
+# records the device facts the FlyThings player port needs. Written for the
+# TC002's minimal busybox — no head/tail/tar are available — so every fact is
+# captured with cat/ls/command and appended whole. Output lands in tmpfs and
+# is erased by any power cycle.
+
+LOG=/tmp/tc002-music/probe.log
+: > "$LOG"
+
+log() { echo "$@" >> "$LOG"; }
+run() { log "--- $1 ---"; shift; "$@" >> "$LOG" 2>&1; }
+
+log "=== tc002-music probe start ==="
+run "date" date
+run "uname" uname -a
+run "id" id
+run "getprop (full)" getprop
+run "mounts" mount
+run "meminfo" cat /proc/meminfo
+run "cpuinfo" cat /proc/cpuinfo
+run "audio /dev/snd" ls -l /dev/snd
+run "audio /proc/asound" cat /proc/asound/cards
+log "--- audio binaries ---"
+for c in aplay amixer tinyplay tinymix tinycap madplay mpg123 ffmpeg gst-launch; do
+  command -v "$c" >/dev/null 2>&1 && log "HAVE $c" || log "no   $c"
+done
+log "--- shell tools present ---"
+for c in sh busybox tar unzip gzip cat sed awk grep sleep kill nohup setprop getprop ps mount md5sum sha256sum wget curl; do
+  command -v "$c" >/dev/null 2>&1 && log "HAVE $c" || log "no   $c"
+done
+run "processes" ps
+run "zkswe svc" getprop init.svc.zkswe
+run "dev nodes" ls /dev
+run "customer dir" ls -l /customer
+run "appconfigs dir" ls -l /appconfigs
+run "data dir" ls -l /data
+log "=== tc002-music probe complete ==="
+
+# The probe collects facts and exits; it does not resident-idle. Mirror the
+# whole log to stdout so a foreground `sh ./player` run returns it directly.
+cat "$LOG"
