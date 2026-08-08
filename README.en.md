@@ -2,132 +2,193 @@
 
 [简体中文](README.md) | English
 
-An extensible, Bun-powered multi-channel content studio for the Ulanzi TC002. Market data, notices, timers, visual animations, and a 52×16 canvas all implement one frame-rendering contract and are composed and pushed by a central scheduler.
+Turns the Ulanzi TC002 pixel clock (52×16 LED) into an extensible multi-channel content
+studio: market data, notices, timers, pixel animations, canvas artwork, official community
+assets — plus a complete music lyrics player. Everything is composed in the browser and
+rendered into pixel frames by a local Bun service that pushes them to the clock.
 
 ![Ulanzi TC002 multi-channel content studio control panel](docs/images/tc002-control-panel.png)
 
-## Content model
+## Core concept: channels and content items
 
-- A **channel** maps to one TC002 Custom App name and therefore one item selectable with the physical knob.
-- A **content item** is one segment inside a channel. One item is standalone; multiple ordered items become one animated GIF carousel.
+- **A channel = one Custom App on the clock**, directly selectable with the TC002 knob.
+- **A content item = one segment inside a channel.** A single item is a standalone screen;
+  multiple items are composed into one ordered GIF carousel.
 
-Renderers only return 52×16 frames and explicit delays. They cannot write to the clock or start background loops. The controller owns shared data caching, bounds validation, GIF encoding, serialized device writes, failure isolation, cleanup, and scheduling. See [ADR 0001](docs/adr/0001-extensible-content-channels.md).
+For example, three knob entries: `markets` (BTC → gold → AAPL carousel), `timer` (interval
+column), `fire` (flame animation).
 
-## Built-in catalog
+## What's included
 
 | Category | Content |
 | --- | --- |
-| Market | BTC, ETH, BNB, SOL, gold, USD/CNY, AAPL, MSFT, NVDA, GOOGL |
+| Market | Built-in BTC, ETH, BNB, SOL, gold, USD/CNY, AAPL, MSFT, NVDA, GOOGL; plus search-and-add for more assets (next section) |
 | Tools | Notice board, interval timer column |
 | Visual | Langton's ant, aquarium, fire, flip clock, Matrix clock, maze, pixel pet, falling sand, starfield |
-| Creative | Persistent 52×16 canvas, plus Ulanzi community pixel assets imported through the dedicated library (PNG / GIF) |
+| Creative | Persistent 52×16 canvas; Ulanzi community pixel assets imported through the Library (PNG / GIF) |
 
-The four stocks use Yahoo Finance's public Chart endpoint. Their 16×16 marks preserve the exact PixDeck source PNG bytes and opaque pixel layouts; provenance and SHA-256 hashes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+### Market: search and add any asset (no API keys)
 
-The canvas supports pen/eraser tools, colors, grid, undo/redo, ASCII pixel text, image pixelization, and PNG export. A saved canvas is a normal content item, so it can be standalone or part of a carousel.
+The content market's **Search more assets** covers four asset classes, all through public
+endpoints — no API key of any kind:
 
-The top-level **Library** tab sits next to **Content** and **Canvas** and provides a wide workspace for browsing, searching, filtering, or importing a public Ulanzi community asset from a `ugc.ulanzistudio.com/contentView/...` link. The channel rail selects the destination for **Add to channel**, while any work can also become a standalone app.
+| Kind | Source | Notes |
+| --- | --- | --- |
+| Crypto | Coinbase Exchange public catalog + market data | Any tradable product, 24H change |
+| Stocks / ETFs | Yahoo Finance public search + Chart endpoint | Major exchanges (US, HK, Shanghai/Shenzhen, Tokyo, EU, …); prices may be delayed, 1D change |
+| FX | Frankfurter (ECB reference rates) | Any ISO currency pair; central-bank daily reference, not tick quotes |
+| Metals | Gold API | Gold, silver, platinum, palladium spot |
 
-The upstream catalog is not hard-coded. Entering the Library, reloading, searching, changing filters, or paging requests the official API again, so upstream additions, removals, and edits appear on the next request. Imported media remains a stable local snapshot and is never silently replaced by later upstream changes. Assets are restored to 52×16 with nearest-neighbor sampling, GIF timing is preserved, and normalized media is stored under `.runtime/pixel-assets`, so later previews and pushes do not depend on the upstream site. The import endpoint only adds a channel item or creates a standalone app; it never bypasses the existing channel pipeline to write the device directly. Delivery then follows the project's existing scheduled and manual channel push behavior. Community artwork is not bundled, and author/source attribution is retained.
+Stock search only admits exchanges whose quote currency is unambiguous (pence-priced London
+listings and OTC pink sheets never appear), and the quote path re-checks the actual listing
+currency — a mismatch fails loudly instead of labelling a price with the wrong currency.
+Added assets are stored as stable local identities; a failing quote falls back to the cached
+price and, once the cache expires, skips that one item while the rest of the channel keeps
+rendering.
 
-## Control panel
+Icons are generated automatically: a cryptocurrency that passes the double symbol +
+normalized-name match against the bundled CC0 catalog (`cryptocurrency-icons@0.18.1`) gets a
+deterministic offline 16×16 pixelization; uncertain matches and every other asset class get a
+procedural identicon derived from the asset identity — never a guessed logo. The four
+built-in US stocks keep their PixDeck source icons; provenance and hashes are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Start the service and open:
+### Canvas and Library
 
-```text
-http://127.0.0.1:43820/
-```
+The canvas supports pen/eraser, custom colors, grid, undo/redo, ASCII pixel text, image
+pixelization, and PNG export; a saved canvas is a normal content item, usable in a carousel
+or as a standalone app.
 
-The left rail manages clock channels, the center edits and previews the selected channel, and the right-side catalog is grouped by Market, Tools, Visual, and Creative. The top navigation exposes four first-class views: **Content**, **Canvas**, **Library**, and **Music**. The top-right **General settings** dialog reads and writes brightness, volume, paging, scrolling, timezone, date, weekday, and low-battery sleep settings. Its title-bar phone icon reveals the same-subnet QR code, current URL, and copy action only when needed instead of occupying the settings landing area.
+The Library talks to the official Ulanzi community live (every browse, search, and page
+requests the official API, so upstream changes appear immediately) and also imports
+`ugc.ulanzistudio.com/contentView/...` links. Imported assets are restored to 52×16 with
+nearest-neighbor sampling, keep GIF timing, and are snapshotted under
+`.runtime/pixel-assets` — later previews and pushes don't depend on the upstream site, and a
+snapshot is never silently replaced by upstream edits. Community artwork is not bundled with
+this repository, and author/source attribution is retained.
 
-Phone portrait mode separates **Channel composition** from **Add content** so the catalog is never buried below the editor. Adding an item returns directly to the new playlist row, while channel settings and the large device preview stay collapsed until requested. Bottom navigation, the horizontal channel picker, and single-column forms are laid out for touch. The canvas asks phone users to rotate to landscape so the 52×16 surface and tools retain accurate targets. Desktop keeps the existing three-column composition.
-
-<p align="center">
-  <img src="docs/images/tc002-mobile-content.png" width="390" alt="Ulanzi TC002 Pixel Studio mobile channel composition">
-</p>
-
-The UI ships a Web App Manifest, home-screen icons, standalone metadata, and an offline static shell. A supporting browser can add it to the home screen for an app-like window. Full PWA installation and Service Worker offline caching require a trusted HTTPS origin; plain LAN HTTP still provides the responsive control panel and any home-screen shortcut mode offered by the browser.
-
-The frontend uses React, Cladd UI, and Tailwind CSS v4. Cladd standardizes controls, tabs, selects, deletion confirmation, tooltips, toasts, and draggable numeric inputs while the product keeps its existing black, white, and green Pixel Market visual language. Motion respects `prefers-reduced-motion`.
-
-Configuration is stored in `.runtime/workspace.json`. A legacy `.runtime/settings.json` is atomically migrated into one market channel on first launch without overwriting the legacy file. Disabled, removed, or renamed channels are cleaned from the clock by posting an empty object to their former Custom App names.
-
-## Pixel lyrics player
-
-The first-class **Music** workspace is a complete music console: NetEase Music QR login, search
-with 20-per-page pagination, signed-in playlists, timed lyrics with translations, a same-origin
-audio proxy, and a live 52×16 pixel lyric preview. The login cookie stays only in
-`.runtime/music-session.json` with mode `0600`; neither the browser nor the TC002 receives the raw
-credential, and logout removes the file. Playback remains subject to account, subscription,
-copyright, and regional availability. A 45-second preview is presented as a preview rather than a
-full track.
-
-The preview and the device share one theme system: four display modes (ticker / skyline /
-spotlight / cascade) × four palettes (signal green / tape orange / blueprint / arcade red), plus a
-color-picker accent override.
-
-Two complementary paths put lyrics on the clock:
-
-- **Device mirror (stock firmware, no flashing)**: pushes the rendered 52×16 lyric frames (up to
-  60 frames, ~15fps) through the stock firmware's Custom App channel; audio plays in the browser.
-- **Native music firmware (non-persistent sideload)**: the repository contains a complete
-  FlyThings C++ player — cross-compiled in Docker, no Windows IDE required — that downloads the
-  audio on-device, plays it through the speaker with millisecond seeking, and drives the LED matrix
-  directly using offline-rasterised 12×12 CJK glyphs (Chinese + Japanese kana/kanji). Web and
-  firmware stay in **bidirectional real-time sync** over a control-sequence + heartbeat protocol:
-  web-side select/pause/theme/seek reaches the device within 2 s, device-side key presses flow back
-  instantly, and the preview clock anchors to the real playhead. In this mode the web page is a
-  silent remote. The UI detects the firmware automatically.
-
-Sideloading is always non-persistent: the TC002 normally runs the official firmware, a session
-only pushes the player into the device tmpfs, and ending the session — or any power cycle —
-restores the official firmware because flash is never written. Starting a session still requires
-the bundle to match its per-file SHA-256 manifest, the official HTTP API and Wi-Fi ADB to both
-identify the device, and the user to acknowledge the restore path. Firmware sources, the protocol,
-build, and deployment live in
-[device/tc002-lyrics-player](device/tc002-lyrics-player/README.md); the architecture boundary is
-[ADR 0002](docs/adr/0002-native-music-player-boundary.md).
-
-MQTT alone cannot make the stock firmware play music: it can carry control messages, but only a
-native device application can invoke `AudioManager` / `MediaPlayer` — which is exactly what the
-sideloaded firmware does.
-
-## HTTP and MQTT
-
-The implementation intentionally keeps the TC002-native `POST /api/custom?name=...` HTTP transport. For a local renderer writing complete Custom Apps to one LAN device, it needs no broker and has explicit update and delete semantics.
-
-Transport is injected behind `pushPayload(appName, payload)`. An MQTT adapter can be added later for Home Assistant, remote buses, or multiple subscribers without changing any renderer; no broker dependency is required today.
-
-## Development
+## Quick start
 
 `mise.toml` pins Bun 1.3.14:
 
 ```bash
 mise install
-mise run test
-mise run typecheck
-mise run build
-CLOCK_HOST=TC002_IP bun start
+mise run test && mise run typecheck && mise run build
+CLOCK_HOST=TC002_IP bun start        # replace TC002_IP with the clock's LAN IP or hostname
 ```
 
-Replace the `TC002_IP` placeholder with the clock's current LAN IP address or hostname.
+Then open `http://127.0.0.1:43820/`. Without mise, plain
+`bun install && bun test && bun run build` works too; `bun run preview` writes per-channel
+preview strips to `.runtime/previews/`, and `bun run status` reports service state.
 
-Generate channel images and preview strips under `.runtime/previews/`:
+Install as a resident service (pick one — don't let both claim port 43820):
 
 ```bash
-bun run preview
+bash scripts/install.sh --host TC002_IP          # macOS LaunchAgent
+bash scripts/install-docker.sh --host TC002_IP   # Docker Compose (published to host loopback only)
 ```
 
-Install as a macOS LaunchAgent or Docker Compose service:
+The macOS install listens on `0.0.0.0` by default so phones on the LAN can connect (General
+settings → title-bar phone icon shows a QR code and copyable URL); pass
+`--control-host 127.0.0.1` to keep it Mac-only.
 
-```bash
-bash scripts/install.sh --host TC002_IP
-bash scripts/install-docker.sh --host TC002_IP
-```
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `CLOCK_HOST` | required | TC002 LAN IP or hostname, without protocol or port |
+| `CONTROL_HOST` | `0.0.0.0` for the macOS install; `127.0.0.1` when run directly | Control panel listen address; phones need `0.0.0.0` |
+| `HEALTH_PORT` | `43820` | Control panel, API, and health-check port |
+| `REQUEST_TIMEOUT_MS` | `5000` | Market and device request timeout |
+| `SOURCE_STALE_MS` | `120000` | How long cached market data may be reused after failures |
+| `DISPLAY_DURATION_SECONDS` | `90` | Minimum Custom App lifetime on the device |
+| `APP_NAME` | `btc` | Default channel name for fresh installs and first-run legacy migration |
+| `ADB_BIN` | auto-detected at install | Absolute `adb` path; a LaunchAgent doesn't inherit the shell PATH |
+| `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials) for device requests |
 
-The native macOS installer listens on `0.0.0.0` by default so phones on the same LAN can connect. Open General settings and use its title-bar phone icon to scan or copy the selected same-subnet URL. Pass `--control-host 127.0.0.1` to keep it Mac-only. Docker Compose remains published to host loopback only.
+## Control panel
 
-The installer also records the absolute `adb` executable as `ADB_BIN`, because a LaunchAgent does not inherit the interactive shell's Homebrew path. Use `--adb-bin /absolute/path/to/adb` or set `ADB_BIN` to override auto-detection.
+- Left: the channel rail (knob entries). Center: the channel editor (ordering, durations,
+  preview, per-channel push). Right: the content market grouped by Market / Tools / Visual /
+  Creative.
+- Top navigation: four first-class views — **Content / Canvas / Library / Music**.
+- The top-right **General settings** dialog reads and writes brightness, volume, paging,
+  scrolling, timezone, date, weekday, and low-battery sleep; its title-bar phone icon reveals
+  the same-subnet QR code and URL on demand.
+
+Phone portrait mode splits **Channel composition** and **Add content** into two workspaces,
+with bottom navigation and single-column forms laid out for touch; the canvas asks for
+landscape. The UI ships a Web App Manifest and an offline static shell for add-to-home-screen
+use; full PWA installation requires a trusted HTTPS origin, while plain LAN HTTP keeps the
+responsive panel fully working.
+
+<p align="center">
+  <img src="docs/images/tc002-mobile-content.png" width="390" alt="Ulanzi TC002 Pixel Studio mobile channel composition">
+</p>
+
+Configuration lives in `.runtime/workspace.json`; a legacy `.runtime/settings.json` is
+atomically migrated into one market channel on first launch without overwriting the original.
+Disabling, deleting, or renaming a channel posts an empty object to its former Custom App
+name; a cleanup that fails while the device is offline is recorded as degraded state and
+never rolls back the save.
+
+## Pixel lyrics player
+
+![Music workspace: search, track picking, themes, and the live 52×16 pixel preview](docs/images/tc002-music-studio.png)
+
+The **Music** view is a complete music console: NetEase Music QR login, search (20 per
+page), signed-in playlists, timed lyrics with translations, a same-origin audio proxy, and a
+live 52×16 pixel lyric preview. The login cookie stays only in
+`.runtime/music-session.json` (mode `0600`) — neither the browser nor the clock ever sees the
+raw credential, and logout deletes the file. Playback remains subject to account,
+subscription, copyright, and regional limits; a 45-second preview is shown as a preview, not
+a full track.
+
+The preview and the device share one theme system: four display modes (ticker / skyline /
+spotlight / cascade) × four palettes (signal green / tape orange / blueprint / arcade red),
+plus a color-picker accent override.
+
+Two complementary paths put lyrics on the clock:
+
+- **Device mirror (stock firmware, no flashing)**: pushes the rendered lyric frames (up to
+  60 frames, ~15fps) through the stock firmware's Custom App channel; audio plays in the
+  browser.
+- **Native music firmware (non-persistent sideload)**: the repository contains a complete
+  FlyThings C++ player — cross-compiled in Docker, no Windows IDE — that downloads the audio
+  on-device, plays it through the speaker with millisecond seeking, and drives the LED matrix
+  with offline-rasterised 12×12 Chinese and Japanese glyphs. Web and firmware stay in **bidirectional
+  real-time sync** over a control-sequence + heartbeat protocol: web-side
+  select/pause/theme/seek reaches the device within 2 s, device keys flow back instantly, and
+  the preview clock anchors to the real playhead; in this mode the web page is a silent
+  remote, and the UI switches over automatically when the firmware is online. The stock
+  firmware has no player that decodes network audio — speaker output requires a device-side
+  app calling `AudioManager`, which is exactly why the sideloaded firmware exists (MQTT can
+  carry control messages but cannot replace it).
+
+<p align="center">
+  <img src="docs/images/tc002-music-firmware-preview.png" width="720" alt="The 52×16 pixel lyric screen — the preview and the music firmware share one rendering algorithm">
+</p>
+
+Sideloading is always non-persistent: a session only pushes the player into the device
+tmpfs, and ending the session — or any power cycle — restores the official firmware because
+flash is never written. Starting a session requires the bundle to match its per-file SHA-256
+manifest, the official HTTP API and Wi-Fi ADB to both identify the device, and an explicit
+restore acknowledgement. Firmware sources, the protocol, build, and deployment live in
+[device/tc002-lyrics-player](device/tc002-lyrics-player/README.md).
+
+## Architecture and extension
+
+Content renderers only produce 52×16 frames and delays — they cannot write to the device or
+start background loops. The central controller owns market caching, frame limits, GIF
+encoding, serialized device writes, failure isolation, and scheduling (see
+[ADR 0001](docs/adr/0001-extensible-content-channels.md)). Adding trusted built-in content
+means registering one `ContentDefinition` in `src/content-registry.ts`; the registry
+deliberately does not load arbitrary third-party JavaScript — an untrusted plugin system
+would need an out-of-process protocol and its own ADR.
+
+Device transport is the TC002-native `POST /api/custom?name=...` (no broker, one request per
+complete Custom App, explicit delete semantics), injected behind
+`pushPayload(appName, payload)` — a future Home Assistant or MQTT adapter changes no
+renderer. The music architecture boundary (web / service / firmware responsibilities) is
+[ADR 0002](docs/adr/0002-native-music-player-boundary.md).
 
 ## API
 
@@ -140,31 +201,42 @@ The installer also records the absolute `adb` executable as `ADB_BIN`, because a
 | `POST` | `/api/push` | Push every enabled channel |
 | `GET` | `/api/state`, `/health` | Device, channel, market, and cleanup status |
 | `GET` / `PUT` | `/api/device/settings/general` | Read or write TC002 general settings |
-| `GET` | `/api/access` | Report the same-subnet phone URL and listener status |
-| `GET` | `/api/library/ulanzi/pixel-assets` | Browse, search, filter, and page through official community assets |
+| `GET` | `/api/access` | Same-subnet phone URL and listener status |
+| `GET` | `/api/market/search` | Search addable market assets by query and kind |
+| `GET` / `POST` | `/api/market/instruments` | List added assets; register one by candidate ref |
+| `GET` | `/api/market/icons/:iconRef.png` | 16×16 pixel icon of a runtime asset (immutable cache) |
+| `GET` | `/api/presets`, `/api/icons/:id.png` | Legacy market presets and built-in asset icons |
+| `GET` / `PUT` | `/api/settings` | Legacy single-carousel settings |
+| `POST` | `/api/preview` | Legacy: returns rendered GIF/PNG bytes directly |
+| `GET` | `/api/library/ulanzi/pixel-assets` | Browse, search, filter, and page community assets |
 | `GET` | `/api/library/ulanzi/media` | Safely proxy official preview media |
-| `POST` | `/api/library/ulanzi/import` | Validate and import an official `contentView` link or work ID |
+| `POST` | `/api/library/ulanzi/import` | Validate and import a `contentView` link or work ID |
 | `GET` | `/api/library/ulanzi/imported/:ref` | Read a normalized local asset snapshot |
-| `GET` | `/api/music/session`, `/api/music/avatar` | Read the sanitized NetEase login state and proxied avatar |
-| `POST` | `/api/music/qr`, `/api/music/qr/check`, `/api/music/logout` | Create/confirm a server-held QR session; log out and delete the local credential |
+| `GET` | `/api/music/session`, `/api/music/avatar` | Sanitized NetEase login state and proxied avatar |
+| `POST` | `/api/music/qr`, `/api/music/qr/check`, `/api/music/logout` | Server-held QR session; logout deletes the local credential |
 | `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks |
-| `GET` | `/api/music/tracks/:id` | Read track metadata and timed lyrics |
-| `GET` | `/api/music/tracks/:id/stream` | Same-origin, allowlisted audio proxy with Range support |
-| `GET` / `POST` | `/api/music/device-app/*` | Validate the bundle, probe the device, and start/stop tmpfs debug sessions |
-| `POST` / `DELETE` | `/api/music/mirror` | Push 52×16 lyric frames (≤60) to a stock-firmware Custom App slot (device mirror) |
-| `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches (play/theme/palette/accent/seek) |
-| `GET` | `/api/music/device/state` | Plain-text control state polled by the music firmware (sequence + live echo) |
+| `GET` | `/api/music/tracks/:id`, `/api/music/tracks/:id/stream` | Track metadata + timed lyrics; same-origin audio proxy (Range) |
+| `GET` / `POST` | `/api/music/device-app/*` | Validate the bundle, probe the device, start/stop tmpfs sessions |
+| `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤60) to a stock-firmware Custom App (device mirror) |
+| `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |
+| `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll |
 | `POST` | `/api/music/device/report`, `/api/music/device/heartbeat` | Firmware key-action reports and playhead heartbeats |
 | `GET` | `/api/music/device/now`, `/api/music/device/audio` | Firmware-side lyric fetch and audio download |
 
-Legacy `/api/presets` and `/api/settings` endpoints remain available. Writes require JSON and same-origin browser requests. Limits are 256 KiB per request, 24 channels, 48 items per channel, and 360 rendered frames per channel.
+Writes accept JSON only and require same-origin requests (except the firmware-facing
+`report` / `heartbeat` endpoints, whose caller is the clock itself); the request-body limit is
+256 KiB.
+Limits: 24 channels, 48 items per channel, 360 rendered frames per channel; app names are
+unique and restricted to 1–32 ASCII letters, digits, underscores, or hyphens.
 
-## Extending the registry
+## Data sources and license
 
-Add a trusted built-in `ContentDefinition` in `src/content-registry.ts`. A renderer receives a time snapshot, shared market reader, and item options, and returns `PixelCanvas[]`, matching delays, and a label. It must not start timers, retain unbounded state, or access the clock directly.
+Built-in assets: crypto via Coinbase (Kraken fallback, 24H change); gold via Gold API (the
+free endpoint has no reliable 24H open, so no fabricated change); USD/CNY from
+Frankfurter/ECB daily reference rates; the four US stocks via Yahoo Chart (1D vs previous
+close). Search-added runtime assets use one fixed provider per kind (Coinbase / Yahoo /
+Frankfurter / Gold API, no fallback route) and degrade gracefully on quote failure.
 
-The registry deliberately does not load arbitrary third-party JavaScript. An untrusted plugin system should use an out-of-process protocol and a separate ADR.
-
-## License
-
-This project is **GPL-3.0-only** because it adapts and modifies GPL-3.0 PixDeck material. Review [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before distributing source or binaries.
+This project is **GPL-3.0-only** because it adapts and modifies GPL-3.0 PixDeck material.
+Review [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before
+distributing source or binaries.
