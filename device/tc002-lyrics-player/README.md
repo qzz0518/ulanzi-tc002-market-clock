@@ -68,9 +68,10 @@ socket）。每轮循环先拉状态、再发心跳，然后 `sleep(2)`：
 播放/暂停、旋钮按下的主题切换）；左右键跳句不单独上报，由下一次心跳的
 `playheadMs` 回流到网页，音量属于设备本地状态、不回传。
 
-> **服务器地址是编译期常量**：`app/src/logic/lyricsLogic.cc` 顶部的
-> `kService*Url` 写死了运行 Pixel Studio 的主机地址（默认
-> `http://PIXEL_STUDIO_HOST:43820`）。换局域网环境时改这几行重新编译即可。
+> **服务器地址是编译期常量**：`app/src/logic/lyricsLogic.cc` 中的
+> `PIXEL_STUDIO_ORIGIN` 默认使用不可直接连接的占位主机
+> `http://PIXEL_STUDIO_HOST:43820`。编译前把这一处替换为运行 Pixel Studio
+> 的局域网地址；换局域网环境后重新编译即可。
 
 ## 字体管线
 

@@ -114,8 +114,10 @@ mise install
 mise run test
 mise run typecheck
 mise run build
-CLOCK_HOST=192.168.1.50 bun start
+CLOCK_HOST=TC002_IP bun start
 ```
+
+上面的 `TC002_IP` 是占位符，运行前替换为时钟当前的局域网 IP 或主机名。
 
 也可以直接执行：
 
@@ -143,13 +145,13 @@ bun run status
 macOS LaunchAgent：
 
 ```bash
-bash scripts/install.sh --host 192.168.1.50
+bash scripts/install.sh --host TC002_IP
 ```
 
 Docker Compose：
 
 ```bash
-bash scripts/install-docker.sh --host 192.168.1.50
+bash scripts/install-docker.sh --host TC002_IP
 ```
 
 macOS 安装默认监听 `0.0.0.0`，以便同一局域网中的手机访问；打开右上角“常规设置”，点击标题栏手机图标即可扫码或复制与时钟同网段的当前 IP 与端口。只希望本机访问时，可传入 `--control-host 127.0.0.1`。Docker 容器内部监听 `0.0.0.0`，但 Compose 仍只把控制端口发布到宿主机 `127.0.0.1`。两种安装方式不要同时占用同一个 43820 端口。

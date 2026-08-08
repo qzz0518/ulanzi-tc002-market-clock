@@ -44,11 +44,14 @@ void applyVolume() {
 }
 
 // LAN Pixel Studio service. All calls block, so they run off the UI thread.
-const char* kServiceStateUrl  = "http://PIXEL_STUDIO_HOST:43820/api/music/device/state";
-const char* kServiceReportUrl = "http://PIXEL_STUDIO_HOST:43820/api/music/device/report";
-const char* kServiceHeartbeatUrl = "http://PIXEL_STUDIO_HOST:43820/api/music/device/heartbeat";
-const char* kServiceNowUrl    = "http://PIXEL_STUDIO_HOST:43820/api/music/device/now";
-const char* kServiceAudioUrl  = "http://PIXEL_STUDIO_HOST:43820/api/music/device/audio";
+#ifndef PIXEL_STUDIO_ORIGIN
+#define PIXEL_STUDIO_ORIGIN "http://PIXEL_STUDIO_HOST:43820"
+#endif
+const char* kServiceStateUrl  = PIXEL_STUDIO_ORIGIN "/api/music/device/state";
+const char* kServiceReportUrl = PIXEL_STUDIO_ORIGIN "/api/music/device/report";
+const char* kServiceHeartbeatUrl = PIXEL_STUDIO_ORIGIN "/api/music/device/heartbeat";
+const char* kServiceNowUrl    = PIXEL_STUDIO_ORIGIN "/api/music/device/now";
+const char* kServiceAudioUrl  = PIXEL_STUDIO_ORIGIN "/api/music/device/audio";
 const char* kLocalTrackPath   = "/tmp/track.mp3";
 
 volatile bool sPolling = true;

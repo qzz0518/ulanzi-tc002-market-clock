@@ -107,8 +107,10 @@ mise install
 mise run test
 mise run typecheck
 mise run build
-CLOCK_HOST=192.168.1.50 bun start
+CLOCK_HOST=TC002_IP bun start
 ```
+
+Replace the `TC002_IP` placeholder with the clock's current LAN IP address or hostname.
 
 Generate channel images and preview strips under `.runtime/previews/`:
 
@@ -119,8 +121,8 @@ bun run preview
 Install as a macOS LaunchAgent or Docker Compose service:
 
 ```bash
-bash scripts/install.sh --host 192.168.1.50
-bash scripts/install-docker.sh --host 192.168.1.50
+bash scripts/install.sh --host TC002_IP
+bash scripts/install-docker.sh --host TC002_IP
 ```
 
 The native macOS installer listens on `0.0.0.0` by default so phones on the same LAN can connect. Open General settings and use its title-bar phone icon to scan or copy the selected same-subnet URL. Pass `--control-host 127.0.0.1` to keep it Mac-only. Docker Compose remains published to host loopback only.
