@@ -275,16 +275,15 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
               <Button
                 type="button"
                 size="sm"
-                square
                 color={accessPopoverOpen ? "brand" : "neutral"}
                 variant={accessPopoverOpen ? "solid-fill" : "transparent"}
                 outline={false}
                 className="device-access-trigger"
-                aria-label="打开手机访问二维码"
+                aria-label="打开手机控制"
                 aria-expanded={accessPopoverOpen}
-                title="手机访问"
               >
                 <Smartphone />
+                <span className="device-access-trigger__label">手机控制</span>
                 {access?.url && <span className="device-access-trigger__status" aria-hidden="true" />}
               </Button>
             </PopoverTrigger>

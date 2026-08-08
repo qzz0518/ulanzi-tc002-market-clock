@@ -30,6 +30,7 @@ import {
   PixelAssetLibrary,
   type ImportedPixelAsset,
 } from "@/components/studio/pixel-asset-library";
+import { MusicPlayer } from "@/components/music/music-player";
 import { StudioHeader } from "@/components/studio/studio-header";
 import { WorkspaceEditor } from "@/components/studio/workspace-editor";
 
@@ -690,7 +691,13 @@ export function App() {
     );
   }
 
-  const pageCopy = view === "canvas"
+  const pageCopy = view === "music"
+    ? {
+        kicker: "TC002 PIXEL RADIO",
+        title: "音乐歌词播放器",
+        description: "左侧选歌，右侧同步试听像素歌词；设备固件只在需要时打开。",
+      }
+    : view === "canvas"
     ? {
         kicker: "TC002 PIXEL STUDIO",
         title: "像素画板",
@@ -708,13 +715,17 @@ export function App() {
           description: "把内容组合成轮播，或作为独立 App 交给时钟旋钮切换。",
         };
 
-  const pageClassName = view === "canvas"
+  const pageClassName = view === "music"
+    ? "studio-page is-music-page"
+    : view === "canvas"
     ? "studio-page is-canvas-page"
     : view === "library"
       ? "studio-page is-library-page"
       : "studio-page";
 
-  const layoutClassName = view === "canvas"
+  const layoutClassName = view === "music"
+    ? "studio-layout is-music"
+    : view === "canvas"
     ? "studio-layout is-canvas"
     : view === "library"
       ? "studio-layout is-library"
@@ -743,13 +754,15 @@ export function App() {
       )}
 
       <div className={layoutClassName}>
-        <ChannelSidebar
-          channels={workspace.channels}
-          selectedChannelId={selectedChannel.id}
-          onSelect={selectChannel}
-          onAdd={addChannel}
-          onDelete={deleteChannel}
-        />
+        {view !== "music" && (
+          <ChannelSidebar
+            channels={workspace.channels}
+            selectedChannelId={selectedChannel.id}
+            onSelect={selectChannel}
+            onAdd={addChannel}
+            onDelete={deleteChannel}
+          />
+        )}
 
         {view === "console" && (
           <nav className="mobile-console-navigation" aria-label="手机端内容工作区">
@@ -836,7 +849,7 @@ export function App() {
             onPreview={() => void preview()}
             onPush={() => void push()}
           />
-        ) : (
+        ) : view === "library" ? (
           <PixelAssetLibrary
             targetChannelName={selectedChannel.name}
             addedOfficialIds={selectedChannel.items.flatMap((item) =>
@@ -847,6 +860,8 @@ export function App() {
             onAdd={addImportedPixelAsset}
             onStandalone={createStandalonePixelAsset}
           />
+        ) : (
+          <MusicPlayer />
         )}
       </div>
     </div>

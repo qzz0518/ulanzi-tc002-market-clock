@@ -210,9 +210,10 @@
   color: var(--muted-foreground);
 }
 .device-settings-titlebar { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 1rem; }
-.device-access-trigger { position: relative; width: 2.25rem; height: 2.25rem; flex: none; }
+.device-access-trigger { position: relative; width: auto; min-width: 0; height: 2.25rem; flex: none; gap: 0.35rem; padding-inline: 0.55rem 0.65rem; white-space: nowrap; }
 .device-access-trigger svg { width: 1rem; height: 1rem; }
-.device-access-trigger__status { position: absolute; top: 0.3rem; inset-inline-end: 0.28rem; width: 0.38rem; height: 0.38rem; border: 2px solid var(--background); border-radius: 999px; background: var(--primary); }
+.device-access-trigger__label { font-size: 0.68rem; font-weight: 600; }
+.device-access-trigger__status { width: 0.38rem; height: 0.38rem; flex: none; border-radius: 999px; background: var(--primary); }
 .device-access-popover { width: min(21rem, calc(100vw - 1.5rem)) !important; max-width: none !important; }
 .device-access-popover__content { display: grid; gap: 0.75rem; padding: 0.9rem !important; }
 .device-access-popover__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
@@ -672,7 +673,7 @@
     bottom: max(0.65rem, env(safe-area-inset-bottom));
     left: max(0.75rem, env(safe-area-inset-left));
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     min-height: 3.45rem;
     justify-self: stretch;
     justify-content: stretch;
@@ -834,7 +835,7 @@
     border-radius: 0 !important;
   }
   .device-settings-dialog__content { display: flex !important; height: 100%; flex-direction: column; padding-top: env(safe-area-inset-top) !important; }
-  .device-access-trigger { width: 2.75rem; height: 2.75rem; touch-action: manipulation; }
+  .device-access-trigger { width: auto; min-height: 2.75rem; height: 2.75rem; padding-inline: 0.7rem 0.75rem; touch-action: manipulation; }
   .device-access-popover__content > button, .device-access-popover__state button { min-height: 2.75rem; touch-action: manipulation; }
   .device-settings-form { min-height: 0; max-height: none; flex: 1; }
   .device-settings-section { display: block; }
@@ -896,7 +897,7 @@
   .brand-device, .is-canvas-page .page-heading { display: none; }
   .header-actions { grid-column: 2; grid-row: 1; }
   .device-settings-trigger { min-width: 2.75rem; min-height: 2.75rem; }
-  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
+  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
   .main-tabs button { min-height: 2.75rem; justify-content: center; touch-action: manipulation; }
   .studio-layout.is-canvas { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); }
   .is-canvas-page .channel-sidebar { padding: 0.55rem 0.65rem 0.8rem 0; }

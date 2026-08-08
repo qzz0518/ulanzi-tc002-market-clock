@@ -114,6 +114,73 @@ export interface ControlAccessInfo {
   sameSubnetAsClock: boolean;
 }
 
-export type StudioView = "console" | "canvas" | "library";
+export interface MusicProfile {
+  userId: number;
+  nickname: string;
+  avatarUrl?: string;
+}
+
+export interface MusicSessionStatus {
+  loggedIn: boolean;
+  profile?: MusicProfile;
+}
+
+export interface MusicPlaylist {
+  id: number;
+  name: string;
+  trackCount: number;
+  coverUrl?: string;
+}
+
+export interface MusicTrack {
+  id: number;
+  title: string;
+  artists: string[];
+  album: string;
+  durationMs: number;
+  coverUrl?: string;
+}
+
+export interface MusicLyricLine {
+  startMs: number;
+  endMs: number;
+  text: string;
+  translation?: string;
+}
+
+export interface MusicTrackDetail {
+  track: MusicTrack;
+  lyrics: MusicLyricLine[];
+}
+
+export interface MusicDeviceAppStatus {
+  artifact: {
+    state: "missing" | "invalid" | "ready";
+    appId: string;
+    version?: string;
+    entry?: string;
+    bundleId?: string;
+    fileCount?: number;
+    bytes?: number;
+    message: string;
+  };
+  adb: "missing" | "ready";
+  busy: boolean;
+  session: { active: boolean; version?: string; startedAt?: string };
+  restore: { title: string; steps: string[] };
+}
+
+export interface MusicDeviceProbe {
+  adb: "missing" | "ready";
+  connected: boolean;
+  model?: string;
+  platform?: string;
+  appVersion?: string;
+  mcuVersion?: string;
+  playerRunning?: boolean;
+  message: string;
+}
+
+export type StudioView = "console" | "canvas" | "library" | "music";
 export type PreviewScope = "item" | "channel";
 export type BusyAction = "preview" | "push" | null;

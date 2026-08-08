@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { CladdProvider } from "@cladd-ui/react";
 import { App } from "@/app";
 import "@/styles/globals.css";
+import "@/styles/music-player.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Pixel Market root element is missing");

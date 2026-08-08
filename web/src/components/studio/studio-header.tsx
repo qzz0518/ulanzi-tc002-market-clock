@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Circle, Images, LayoutGrid, Palette, Settings2 } from "lucide-react";
+import { Circle, Images, LayoutGrid, Music2, Palette, Settings2 } from "lucide-react";
 import { Button, Tab, Tabs, TabsList, Tooltip } from "@cladd-ui/react";
 import type { RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
@@ -36,6 +36,7 @@ export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps)
           <Tab value="console"><LayoutGrid />内容</Tab>
           <Tab value="canvas"><Palette />画板</Tab>
           <Tab value="library"><Images />素材库</Tab>
+          <Tab value="music"><Music2 />音乐</Tab>
         </TabsList>
       </Tabs>
 
