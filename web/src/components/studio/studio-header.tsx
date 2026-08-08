@@ -8,6 +8,8 @@ interface StudioHeaderProps {
   view: StudioView;
   onViewChange: (view: StudioView) => void;
   runtime: RuntimeState | null;
+  // 音乐固件直连中：其他视图与常规设置都走官方固件通道，此时全部禁用。
+  musicLocked?: boolean;
 }
 
 function runtimeLabel(runtime: RuntimeState | null): string {
@@ -18,9 +20,12 @@ function runtimeLabel(runtime: RuntimeState | null): string {
   return "设备离线";
 }
 
-export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps) {
+export function StudioHeader({ view, onViewChange, runtime, musicLocked = false }: StudioHeaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const tone = runtime?.healthy ? "is-good" : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
+  const tone = musicLocked
+    ? "is-good"
+    : runtime?.healthy ? "is-good" : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
+  const statusLabel = musicLocked ? "音乐固件直连" : runtimeLabel(runtime);
   return (
     <header className="studio-header">
       <div className="brand-lockup" aria-label="Pixel Market，Ulanzi TC002">
@@ -33,9 +38,9 @@ export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps)
 
       <Tabs value={view} onValueChange={(value) => onViewChange(value as StudioView)}>
         <TabsList aria-label="主视图" className="main-tabs">
-          <Tab value="console"><LayoutGrid />内容</Tab>
-          <Tab value="canvas"><Palette />画板</Tab>
-          <Tab value="library"><Images />素材库</Tab>
+          <Tab value="console" disabled={musicLocked}><LayoutGrid />内容</Tab>
+          <Tab value="canvas" disabled={musicLocked}><Palette />画板</Tab>
+          <Tab value="library" disabled={musicLocked}><Images />素材库</Tab>
           <Tab value="music"><Music2 />音乐</Tab>
         </TabsList>
       </Tabs>
@@ -43,9 +48,9 @@ export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps)
       <div className="header-actions">
         <div className={`device-status ${tone}`} role="status" aria-live="polite">
           <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
-          <span>{runtimeLabel(runtime)}</span>
+          <span>{statusLabel}</span>
         </div>
-        <Tooltip tooltip="常规设置">
+        <Tooltip tooltip={musicLocked ? "音乐固件运行中，恢复官方固件后可用" : "常规设置"}>
           <Button
             type="button"
             size="sm"
@@ -55,6 +60,7 @@ export function StudioHeader({ view, onViewChange, runtime }: StudioHeaderProps)
             outline={false}
             className="device-settings-trigger"
             aria-label="打开常规设置"
+            disabled={musicLocked}
             onClick={() => setSettingsOpen(true)}
           >
             <Settings2 />

@@ -147,6 +147,7 @@ export function App() {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [category, setCategory] = useState<ContentCategory>("market");
   const [view, setView] = useState<StudioView>("console");
+  const [musicFirmwareOnline, setMusicFirmwareOnline] = useState(false);
   const [mobileConsolePane, setMobileConsolePane] = useState<MobileConsolePane>("compose");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -693,7 +694,28 @@ export function App() {
     }
   };
 
+  // 音乐固件直连时，官方固件的推送/设置通道都不存在——刷新后也要自动回到音乐视图并锁定。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/music/device/state?viewer=web", { cache: "no-store" });
+        if (!response.ok || cancelled) return;
+        const match = /FWPOLL\t(-?\d+)/.exec(await response.text());
+        const age = match ? Number(match[1]) : -1;
+        if (age >= 0 && age < 8000) {
+          setMusicFirmwareOnline(true);
+          setView("music");
+        }
+      } catch {
+        // 服务不可达时保持默认视图。
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const changeView = (nextView: StudioView) => {
+    if (musicFirmwareOnline && nextView !== "music") return;
     if (nextView === "canvas" && workspace && selectedItem?.contentId !== "creative:canvas") {
       for (const channel of workspace.channels) {
         const item = channel.items.find((entry) => entry.contentId === "creative:canvas");
@@ -821,7 +843,7 @@ export function App() {
 
   return (
     <div className={pageClassName}>
-      <StudioHeader view={view} onViewChange={changeView} runtime={runtime} />
+      <StudioHeader view={view} onViewChange={changeView} runtime={runtime} musicLocked={musicFirmwareOnline} />
       <div className="page-heading">
         <div>
           <span>{pageCopy.kicker}</span>
@@ -958,7 +980,7 @@ export function App() {
             onStandalone={createStandalonePixelAsset}
           />
         ) : (
-          <MusicPlayer />
+          <MusicPlayer onFirmwareOnlineChange={setMusicFirmwareOnline} />
         )}
       </div>
     </div>

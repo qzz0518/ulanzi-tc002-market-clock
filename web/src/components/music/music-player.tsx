@@ -116,7 +116,9 @@ export function MusicAccountAvatar({ profile }: { profile: MusicProfile }) {
   );
 }
 
-export function MusicPlayer() {
+export function MusicPlayer({ onFirmwareOnlineChange }: {
+  onFirmwareOnlineChange?: (online: boolean) => void;
+} = {}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeekMsRef = useRef<number | null>(null);
   const [session, setSession] = useState<MusicSessionStatus | null>(null);
@@ -187,6 +189,12 @@ export function MusicPlayer() {
     }
   }, []);
 
+  // 固件直连状态上报给工作台：在线时锁定其他视图（官方固件的推送通道此时不存在）。
+  useEffect(() => {
+    onFirmwareOnlineChange?.(deviceOnline);
+  }, [deviceOnline, onFirmwareOnlineChange]);
+  useEffect(() => () => onFirmwareOnlineChange?.(false), [onFirmwareOnlineChange]);
+
   const loadDeviceApp = useCallback(async () => {
     try {
       const result = await jsonApi<{ deviceApp: MusicDeviceAppStatus }>("/api/music/device-app");
@@ -230,16 +238,21 @@ export function MusicPlayer() {
     };
     const poll = async () => {
       try {
-        const response = await fetch("/api/music/device/state", { cache: "no-store" });
+        const response = await fetch("/api/music/device/state?viewer=web", { cache: "no-store" });
         if (!response.ok || cancelled) return;
         const fields = parseState(await response.text());
 
         // Heartbeat — processed every poll (independent of seq). Detects that the
         // music firmware is live and anchors its playback clock for preview sync.
         const hbAge = Number(fields.HBAGE);
+        // The firmware polls /state every 2s from boot — long before the first
+        // heartbeat (which only starts once a track is selected) — so FWPOLL is
+        // what flips the page into remote mode right after a sideload.
+        const fwPollAge = Number(fields.FWPOLL);
+        const firmwareAlive = Number.isFinite(fwPollAge) && fwPollAge >= 0 && fwPollAge < 8000;
         // 10s window: the device pauses heartbeats while it blocks on a ~5-7s
         // track download, and we must not flip it to "offline" during that.
-        const online = Number.isFinite(hbAge) && hbAge >= 0 && hbAge < 10000;
+        const online = firmwareAlive || (Number.isFinite(hbAge) && hbAge >= 0 && hbAge < 10000);
         setDeviceOnline(online);
         deviceOnlineRef.current = online;
         if (online) {
@@ -685,6 +698,9 @@ export function MusicPlayer() {
         { method: "POST" },
       );
       setDeviceProbe(result.device);
+      // 探测让服务端核实了会话真实状态（断电重启后自动回落为未运行），
+      // 回读一次让按钮和步骤跟随设备现状。
+      await loadDeviceApp();
     } catch (error) {
       setDeviceError(errorMessage(error));
     } finally {
@@ -774,14 +790,16 @@ export function MusicPlayer() {
         ? "正在播放"
         : selected
           ? "已载入"
-          : "等待选歌";
+          : deviceOnline
+            ? "音乐固件就绪 · 选一首歌"
+            : "等待选歌";
   const deviceStatus = sessionActive
-    ? "调试会话运行中"
+    ? "音乐固件运行中"
     : deviceProbe?.connected
       ? "TC002 已连接"
       : deviceApp?.artifact.state === "ready"
-        ? "旁载包已就绪"
-        : "旁载调试";
+        ? "固件包已就绪"
+        : "侧载固件";
   const visibleLyrics = selected?.lyrics.length
     ? selected.lyrics.slice(Math.max(0, activeLyricIndex - 1), activeLyricIndex + 4)
     : [];
@@ -811,11 +829,15 @@ export function MusicPlayer() {
             variant="transparent"
             outline
             aria-haspopup="dialog"
-            aria-label={`设备与固件，${deviceStatus}`}
-            onClick={() => setDevicePanelOpen(true)}
+            aria-label={`侧载音乐固件，${deviceStatus}`}
+            onClick={() => {
+              setDevicePanelOpen(true);
+              // 打开面板即核实设备现状：断电重启后按钮要回到「侧载固件」。
+              void probeDevice();
+            }}
           >
             <HardDrive aria-hidden="true" />
-            <span>设备与固件</span>
+            <span>侧载音乐固件</span>
             <ChevronRight aria-hidden="true" />
           </Button>
         </header>
@@ -1277,20 +1299,20 @@ export function MusicPlayer() {
       >
         <section className="music-deploy" aria-labelledby="music-deploy-title">
           <div className="music-section-heading">
-            <span>SIDELOAD SESSION</span>
-            <h2 id="music-deploy-title">旁载调试会话</h2>
-            <p>播放器只推送到 TC002 的内存盘临时运行，不写入设备存储；官方固件保持原样，断电重启即自动恢复。</p>
+            <span>SIDELOAD FIRMWARE</span>
+            <h2 id="music-deploy-title">侧载音乐固件</h2>
+            <p>把音乐固件推进时钟内存临时运行，绝不写入存储芯片；官方固件原封不动，断电重启即自动恢复。</p>
           </div>
 
           <ol className="music-deploy-steps">
             <li className={deviceApp?.artifact.state === "ready" ? "is-done" : "is-current"}>
-              <span>1</span><div><strong>校验旁载包</strong><small>{deviceApp?.artifact.message ?? "正在读取发布清单…"}</small></div>
+              <span>1</span><div><strong>校验固件包</strong><small>{deviceApp?.artifact.message ?? "正在读取发布清单…"}</small></div>
             </li>
             <li className={deviceProbe?.connected ? "is-done" : deviceApp?.artifact.state === "ready" ? "is-current" : undefined}>
               <span>2</span><div><strong>检测 TC002</strong><small>{deviceProbe?.message ?? (deviceApp?.adb === "missing" ? "后台服务尚未识别 adb；请重新运行安装脚本" : "通过 HTTP 与 Wi-Fi ADB 双重确认")}</small></div>
             </li>
             <li className={sessionActive ? "is-done" : canStartSession ? "is-current" : undefined}>
-              <span>3</span><div><strong>开始调试会话</strong><small>{sessionMessage ?? (sessionActive ? "会话运行中；结束会话或断电重启即可回到官方固件" : "旁载包校验通过后解锁；不会写入官方固件")}</small></div>
+              <span>3</span><div><strong>侧载固件</strong><small>{sessionMessage ?? (sessionActive ? "音乐固件运行中；点「恢复官方固件」或断电重启即可回到原样" : "固件包校验通过后解锁；由时钟系统框架从内存加载，不写入官方固件")}</small></div>
             </li>
           </ol>
 
@@ -1313,15 +1335,15 @@ export function MusicPlayer() {
               checked={recoveryAcknowledged}
               onChange={setRecoveryAcknowledged}
             />
-            <span><strong>我知道如何回到官方固件</strong>结束会话即恢复官方界面；断电重启同样自动恢复。仍异常时断电后按住 USB-C 旁的复位按钮再上电。</span>
+            <span><strong>我知道如何回到官方固件</strong>点「恢复官方固件」立即回到官方界面；断电重启同样自动恢复。仍异常时断电后按住 USB-C 旁的复位按钮再上电。</span>
           </label>
 
           <div className="music-deploy-actions">
             <Button type="button" variant="transparent" outline loading={deviceBusy} disabled={deviceBusy} onClick={() => void probeDevice()}><Wifi />检测 TC002</Button>
             {sessionActive ? (
-              <Button type="button" color="brand" loading={deviceBusy} disabled={deviceBusy} onClick={() => void stopDeviceSession()}><Power />结束会话</Button>
+              <Button type="button" color="brand" loading={deviceBusy} disabled={deviceBusy} onClick={() => void stopDeviceSession()}><Power />恢复官方固件</Button>
             ) : (
-              <Button type="button" color="brand" loading={deviceBusy} disabled={!canStartSession || !recoveryAcknowledged || deviceBusy} onClick={() => void startDeviceSession()}><Play />开始会话</Button>
+              <Button type="button" color="brand" loading={deviceBusy} disabled={!canStartSession || !recoveryAcknowledged || deviceBusy} onClick={() => void startDeviceSession()}><Play />侧载固件</Button>
             )}
           </div>
           {deviceError && <p className="music-inline-error" role="alert">{deviceError}</p>}
@@ -1332,9 +1354,10 @@ export function MusicPlayer() {
             <h3>{deviceApp?.restore?.title ?? "回到 Ulanzi 官方固件"}</h3>
             <ol>
               {(deviceApp?.restore?.steps ?? [
-                "点击「结束会话」，官方界面会立即恢复",
-                "或直接断电重启 TC002，自动回到官方固件",
-                "仍异常时断电后按住 USB-C 旁的复位按钮再上电",
+                "点「恢复官方固件」，官方界面立即恢复",
+                "或直接断电重启 TC002——固件只在内存里，重启后自动回到官方固件",
+                "如界面仍异常，断电后按住 USB-C 旁的复位按钮再上电（官方恢复方式）",
+                "恢复后重新检查 Wi-Fi、亮度、时区和音量设置",
               ]).map((step) => <li key={step}>{step}</li>)}
             </ol>
           </div>

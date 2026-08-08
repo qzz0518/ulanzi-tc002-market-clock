@@ -163,12 +163,14 @@ function applyControlPatch(input: unknown): void {
 // music firmware is running, and playheadMs to align its preview to the device.
 interface DeviceLiveStatus {
   heartbeatAt: number; // Date.now() of the last heartbeat, 0 if never
+  firmwarePollAt: number; // Date.now() of the last firmware /state poll, 0 if never
   trackId: number | null;
   playheadMs: number;
   playing: boolean;
 }
 const sDeviceLive: DeviceLiveStatus = {
   heartbeatAt: 0,
+  firmwarePollAt: 0,
   trackId: null,
   playheadMs: 0,
   playing: false,
@@ -735,9 +737,13 @@ export function createControlHandler(
 
       if (request.method === "GET" && url.pathname === "/api/music/device/state") {
         // Full control state as plain text so the TC002 parses it without a JSON
-        // lib — one "KEY\tVALUE" line each. Both device and web UI poll this.
+        // lib — one "KEY\tVALUE" line each. Both device and web UI poll this;
+        // the web tags itself with ?viewer=web so a bare poll marks the firmware
+        // as alive (it polls from boot, long before the first heartbeat).
+        if (url.searchParams.get("viewer") !== "web") sDeviceLive.firmwarePollAt = Date.now();
         const s = sDeviceState;
         const hbAge = sDeviceLive.heartbeatAt > 0 ? Date.now() - sDeviceLive.heartbeatAt : -1;
+        const fwPollAge = sDeviceLive.firmwarePollAt > 0 ? Date.now() - sDeviceLive.firmwarePollAt : -1;
         const body =
           `SEQ\t${s.seq}\n` +
           `TID\t${s.trackId === null ? "-" : s.trackId}\n` +
@@ -748,6 +754,7 @@ export function createControlHandler(
           `SEEK\t${s.seekMs}\n` +
           // Device-reported live status (web reads these; the device ignores them).
           `HBAGE\t${hbAge}\n` +
+          `FWPOLL\t${fwPollAge}\n` +
           `DTRACK\t${sDeviceLive.trackId === null ? "-" : sDeviceLive.trackId}\n` +
           `DPLAY\t${Math.round(sDeviceLive.playheadMs)}\n` +
           `DPLAYING\t${sDeviceLive.playing ? 1 : 0}\n`;

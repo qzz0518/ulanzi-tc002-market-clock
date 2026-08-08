@@ -51,7 +51,7 @@ describe("music player UI", () => {
     expect(html).toContain("cladd-chip");
     expect(html).toContain("搜索歌曲、歌手或专辑");
     expect(html).toContain('aria-haspopup="dialog"');
-    expect(html).toContain("设备与固件");
+    expect(html).toContain("侧载音乐固件");
     expect(html).toContain("设备同屏");
     expect(html).toContain("还没有选择歌曲");
     expect(html).toContain("歌词会在这里跟随播放");
@@ -70,9 +70,11 @@ describe("music player UI", () => {
     expect(source).toContain('className="music-firmware-dialog"');
     expect(source).toContain("我知道如何回到官方固件");
     expect(source).toContain("按住 USB-C 旁的复位按钮");
-    expect(source).toContain("旁载调试会话");
-    expect(source).toContain("开始会话");
-    expect(source).toContain("结束会话");
+    expect(source).toContain("侧载音乐固件");
+    expect(source).toContain("侧载固件");
+    expect(source).toContain("恢复官方固件");
+    expect(source).toContain("/api/music/device/state?viewer=web");
+    expect(source).toContain("FWPOLL");
     expect(source).toContain("START_TC002_MUSIC_SESSION");
     expect(source).not.toContain("刷入");
     expect(source).not.toContain("update.img");
