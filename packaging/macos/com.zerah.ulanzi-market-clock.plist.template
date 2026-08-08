@@ -32,6 +32,8 @@
     <string>@@DISPLAY_DURATION_SECONDS_XML@@</string>
     <key>HEALTH_PORT</key>
     <string>@@HEALTH_PORT_XML@@</string>
+    <key>ADB_BIN</key>
+    <string>@@ADB_BIN_XML@@</string>
   </dict>
 
   <key>RunAtLoad</key>

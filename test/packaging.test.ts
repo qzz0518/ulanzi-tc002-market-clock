@@ -45,8 +45,11 @@ describe("service packaging", () => {
     expect(installer).toContain('clock_host="${CLOCK_HOST:-}"');
     expect(installer).toContain('control_host="${CONTROL_HOST:-0.0.0.0}"');
     expect(installer).toContain("--control-host");
+    expect(installer).toContain("--adb-bin");
+    expect(installer).toContain("command -v adb");
     expect(installer).not.toContain("CLOCK_HOST:-192.168");
     expect(macos).toContain("@@CONTROL_HOST_XML@@");
+    expect(macos).toContain("@@ADB_BIN_XML@@");
     expect(installer).toContain('readonly REQUIRED_BUN_VERSION="1.3.14"');
     expect(installer).toContain("mise which bun");
     expect(installer).toContain('version="$("$candidate" --version');

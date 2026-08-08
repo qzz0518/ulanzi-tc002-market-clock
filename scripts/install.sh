@@ -13,6 +13,7 @@ request_timeout_ms="${REQUEST_TIMEOUT_MS:-5000}"
 source_stale_ms="${SOURCE_STALE_MS:-120000}"
 display_duration_seconds="${DISPLAY_DURATION_SECONDS:-90}"
 health_port="${HEALTH_PORT:-43820}"
+adb_bin="${ADB_BIN:-}"
 
 usage() {
   cat <<'USAGE'
@@ -27,14 +28,15 @@ Options:
   --control-host HOST         Control listener: 0.0.0.0 for phone access (default)
   --app-name NAME             TC002 Custom App name (default: btc)
   --health-port PORT          Local control-panel port (default: 43820)
+  --adb-bin PATH              Absolute adb executable path (auto-detected when omitted)
   --request-timeout-ms MS     Device and market request timeout
   --source-stale-ms MS        Maximum age of cached market data
   --display-duration SEC      Minimum TC002 Custom App duration
   -h, --help                  Show this help
 
 The same values can be supplied with CLOCK_HOST, CLOCK_HTTP_PROXY,
-CONTROL_HOST, APP_NAME, HEALTH_PORT, REQUEST_TIMEOUT_MS, SOURCE_STALE_MS, and
-DISPLAY_DURATION_SECONDS.
+CONTROL_HOST, APP_NAME, HEALTH_PORT, REQUEST_TIMEOUT_MS, SOURCE_STALE_MS,
+DISPLAY_DURATION_SECONDS, and ADB_BIN.
 
 For Docker deployment, use scripts/install-docker.sh instead.
 USAGE
@@ -76,6 +78,11 @@ while (($# > 0)); do
     --health-port)
       require_value "$1" "${2-}"
       health_port="$2"
+      shift 2
+      ;;
+    --adb-bin)
+      require_value "$1" "${2-}"
+      adb_bin="$2"
       shift 2
       ;;
     --request-timeout-ms)
@@ -130,6 +137,17 @@ validate_clock_host "$clock_host"
 [[ "$control_host" == "127.0.0.1" || "$control_host" == "0.0.0.0" ]] || \
   die "CONTROL_HOST must be 127.0.0.1 or 0.0.0.0"
 
+resolve_adb_bin() {
+  if [[ -z "$adb_bin" ]] && command -v adb >/dev/null 2>&1; then
+    adb_bin="$(command -v adb)"
+  fi
+  [[ -z "$adb_bin" ]] && return
+  [[ "$adb_bin" == /* ]] || die "ADB_BIN must be an absolute path"
+  [[ -x "$adb_bin" ]] || die "ADB_BIN is not executable: $adb_bin"
+}
+
+resolve_adb_bin
+
 assert_single_line() {
   local name="$1"
   local value="$2"
@@ -144,7 +162,8 @@ for setting in \
   "REQUEST_TIMEOUT_MS:$request_timeout_ms" \
   "SOURCE_STALE_MS:$source_stale_ms" \
   "DISPLAY_DURATION_SECONDS:$display_duration_seconds" \
-  "HEALTH_PORT:$health_port"; do
+  "HEALTH_PORT:$health_port" \
+  "ADB_BIN:$adb_bin"; do
   assert_single_line "${setting%%:*}" "${setting#*:}"
 done
 
@@ -253,6 +272,7 @@ write_environment_file() {
     printf 'SOURCE_STALE_MS=%q\n' "$source_stale_ms"
     printf 'DISPLAY_DURATION_SECONDS=%q\n' "$display_duration_seconds"
     printf 'HEALTH_PORT=%q\n' "$health_port"
+    printf 'ADB_BIN=%q\n' "$adb_bin"
   } > "$temporary"
   chmod 600 "$temporary"
   mv -f "$temporary" "$target"
@@ -273,6 +293,7 @@ render_macos_service() {
     '@@SOURCE_STALE_MS_XML@@' "$(xml_escape "$source_stale_ms")" \
     '@@DISPLAY_DURATION_SECONDS_XML@@' "$(xml_escape "$display_duration_seconds")" \
     '@@HEALTH_PORT_XML@@' "$(xml_escape "$health_port")" \
+    '@@ADB_BIN_XML@@' "$(xml_escape "$adb_bin")" \
     '@@STDOUT_XML@@' "$(xml_escape "$project_dir/.runtime/service.log")" \
     '@@STDERR_XML@@' "$(xml_escape "$project_dir/.runtime/service.error.log")"
 }
@@ -344,3 +365,8 @@ else
   printf 'Phone access is disabled because CONTROL_HOST is restricted to loopback.\n'
 fi
 printf 'Settings and generated service configuration remain in .runtime/.\n'
+if [[ -n "$adb_bin" ]]; then
+  printf 'ADB executable configured for the background service: %s\n' "$adb_bin"
+else
+  printf 'ADB was not found during installation; firmware detection will remain unavailable.\n'
+fi

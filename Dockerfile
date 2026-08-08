@@ -16,6 +16,9 @@ FROM oven/bun:${BUN_VERSION}-alpine AS runtime
 RUN apk add --no-cache curl
 
 WORKDIR /app
+COPY --from=build /app/package.json /app/bun.lock ./
+RUN bun install --frozen-lockfile --production
+
 ENV NODE_ENV=production \
     CONTROL_HOST=0.0.0.0 \
     HOME=/tmp

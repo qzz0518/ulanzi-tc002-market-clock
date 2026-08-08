@@ -13,6 +13,10 @@ run = "bun test"
 description = "Type-check the TypeScript sources"
 run = "bun run typecheck"
 
+[tasks.music-release]
+description = "Validate and stage a FlyThings TC002 lyrics-player sideload bundle"
+run = "bun run music-release"
+
 [tasks.install-macos]
 description = "Build and install the native macOS background service"
 run = "bash scripts/install.sh"
