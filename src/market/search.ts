@@ -103,6 +103,18 @@ const METALS: readonly { code: string; name: string; aliases: string[]; decimals
   { code: "XPD", name: "Palladium", aliases: ["palladium", "钯金"], decimals: 2 },
 ];
 
+const YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search";
+
+// Yahoo 搜索结果不带上市币种；只放行报价币种确定无歧义的交易所，
+// 未收录的交易所（如以便士报价的伦敦 LSE、OTC 粉单）不产生候选。
+const STOCK_EXCHANGE_CURRENCIES: ReadonlyMap<string, string> = new Map([
+  ["NMS", "USD"], ["NGM", "USD"], ["NCM", "USD"], ["NAS", "USD"],
+  ["NYQ", "USD"], ["ASE", "USD"], ["PCX", "USD"], ["BTS", "USD"],
+  ["HKG", "HKD"], ["SHH", "CNY"], ["SHZ", "CNY"], ["JPX", "JPY"],
+  ["GER", "EUR"], ["FRA", "EUR"], ["PAR", "EUR"], ["AMS", "EUR"], ["MIL", "EUR"],
+  ["TOR", "CAD"], ["SES", "SGD"], ["ASX", "AUD"],
+]);
+
 export class MarketSearchService {
   private readonly fetcher: FetchLike;
   private readonly timeoutMs: number;
@@ -341,30 +353,74 @@ export class MarketSearchService {
     }, "Gold API"));
   }
 
+  private async searchStocks(query: string): Promise<MarketSearchCandidate[]> {
+    const url = `${YAHOO_SEARCH_URL}?q=${encodeURIComponent(query)}&quotesCount=20&newsCount=0&listsCount=0`;
+    const body = asRecord(await fetchJson(url, this.fetcher, this.timeoutMs));
+    const quoteRows = body?.quotes;
+    const quotes = Array.isArray(quoteRows) ? quoteRows : [];
+    const results: MarketSearchCandidate[] = [];
+    for (const value of quotes) {
+      if (results.length >= 12) break;
+      const input = asRecord(value);
+      if (!input || input.isYahooFinance !== true) continue;
+      if (input.quoteType !== "EQUITY" && input.quoteType !== "ETF") continue;
+      const symbol = code(input.symbol);
+      const exchange = code(input.exchange);
+      const quoteCode = exchange === undefined ? undefined : STOCK_EXCHANGE_CURRENCIES.get(exchange);
+      if (!symbol || !exchange || !quoteCode) continue;
+      const longName = typeof input.longname === "string" && input.longname.trim() ? input.longname.trim() : undefined;
+      const shortName = typeof input.shortname === "string" && input.shortname.trim() ? input.shortname.trim() : undefined;
+      const exchangeLabel = (typeof input.exchDisp === "string" && input.exchDisp.trim()
+        ? input.exchDisp.trim()
+        : exchange).slice(0, 40);
+      results.push(this.remember({
+        canonicalKey: canonicalInstrumentKey({ kind: "stock", exchange, symbol }),
+        kind: "stock",
+        displayName: (longName ?? shortName ?? symbol).slice(0, 120),
+        displaySymbol: symbol,
+        baseCode: symbol,
+        quoteCode,
+        decimals: 2,
+        changePeriod: "1D",
+        routes: [{ provider: "yahoo", symbol }],
+        sourceNote: `Yahoo Finance 公开行情（${exchangeLabel}），价格可能延迟，仅供展示。`,
+      }, `Yahoo Finance · ${exchangeLabel}`));
+    }
+    return results;
+  }
+
   async search(
     rawQuery: string,
     kind?: MarketInstrumentKind,
   ): Promise<MarketSearchResponse> {
     const query = rawQuery.trim();
     if (query.length < 1 || query.length > 48) throw new Error("search query must contain 1-48 characters");
-    if (kind === "stock") {
-      return {
-        query,
-        kind,
-        results: [],
-        notice: "任意股票搜索需要用户自带合规行情 Key（BYOK）；当前内置股票仍可继续使用。",
-      };
-    }
     const tasks: Promise<MarketSearchCandidate[]>[] = [];
     if (!kind || kind === "crypto") tasks.push(this.searchCrypto(query));
     if (!kind || kind === "fx") tasks.push(this.searchFx(query));
     if (!kind || kind === "metal") tasks.push(Promise.resolve(this.searchMetals(query)));
+    if (!kind || kind === "stock") tasks.push(this.searchStocks(query));
     const settled = await Promise.allSettled(tasks);
     const results = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+    const deduped = [...new Map(results.map((result) => [result.canonicalKey, result])).values()];
+    // 各类别轮转交织后再截断，避免排在前面的类别占满名额把后面的类别整体挤出。
+    const byKind = new Map<MarketInstrumentKind, MarketSearchCandidate[]>();
+    for (const candidate of deduped) {
+      const list = byKind.get(candidate.kind);
+      if (list) list.push(candidate);
+      else byKind.set(candidate.kind, [candidate]);
+    }
+    const queues = [...byKind.values()];
+    const interleaved: MarketSearchCandidate[] = [];
+    for (let round = 0; interleaved.length < deduped.length && round < deduped.length; round += 1) {
+      for (const queue of queues) {
+        if (round < queue.length) interleaved.push(queue[round]!);
+      }
+    }
     return {
       query,
       ...(kind ? { kind } : {}),
-      results: [...new Map(results.map((result) => [result.canonicalKey, result])).values()].slice(0, 24),
+      results: interleaved.slice(0, 24),
       ...(results.length === 0 && settled.some((result) => result.status === "rejected")
         ? { notice: "部分公共目录暂时不可用，请稍后重试。" }
         : {}),

@@ -151,7 +151,7 @@ export function ContentMarket({
           <section className="instrument-search" aria-labelledby="instrument-search-title">
             <div className="instrument-search__copy">
               <h3 id="instrument-search-title">搜索更多资产</h3>
-              <p>零 Key 支持 Coinbase 数字货币、Frankfurter 汇率和金属；任意股票搜索需要 BYOK。</p>
+              <p>零 Key 支持 Coinbase 数字货币、Frankfurter 汇率、金属与 Yahoo Finance 股票/ETF。</p>
             </div>
             <form className="instrument-search__form" onSubmit={(event) => void searchMarkets(event)}>
               <Input
@@ -163,7 +163,7 @@ export function ContentMarket({
                 icon={<Search aria-hidden="true" />}
                 value={query}
                 maxLength={48}
-                placeholder="BTC、EUR/USD、Silver…"
+                placeholder="BTC、TSLA、EUR/USD、Silver…"
                 inputMode="search"
                 inputComponentProps={{
                   "aria-label": "资产名称或代码",

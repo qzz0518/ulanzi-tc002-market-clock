@@ -5,6 +5,9 @@ import type { MarketInstrument, RuntimePriceProvider } from "./instruments.ts";
 const COINBASE_BASE_URL = "https://api.exchange.coinbase.com/products";
 const FRANKFURTER_BASE_URL = "https://api.frankfurter.dev/v2/rates";
 const GOLD_BASE_URL = "https://api.gold-api.com/price";
+const YAHOO_CHART_BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
+// Yahoo 无鉴权接口按内置股票同款 60s 节流；频道刷新可以更快，但同一 symbol 一分钟内只打一次。
+const YAHOO_MIN_REFRESH_MS = 60_000;
 const COINBASE_MAX_TRADE_AGE_MS = 5 * 60_000;
 const GOLD_MAX_AGE_MS = 60 * 60_000;
 
@@ -53,6 +56,7 @@ export class DynamicMarketDataClient {
   private readonly fetcher: FetchLike;
   private readonly timeoutMs: number;
   private readonly now: () => number;
+  private readonly yahooCache = new Map<string, { at: number; data: Omit<RuntimeMarketData, "instrumentRef"> }>();
 
   constructor(options: DynamicMarketDataClientOptions = {}) {
     this.fetcher = options.fetcher ?? fetch;
@@ -154,6 +158,44 @@ export class DynamicMarketDataClient {
     };
   }
 
+  private async yahoo(instrument: MarketInstrument, symbol: string, nowMs: number): Promise<RuntimeMarketData> {
+    const cached = this.yahooCache.get(symbol);
+    if (cached && nowMs - cached.at < YAHOO_MIN_REFRESH_MS && nowMs >= cached.at) {
+      return { ...cached.data, instrumentRef: instrument.ref };
+    }
+    const body = asRecord(await this.json("yahoo", `${YAHOO_CHART_BASE_URL}/${encodeURIComponent(symbol)}`));
+    const chart = body ? asRecord(body.chart) : undefined;
+    const resultList = chart?.result;
+    const result = Array.isArray(resultList) ? asRecord(resultList[0]) : undefined;
+    const meta = result ? asRecord(result.meta) : undefined;
+    if (!meta) throw new Error("yahoo returned no quote metadata");
+    const currency = typeof meta.currency === "string" ? meta.currency.trim() : "";
+    if (currency && currency.toUpperCase() !== instrument.quoteCode) {
+      throw new Error(`yahoo listing trades in ${currency}, not ${instrument.quoteCode}`);
+    }
+    const { price, rawPrice } = positivePrice("yahoo", meta.regularMarketPrice);
+    let changePercent: number | undefined;
+    try {
+      changePercent = change(price, positivePrice("yahoo", meta.chartPreviousClose ?? meta.previousClose).price);
+    } catch {
+      // A valid live price stays useful when the previous close is missing (halts, fresh listings).
+    }
+    const sourceTimeSeconds = Number(meta.regularMarketTime);
+    const sourceTime = Number.isFinite(sourceTimeSeconds) && sourceTimeSeconds > 0
+      ? new Date(sourceTimeSeconds * 1_000).toISOString()
+      : undefined;
+    const data: Omit<RuntimeMarketData, "instrumentRef"> = {
+      provider: "yahoo",
+      price,
+      rawPrice,
+      fetchedAt: new Date(nowMs).toISOString(),
+      ...(sourceTime ? { sourceTime } : {}),
+      ...(changePercent === undefined ? {} : { changePercent, changePeriod: "1D" as const }),
+    };
+    this.yahooCache.set(symbol, { at: nowMs, data });
+    return { ...data, instrumentRef: instrument.ref };
+  }
+
   async getInstrument(instrument: MarketInstrument): Promise<RuntimeMarketData> {
     const nowMs = this.now();
     const errors: string[] = [];
@@ -162,7 +204,7 @@ export class DynamicMarketDataClient {
         if (route.provider === "coinbase") return await this.coinbase(instrument, route.symbol, nowMs);
         if (route.provider === "frankfurter") return await this.frankfurter(instrument, route.symbol, nowMs);
         if (route.provider === "gold-api") return await this.gold(instrument, route.symbol, nowMs);
-        errors.push("dynamic Yahoo routes require a configured BYOK adapter");
+        return await this.yahoo(instrument, route.symbol, nowMs);
       } catch (error) {
         errors.push(error instanceof Error ? error.message : `${route.provider} failed`);
       }

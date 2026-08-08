@@ -124,13 +124,116 @@ describe("zero-key market discovery", () => {
     expect(requests.filter((url) => url.endsWith("/currencies"))).toHaveLength(1);
   });
 
-  test("does not silently invent unrestricted stock search", async () => {
-    const search = new MarketSearchService({
-      fetcher: async () => json([]),
+  test("searches Yahoo stocks with mapped listing currencies and registers a fallback-icon instrument", async () => {
+    const fetcher = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (!url.startsWith("https://query1.finance.yahoo.com/v1/finance/search?")) {
+        throw new Error(`unexpected URL: ${url}`);
+      }
+      return json({
+        quotes: [
+          {
+            symbol: "TSLA",
+            exchange: "NMS",
+            exchDisp: "NASDAQ",
+            quoteType: "EQUITY",
+            isYahooFinance: true,
+            longname: "Tesla, Inc.",
+            shortname: "Tesla",
+          },
+          {
+            symbol: "0700.HK",
+            exchange: "HKG",
+            exchDisp: "Hong Kong",
+            quoteType: "EQUITY",
+            isYahooFinance: true,
+            longname: "Tencent Holdings Limited",
+          },
+          {
+            symbol: "TSLI.L",
+            exchange: "LSE",
+            exchDisp: "London",
+            quoteType: "ETF",
+            isYahooFinance: true,
+            longname: "Pence-priced London listing",
+          },
+          {
+            symbol: "TSLAX",
+            exchange: "PNK",
+            exchDisp: "OTC Markets",
+            quoteType: "EQUITY",
+            isYahooFinance: true,
+            longname: "OTC listing",
+          },
+          { symbol: "GC=F", exchange: "CMX", exchDisp: "COMEX", quoteType: "FUTURE", isYahooFinance: true },
+          { symbol: "TSLA-USD", exchange: "CCC", exchDisp: "CCC", quoteType: "CRYPTOCURRENCY", isYahooFinance: true },
+          { symbol: "FAKE", exchange: "NMS", exchDisp: "NASDAQ", quoteType: "EQUITY", isYahooFinance: false },
+        ],
+      });
+    };
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-market-stocks-"));
+    directories.push(directory);
+    const instruments = new InstrumentStore(join(directory, "instruments"), { now: () => 0 });
+    const icons = new MarketIconStore(join(directory, "icons"), { now: () => 0 });
+    await Promise.all([instruments.load(), icons.load()]);
+    const catalog = new MarketCatalogService({
+      instruments,
+      icons,
+      search: new MarketSearchService({ fetcher, now: () => 0 }),
     });
-    const result = await search.search("TSLA", "stock");
-    expect(result.results).toEqual([]);
-    expect(result.notice).toContain("BYOK");
+
+    const result = await catalog.search("tsla", "stock");
+    expect(result.results.map((candidate) => candidate.canonicalKey))
+      .toEqual(["stock:NMS:TSLA", "stock:HKG:0700.HK"]);
+    expect(result.results[0]).toMatchObject({
+      pair: "TSLA/USD",
+      displayName: "Tesla, Inc.",
+      sourceLabel: "Yahoo Finance · NASDAQ",
+    });
+    expect(result.results[1]).toMatchObject({ baseCode: "0700.HK", quoteCode: "HKD" });
+    expect(result.notice).toBeUndefined();
+
+    const registered = await catalog.register(result.results[0]!.candidateRef);
+    expect(registered.kind).toBe("stock");
+    expect(registered.canonicalKey).toBe("stock:NMS:TSLA");
+    expect(registered.routes).toEqual([{ provider: "yahoo", symbol: "TSLA" }]);
+    expect(registered.changePeriod).toBe("1D");
+    expect(icons.get(registered.iconRef)?.mode).toBe("fallback");
+    expect((await catalog.register(result.results[0]!.candidateRef)).ref).toBe(registered.ref);
+  });
+
+  test("keeps stocks visible when earlier asset kinds fill the mixed-search cap", async () => {
+    const fetcher = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("/products")) {
+        return json(Array.from({ length: 26 }, (_, index) => ({
+          id: `T${index}A-USD`,
+          base_currency: `T${index}A`,
+          quote_currency: "USD",
+          display_name: `T${index}A/USD`,
+          status: "online",
+          quote_increment: "0.01",
+        })));
+      }
+      if (url.endsWith("/currencies")) return json([]);
+      if (url.startsWith("https://query1.finance.yahoo.com/v1/finance/search?")) {
+        return json({
+          quotes: [{
+            symbol: "T",
+            exchange: "NYQ",
+            exchDisp: "NYSE",
+            quoteType: "EQUITY",
+            isYahooFinance: true,
+            longname: "AT&T Inc.",
+          }],
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    };
+    const search = new MarketSearchService({ fetcher, now: () => 0 });
+    const mixed = await search.search("t");
+    expect(mixed.results.length).toBeLessThanOrEqual(24);
+    expect(mixed.results.map((candidate) => candidate.canonicalKey)).toContain("stock:NYQ:T");
   });
 
   test("refreshes legacy wide catalog icons to the compact automatic variant", async () => {
@@ -254,5 +357,119 @@ describe("runtime quotes", () => {
     expect(market.price).toBe(101.25);
     expect(market.changePercent).toBeCloseTo(1.25);
     expect(market.changePeriod).toBe("24H");
+  });
+
+  test("reads a delayed Yahoo stock quote through the dynamic yahoo route", async () => {
+    const now = Date.parse("2026-08-07T00:00:00Z");
+    const client = new DynamicMarketDataClient({
+      now: () => now,
+      fetcher: async (input) => {
+        const url = String(input);
+        if (!url.startsWith("https://query1.finance.yahoo.com/v8/finance/chart/0700.HK")) {
+          throw new Error(`unexpected URL: ${url}`);
+        }
+        return json({
+          chart: {
+            result: [{
+              meta: {
+                currency: "HKD",
+                symbol: "0700.HK",
+                regularMarketPrice: 478.8,
+                chartPreviousClose: 479.2,
+                regularMarketTime: 1_786_090_091,
+              },
+            }],
+          },
+        });
+      },
+    });
+    const market = await client.getInstrument({
+      version: 1,
+      ref: "ins_bbbbbbbbbbbbbbbbbbbbbbbb",
+      iconRef: `ico_${"2".repeat(32)}`,
+      canonicalKey: "stock:HKG:0700.HK",
+      kind: "stock",
+      displayName: "Tencent Holdings Limited",
+      displaySymbol: "0700.HK",
+      baseCode: "0700.HK",
+      quoteCode: "HKD",
+      decimals: 2,
+      changePeriod: "1D",
+      routes: [{ provider: "yahoo", symbol: "0700.HK" }],
+      sourceNote: "Yahoo Finance 公开行情（Hong Kong），价格可能延迟，仅供展示。",
+      createdAt: "2026-08-07T00:00:00Z",
+      updatedAt: "2026-08-07T00:00:00Z",
+    });
+    expect(market.provider).toBe("yahoo");
+    expect(market.price).toBe(478.8);
+    expect(market.changePercent).toBeCloseTo(((478.8 - 479.2) / 479.2) * 100);
+    expect(market.changePeriod).toBe("1D");
+    expect(market.sourceTime).toBe(new Date(1_786_090_091 * 1_000).toISOString());
+  });
+
+  const stockInstrument = {
+    version: 1,
+    ref: "ins_cccccccccccccccccccccccc",
+    iconRef: `ico_${"3".repeat(32)}`,
+    canonicalKey: "stock:NMS:TSLA",
+    kind: "stock",
+    displayName: "Tesla, Inc.",
+    displaySymbol: "TSLA",
+    baseCode: "TSLA",
+    quoteCode: "USD",
+    decimals: 2,
+    changePeriod: "1D",
+    routes: [{ provider: "yahoo", symbol: "TSLA" }],
+    sourceNote: "Yahoo Finance 公开行情（NASDAQ），价格可能延迟，仅供展示。",
+    createdAt: "2026-08-07T00:00:00Z",
+    updatedAt: "2026-08-07T00:00:00Z",
+  } as const;
+
+  test("throttles Yahoo chart requests to one per symbol per minute", async () => {
+    let nowMs = Date.parse("2026-08-07T00:00:00Z");
+    let fetches = 0;
+    const client = new DynamicMarketDataClient({
+      now: () => nowMs,
+      fetcher: async () => {
+        fetches += 1;
+        return json({ chart: { result: [{ meta: { currency: "USD", regularMarketPrice: 200, chartPreviousClose: 190 } }] } });
+      },
+    });
+    await client.getInstrument({ ...stockInstrument, routes: [...stockInstrument.routes] });
+    nowMs += 30_000;
+    const cachedRead = await client.getInstrument({ ...stockInstrument, routes: [...stockInstrument.routes] });
+    expect(fetches).toBe(1);
+    expect(cachedRead.price).toBe(200);
+    nowMs += 65_000;
+    await client.getInstrument({ ...stockInstrument, routes: [...stockInstrument.routes] });
+    expect(fetches).toBe(2);
+  });
+
+  test("rejects a Yahoo quote whose listing currency contradicts the instrument", async () => {
+    const client = new DynamicMarketDataClient({
+      now: () => Date.parse("2026-08-07T00:00:00Z"),
+      fetcher: async () =>
+        json({ chart: { result: [{ meta: { currency: "USD", regularMarketPrice: 0.691, chartPreviousClose: 0.7 } }] } }),
+    });
+    await expect(client.getInstrument({
+      ...stockInstrument,
+      canonicalKey: "stock:SHH:900901.SS",
+      displaySymbol: "900901.SS",
+      baseCode: "900901.SS",
+      quoteCode: "CNY",
+      routes: [{ provider: "yahoo", symbol: "900901.SS" }],
+    })).rejects.toThrow(/trades in USD, not CNY/);
+  });
+
+  test("keeps a valid live Yahoo price when the previous close is missing", async () => {
+    const client = new DynamicMarketDataClient({
+      now: () => Date.parse("2026-08-07T00:00:00Z"),
+      fetcher: async () =>
+        json({ chart: { result: [{ meta: { currency: "USD", regularMarketPrice: 478.8 } }] } }),
+    });
+    const market = await client.getInstrument({ ...stockInstrument, routes: [...stockInstrument.routes] });
+    expect(market.price).toBe(478.8);
+    expect(market.changePercent).toBeUndefined();
+    expect(market.changePeriod).toBeUndefined();
   });
 });
