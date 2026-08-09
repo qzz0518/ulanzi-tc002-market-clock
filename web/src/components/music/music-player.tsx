@@ -82,6 +82,8 @@ interface QrLogin {
 
 const SESSION_CONFIRMATION = "START_TC002_MUSIC_SESSION";
 const TRACKS_PER_PAGE = 20;
+// 歌单加载失败后的退避重试节奏，最后一次之后就把错误留给用户处理。
+const PLAYLIST_RETRY_DELAYS = [2_000, 5_000, 12_000] as const;
 const SPOTIFY_DASHBOARD_URL = "https://developer.spotify.com/dashboard";
 const PROVIDER_COPY: Record<MusicProviderId, {
   label: string;
@@ -210,6 +212,8 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [searchBusy, setSearchBusy] = useState(false);
   const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [playlistReloadKey, setPlaylistReloadKey] = useState(0);
+  const playlistRetryRef = useRef(0);
   const [selected, setSelected] = useState<MusicTrackDetail | null>(null);
   const [trackBusy, setTrackBusy] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
@@ -546,15 +550,33 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
       return;
     }
     let cancelled = false;
+    let retryTimer: number | undefined;
     void jsonApi<{ playlists: MusicPlaylist[] }>("/api/music/playlists")
       .then((result) => {
         if (cancelled) return;
         setPlaylists(result.playlists);
         setLibraryError(null);
+        playlistRetryRef.current = 0;
       })
-      .catch((error) => { if (!cancelled) setLibraryError(`歌单加载失败：${errorMessage(error)}`); });
-    return () => { cancelled = true; };
-  }, [activeProviderId, session?.loggedIn]);
+      .catch((error) => {
+        if (cancelled) return;
+        setLibraryError(`歌单加载失败：${errorMessage(error)}`);
+        // 这条横幅没有别的出口：歌单只在切音源或登录态变化时才加载，所以一次瞬时
+        // 故障（令牌刷新撞车之类）会把它永久挂在那儿，哪怕其它功能早就恢复了。
+        // 自己退避重试，成功即撤下横幅。
+        const attempt = playlistRetryRef.current;
+        if (attempt >= PLAYLIST_RETRY_DELAYS.length) return;
+        playlistRetryRef.current = attempt + 1;
+        retryTimer = window.setTimeout(
+          () => setPlaylistReloadKey((key) => key + 1),
+          PLAYLIST_RETRY_DELAYS[attempt],
+        );
+      });
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [activeProviderId, session?.loggedIn, playlistReloadKey]);
 
   useEffect(() => {
     if (!qrLogin || !["waiting", "scanned"].includes(qrState)) return;
@@ -652,6 +674,7 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
     setSourceLabel("搜索结果");
     setLibraryError(null);
     setPlaybackError(null);
+    playlistRetryRef.current = 0;
     pendingSeekMsRef.current = null;
     pendingSeekRef.current = null;
     lastSentSeekRef.current = null;

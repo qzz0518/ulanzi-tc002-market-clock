@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
@@ -74,7 +74,9 @@ interface StoredSpotifySession {
 
 async function writePrivateJson(path: string, data: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.tmp`;
+  // tmp 名必须逐次唯一：同一进程里并发写会共用 `pid` 后缀，先落地的那次 rename
+  // 会把文件抢走，后一次就撞上 ENOENT（Spotify 令牌刷新最容易触发）。
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, path);
@@ -167,6 +169,7 @@ export class SpotifyMusicService implements MusicProvider, MusicRemoteControl {
   private readonly pendingLogins = new Map<string, PendingLogin>();
   private snapshotCache: MusicRemoteSnapshot | null = null;
   private snapshotInFlight: Promise<MusicRemoteSnapshot> | null = null;
+  private refreshInFlight: Promise<string> | null = null;
 
   constructor(
     private readonly options: {
@@ -530,6 +533,16 @@ export class SpotifyMusicService implements MusicProvider, MusicRemoteControl {
     ) {
       return session.accessToken;
     }
+    // 打开音乐页会并发打好几个请求（歌单、播放状态、搜索），令牌过期时它们会同时走到
+    // 这里。必须共享同一次刷新：Spotify 在部分响应里轮换 refresh token，并发刷新会让
+    // 后到的那个拿着已作废的旧令牌去换，直接把登录状态弄掉线。
+    this.refreshInFlight ??= this.refreshAccessToken(session).finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async refreshAccessToken(session: StoredSpotifySession): Promise<string> {
     const token = await this.requestToken({
       grant_type: "refresh_token",
       refresh_token: session.refreshToken,

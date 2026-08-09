@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { NeteaseMusicService } from "../netease-music.ts";
@@ -45,7 +46,9 @@ export class MusicProviderStore {
 
   async save(active: MusicProviderId): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
-    const temporaryPath = `${this.path}.${process.pid}.tmp`;
+    // tmp 名必须逐次唯一：同一进程里并发写会共用 `pid` 后缀，先落地的那次 rename
+    // 会把文件抢走，后一次就撞上 ENOENT（Spotify 令牌刷新最容易触发）。
+    const temporaryPath = `${this.path}.${randomUUID()}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify({ version: 1, active }, null, 2)}\n`);
     await rename(temporaryPath, this.path);
   }

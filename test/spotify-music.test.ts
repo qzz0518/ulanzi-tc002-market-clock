@@ -226,6 +226,36 @@ describe("Spotify music service", () => {
     expect(service.status().loggedIn).toBe(true);
   });
 
+  test("shares one token refresh across concurrent requests", async () => {
+    let clock = 1_000_000;
+    const { service, calls, sessionPath } = await signedInService(
+      [
+        ["https://api.spotify.com/v1/search", () => json({ tracks: { items: [] } })],
+        ["https://api.spotify.com/v1/me/playlists", () => json({ items: [] })],
+        ["https://api.spotify.com/v1/me/tracks", () => json({ items: [], total: 0 })],
+      ],
+      { now: () => clock },
+    );
+    clock += 4_000_000; // 令牌过期
+
+    // 打开音乐页就是这个形状：几个请求同时出发，全都发现令牌过期了。
+    await Promise.all([
+      service.search("midnight"),
+      service.playlists(),
+      service.search("aurora"),
+    ]);
+
+    // 只能刷新一次。刷新两次的话，Spotify 轮换 refresh token 后第二次就带着作废的
+    // 旧令牌去换，登录会莫名其妙掉线；而且两次刷新会同时去写 session 文件。
+    const refreshes = calls.filter((call) => call.url.pathname === "/api/token");
+    expect(refreshes).toHaveLength(1);
+
+    // session 文件必须完好落盘——并发写曾经因为 tmp 名撞车而报 ENOENT。
+    const stored = JSON.parse(await readFile(sessionPath, "utf8")) as { accessToken: string };
+    expect(stored.accessToken).toBe("access-1");
+    expect(service.status().loggedIn).toBe(true);
+  });
+
   test("signs out when Spotify rejects the refresh token for good", async () => {
     let clock = 1_000_000;
     const { appStore, sessionStore } = await stores();

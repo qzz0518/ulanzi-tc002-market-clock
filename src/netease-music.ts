@@ -104,7 +104,9 @@ export class MusicSessionStore {
   async save(cookie: string, profile: MusicProfile): Promise<void> {
     if (!validCookie(cookie)) throw new MusicServiceError("网易云登录凭据格式无效", 502);
     await mkdir(dirname(this.path), { recursive: true });
-    const temporaryPath = `${this.path}.${process.pid}.tmp`;
+    // tmp 名必须逐次唯一：同一进程里并发写会共用 `pid` 后缀，先落地的那次 rename
+    // 会把文件抢走，后一次就撞上 ENOENT（Spotify 令牌刷新最容易触发）。
+    const temporaryPath = `${this.path}.${randomUUID()}.tmp`;
     const data: StoredMusicSession = { version: 1, cookie, profile };
     await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
     await chmod(temporaryPath, 0o600);
