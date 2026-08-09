@@ -220,7 +220,7 @@ void* pollThread(void*) {
 			}
 			// Remote mode re-syncs every poll, not only when seq moves: the
 			// Connect player's position advances on its own and nobody bumps
-			// seq for it. The local 60ms tick carries the animation between
+			// seq for it. The local 30ms tick carries the animation between
 			// polls, so only a real drift is worth a correction.
 			if (remote) {
 				LyricsPage* lp = lyricsPage();

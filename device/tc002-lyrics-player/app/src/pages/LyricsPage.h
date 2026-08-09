@@ -30,7 +30,12 @@ public:
 	virtual bool onKeyEvent(int keyCode, int keyStatus) override;
 
 	void tick();
-	int getTickIntervalMs() const { return 60; }
+	// 33fps，与网页同屏推给官方固件的帧率基线一致。60ms 曾经欠帧：聚光模式逐像素
+	// 扫字（一句 4 秒、文字 200px 就要 50fps），升降模式进出场要在 0.14 的时间窗里
+	// 走完 18 像素（约 32fps），两者在 16.7fps 下都是跳着走的。走带和天际不受影响
+	// ——它们的文字按 12 像素整格跳、频谱按 8fps 量化，本来就饱和了。
+	// mPlayheadMs 也按这个间隔累加，改这里等于同时改了本地补帧的时基。
+	int getTickIntervalMs() const { return 30; }
 
 	// Control state, set by lyricsLogic from the polled /state.
 	void setMode(int mode);

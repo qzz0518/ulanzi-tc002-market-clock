@@ -190,7 +190,7 @@ Details of the two display paths:
   device at sideload time, so a new network never requires a rebuild. One firmware covers
   both sources: on NetEase it downloads the track and plays it locally; on Spotify it
   downloads no audio at all and instead follows the Connect player's reported position
-  (correcting only past 0.9 s of drift, with the local 60 ms tick carrying the frames in
+  (correcting only past 0.9 s of drift, with the local 30 ms tick carrying the frames in
   between), the side keys become previous/next, and the knob sets the Connect device's
   volume. The firmware downloads the audio on-device, plays it through the speaker with
   millisecond seeking,
