@@ -589,12 +589,41 @@ describe("local control API", () => {
     expect(payloads[0]!.image[0]!.data.startsWith("data:image/gif;base64,")).toBe(true);
     expect(payloads[0]!.duration).toBeGreaterThanOrEqual(5);
 
+    // 歌词 GIF 只播一次：没有 NETSCAPE 循环块，唱完的句子就停在最后一帧，
+    // 不会在下一句推上来之前从头再滚一遍。
+    const gifBytes = Buffer.from(
+      payloads[0]!.image[0]!.data.replace("data:image/gif;base64,", ""),
+      "base64",
+    );
+    expect(gifBytes.includes(Buffer.from("NETSCAPE2.0"))).toBe(false);
+
     const badFrame = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ frames: [{ delayMs: 400, pixels: "short" }] }),
     }));
     expect(badFrame.status).toBe(400);
+
+    // 一句 12 秒的歌词按 33fps 就是 400 帧，整条请求约 1.3MB——通用的 256KB
+    // 上限会把它挡掉，所以这个端点单独放宽了 body 限制。
+    const fullLine = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        frames: Array.from({ length: 400 }, () => ({ delayMs: 30, pixels })),
+      }),
+    }));
+    expect(fullLine.status).toBe(200);
+    expect((await fullLine.json()).mirror.frames).toBe(400);
+
+    const overCap = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        frames: Array.from({ length: 401 }, () => ({ delayMs: 30, pixels })),
+      }),
+    }));
+    expect(overCap.status).toBe(400);
 
     const clearedResponse = await handler(new Request("http://127.0.0.1:43820/api/music/mirror", {
       method: "DELETE",

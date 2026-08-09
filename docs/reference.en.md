@@ -169,8 +169,22 @@ and the native firmware are identical pixel for pixel.
 Details of the two display paths:
 
 - **Device mirror (stock firmware, no flashing)**: pushes the rendered lyric frames (up to
-  60 frames, ~15fps) through the stock firmware's Custom App channel; audio plays in the
-  browser.
+  400 frames, 33–50fps) through the stock firmware's Custom App channel; audio plays in the
+  browser. Frame delays are multiples of 10ms because GIF only has centisecond precision;
+  a line too long for 400 frames gets a longer delay rather than fewer frames, so the GIF
+  always covers the whole line. The lyric GIF does not loop — it holds the last frame until
+  the next line arrives.
+
+  The frame rate was measured on hardware and is **budgeted per content motion** rather than
+  applied uniformly. A ruler animation (three speeds staged inside one GIF) showed the stock
+  firmware honors frame delays faithfully, staying smooth even at 10ms/100fps — the end of
+  the GIF format, whose delay field is in centiseconds — and it accepts a 400-frame, 48KB
+  body in 109ms. But that headroom has nothing to consume it: ticker/skyline/cascade scroll
+  text in whole 12px cells, the spectrum is quantized to 8fps, and the progress cursor has
+  only 47 positions, so those modes saturate at 33fps and extra frames just repeat a frame.
+  Only spotlight sweeps text per pixel and needs one frame per pixel of travel, so it scales
+  up to 50fps based on text width. What actually caps the frame count is how many frames the
+  browser rasterizes per line, not device capacity.
 - **Native music firmware (non-persistent sideload)**: the FlyThings C++ player is
   cross-compiled in Docker — no Windows IDE; the service address is injected onto the
   device at sideload time, so a new network never requires a rebuild. One firmware covers
@@ -249,7 +263,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks on the live source |
 | `GET` | `/api/music/tracks/:id`, `/api/music/tracks/:id/stream` | Track metadata + timed lyrics; same-origin audio proxy (Range, NetEase only) |
 | `GET` / `POST` | `/api/music/device-app/*` | Validate the firmware bundle, probe the device, sideload / restore (tmpfs session) |
-| `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤60) to a stock-firmware Custom App (device mirror) |
+| `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤400) to a stock-firmware Custom App (device mirror) |
 | `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |
 | `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll |
 | `POST` | `/api/music/device/report`, `/api/music/device/heartbeat` | Firmware key-action reports and playhead heartbeats |

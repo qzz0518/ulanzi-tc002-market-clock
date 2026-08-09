@@ -239,9 +239,12 @@ function assertSameOrigin(request: Request): void {
   }
 }
 
-async function readJson(request: Request): Promise<unknown> {
+async function readJson(
+  request: Request,
+  maxBytes: number = WORKSPACE_LIMITS.maxRequestBytes,
+): Promise<unknown> {
   const contentLength = Number(request.headers.get("Content-Length") ?? 0);
-  if (contentLength > WORKSPACE_LIMITS.maxRequestBytes) {
+  if (contentLength > maxBytes) {
     throw new SettingsValidationError("request body is too large");
   }
   const contentType = request.headers.get("Content-Type") ?? "";
@@ -249,7 +252,7 @@ async function readJson(request: Request): Promise<unknown> {
     throw new SettingsValidationError("Content-Type must be application/json");
   }
   const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > WORKSPACE_LIMITS.maxRequestBytes) {
+  if (bytes.byteLength > maxBytes) {
     throw new SettingsValidationError("request body is too large");
   }
   try {
@@ -306,18 +309,27 @@ function boundedInteger(
 }
 
 const MIRROR_FRAME_BYTES = DISPLAY_WIDTH * DISPLAY_HEIGHT * 3;
+// 400 帧覆盖一句 12 秒的歌词跑满 33fps。真机实测官方固件 400 帧 / 48KB 请求体照收，只用
+// 109ms，所以这个上限管的是渲染与传输成本，不是设备容量。
+const MIRROR_MAX_FRAMES = 400;
+// 每帧 base64 约 3.3KB，满帧一次请求约 1.3MB——比通用的 256KB 上限大，单独放宽这一个
+// 端点，而不是把所有写接口的门槛都抬上去。
+const MIRROR_REQUEST_BYTES = 2048 * 1024;
 
 function decodeMirrorFrames(
   value: unknown,
 ): { canvas: PixelCanvas; delayMs: number }[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 60) {
-    throw new SettingsValidationError("mirror frames must contain 1 to 60 entries");
+  if (!Array.isArray(value) || value.length < 1 || value.length > MIRROR_MAX_FRAMES) {
+    throw new SettingsValidationError(
+      `mirror frames must contain 1 to ${MIRROR_MAX_FRAMES} entries`,
+    );
   }
   return value.map((entry) => {
     const record = entry && typeof entry === "object" && !Array.isArray(entry)
       ? entry as Record<string, unknown>
       : {};
-    const delayMs = boundedInteger(record.delayMs, 40, 10_000, "frame delayMs");
+    // 下限 20ms：GIF 的厘秒粒度下 50fps 还能如实表达，再快就得指望解码器不去钳它。
+    const delayMs = boundedInteger(record.delayMs, 20, 10_000, "frame delayMs");
     if (typeof record.pixels !== "string" || record.pixels.length > MIRROR_FRAME_BYTES * 2) {
       throw new SettingsValidationError("frame pixels are invalid");
     }
@@ -977,7 +989,10 @@ export function createControlHandler(
           return jsonResponse({ error: "music mirror is unavailable" }, 404);
         }
         assertSameOrigin(request);
-        const input = await readJson(request) as { frames?: unknown; holdSeconds?: unknown };
+        const input = await readJson(request, MIRROR_REQUEST_BYTES) as {
+          frames?: unknown;
+          holdSeconds?: unknown;
+        };
         const frames = decodeMirrorFrames(input.frames);
         const totalMs = frames.reduce((sum, frame) => sum + frame.delayMs, 0);
         const holdSeconds = input.holdSeconds === undefined
@@ -986,9 +1001,12 @@ export function createControlHandler(
         const image = frames.length === 1
           ? { bytes: frames[0]!.canvas.toPng(), mimeType: "image/png" as const }
           : {
+            // 只播一次：整句的帧已经覆盖整句时长，循环只会让唱完的那一句在等
+            // 下一句推上来的空档里从头再滚一遍。
             bytes: encodePixelAnimation(
               frames.map((frame) => frame.canvas),
               frames.map((frame) => frame.delayMs),
+              { repeat: -1 },
             ),
             mimeType: "image/gif" as const,
           };

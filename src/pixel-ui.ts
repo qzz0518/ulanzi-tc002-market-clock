@@ -620,6 +620,8 @@ function paletteForFrames(frames: readonly PixelCanvas[]): number[][] {
 export function encodePixelAnimation(
   frames: readonly PixelCanvas[],
   frameDelaysMs: readonly number[],
+  // repeat: 0 无限循环（频道轮播要的），-1 只播一次并停在最后一帧（歌词同屏要的）。
+  options: { repeat?: number } = {},
 ): Uint8Array {
   if (frames.length === 0) throw new Error("GIF requires at least one frame");
   if (frames.length !== frameDelaysMs.length) {
@@ -627,12 +629,13 @@ export function encodePixelAnimation(
   }
   const gif = GIFEncoder();
   const palette = paletteForFrames(frames);
+  const repeat = options.repeat ?? 0;
   for (const [index, frame] of frames.entries()) {
     if (frame.width !== WIDTH || frame.height !== HEIGHT) {
       throw new Error(`GIF frame must be ${WIDTH}x${HEIGHT}`);
     }
     gif.writeFrame(applyPalette(frame.pixels, palette), WIDTH, HEIGHT, {
-      ...(index === 0 ? { palette, repeat: 0 } : {}),
+      ...(index === 0 ? { palette, repeat } : {}),
       delay: frameDelaysMs[index],
       dispose: 1,
     });

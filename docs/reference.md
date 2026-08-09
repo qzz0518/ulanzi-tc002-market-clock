@@ -134,8 +134,18 @@ Spotify 没有公开歌词接口，歌词来自 [LRCLIB](https://lrclib.net)（�
 
 两条上屏路径的细节：
 
-- **设备同屏（官方固件，不刷机）**：把渲染好的歌词帧（≤60 帧、约 15fps）推到官方固件的
-  Custom App 通道显示；声音由浏览器播放。
+- **设备同屏（官方固件，不刷机）**：把渲染好的歌词帧（≤400 帧、33–50fps）推到官方固件的
+  Custom App 通道显示；声音由浏览器播放。帧间隔取 10ms 的整倍数，因为 GIF 只有厘秒精度；
+  一句长到 400 帧装不下时，间隔按档位上调而不是压缩帧数，保证 GIF 时长盖住整句。歌词 GIF
+  不循环，唱完停在最后一帧，等下一句推上来。
+
+  帧率是真机量出来的，且**按内容的变化率分配**而不是一刀切。标尺动画（同一个 GIF 里放
+  三档速度逐段对比）显示：官方固件忠实按帧延迟播放，连 10ms／100fps——GIF 格式的尽头，
+  延迟字段以厘秒计——都很顺，400 帧、48KB 的请求体照收只用 109ms。但面板的余量喂不进
+  画面：走带/天际/升降的文字按 12 像素整格步进，频谱是 8fps 量化的，进度条光标一共只有
+  47 个位置，这些模式在 33fps 就已饱和，再快只是同一张画面重复。只有聚光模式逐像素扫字，
+  需要「文字每挪 1 像素就有一帧」，所以它按文字宽度自动提到最高 50fps。真正限制帧数的是
+  浏览器每句要光栅化多少帧，不是设备容量。
 - **原生音乐固件（非持久化侧载）**：FlyThings C++ 播放器用 Docker 交叉编译，无需 Windows
   IDE；侧载时服务地址自动写入设备，换网络、换机器都无需重新编译。同一个固件按音源自动
   切换两种工作方式：网易云下下载音频本地播放；Spotify 下不下载任何音频，改为跟随服务端
@@ -202,7 +212,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/music/search`、`/api/music/playlists`、`/api/music/playlists/:id/tracks` | 按当前音源搜索歌曲、读取歌单及曲目 |
 | `GET` | `/api/music/tracks/:id`、`/api/music/tracks/:id/stream` | 歌曲信息与逐行歌词；同源音频代理（支持 Range，仅网易云） |
 | `GET` / `POST` | `/api/music/device-app/*` | 校验固件包、检测真机、侧载固件与恢复官方固件（内存盘会话） |
-| `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤60）推到官方固件 Custom App（设备同屏） |
+| `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` | `/api/music/device/select`、`/api/music/device/control` | 网页下发选歌与控制补丁（播放/主题/配色/主色/seek） |
 | `GET` | `/api/music/device/state`、`/api/music/device/current` | 音乐固件轮询的纯文本控制状态；兼容的轻量当前曲目查询 |
 | `POST` | `/api/music/device/report`、`/api/music/device/heartbeat` | 固件上报按键动作与播放头心跳 |
