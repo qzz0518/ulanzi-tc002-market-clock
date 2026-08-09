@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createControlHandler } from "../src/control-api.ts";
+import { createControlHandler, resetDeviceMusicSelection } from "../src/control-api.ts";
 import {
   DEFAULT_DEVICE_GENERAL_SETTINGS,
   type DeviceGeneralSettings,
@@ -10,7 +10,8 @@ import {
 import { DEFAULT_SETTINGS } from "../src/settings.ts";
 import type { DashboardController } from "../src/controller.ts";
 import { renderOfflineDashboard } from "../src/pixel-ui.ts";
-import { MusicServiceError, type NeteaseMusicService } from "../src/netease-music.ts";
+import { MusicServiceError } from "../src/netease-music.ts";
+import type { MusicHub } from "../src/music/hub.ts";
 import { createDefaultWorkspace } from "../src/workspace.ts";
 import type { WorkspaceController } from "../src/workspace-controller.ts";
 import { PixelAssetStore } from "../src/pixel-asset-store.ts";
@@ -30,6 +31,38 @@ afterEach(async () => {
     rm(directory, { recursive: true, force: true })
   ));
 });
+
+// A hub whose active provider is whatever the test hands it; the Spotify half
+// only has to exist for the routes that read the overview.
+function fakeMusicHub(
+  active: Record<string, unknown>,
+  spotify: Record<string, unknown> = {},
+): MusicHub {
+  const provider = {
+    id: "netease",
+    label: "网易云音乐",
+    playbackMode: "device-audio",
+    status: () => ({ loggedIn: false }),
+    ...active,
+  };
+  const spotifyProvider = {
+    id: "spotify",
+    label: "Spotify",
+    playbackMode: "remote",
+    status: () => ({ loggedIn: false }),
+    appStatus: () => ({ configured: false, clientId: null, redirectUri: "http://127.0.0.1:43820/api/music/spotify/callback" }),
+    ...spotify,
+  };
+  return {
+    netease: provider,
+    spotify: spotifyProvider,
+    activeId: () => provider.id,
+    activeProvider: () => provider,
+    provider: (id: string) => (id === "spotify" ? spotifyProvider : provider),
+    setActive: async () => ({ active: provider.id, providers: [] }),
+    overview: () => ({ active: provider.id, providers: [] }),
+  } as unknown as MusicHub;
+}
 
 function fakeController(): DashboardController {
   let settings = structuredClone(DEFAULT_SETTINGS);
@@ -236,11 +269,15 @@ describe("local control API", () => {
 
   test("keeps music login writes same-origin and exposes only sanitized session state", async () => {
     let avatarRequests = 0;
-    const music = {
+    const netease = {
+      id: "netease",
+      label: "网易云音乐",
+      playbackMode: "device-audio",
       status: () => ({
         loggedIn: true,
         profile: {
-          userId: 42,
+          provider: "netease",
+          id: "42",
           nickname: "像素听众",
           avatarUrl: "https://p1.music.126.net/avatar.jpg",
         },
@@ -257,13 +294,14 @@ describe("local control API", () => {
         expiresAt: "2026-08-07T00:03:00.000Z",
       }),
       search: async () => [{
-        id: 123,
+        id: "123",
         title: "夜航",
         artists: ["像素乐队"],
         album: "十六行",
         durationMs: 180_000,
       }],
-    } as unknown as NeteaseMusicService;
+    };
+    const music = fakeMusicHub(netease);
     const handler = createControlHandler(fakeWorkspaceController(), { music });
 
     const session = await handler(new Request("http://127.0.0.1:43820/api/music/session"));
@@ -271,7 +309,8 @@ describe("local control API", () => {
       session: {
         loggedIn: true,
         profile: {
-          userId: 42,
+          provider: "netease",
+          id: "42",
           nickname: "像素听众",
           avatarUrl: "https://p1.music.126.net/avatar.jpg",
         },
@@ -287,11 +326,11 @@ describe("local control API", () => {
     expect(avatarRequests).toBe(1);
 
     const failedAvatarHandler = createControlHandler(fakeWorkspaceController(), {
-      music: {
+      music: fakeMusicHub({
         avatar: async () => {
           throw new MusicServiceError("头像格式无效", 502);
         },
-      } as unknown as NeteaseMusicService,
+      }),
     });
     const failedAvatar = await failedAvatarHandler(
       new Request("http://127.0.0.1:43820/api/music/avatar"),
@@ -316,6 +355,174 @@ describe("local control API", () => {
       "http://127.0.0.1:43820/api/music/search?query=%E5%A4%9C%E8%88%AA",
     ));
     expect((await search.json()).tracks[0].title).toBe("夜航");
+  });
+
+  test("switches the live music source and keeps the switch same-origin", async () => {
+    let active = "netease";
+    const music = fakeMusicHub({});
+    (music as unknown as Record<string, unknown>).setActive = async (id: string) => {
+      active = id;
+      return { active, providers: [] };
+    };
+    (music as unknown as Record<string, unknown>).overview = () => ({ active, providers: [] });
+    const handler = createControlHandler(fakeWorkspaceController(), { music });
+
+    const listed = await handler(new Request("http://127.0.0.1:43820/api/music/providers"));
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).music.active).toBe("netease");
+
+    const crossOrigin = await handler(new Request("http://127.0.0.1:43820/api/music/provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://example.com" },
+      body: JSON.stringify({ provider: "spotify" }),
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect(active).toBe("netease");
+
+    const unknown = await handler(new Request("http://127.0.0.1:43820/api/music/provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ provider: "tidal" }),
+    }));
+    expect(unknown.status).toBe(400);
+
+    const switched = await handler(new Request("http://127.0.0.1:43820/api/music/provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ provider: "spotify" }),
+    }));
+    expect(switched.status).toBe(200);
+    expect(active).toBe("spotify");
+  });
+
+  test("publishes the Connect player's position to the device and relays transport commands", async () => {
+    const commands: string[] = [];
+    let snapshot = {
+      trackId: "4uLU6hMCjMI75M1A2tKUQC",
+      positionMs: 42_000,
+      durationMs: 213_000,
+      playing: true,
+      deviceName: "厨房音箱",
+      volumePercent: 40,
+      fetchedAt: 0,
+    };
+    const remoteProvider = {
+      id: "spotify",
+      label: "Spotify",
+      playbackMode: "remote",
+      status: () => ({ loggedIn: true, profile: { provider: "spotify", id: "u", nickname: "听众" } }),
+      trackDetail: async (id: string) => ({
+        track: { id, title: "夜航", artists: ["像素乐队"], album: "十六行", durationMs: 213_000 },
+        lyrics: [{ startMs: 1_000, endMs: 4_000, text: "第一行" }],
+      }),
+      remote: {
+        snapshot: async () => snapshot,
+        play: async () => { commands.push("play"); },
+        pause: async () => { commands.push("pause"); },
+        next: async () => { commands.push("next"); },
+        previous: async () => { commands.push("previous"); },
+        seek: async (ms: number) => { commands.push(`seek:${ms}`); },
+        setVolume: async (pct: number) => { commands.push(`volume:${pct}`); },
+        devices: async () => [],
+        transfer: async (id: string) => { commands.push(`transfer:${id}`); },
+      },
+    };
+    resetDeviceMusicSelection("spotify");
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      music: fakeMusicHub(remoteProvider),
+    });
+
+    const state = await handler(new Request("http://127.0.0.1:43820/api/music/device/state"));
+    const fields = Object.fromEntries(
+      (await state.text()).split("\n").filter(Boolean).map((line) => line.split("\t") as [string, string]),
+    );
+    expect(fields.SRC).toBe("spotify");
+    expect(fields.RMT).toBe("1");
+    // The device follows whatever the Connect player moved to on its own.
+    expect(fields.TID).toBe("4uLU6hMCjMI75M1A2tKUQC");
+    expect(fields.RPOS).toBe("42000");
+    expect(fields.RDUR).toBe("213000");
+    expect(fields.RPLAY).toBe("1");
+    expect(fields.RVOL).toBe("40");
+
+    // Remote mode has no local audio for the device to fetch.
+    const audio = await handler(new Request("http://127.0.0.1:43820/api/music/device/audio"));
+    expect(audio.status).toBe(204);
+
+    // ...but the lyric timeline still comes from the service.
+    const now = await handler(new Request("http://127.0.0.1:43820/api/music/device/now"));
+    expect(await now.text()).toBe("DUR\t213000\n1000\t第一行\n");
+
+    const stream = await handler(new Request(
+      "http://127.0.0.1:43820/api/music/tracks/4uLU6hMCjMI75M1A2tKUQC/stream",
+    ));
+    expect(stream.status).toBe(409);
+
+    const rejected = await handler(new Request("http://127.0.0.1:43820/api/music/remote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://example.com" },
+      body: JSON.stringify({ action: "next" }),
+    }));
+    expect(rejected.status).toBe(400);
+    expect(commands).toEqual([]);
+
+    for (const patch of [
+      { action: "next" },
+      { action: "seek", positionMs: 12_345 },
+      { action: "volume", percent: 55 },
+      { action: "transfer", deviceId: "device1" },
+    ]) {
+      const response = await handler(new Request("http://127.0.0.1:43820/api/music/remote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+        body: JSON.stringify(patch),
+      }));
+      expect(response.status).toBe(200);
+    }
+    expect(commands).toEqual(["next", "seek:12345", "volume:55", "transfer:device1"]);
+
+    // A device key press is a Connect command too — the TC002 has no audio here.
+    await handler(new Request("http://127.0.0.1:43820/api/music/device/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playing: false }),
+    }));
+    expect(commands.at(-1)).toBe("pause");
+
+    // A base62 track ID survives the shared route that used to be digits-only.
+    const detail = await handler(new Request(
+      "http://127.0.0.1:43820/api/music/tracks/4uLU6hMCjMI75M1A2tKUQC",
+    ));
+    expect((await detail.json()).detail.track.title).toBe("夜航");
+
+    snapshot = { ...snapshot, trackId: "1301WleyT98MSxVHPZCA6M", playing: false };
+    const moved = await handler(new Request("http://127.0.0.1:43820/api/music/device/state"));
+    expect(await moved.text()).toContain("TID\t1301WleyT98MSxVHPZCA6M");
+
+    // A Spotify outage must not tell the device to fall back to local audio.
+    remoteProvider.remote.snapshot = async () => {
+      throw new MusicServiceError("Spotify 无法连接", 502);
+    };
+    const degraded = await handler(new Request("http://127.0.0.1:43820/api/music/device/state"));
+    const degradedText = await degraded.text();
+    expect(degradedText).toContain("RMT\t1");
+    expect(degradedText).toContain("RPOS\t-1");
+    expect(degradedText).toContain("TID\t1301WleyT98MSxVHPZCA6M");
+    resetDeviceMusicSelection("netease");
+  });
+
+  test("renders a self-contained Spotify callback page and escapes its message", async () => {
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      music: fakeMusicHub({}),
+    });
+    const denied = await handler(new Request(
+      "http://127.0.0.1:43820/api/music/spotify/callback?error=%3Cimg+src%3Dx%3E",
+    ));
+    expect(denied.status).toBe(400);
+    expect(denied.headers.get("Content-Type")).toContain("text/html");
+    const html = await denied.text();
+    expect(html).toContain("&lt;img src=x&gt;");
+    expect(html).not.toContain("<img src=x>");
   });
 
   test("does not allow cross-origin sideload session requests", async () => {

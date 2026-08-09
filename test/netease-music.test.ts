@@ -69,7 +69,12 @@ describe("NetEase music service", () => {
     const confirmed = await service.checkQrLogin(login.id);
     expect(confirmed).toEqual({
       state: "confirmed",
-      profile: { userId: 42, nickname: "像素听众", avatarUrl: "https://p1.music.126.net/avatar.jpg" },
+      profile: {
+        provider: "netease",
+        id: "42",
+        nickname: "像素听众",
+        avatarUrl: "https://p1.music.126.net/avatar.jpg",
+      },
     });
     expect(JSON.stringify(confirmed)).not.toContain("MUSIC_U");
     expect((await stat(path)).mode & 0o777).toBe(0o600);
@@ -104,14 +109,14 @@ describe("NetEase music service", () => {
     await service.initialize();
 
     expect(await service.search("夜航")).toEqual([{
-      id: 123,
+      id: "123",
       title: "夜航",
       artists: ["像素乐队"],
       album: "十六行",
       durationMs: 5_000,
       coverUrl: "https://p.example/cover.jpg",
     }]);
-    expect((await service.trackDetail(123)).lyrics).toEqual([
+    expect((await service.trackDetail("123")).lyrics).toEqual([
       { startMs: 1_200, endMs: 3_000, text: "第一行", translation: "First line" },
       { startMs: 3_000, endMs: 5_000, text: "第二行" },
     ]);
@@ -141,7 +146,7 @@ describe("NetEase music service", () => {
     });
     await service.initialize();
 
-    const response = await service.stream(123, "bytes=0-2");
+    const response = await service.stream("123", "bytes=0-2");
     expect(response.status).toBe(206);
     expect(response.headers.get("Content-Range")).toBe("bytes 0-2/3");
     expect(String(observedRange)).toBe("bytes=0-2");
@@ -153,13 +158,14 @@ describe("NetEase music service", () => {
       }),
     });
     await blocked.initialize();
-    await expect(blocked.stream(123)).rejects.toBeInstanceOf(MusicServiceError);
+    await expect(blocked.stream("123")).rejects.toBeInstanceOf(MusicServiceError);
   });
 
   test("proxies the signed-in profile avatar without exposing third-party image access", async () => {
     const { store } = await sessionStore();
     await store.save("MUSIC_U=secret-value; os=pc", {
-      userId: 42,
+      provider: "netease",
+      id: "42",
       nickname: "像素听众",
       avatarUrl: "https://p1.music.126.net/avatar.jpg",
     });
@@ -194,7 +200,8 @@ describe("NetEase music service", () => {
 
     const { store: blockedStore } = await sessionStore();
     await blockedStore.save("MUSIC_U=secret-value; os=pc", {
-      userId: 7,
+      provider: "netease",
+      id: "7",
       nickname: "不可信头像",
       avatarUrl: "https://example.com/avatar.jpg",
     });

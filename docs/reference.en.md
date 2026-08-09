@@ -99,10 +99,65 @@ this repository, and author/source attribution is retained.
 
 ## Music
 
-The login cookie stays only in `.runtime/music-session.json` (mode `0600`) — neither the
-browser nor the clock ever sees the raw credential, and logout deletes the file. Playback
-remains subject to account, subscription, copyright, and regional limits; a 45-second
-preview is shown as a preview, not a full track.
+The module has two interchangeable sources. The live one is remembered in
+`.runtime/music-provider.json`; switching clears the previous source's selection, because
+the two catalogues share no track IDs (NetEase hands out decimals, Spotify base62). Cover
+art always goes through the same-origin proxy `/api/music/art`, so the page CSP stays
+`img-src 'self'` and no third-party CDN learns what is playing.
+
+### NetEase
+
+QR login, audio through a same-origin proxy, and the TC002 downloads and plays the track
+itself. The login cookie stays only in `.runtime/music-session.json` (mode `0600`) — neither
+the browser nor the clock ever sees the raw credential, and logout deletes the file.
+Playback remains subject to account, subscription, copyright, and regional limits; a
+45-second preview is shown as a preview, not a full track.
+
+### Spotify Connect
+
+Spotify audio is DRM-protected and never touches this machine or the clock — playback
+happens on whichever Connect device you pick, and both the studio and the TC002 are a remote
+plus a lyric screen. Spotify issues no public key, so register a free app in your own
+developer dashboard:
+
+1. Open the [Spotify developer dashboard](https://developer.spotify.com/dashboard) →
+   Create app
+2. Set the Redirect URI to exactly `http://127.0.0.1:43820/api/music/spotify/callback`
+   (the port follows `HEALTH_PORT`; Spotify accepts plaintext http only on the loopback
+   address, and no longer accepts `localhost`)
+3. Enable Web API, save, and paste the Client ID into the studio's Spotify panel
+
+Authorization uses **Authorization Code + PKCE**, so no client secret is needed or stored.
+The refresh token lives in `.runtime/spotify-session.json` (mode `0600`) and is deleted on
+logout. The callback can only land on the machine running the service, so when the studio is
+open on a phone or tablet, paste that unreachable `127.0.0.1` URL back into the panel to
+finish the login.
+
+Once connected, search, playlists (including Liked Songs), track selection, pause,
+previous/next, seeking, switching the Connect device, and volume all go through the Web
+API — **and the reverse holds too**: change the song on your phone and the clock and the
+studio follow within two seconds. Connect playback control requires a Premium account; a
+free account gets a clear message instead of a silent failure. Playback itself stays in your
+own Spotify clients — the studio is not a web player, because that would mean pulling in
+Spotify's CDN script, widening the page CSP, and handing an access token to the frontend,
+while the client is already at hand.
+
+Apps still in Development Mode have their paging parameters restricted (an explicit `limit`
+is rejected outright with `Invalid limit`), so no list ever asks for a page size: each walks
+`offset` with whatever the server gives and dedupes by ID. The same code keeps working once
+the quota is extended.
+
+Spotify exposes no lyric API, so lyrics come from [LRCLIB](https://lrclib.net) (no key),
+falling back to NetEase's timed lyrics for Chinese-language tracks; with neither, the player
+degrades to showing the track title rather than failing.
+
+### Sources and attribution
+
+NetEase Cloud Music uses unofficial endpoints and its credentials stay on this machine;
+Spotify uses the official Web API and Spotify Connect, needs your own developer app, and
+requires Premium for Connect control. This project is not affiliated with or endorsed by
+NetEase, Spotify, or Ulanzi; Spotify audio is DRM-protected and is never downloaded,
+proxied, or transcoded here.
 
 The preview and the device share one theme system: four display modes (ticker / skyline /
 spotlight / cascade) × four palettes (signal green / tape orange / blueprint / arcade red),
@@ -118,8 +173,13 @@ Details of the two display paths:
   browser.
 - **Native music firmware (non-persistent sideload)**: the FlyThings C++ player is
   cross-compiled in Docker — no Windows IDE; the service address is injected onto the
-  device at sideload time, so a new network never requires a rebuild. The firmware
-  downloads the audio on-device, plays it through the speaker with millisecond seeking,
+  device at sideload time, so a new network never requires a rebuild. One firmware covers
+  both sources: on NetEase it downloads the track and plays it locally; on Spotify it
+  downloads no audio at all and instead follows the Connect player's reported position
+  (correcting only past 0.9 s of drift, with the local 60 ms tick carrying the frames in
+  between), the side keys become previous/next, and the knob sets the Connect device's
+  volume. The firmware downloads the audio on-device, plays it through the speaker with
+  millisecond seeking,
   drives the LED matrix with offline-rasterised 12×12 Chinese and Japanese glyphs, and
   ships a six-second boot animation plus a "pick a song" idle screen. Web and firmware stay
   in bidirectional real-time sync over a control-sequence + heartbeat protocol: web-side
@@ -177,10 +237,17 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/library/ulanzi/media` | Safely proxy official preview media |
 | `POST` | `/api/library/ulanzi/import` | Validate and import a `contentView` link or work ID |
 | `GET` | `/api/library/ulanzi/imported/:ref` | Read a normalized local asset snapshot |
-| `GET` | `/api/music/session`, `/api/music/avatar` | Sanitized NetEase login state and proxied avatar |
-| `POST` | `/api/music/qr`, `/api/music/qr/check`, `/api/music/logout` | Server-held QR session; logout deletes the local credential |
-| `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks |
-| `GET` | `/api/music/tracks/:id`, `/api/music/tracks/:id/stream` | Track metadata + timed lyrics; same-origin audio proxy (Range) |
+| `GET` / `POST` | `/api/music/providers`, `/api/music/provider` | List both sources with their login state; switch the live source |
+| `GET` | `/api/music/session`, `/api/music/avatar` | Sanitized login state and proxied avatar for the live source (`?provider=` picks one) |
+| `GET` | `/api/music/art` | Same-origin album-art proxy (only the sources' own image hosts) |
+| `POST` | `/api/music/qr`, `/api/music/qr/check`, `/api/music/logout` | Server-held NetEase QR session; logout deletes the local credential |
+| `GET` / `PUT` | `/api/music/spotify/app` | Read or store the Spotify app Client ID (PKCE, no secret) |
+| `POST` | `/api/music/spotify/login`, `/api/music/spotify/complete` | Mint a PKCE authorize URL; finish a login from a pasted callback URL |
+| `GET` | `/api/music/spotify/callback` | Spotify's redirect target (self-contained result page, state-checked) |
+| `GET` | `/api/music/spotify/devices` | List available Spotify Connect devices |
+| `POST` | `/api/music/remote` | Connect transport: play/pause/next/previous/seek/volume/transfer |
+| `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks on the live source |
+| `GET` | `/api/music/tracks/:id`, `/api/music/tracks/:id/stream` | Track metadata + timed lyrics; same-origin audio proxy (Range, NetEase only) |
 | `GET` / `POST` | `/api/music/device-app/*` | Validate the firmware bundle, probe the device, sideload / restore (tmpfs session) |
 | `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤60) to a stock-firmware Custom App (device mirror) |
 | `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |

@@ -62,6 +62,33 @@ describe("music player UI", () => {
     expect(html).not.toContain("MUSIC_U=");
   });
 
+  test("offers both music sources and keeps Spotify a remote, not a player", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
+    ).text();
+
+    // The switch itself, and the two sources it moves between.
+    expect(source).toContain('className="music-source-switch"');
+    expect(source).toContain("/api/music/provider");
+    expect(source).toContain("/api/music/providers");
+    expect(source).toContain('切换到 ${PROVIDER_COPY[provider].label}');
+
+    // Spotify Connect: transport goes to the service, never to an <audio> tag,
+    // and the picker can move playback to another Connect device.
+    expect(source).toContain("/api/music/remote");
+    expect(source).toContain('action: "transfer"');
+    expect(source).toContain("selected && !remoteMode && (");
+    expect(source).toContain("/api/music/spotify/devices");
+
+    // PKCE setup guidance has to name the exact redirect URI Spotify demands.
+    expect(source).toContain("/api/music/spotify/callback");
+    expect(source).toContain("无需 Client Secret");
+
+    const html = renderToStaticMarkup(createElement(MusicPlayer));
+    expect(html).toContain("网易云");
+    expect(html).toContain("Spotify");
+  });
+
   test("keeps the guarded sideload session flow in the secondary drawer", async () => {
     const source = await Bun.file(
       new URL("../web/src/components/music/music-player.tsx", import.meta.url),
@@ -236,17 +263,31 @@ describe("music player UI", () => {
   test("renders the NetEase profile image with a readable initial fallback", () => {
     const html = renderToStaticMarkup(createElement(MusicAccountAvatar, {
       profile: {
-        userId: 42,
+        provider: "netease",
+        id: "42",
         nickname: "小皮皮蛋",
         avatarUrl: "https://p1.music.126.net/avatar.jpg",
       },
     }));
 
-    expect(html).toContain('src="/api/music/avatar"');
+    // The proxy URL names the account, so switching sources cannot leave the
+    // browser showing the other provider's face for an identical URL.
+    expect(html).toContain('src="/api/music/avatar?provider=netease&amp;account=42"');
     expect(html).toContain('class="music-account-strip__avatar-image"');
     expect(html).toContain('class="music-account-strip__avatar-fallback"');
     expect(html).toContain(">小<");
     expect(html).not.toContain("p1.music.126.net");
+
+    const spotify = renderToStaticMarkup(createElement(MusicAccountAvatar, {
+      profile: {
+        provider: "spotify",
+        id: "pixel-listener",
+        nickname: "小鸭",
+        avatarUrl: "https://i.scdn.co/image/avatar",
+      },
+    }));
+    expect(spotify).toContain('src="/api/music/avatar?provider=spotify&amp;account=pixel-listener"');
+    expect(spotify).not.toContain("i.scdn.co");
   });
 
   test("keeps the long-form music workspace on document scrolling", async () => {

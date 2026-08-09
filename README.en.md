@@ -31,11 +31,22 @@ add-to-home-screen support.
 
 ## Pixel lyrics player
 
-![Music workspace: search, track picking, themes, and the live 52×16 pixel preview](docs/images/tc002-music-studio.png)
+![Music workspace: switchable NetEase / Spotify sources, cover art in the track list, the player console, and the live 52×16 pixel preview](docs/images/tc002-music-studio.png)
 
-The **Music** view is a complete music console: NetEase Music QR login, search, playlists,
-timed lyrics with translations, and a live 52×16 pixel lyric preview — four display modes ×
-four palettes, freely combined. Two paths put lyrics on the clock:
+The **Music** view is a complete music console with two interchangeable sources —
+**NetEase Cloud Music** and **Spotify**. Search, playlists, cover art, timed lyrics with
+translations, and the live 52×16 pixel preview are shared between them, with four display
+modes × four palettes.
+
+- **NetEase**: QR login, and the TC002 downloads the track and plays it through its own
+  speaker.
+- **Spotify**: official Spotify Connect — playback happens on whichever device you pick
+  (phone, desktop client, speaker) and both the studio and the clock act as a remote plus a
+  lyric screen; change the song on your phone and they follow within two seconds. It needs a
+  free app registered in your own developer dashboard, see the
+  [technical reference](docs/reference.en.md#music).
+
+Two paths put lyrics on the clock:
 
 - **Device mirror**: no flashing — lyric frames are pushed to the stock firmware while
   audio plays in the browser.

@@ -13,6 +13,8 @@
   `/tmp` load path and restarts `zkswe` on it (decision 5's "temporary process while the
   official UI service is paused" describes the earlier probe-era session model); a session
   counts as alive while `/tmp/EasyUI.cfg` exists and `zkswe` is running.
+- Amended: 2026-08-09 — music became multi-source (NetEase + Spotify), which splits
+  decision 1–3 along a new axis; see "Playback modes" below.
 
 ## Context
 
@@ -47,10 +49,45 @@ Music is a fourth first-class Pixel Studio view backed by a separate, native TC0
    (`POST /api/custom`), giving on-device lyrics without touching the firmware at all.
    Audio on the device speaker still requires the native sideloaded player.
 
+## Playback modes
+
+Adding Spotify did not change where credentials live, but it did split *who owns the audio*.
+Each source declares a `playbackMode` and everything downstream follows it:
+
+- `device-audio` (NetEase) — decisions 1–3 as written: the service proxies a bounded audio
+  file, the TC002 downloads it and plays it through `AudioManager`, and the device owns the
+  playhead.
+- `remote` (Spotify) — Spotify audio is DRM-protected and never leaves Spotify's own clients,
+  so the service does not proxy, download, or transcode it. Playback lives on a Spotify
+  Connect device; the service polls `GET /v1/me/player`, republishes the position through the
+  same plain-text device-state endpoint, and both the studio and the firmware become remotes
+  whose lyric clock is anchored on that reading. `/api/music/device/audio` answers `204` so
+  the firmware cannot try to play anything locally, and device key presses are relayed to
+  the Web API as Connect commands instead of acting on local audio.
+
+Making the studio tab itself a Connect device (Spotify's Web Playback SDK) was built and
+then removed. It worked, but it cost a third-party script from `sdk.scdn.co`, a widened page
+CSP for the DRM iframe, and an access token handed to the frontend — all to duplicate a
+desktop client the user already has open on the same machine. Following their clients beats
+becoming one.
+
+The alternative — reverse-engineering the Connect *receiver* protocol (librespot) so the
+TC002 appears as a Spotify speaker — was rejected: it needs a DRM-bypassing client on a
+36 MB ARM device, and it is neither licensable nor honest about what it is doing. Being a
+Connect *controller* is the officially supported path and needs no such compromise.
+
+Spotify has no public lyric API, so lyrics for `remote` sources come from LRCLIB with a
+NetEase search fallback; a miss degrades to showing the track title, never to a failure.
+
 ## Consequences
 
 - The existing official-firmware Custom Apps continue to work unchanged until the user chooses
   to start a sideload session for the separate player.
+- Spotify requires the user to register their own developer app: the Client ID is theirs,
+  authorization is PKCE (no client secret exists to leak), and the only redirect URI Spotify
+  will accept over plaintext http is the loopback callback on the machine running the service.
+- Connect transport control requires a Spotify Premium account. A free account can still be
+  signed in and browsed; commands surface Spotify's `PREMIUM_REQUIRED` as a plain message.
 - The device player still depends on a LAN Pixel Studio service for NetEase access; the NetEase
   cookie is never copied to the clock.
 - Building the sideload bundle requires Windows and FlyThings IDE, followed by real-device audio,
