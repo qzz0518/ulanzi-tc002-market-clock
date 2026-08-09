@@ -142,19 +142,13 @@ function OptionEditor({
   onTimerPause,
 }: OptionEditorProps) {
   const visibleFields = definition.options.filter((field) => field.type !== "hidden");
-  const titleId = `content-options-${item.id}`;
+  const hasMetadata = item.contentId === "creative:pixel-asset" || item.contentId === "market:instrument";
 
   return (
-    <section className="content-options" aria-labelledby={titleId}>
-      <div className="subsection-heading">
-        <div>
-          <h3 id={titleId}>内容设置</h3>
-          <p>{contentTitle(item, definition, instrument)}</p>
-        </div>
-        {visibleFields.length === 0 && item.contentId !== "tools:timer" && (
-          <span>此内容无需额外设置</span>
-        )}
-      </div>
+    <section className="content-options" aria-label={`${contentTitle(item, definition, instrument)} 内容设置`}>
+      {visibleFields.length === 0 && item.contentId !== "tools:timer" && !hasMetadata && (
+        <p className="option-empty">此内容无需额外设置</p>
+      )}
       {(visibleFields.length > 0 || item.contentId === "tools:timer") && (
         <div className="option-grid">
           {visibleFields.map((field) => {
@@ -168,7 +162,7 @@ function OptionEditor({
                 <label key={field.key} className="option-field option-field--boolean">
                   <div className="option-copy">
                     <span className="option-label">{field.label}</span>
-                    {field.help && <span>{field.help}</span>}
+                    {field.help && <span className="option-help">{field.help}</span>}
                   </div>
                   <Switch
                     as="span"
@@ -182,7 +176,10 @@ function OptionEditor({
 
             return (
               <div key={field.key} className={cn("option-field", field.type === "text" && "option-field--wide")}>
-                <label htmlFor={controlId} className="option-label">{field.label}</label>
+                <div className="option-copy">
+                  <label htmlFor={controlId} className="option-label">{field.label}</label>
+                  {field.help && <span className="option-help">{field.help}</span>}
+                </div>
                 {field.type === "select" ? (
                   <Select
                     id={controlId}
@@ -219,7 +216,6 @@ function OptionEditor({
                     onChange={(nextValue) => onChange(field.key, nextValue)}
                   />
                 )}
-                {field.help && <span className="option-help">{field.help}</span>}
               </div>
             );
           })}
@@ -299,7 +295,6 @@ export function WorkspaceEditor({
     ? catalog.find((definition) => definition.id === selectedItem.contentId)
     : undefined;
   const totalDuration = channel.items.reduce((sum, item) => sum + item.durationMs, 0);
-  const effectiveRefresh = Math.max(channel.refreshIntervalMs, totalDuration);
   const previewLabel = previewScope === "item"
     ? selectedItem ? contentTitle(selectedItem, selectedDefinition, instrumentFor(selectedItem)) : "所选内容"
     : `完整轮播 · ${channel.items.length} 个内容`;
@@ -341,7 +336,6 @@ export function WorkspaceEditor({
             maxLength={48}
             onChange={(nextValue) => onChannelChange({ name: nextValue })}
           />
-          <span className="config-help">仅用于本页面识别。</span>
         </div>
         <div className="config-field">
           <label htmlFor="channel-app">时钟旋钮名称</label>
@@ -352,7 +346,6 @@ export function WorkspaceEditor({
             inputComponentProps={{ spellCheck: false, autoCapitalize: "none" }}
             onChange={(nextValue) => onChannelChange({ appName: nextValue })}
           />
-          <span className="config-help">设备旋钮列表中显示；限 1–32 位字母、数字、_ 或 -。</span>
         </div>
         <div className="config-field config-field--refresh">
           <label htmlFor="channel-refresh">内容刷新间隔</label>
@@ -366,7 +359,6 @@ export function WorkspaceEditor({
             ariaLabel="内容刷新间隔（秒）"
             onCommit={(nextValue) => onChannelChange({ refreshIntervalMs: Math.round(nextValue * 1_000) })}
           />
-          <span className="config-help">完整播放后才重新取数；当前实际最短 {seconds(effectiveRefresh)} 秒。</span>
         </div>
         <label className="config-field config-field--toggle" title="启用后显示在时钟旋钮列表中">
           <span className="option-label">启用频道</span>

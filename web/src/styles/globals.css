@@ -398,16 +398,15 @@
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
-.channel-config { display: grid; grid-template-columns: 1fr 1.22fr 1.25fr 0.9fr; border-bottom: 1px solid var(--border); }
-.config-field { display: flex; min-width: 0; min-height: 5.35rem; flex-direction: column; justify-content: center; gap: 0.3rem; padding: 0.55rem 0.75rem; }
+.channel-config { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
+.config-field { display: flex; min-width: 0; min-height: 4.6rem; flex-direction: column; justify-content: center; gap: 0.3rem; padding: 0.55rem 0.75rem; }
 .config-field + .config-field { border-left: 1px solid var(--border); }
 .config-field:first-child { padding-left: 0; }
+.config-field .number-scrubber { width: 100%; }
 .config-field--toggle { flex-direction: row; align-items: center; justify-content: space-between; gap: 0.75rem; }
-.config-field--toggle .option-label { max-width: 8rem; color: var(--foreground); line-height: 1.4; }
 .config-field--toggle, .option-field--boolean, .grid-toggle { cursor: pointer; }
 .config-field input { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .config-field > label, .config-field--toggle .option-label { font-size: 0.67rem; font-weight: 520; }
-.config-help { min-height: 1.3em; color: var(--muted-foreground); font-size: 0.56rem; line-height: 1.3; text-wrap: pretty; }
 
 .preview-section { padding-top: 0.75rem; }
 .preview-toolbar { display: flex; align-items: center; gap: 0.75rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border); }
@@ -467,15 +466,15 @@
 .playlist-item:focus-within .playlist-remove { opacity: 0.72; }
 
 .content-options { margin: 0 0.45rem 0.45rem 2.3rem; border: 1px solid var(--border); background: color-mix(in oklch, var(--card) 82%, transparent); animation: option-in 180ms ease-out both; }
-.content-options .subsection-heading { padding-inline: 0.7rem; }
+.content-options > .option-grid:last-child { margin-bottom: -1px; }
 .option-grid { display: grid; grid-template-columns: repeat(2, minmax(9rem, 1fr)); }
-.option-field { display: flex; min-width: 0; min-height: 4.5rem; flex-direction: column; justify-content: center; gap: 0.35rem; padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border); }
+.option-field { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 0.35rem 1rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
 .option-field + .option-field { border-left: 1px solid var(--border); }
-.option-field--wide { grid-column: span 2; }
-.option-field--boolean { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
-.option-copy { display: grid; gap: 0.35rem; }
-.option-copy span, .option-help { color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.35; }
+.option-field--wide { grid-column: span 2; flex-direction: column; align-items: stretch; }
+.option-copy { display: grid; min-width: 0; gap: 0.2rem; }
+.option-help { color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.35; }
 .option-label { color: var(--foreground); font-size: 0.72rem; }
+.option-empty { margin: 0; padding: 0.6rem 0.75rem; color: var(--muted-foreground); font-size: 0.62rem; }
 .option-field input, .option-field button { font-family: var(--mono); font-size: 0.72rem; }
 .timer-actions { grid-column: 1 / -1; display: flex; gap: 0.45rem; padding: 0.65rem 0.75rem; }
 
