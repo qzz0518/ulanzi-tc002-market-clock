@@ -341,7 +341,17 @@ describe("music player UI", () => {
     expect(css).toMatch(
       /\.music-playlist-popover > div:last-child\s*\{[^}]*max-height:\s*min\(18rem, calc\(100dvh - 2rem\)\) !important;/s,
     );
+    // 主题面板按自身宽度排版（容器查询），不看视口：它是右栏的一部分，宽度随分栏变化。
+    expect(css).toMatch(/\.music-theme-panel\s*\{[^}]*container-type:\s*inline-size;/s);
+    expect(css).toMatch(/\.music-theme-panel__group\s*\{[^}]*container-type:\s*inline-size;/s);
+    // 窄面板两组堆叠、每组 2×2；宽面板两组并排、每组 4 列——横向吃满且不出现 3+1 断行。
     expect(css).toMatch(/\.music-theme-options\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/s);
+    expect(css).toMatch(
+      /@container \(min-width: 38rem\)[\s\S]*?\.music-theme-options\s*\{[^}]*grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\);/,
+    );
+    expect(css).toMatch(
+      /@container \(min-width: 50rem\)[\s\S]*?\.music-theme-panel__groups\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/,
+    );
     expect(css).not.toMatch(/\.music-theme-option__content\s*\{[^}]*min-height:/s);
   });
 

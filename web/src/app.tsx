@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListOrdered, Plus, RefreshCw, RotateCw } from "lucide-react";
-import { Button, Tab, Tabs, TabsList } from "@cladd-ui/react";
+import { Button, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
 import { api, jsonApi } from "@/lib/api";
 import { createLatestTaskRunner } from "@/lib/latest-task-runner";
 import {
@@ -880,17 +880,17 @@ export function App() {
               value={mobileConsolePane}
               onValueChange={(value) => showMobileConsolePane(value as MobileConsolePane)}
             >
-              <TabsList
-                className="mobile-console-tabs"
-                size="sm"
-                rounded
-                activeColor="brand"
-                activeVariant="solid-fill"
-                activeOutline={false}
+              <SurfaceCut
+                className="segmented-track mobile-console-tabs"
+                color="neutral"
+                outline={false}
+                contentClassName="segmented-track__content"
               >
-                <Tab value="compose"><ListOrdered />频道编排</Tab>
-                <Tab value="catalog"><Plus />添加内容</Tab>
-              </TabsList>
+                <TabsList size="md" rounded activeColor="brand">
+                  <Tab value="compose"><ListOrdered />频道编排</Tab>
+                  <Tab value="catalog"><Plus />添加内容</Tab>
+                </TabsList>
+              </SurfaceCut>
             </Tabs>
           </nav>
         )}

@@ -1,7 +1,8 @@
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AppWindow, Check, LoaderCircle, Plus, Search } from "lucide-react";
 import { Button, Input, Select, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
+import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
 import type {
   ContentCatalogEntry,
@@ -77,8 +78,16 @@ export function ContentMarket({
   const [results, setResults] = useState<MarketSearchCandidate[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
   const [registering, setRegistering] = useState<string | null>(null);
   const searchSequence = useRef(0);
+  const toast = useAppToast();
+
+  // 切换分类会把搜索表单整个隐藏；不清掉的话，切回来还挂着上一轮的提示。
+  useEffect(() => {
+    setNotice(null);
+    setSearched(false);
+  }, [category]);
 
   const searchMarkets = async (event: FormEvent) => {
     event.preventDefault();
@@ -93,11 +102,15 @@ export function ContentMarket({
       const response = await jsonApi<SearchResponse>(`/api/market/search?${parameters}`);
       if (sequence !== searchSequence.current) return;
       setResults(response.results);
-      setNotice(response.notice ?? (response.results.length === 0 ? "没有找到可添加的资产。" : null));
+      setSearched(true);
+      // 只保留服务端给的说明性提示；「没找到」交给结果区的空状态表达。
+      setNotice(response.notice ?? null);
     } catch (error) {
       if (sequence !== searchSequence.current) return;
       setResults([]);
-      setNotice(errorMessage(error));
+      setSearched(false);
+      setNotice(null);
+      toast.error("资产搜索失败", { description: errorMessage(error) });
     } finally {
       if (sequence === searchSequence.current) setSearching(false);
     }
@@ -106,7 +119,6 @@ export function ContentMarket({
   const register = async (candidate: MarketSearchCandidate, standalone: boolean) => {
     const action = `${standalone ? "standalone" : "add"}:${candidate.candidateRef}`;
     setRegistering(action);
-    setNotice(null);
     try {
       const known = registeredByCanonical.get(candidate.canonicalKey);
       const instrument = known ?? (await jsonApi<RegisterResponse>("/api/market/instruments", {
@@ -117,7 +129,7 @@ export function ContentMarket({
       if (standalone) onStandaloneInstrument(instrument);
       else onAddInstrument(instrument);
     } catch (error) {
-      setNotice(errorMessage(error));
+      toast.error(standalone ? "创建独立 App 失败" : "加入频道失败", { description: errorMessage(error) });
     } finally {
       setRegistering(null);
     }
@@ -130,16 +142,13 @@ export function ContentMarket({
         <span>当前分类 {contents.length} 项</span>
       </div>
       <Tabs value={category} onValueChange={(value) => onCategoryChange(value as ContentCategory)}>
-        <SurfaceCut className="market-filter" color="neutral" outline={false} contentClassName="market-filter__content">
-          <TabsList
-            className="market-tabs"
-            aria-label="内容分类"
-            size="sm"
-            rounded
-            activeColor="brand"
-            activeVariant="solid-fill"
-            activeOutline={false}
-          >
+        <SurfaceCut
+          className="segmented-track market-filter"
+          color="neutral"
+          outline={false}
+          contentClassName="segmented-track__content"
+        >
+          <TabsList className="market-tabs" aria-label="内容分类" size="sm" rounded activeColor="brand">
             {categories.map((entry) => (
               <Tab key={entry.id} value={entry.id}>{entry.label}</Tab>
             ))}
@@ -173,6 +182,8 @@ export function ContentMarket({
                 onChange={(nextValue) => {
                   searchSequence.current += 1;
                   setSearching(false);
+                  setNotice(null);
+                  setSearched(false);
                   setQuery(nextValue);
                 }}
               />
@@ -188,6 +199,8 @@ export function ContentMarket({
                 onChange={(nextValue) => {
                   searchSequence.current += 1;
                   setSearching(false);
+                  setNotice(null);
+                  setSearched(false);
                   setSearchKind(nextValue);
                 }}
               >
@@ -199,6 +212,9 @@ export function ContentMarket({
               </Button>
             </form>
             {notice && <p className="instrument-search__notice" role="status">{notice}</p>}
+            {searched && !searching && results.length === 0 && (
+              <p className="instrument-search__notice" role="status">没有找到可添加的资产，换个代码或名称再试。</p>
+            )}
             {results.length > 0 && (
               <div className="instrument-results" aria-label="资产搜索结果">
                 {results.map((candidate) => {

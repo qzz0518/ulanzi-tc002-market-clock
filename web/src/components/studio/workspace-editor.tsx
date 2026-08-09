@@ -17,6 +17,7 @@ import {
   Input,
   NumberScrubber,
   Select,
+  SurfaceCut,
   Switch,
   Tab,
   Tabs,
@@ -222,7 +223,7 @@ function OptionEditor({
 
           {item.contentId === "tools:timer" && (
             <div className="timer-actions">
-              <Button type="button" color="brand" variant="solid-fill" size="sm" onClick={onTimerStart}><Play />从头开始</Button>
+              <Button type="button" color="brand" size="sm" onClick={onTimerStart}><Play />从头开始</Button>
               <Button type="button" size="sm" onClick={onTimerPause}><Pause />暂停</Button>
             </div>
           )}
@@ -379,25 +380,21 @@ export function WorkspaceEditor({
           </div>
           {channel.items.length > 1 && (
             <Tabs value={previewScope} onValueChange={(value) => onPreviewScopeChange(value as PreviewScope)}>
-              <TabsList
-                className="preview-scope"
-                aria-label="预览范围"
-                size="sm"
-                activeColor="brand"
-                activeVariant="solid-fill"
-                activeOutline={false}
+              <SurfaceCut
+                className="segmented-track preview-scope"
+                color="neutral"
+                outline={false}
+                contentClassName="segmented-track__content"
               >
-                <Tab value="item">所选内容</Tab>
-                <Tab value="channel">完整轮播</Tab>
-              </TabsList>
+                <TabsList aria-label="预览范围" size="sm" activeColor="brand">
+                  <Tab value="item">所选内容</Tab>
+                  <Tab value="channel">完整轮播</Tab>
+                </TabsList>
+              </SurfaceCut>
             </Tabs>
           )}
           <Button
             type="button"
-            color="neutral"
-            variant="transparent"
-            outline={false}
-            size="sm"
             className="mobile-preview-toggle"
             aria-expanded={mobilePreviewOpen}
             aria-controls="channel-device-preview"
@@ -484,7 +481,6 @@ export function WorkspaceEditor({
           <Button
             type="button"
             color="brand"
-            size="sm"
             className="mobile-add-content"
             onClick={onOpenCatalog}
           >

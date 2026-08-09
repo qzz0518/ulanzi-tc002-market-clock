@@ -286,7 +286,7 @@ export function CanvasWorkspace({
     setPixels(previous);
     setHistory((current) => current.slice(0, -1));
     setSelection(null);
-    setStatus("已撤销。");
+    toast.success("已撤销");
   };
 
   const redo = () => {
@@ -296,24 +296,24 @@ export function CanvasWorkspace({
     setPixels(next);
     setFuture((current) => current.slice(0, -1));
     setSelection(null);
-    setStatus("已重做。");
+    toast.success("已重做");
   };
 
   const clear = () => {
     snapshot();
     setPixels(new Array(PIXEL_COUNT).fill(0));
     setSelection(null);
-    setStatus("画布已清空，可撤销恢复。");
+    toast.success("画布已清空", { description: "可以撤销恢复。" });
   };
 
   const placeText = (x: number, y: number) => {
     if (!canvasText) {
-      setStatus("请先输入 ASCII 文字。");
+      toast.error("请先输入 ASCII 文字");
       return;
     }
     const bitmap = renderPixelText(canvasText, fontHeight);
     if (!bitmap.on.some((value) => value === 1)) {
-      setStatus("没有可显示的字符；设备像素字体仅支持 ASCII。");
+      toast.error("没有可显示的字符", { description: "设备像素字体仅支持 ASCII。" });
       return;
     }
     snapshot();
@@ -365,7 +365,7 @@ export function CanvasWorkspace({
 
   const generateImage = () => {
     if (!imageView) {
-      setStatus("请先上传一张图片。");
+      toast.error("请先上传一张图片");
       return;
     }
     const block = pixelizeImage(imageView, {
@@ -376,7 +376,7 @@ export function CanvasWorkspace({
       palette: PALETTE,
     });
     if (!block) {
-      setStatus("没有识别到主体；可换图，或开启“暗色作为主体”。");
+      toast.error("没有识别到主体", { description: "可以换一张图，或开启「暗色作为主体」。" });
       return;
     }
     snapshot();
@@ -414,7 +414,7 @@ export function CanvasWorkspace({
     link.download = "tc002-canvas.png";
     link.href = output.toDataURL("image/png");
     link.click();
-    setStatus(`已按 ${exportScale}× 倍率导出 PNG。`);
+    toast.success(`已按 ${exportScale}× 倍率导出 PNG`);
   };
 
   const finishPointerAction = () => {
@@ -462,7 +462,7 @@ export function CanvasWorkspace({
       return;
     }
     if (tool === "image") {
-      setStatus("请从右侧的图片工具生成像素块。");
+      toast.error("请先从右侧的图片工具生成像素块");
       return;
     }
 
@@ -531,7 +531,6 @@ export function CanvasWorkspace({
 
   const writeToChannel = () => {
     onApply(pixels);
-    setStatus(`已写入到“${targetChannelName}”；自动保存后可推送到时钟。`);
   };
 
   return (
@@ -595,11 +594,11 @@ export function CanvasWorkspace({
 
         <section className="canvas-controls" aria-label="画板工具">
           <div className="canvas-toolset" role="toolbar" aria-label="绘制工具">
-            <Button type="button" size="sm" aria-pressed={tool === "pen"} color={tool === "pen" ? "brand" : "neutral"} variant={tool === "pen" ? "solid-fill" : "gradient"} onClick={() => activateTool("pen")}><Pencil />画笔</Button>
-            <Button type="button" size="sm" aria-pressed={tool === "eraser"} color={tool === "eraser" ? "brand" : "neutral"} variant={tool === "eraser" ? "solid-fill" : "gradient"} onClick={() => activateTool("eraser")}><Eraser />橡皮</Button>
-            <Button type="button" size="sm" aria-pressed={tool === "select"} color={tool === "select" ? "brand" : "neutral"} variant={tool === "select" ? "solid-fill" : "gradient"} onClick={() => activateTool("select")}><Move />选择</Button>
-            <Button type="button" size="sm" aria-pressed={tool === "text"} color={tool === "text" ? "brand" : "neutral"} variant={tool === "text" ? "solid-fill" : "gradient"} onClick={() => activateTool("text")}><Type />文字</Button>
-            <Button type="button" size="sm" aria-pressed={tool === "image"} color={tool === "image" ? "brand" : "neutral"} variant={tool === "image" ? "solid-fill" : "gradient"} onClick={() => activateTool("image")}><ImagePlus />图片</Button>
+            <Button type="button" size="sm" aria-pressed={tool === "pen"} color={tool === "pen" ? "brand" : "neutral"} onClick={() => activateTool("pen")}><Pencil />画笔</Button>
+            <Button type="button" size="sm" aria-pressed={tool === "eraser"} color={tool === "eraser" ? "brand" : "neutral"} onClick={() => activateTool("eraser")}><Eraser />橡皮</Button>
+            <Button type="button" size="sm" aria-pressed={tool === "select"} color={tool === "select" ? "brand" : "neutral"} onClick={() => activateTool("select")}><Move />选择</Button>
+            <Button type="button" size="sm" aria-pressed={tool === "text"} color={tool === "text" ? "brand" : "neutral"} onClick={() => activateTool("text")}><Type />文字</Button>
+            <Button type="button" size="sm" aria-pressed={tool === "image"} color={tool === "image" ? "brand" : "neutral"} onClick={() => activateTool("image")}><ImagePlus />图片</Button>
           </div>
           <div className="palette" aria-label="颜色">
             {PALETTE.map((value) => (
@@ -633,7 +632,7 @@ export function CanvasWorkspace({
             <Button type="button" variant="transparent" outline={false} size="sm" square disabled={future.length === 0} onClick={redo} aria-label="重做" title="重做"><Redo2 /></Button>
             <Button type="button" color="red" variant="transparent" outline={false} size="sm" square onClick={clear} aria-label="清空画布" title="清空画布"><Trash2 /></Button>
           </div>
-          <Button type="button" color="brand" variant="solid-fill" size="sm" onClick={writeToChannel}><Save />写入到所选频道</Button>
+          <Button type="button" color="brand" size="sm" onClick={writeToChannel}><Save />写入到所选频道</Button>
         </section>
 
         <p className="canvas-status" aria-live="polite">{status}</p>
@@ -667,7 +666,7 @@ export function CanvasWorkspace({
                 {fontHeight}px
               </Select>
             </label>
-            <Button type="button" color={tool === "text" ? "brand" : "neutral"} variant={tool === "text" ? "solid-fill" : "gradient"} onClick={() => activateTool("text")}><Type />在画布上落字</Button>
+            <Button type="button" color={tool === "text" ? "brand" : "neutral"} onClick={() => activateTool("text")}><Type />在画布上落字</Button>
           </section>
 
           <section className={cn("canvas-inspector-section", tool === "image" && "is-active")}>
@@ -730,7 +729,7 @@ export function CanvasWorkspace({
               <span><strong>暗色作为主体</strong><small>适合纯黑 Logo</small></span>
               <Switch as="span" input checked={invertImage} onChange={setInvertImage} />
             </label>
-            <Button type="button" color="brand" variant="solid-fill" disabled={!imageView} onClick={generateImage}><ImagePlus />生成到画布</Button>
+            <Button type="button" color="brand" disabled={!imageView} onClick={generateImage}><ImagePlus />生成到画布</Button>
           </section>
 
           <section className="canvas-inspector-section">

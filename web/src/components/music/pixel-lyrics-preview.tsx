@@ -1,5 +1,5 @@
 import { Button, Chip, ColorPicker, ToggleButton, ToggleGroup } from "@cladd-ui/react";
-import { AudioLines, Monitor, MoveHorizontal, Radar, Radio, Rows3 } from "lucide-react";
+import { AudioLines, Check, Monitor, MoveHorizontal, Radar, Radio, Rows3 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { FULL_WIDTH_CELL, GLYPH_HEIGHT, glyphCellWidth, glyphRows } from "@/lib/pixel-glyphs";
 import {
@@ -674,86 +674,90 @@ export function MusicThemePanel({
         </Chip>
       </header>
 
-      <div className="music-theme-panel__group">
-        <span className="music-theme-panel__label" id="music-theme-mode-label">显示形式</span>
-        <ToggleGroup
-          className="music-theme-options"
-          value={mode}
-          size="lg"
-          rounded={false}
-          variant="transparent"
-          outline={false}
-          activeVariant="gradient"
-          activeOutline
-          role="group"
-          aria-labelledby="music-theme-mode-label"
-          onValueChange={(nextValue) => {
-            if (typeof nextValue === "string" && isMusicMode(nextValue)) onModeChange(nextValue);
-          }}
-        >
-          {MUSIC_MODES.map((item) => {
-            const Icon = MODE_ICON[item.id];
-            return (
-              <ToggleButton
-                key={item.id}
-                value={item.id}
-                className="music-theme-option"
-                contentClassName="music-theme-option__content"
-                activeColor="lime"
-                aria-label={item.name + "，" + item.note}
-              >
-                <Icon aria-hidden="true" />
-                <span className="music-theme-option__text">
-                  <strong>{item.name}</strong>
-                  <small>{item.note}</small>
-                </span>
-              </ToggleButton>
-            );
-          })}
-        </ToggleGroup>
-      </div>
+      <div className="music-theme-panel__groups">
+        <div className="music-theme-panel__group">
+          <span className="music-theme-panel__label" id="music-theme-mode-label">显示形式</span>
+          <ToggleGroup
+            className="music-theme-options"
+            value={mode}
+            size="lg"
+            rounded={false}
+            variant="transparent"
+            outline
+            activeVariant="gradient"
+            activeOutline
+            role="group"
+            aria-labelledby="music-theme-mode-label"
+            onValueChange={(nextValue) => {
+              if (typeof nextValue === "string" && isMusicMode(nextValue)) onModeChange(nextValue);
+            }}
+          >
+            {MUSIC_MODES.map((item) => {
+              const Icon = MODE_ICON[item.id];
+              return (
+                <ToggleButton
+                  key={item.id}
+                  value={item.id}
+                  className="music-theme-option"
+                  contentClassName="music-theme-option__content"
+                  activeColor="lime"
+                  aria-label={item.name + "，" + item.note}
+                >
+                  <Icon aria-hidden="true" />
+                  <span className="music-theme-option__text">
+                    <strong>{item.name}</strong>
+                    <small>{item.note}</small>
+                  </span>
+                  {mode === item.id && <Check className="music-theme-option__check" aria-hidden="true" />}
+                </ToggleButton>
+              );
+            })}
+          </ToggleGroup>
+        </div>
 
-      <div className="music-theme-panel__group">
-        <span className="music-theme-panel__label" id="music-theme-skin-label">像素配色</span>
-        <ToggleGroup
-          className="music-theme-options"
-          value={skin}
-          size="lg"
-          rounded={false}
-          variant="transparent"
-          outline={false}
-          activeVariant="gradient"
-          activeOutline
-          role="group"
-          aria-labelledby="music-theme-skin-label"
-          onValueChange={(nextValue) => {
-            if (typeof nextValue === "string" && isMusicSkin(nextValue)) onSkinChange(nextValue);
-          }}
-        >
-          {MUSIC_SKINS.map((item) => {
-            const pal = PALETTES[item.id];
-            return (
-              <ToggleButton
-                key={item.id}
-                value={item.id}
-                className="music-theme-option"
-                contentClassName="music-theme-option__content"
-                activeColor={item.color}
-                aria-label={item.name + "，" + item.note}
-              >
-                <span className="music-theme-swatch" aria-hidden="true">
-                  <i style={{ background: pal.primary }} />
-                  <i style={{ background: pal.secondary }} />
-                  <i style={{ background: pal.context }} />
-                </span>
-                <span className="music-theme-option__text">
-                  <strong>{item.name}</strong>
-                  <small>{item.note}</small>
-                </span>
-              </ToggleButton>
-            );
-          })}
-        </ToggleGroup>
+        <div className="music-theme-panel__group">
+          <span className="music-theme-panel__label" id="music-theme-skin-label">像素配色</span>
+          <ToggleGroup
+            className="music-theme-options"
+            value={skin}
+            size="lg"
+            rounded={false}
+            variant="transparent"
+            outline
+            activeVariant="gradient"
+            activeOutline
+            role="group"
+            aria-labelledby="music-theme-skin-label"
+            onValueChange={(nextValue) => {
+              if (typeof nextValue === "string" && isMusicSkin(nextValue)) onSkinChange(nextValue);
+            }}
+          >
+            {MUSIC_SKINS.map((item) => {
+              const pal = PALETTES[item.id];
+              return (
+                <ToggleButton
+                  key={item.id}
+                  value={item.id}
+                  className="music-theme-option"
+                  contentClassName="music-theme-option__content"
+                  activeColor={item.color}
+                  aria-label={item.name + "，" + item.note}
+                >
+                  <span className="music-theme-swatch" aria-hidden="true">
+                    <i style={{ background: pal.primary }} />
+                    <i style={{ background: pal.secondary }} />
+                    <i style={{ background: pal.context }} />
+                  </span>
+                  <span className="music-theme-option__text">
+                    <strong>{item.name}</strong>
+                    <small>{item.note}</small>
+                  </span>
+                  {skin === item.id && <Check className="music-theme-option__check" aria-hidden="true" />}
+                </ToggleButton>
+              );
+            })}
+          </ToggleGroup>
+        </div>
       </div>
 
       <div className="music-theme-panel__accent">

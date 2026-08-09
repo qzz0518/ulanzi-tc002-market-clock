@@ -547,8 +547,12 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
     }
     let cancelled = false;
     void jsonApi<{ playlists: MusicPlaylist[] }>("/api/music/playlists")
-      .then((result) => { if (!cancelled) setPlaylists(result.playlists); })
-      .catch((error) => { if (!cancelled) setLibraryError(errorMessage(error)); });
+      .then((result) => {
+        if (cancelled) return;
+        setPlaylists(result.playlists);
+        setLibraryError(null);
+      })
+      .catch((error) => { if (!cancelled) setLibraryError(`歌单加载失败：${errorMessage(error)}`); });
     return () => { cancelled = true; };
   }, [activeProviderId, session?.loggedIn]);
 
@@ -566,6 +570,7 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
           },
         );
         if (cancelled) return;
+        setSessionError(null);
         setQrState(result.login.state);
         if (result.login.state === "confirmed" && result.login.profile) {
           setSession({ loggedIn: true, profile: result.login.profile });
@@ -1764,7 +1769,7 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
                       className="music-mirror-toggle"
                       size="sm"
                       color={mirrorOn ? "brand" : "neutral"}
-                      variant={mirrorOn ? "solid-fill" : "transparent"}
+                      variant="transparent"
                       outline
                       tightFocusRing
                       aria-pressed={mirrorOn}

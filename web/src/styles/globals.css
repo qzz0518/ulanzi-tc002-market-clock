@@ -310,15 +310,13 @@
   cursor: pointer;
 }
 .device-settings-number { width: 8rem; }
-.device-settings-validation,
-.device-settings-inline-error {
+.device-settings-validation {
   margin: 0;
   padding: 0.65rem 1.25rem;
   border-top: 1px solid color-mix(in oklch, var(--destructive) 30%, var(--border));
   color: var(--destructive);
   font-size: 0.65rem;
 }
-.device-settings-inline-error { border-top: 0; border-bottom: 1px solid var(--border); }
 .device-settings-actions {
   display: flex;
   width: 100%;
@@ -482,10 +480,20 @@
 .market-heading { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0.25rem 0.65rem; }
 .market-heading h2 { margin: 0; font-size: 1rem; font-weight: 580; letter-spacing: -0.025em; }
 .market-heading span { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.66rem; }
-.market-filter { margin: 0 0.15rem 0.55rem; border-radius: 999px; }
-.market-filter__content { padding: 0.2rem; }
-.market-tabs { display: grid; width: 100%; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.market-tabs button { min-width: 0; padding-inline: 0.2rem; font-size: 0.68rem; }
+/* 分段控件的凹槽轨道：内容分类、手机端工作区切换、预览范围三处共用。
+   底色和圆角由 cladd 的 SurfaceCut 负责，这里只管排布——不再各自手搓 background。 */
+.segmented-track { border-radius: 999px; }
+.segmented-track__content { padding: 0.2rem; }
+.segmented-track__content > * {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  width: 100%;
+}
+.segmented-track button { min-width: 0; justify-content: center; }
+
+.market-filter { margin: 0 0.15rem 0.55rem; }
+.market-tabs button { padding-inline: 0.2rem; }
 .market-scroll { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: transparent transparent; scrollbar-width: thin; }
 .instrument-search { display: grid; gap: 0.65rem; padding: 0.75rem 0.25rem 0.9rem; border-bottom: 1px solid var(--border); }
 .instrument-search__copy { display: grid; gap: 0.22rem; }
@@ -496,7 +504,7 @@
 .instrument-search__input-control, .instrument-search__kind { font-family: var(--mono); font-size: 0.64rem; }
 .instrument-search__kind { width: 100%; }
 .instrument-search__kind [data-part="value"] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.instrument-search__form button { min-width: 4.6rem; padding-inline: 0.45rem; font-size: 0.64rem; }
+.instrument-search__form button { min-width: 4.6rem; padding-inline: 0.45rem; }
 .instrument-search__form button svg { width: 0.75rem; height: 0.75rem; }
 .instrument-search__notice { margin: 0; padding: 0.45rem 0.55rem; border-radius: 0.4rem; background: var(--muted); color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.4; }
 .instrument-results { display: grid; border-top: 1px solid var(--border); }
@@ -513,8 +521,8 @@
 .market-added { display: inline-flex; align-items: center; gap: 0.18rem; margin-left: auto; color: var(--muted-foreground); font-size: 0.52rem; white-space: nowrap; }
 .market-added svg { width: 0.68rem; height: 0.68rem; }
 .market-item p { min-height: 2.8em; margin: 0.4rem 0 0.65rem; color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.48; }
-.market-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem; }
-.market-actions button { min-width: 0; padding-inline: 0.4rem; font-size: 0.65rem; }
+.market-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.35rem; }
+.market-actions button { min-width: 0; padding-inline: 0.4rem; }
 .market-actions svg { width: 0.78rem; height: 0.78rem; }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 .is-spinning { animation: ui-spin 800ms linear infinite; }
@@ -533,11 +541,11 @@
 .pixel-library-controls { display: grid; gap: 0.55rem; padding-block: 0.75rem; border-block: 1px solid var(--border); }
 .pixel-library-link, .pixel-library-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.35rem; }
 .pixel-library-link input, .pixel-library-search input { min-width: 0; font-family: var(--mono); font-size: 0.7rem; }
-.pixel-library-link button { min-width: 8.5rem; padding-inline: 0.75rem; font-size: 0.68rem; }
+.pixel-library-link button { min-width: 8.5rem; padding-inline: 0.75rem; }
 .pixel-library-link button svg, .pixel-library-search button svg { width: 0.82rem; height: 0.82rem; }
 .pixel-library-discovery { display: grid; grid-template-columns: minmax(14rem, 1fr) auto; gap: 0.55rem; }
 .pixel-library-filters { display: grid; grid-template-columns: repeat(2, 7rem); gap: 0.35rem; }
-.pixel-library-filters button { width: 100%; min-width: 0; font-size: 0.68rem; }
+.pixel-library-filters button { width: 100%; min-width: 0; }
 .pixel-library-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; opacity: 1; transition: opacity 140ms ease; }
 .pixel-library-list[aria-busy="true"] { opacity: 0.55; }
 .pixel-library-card { display: grid; align-content: start; gap: 0.6rem; min-width: 0; padding-bottom: 0.9rem; border-bottom: 1px solid var(--border); }
@@ -549,8 +557,8 @@
 .pixel-library-copy strong, .pixel-library-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pixel-library-copy strong { font-size: 0.8rem; font-weight: 570; }
 .pixel-library-copy span { color: var(--muted-foreground); font-size: 0.62rem; }
-.pixel-library-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem; }
-.pixel-library-actions button { min-width: 0; padding-inline: 0.45rem; font-size: 0.65rem; }
+.pixel-library-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.35rem; }
+.pixel-library-actions button { min-width: 0; padding-inline: 0.45rem; }
 .pixel-library-actions svg { width: 0.78rem; height: 0.78rem; }
 .pixel-library-pagination { display: flex; align-items: center; justify-content: center; gap: 0.55rem; }
 .pixel-library-pagination span { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.62rem; }
@@ -671,6 +679,21 @@
 }
 
 @media (max-width: 52rem) {
+  /* 手机端整体上移一档尺度。cladd 的高度、圆角、内嵌元素都从这几个 token 推导，
+     所以改 token 能让三者同步放大；旧写法逐处 min-height: 2.75rem 只撑高度，
+     结果是 44px 的按钮配 24px 档的圆角和字号——那才是「按钮风格混乱」的根。 */
+  :root {
+    --spacing-cladd-sm: 28px;
+    --spacing-cladd-md: 32px;
+    --spacing-cladd-lg: 36px;
+    --cladd-radius: 8px;
+  }
+
+  /* 触控行为统一交给一条规则，不再逐个组件点名（漏点名就是 24px/44px 错位的来源）。 */
+  .studio-page :is(.cladd-button, .cladd-input, .cladd-select, .cladd-number-scrubber, button) {
+    touch-action: manipulation;
+  }
+
   .studio-page {
     display: block;
     min-height: 100dvh;
@@ -703,34 +726,38 @@
     box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14);
     backdrop-filter: blur(1rem);
   }
-  .main-tabs button { min-width: 0; min-height: 2.75rem; justify-content: center; touch-action: manipulation; }
+  /* 底部主导航是全 App 的拇指落点，唯一保留大于尺度档的触控高度。 */
+  .main-tabs button { min-width: 0; min-height: 2.75rem; justify-content: center; }
   .header-actions { grid-column: 2; grid-row: 1; }
   .brand-device { display: none; }
-  .device-settings-trigger { min-width: 2.75rem; min-height: 2.75rem; }
-  .page-heading { display: block; padding: 0.9rem 0 0.8rem; }
-  .page-heading h1 { font-size: 1.62rem; }
-  .page-heading p { margin-top: 0.35rem; }
+  .device-settings-trigger { min-width: 2.75rem; }
+  .page-heading { display: block; padding: 0.7rem 0 0.55rem; }
+  .page-heading span { display: none; }
+  .page-heading h1 { font-size: 1.12rem; letter-spacing: -0.02em; }
+  .page-heading p { display: none; }
   .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library { display: block; padding-top: 0; }
-  .channel-sidebar { display: block; padding: 0.6rem 0 0.55rem; border-right: 0; border-bottom: 0; }
+  .channel-sidebar { display: block; padding: 0.5rem 0 0.45rem; border-right: 0; border-bottom: 0; }
   .section-kicker { display: none; }
   .channel-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scrollbar-width: none; }
   .channel-scroll::-webkit-scrollbar { display: none; }
   .channel-list { display: flex; gap: 0.45rem; padding: 0 0 0.05rem; scroll-snap-type: x proximity; }
-  .channel-entry { flex: 0 0 min(70vw, 12.5rem); min-height: 3.6rem; overflow: hidden; border: 1px solid var(--border); border-left-width: 1px; border-radius: var(--radius-md); scroll-snap-align: start; }
+  .channel-entry { flex: 0 0 min(56vw, 11rem); min-height: 3rem; overflow: hidden; border: 1px solid var(--border); border-left-width: 1px; border-radius: var(--radius-cladd-md); scroll-snap-align: start; }
   .channel-entry.is-active { border-color: color-mix(in oklch, var(--primary) 48%, var(--border)); box-shadow: inset 3px 0 var(--primary); }
-  .channel-select { min-height: 3.6rem; padding-block: 0.55rem; touch-action: manipulation; }
+  .channel-select { min-height: 3rem; padding-block: 0.45rem; }
   .channel-delete { width: 2.75rem; height: 2.75rem; opacity: 0.72; }
   .add-channel--desktop { display: none !important; }
   .add-channel--mobile {
     display: inline-flex !important;
+    /* 与频道卡片同排：高度交给 flex 拉伸（cladd Button 自带固定高度，
+       必须 height:auto 才能对齐），宽度按卡片比例取一半。 */
     width: auto;
-    min-width: 8rem;
-    min-height: 3.6rem;
-    flex: 0 0 8rem;
+    height: auto;
+    min-width: 0;
+    align-self: stretch;
+    flex: 0 0 min(56vw, 11rem);
     margin-top: 0;
     border: 1px dashed color-mix(in oklch, var(--primary) 42%, var(--border));
     scroll-snap-align: start;
-    touch-action: manipulation;
   }
   .mobile-console-navigation {
     position: sticky;
@@ -742,15 +769,7 @@
     background: color-mix(in oklch, var(--background) 96%, transparent);
     backdrop-filter: blur(0.9rem);
   }
-  .mobile-console-tabs {
-    display: grid;
-    width: 100%;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 0.22rem;
-    border-radius: 999px;
-    background: var(--muted);
-  }
-  .mobile-console-tabs button { min-width: 0; min-height: 2.75rem; justify-content: center; touch-action: manipulation; }
+  .mobile-console-tabs { width: 100%; }
   .mobile-console-tabs svg { width: 0.86rem; height: 0.86rem; }
   .mobile-pane-compose .content-market { display: none; }
   .mobile-pane-catalog .workspace-editor { display: none; }
@@ -771,19 +790,18 @@
   .mobile-channel-settings-trigger {
     display: flex !important;
     width: 100%;
-    min-height: 3.8rem;
+    min-height: 3rem;
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    margin-top: 0.65rem;
-    padding: 0.65rem 0.8rem;
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-cladd-md);
     background: color-mix(in oklch, var(--muted) 58%, transparent);
     text-align: left;
-    touch-action: manipulation;
   }
-  .mobile-channel-settings-trigger__copy { display: grid; min-width: 0; gap: 0.2rem; }
+  .mobile-channel-settings-trigger__copy { display: grid; min-width: 0; flex: 1; gap: 0.2rem; justify-items: start; text-align: left; }
   .mobile-channel-settings-trigger__copy > span { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; font-weight: 570; }
   .mobile-channel-settings-trigger__copy svg { width: 0.85rem; height: 0.85rem; color: var(--primary); }
   .mobile-channel-settings-trigger__copy small { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
@@ -794,56 +812,64 @@
   .channel-config:not(.is-mobile-collapsed) { margin-top: 0.45rem; border: 1px solid var(--border); border-radius: var(--radius-md); }
   .config-field:first-child { padding-left: 0.9rem; }
   .config-field:nth-child(3) { border-left: 0; }
-  .preview-section { padding-top: 0.65rem; }
+  .preview-section { padding-top: 0.5rem; }
   .preview-toolbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: start;
-    gap: 0.55rem;
-    padding: 0.7rem 0;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0;
   }
   .canvas-toolbar { align-items: flex-start; flex-wrap: wrap; gap: 0.55rem; }
-  .preview-copy { grid-column: 1 / -1; grid-row: 1; }
-  .preview-scope { grid-column: 1; grid-row: 2; justify-self: start; }
+  .preview-toolbar .preview-copy { display: none; }
+  .preview-scope { grid-column: 1; grid-row: 1; justify-self: start; }
   .mobile-preview-toggle {
     display: inline-flex !important;
     grid-column: 2;
-    grid-row: 2;
-    min-height: 2.75rem;
-    align-self: start;
-    touch-action: manipulation;
+    grid-row: 1;
+    align-self: center;
   }
   .mobile-preview-toggle svg { width: 0.85rem; height: 0.85rem; }
-  .workspace-actions { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto auto; margin-left: 0; }
-  .preview-toolbar .workspace-actions { grid-column: 1 / -1; grid-row: 3; }
+  /* 用 flex 而不是三列 grid：预览按钮不存在时，grid 的空列仍会在按钮右侧
+     留下一个 gap，导致推送频道比同屏其它按钮少对齐 7.2px。 */
+  .workspace-actions { display: flex; width: 100%; align-items: center; margin-left: 0; }
+  .workspace-actions .action-status { margin-right: auto; }
+  .preview-toolbar .workspace-actions { grid-column: 1 / -1; grid-row: 2; }
   .action-status { margin-right: auto; justify-items: start; }
-  .workspace-actions > button { min-width: 7rem; min-height: 2.75rem; padding-inline: 0.45rem; touch-action: manipulation; }
-  .preview-scope button { min-height: 2.75rem; }
+  .workspace-actions > button { min-width: 7rem; padding-inline: 0.7rem; }
+  .preview-scope button { padding-inline: 0.8rem; }
   .device-stage.is-mobile-collapsed { display: none; }
   .device-stage:not(.is-mobile-collapsed) { padding-top: 0.7rem; }
   .playlist-section { margin-top: 0.45rem; scroll-margin-top: calc(8.25rem + env(safe-area-inset-top)); }
   .playlist-section > .subsection-heading { align-items: center; }
   .playlist-heading-copy { display: grid; width: auto; justify-content: start; gap: 0.18rem; }
-  .mobile-add-content { display: inline-flex !important; min-height: 2.75rem; flex: none; touch-action: manipulation; }
+  .mobile-add-content { display: inline-flex !important; flex: none; }
   #market-title, [id^="playlist-item-"] { scroll-margin-top: calc(8.25rem + env(safe-area-inset-top)); }
-  .playlist-select { min-height: 2.75rem; touch-action: manipulation; }
-  .playlist-actions button, .drag-handle { min-width: 2.75rem; min-height: 2.75rem; }
-  .number-scrubber { min-height: 2.75rem; touch-action: manipulation; }
+  /* 激活项左侧有 2px 绿条，内边距太小会让内容图标直接贴上去。 */
+  .playlist-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.4rem; min-height: 3.4rem; padding: 0.4rem 0.55rem; }
+  .playlist-row > :first-child { display: none; }
+  .playlist-item:not(.is-active) .playlist-row > :last-child { display: none; }
+  /* 非 cladd 的自定义行，拿不到 size token，按 sm 档（40px）单独对齐。 */
+  .playlist-select { min-height: 2.5rem; }
+  .playlist-actions { gap: 0; }
+  .playlist-actions button { min-width: 2.4rem; }
+  .playlist-remove { opacity: 0.72; }
+  .duration-field { width: auto; }
+  .duration-field > span { display: none; }
+  .content-options { margin-left: 0.35rem; }
   .option-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .option-field--wide { grid-column: span 2; }
   .content-market { min-height: 0; }
   .instrument-search { padding-inline: 0; }
   .instrument-search__form { grid-template-columns: minmax(0, 1fr) 6.5rem; }
-  .instrument-search__form button { grid-column: 1 / -1; min-height: 2.75rem; touch-action: manipulation; }
+  .instrument-search__form button { grid-column: 1 / -1; }
   .instrument-results { grid-template-columns: 1fr; }
-  .market-filter button, .market-actions button { min-height: 2.75rem; touch-action: manipulation; }
   .market-list { grid-template-columns: 1fr; }
   .market-item { border-right: 0; }
   .pixel-library { padding: 0 0 1.5rem; overflow: visible; }
   .pixel-library-discovery { grid-template-columns: 1fr; }
   .pixel-library-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pixel-library-list { grid-template-columns: 1fr; }
-  .pixel-library-link button, .pixel-library-search button, .pixel-library-actions button, .pixel-library-pagination button { min-height: 2.75rem; touch-action: manipulation; }
   .canvas-inspector { display: block; margin-top: 0; padding: 0 0 1.5rem; }
   .canvas-inspector-scroll { display: block; }
   .canvas-inspector-section { padding-inline: 0.25rem; border-right: 0; }
@@ -858,16 +884,14 @@
     border-radius: 0 !important;
   }
   .device-settings-dialog__content { display: flex !important; height: 100%; flex-direction: column; padding-top: env(safe-area-inset-top) !important; }
-  .device-access-trigger { width: auto; min-height: 2.75rem; height: 2.75rem; padding-inline: 0.7rem 0.75rem; touch-action: manipulation; }
-  .device-access-popover__content > button, .device-access-popover__state button { min-height: 2.75rem; touch-action: manipulation; }
+  .device-access-trigger { width: auto; padding-inline: 0.7rem 0.75rem; }
   .device-settings-form { min-height: 0; max-height: none; flex: 1; }
   .device-settings-section { display: block; }
   .device-settings-section__heading { border-right: 0; border-bottom: 1px solid var(--border); }
   .device-setting-field { min-height: 4.25rem; }
-  .device-setting-control > button, .device-settings-switch { min-height: 2.75rem; touch-action: manipulation; }
+  .device-settings-switch { min-height: 2.5rem; }
   .device-settings-actions { padding-bottom: max(0.9rem, env(safe-area-inset-bottom)); background: var(--background); }
-  .canvas-toolset button, .canvas-history-actions button, .canvas-command-bar > button, .canvas-inspector button { min-height: 2.75rem; touch-action: manipulation; }
-  .color-swatch { width: 2.75rem; height: 2.75rem; touch-action: manipulation; }
+  .color-swatch { width: 2.75rem; height: 2.75rem; }
 }
 
 @media (max-width: 34rem) {
@@ -882,12 +906,19 @@
 @media (max-width: 36rem) {
   .channel-config { grid-template-columns: 1fr; }
   .config-field + .config-field { border-left: 0; border-top: 1px solid var(--border); }
-  .playlist-row { grid-template-columns: 2rem minmax(0, 1fr) auto; }
-  .drag-handle { grid-column: 1; grid-row: 1 / span 2; }
-  .playlist-select { grid-column: 2; }
-  .duration-field { grid-column: 2; width: 6.75rem; }
-  .playlist-actions { grid-column: 3; grid-row: 1 / span 2; }
-  .content-options { margin-left: 0.35rem; }
+  /* 单列时改成「标签在左、控件在右」。原来是标签独占一行、控件再占满整宽，
+     每格因此高出一大截空白——和「启用频道」那行的行式布局也对不上。 */
+  .config-field {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 0;
+    padding: 0.6rem 0.9rem;
+  }
+  .config-field > label,
+  .config-field > .option-label { flex: 1 1 auto; min-width: 0; }
+  .config-field:not(.config-field--toggle) > :last-child { flex: 0 0 min(56%, 11rem); width: auto; }
   .option-grid { grid-template-columns: 1fr; }
   .option-field + .option-field { border-left: 0; }
   .option-field--wide { grid-column: auto; }
@@ -919,21 +950,19 @@
   .studio-header { position: sticky; z-index: 30; top: 0; grid-template-columns: 1fr auto; min-height: calc(3.2rem + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); background: var(--background); }
   .brand-device, .is-canvas-page .page-heading { display: none; }
   .header-actions { grid-column: 2; grid-row: 1; }
-  .device-settings-trigger { min-width: 2.75rem; min-height: 2.75rem; }
+  .device-settings-trigger { min-width: 2.75rem; }
   .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
-  .main-tabs button { min-height: 2.75rem; justify-content: center; touch-action: manipulation; }
+  .main-tabs button { justify-content: center; }
   .studio-layout.is-canvas { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); }
   .is-canvas-page .channel-sidebar { padding: 0.55rem 0.65rem 0.8rem 0; }
   .is-canvas-page .section-kicker { padding-bottom: 0.4rem; font-size: 0.6rem; }
   .is-canvas-page .channel-entry { grid-template-columns: minmax(0, 1fr); }
   .is-canvas-page .channel-delete { display: none; }
   .is-canvas-page .channel-select { min-height: 3.2rem; padding: 0.5rem; }
-  .is-canvas-page .add-channel { min-height: 2.75rem; }
   .canvas-workspace { padding: 0 0.75rem 1rem; overflow: visible; }
   .canvas-toolbar { align-items: flex-start; flex-wrap: wrap; gap: 0.45rem; }
   .canvas-toolbar > div:first-child { width: auto; }
   .canvas-toolbar .workspace-actions { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto auto; margin-left: 0; }
-  .canvas-toolbar button, .canvas-toolset button, .canvas-command-bar button, .canvas-history-actions button { min-height: 2.75rem; touch-action: manipulation; }
   .pixel-canvas-panel { margin-top: 0.55rem; }
   .color-swatch { width: 2.75rem; height: 2.75rem; }
   .canvas-inspector { grid-column: 2; margin-top: 0; padding-left: 0.75rem; border-top: 1px solid var(--border); border-left: 0; }

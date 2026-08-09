@@ -102,12 +102,10 @@
   white-space: nowrap;
 }
 
+/* 只补 3 个子元素的间距——高度和内边距交回 cladd 的 size token，
+   否则它会和同一行的 .music-mirror-toggle 不等高。 */
 .music-device-trigger__content {
-  display: flex !important;
-  height: 100%;
-  align-items: center;
   gap: 0.4rem !important;
-  padding: 0.2rem 0.45rem !important;
 }
 
 .music-device-trigger__content > svg:first-child {
@@ -886,6 +884,9 @@
 
 /* Consolidated theme card: display form + palette + accent in one panel. */
 .music-theme-panel {
+  /* 按面板自身宽度排版，而不是视口——这个面板在桌面是右栏的一部分，
+     宽度随分栏变化，用 @media 猜断点必然对不准。 */
+  container-type: inline-size;
   display: grid;
   min-width: 0;
   gap: 0.85rem;
@@ -907,7 +908,23 @@
   font-weight: 680;
 }
 
+/* 窄面板：两组上下堆叠。宽面板：并排——横向吃满宽度，总高度还砍一半，
+   比让 4 个磁贴各自拉到 400px 宽好得多。 */
+.music-theme-panel__groups {
+  display: grid;
+  min-width: 0;
+  gap: 0.85rem;
+}
+
+@container (min-width: 50rem) {
+  .music-theme-panel__groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.4rem;
+  }
+}
+
 .music-theme-panel__group {
+  container-type: inline-size;
   display: grid;
   min-width: 0;
   gap: 0.42rem;
@@ -930,16 +947,34 @@
   gap: 0.42rem;
 }
 
+/* 一组够宽才排成 4 列；否则宁可 2×2，也不要出现 3+1 的断行。 */
+@container (min-width: 38rem) {
+  .music-theme-options {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 .music-theme-option {
   min-width: 0;
 }
 
+/* 一律左对齐：选中项因为右侧多一个勾会被挤成左对齐，
+   未选中项若还居中，切换时整块图文会横向跳一下。 */
 .music-theme-option__content {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.5rem;
   min-width: 0;
-  padding: 0.18rem 0.1rem;
+  padding: 0.18rem 0.55rem;
+}
+
+/* 选中项除了配色变化，再给一个明确的勾——蓝晒这类冷色在浅底上的色差很弱。 */
+.music-theme-option__check {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .music-theme-option__content > svg {
@@ -1014,8 +1049,10 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 不要 margin-left:auto——面板在桌面上有 1000px+ 宽，
+   会把「还原预设」甩到屏幕另一头，读起来和取色器毫无关系。 */
 .music-theme-panel__accent > :last-child {
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .music-timeline__loading {
@@ -1718,11 +1755,6 @@
   line-height: 1.45;
 }
 
-@media (min-width: 40rem) {
-  .music-theme-options {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
 
 @media (min-width: 70rem) {
   .music-studio {
@@ -1846,9 +1878,10 @@
 }
 
 @media (pointer: coarse) {
-  .music-device-trigger,
+  /* cladd 控件的触控高度由手机端的 --spacing-cladd-* 统一提档，这里只补
+     非 cladd 的自定义行。旧写法单独点名 .music-device-trigger，导致它比
+     同一行的 .music-mirror-toggle 高出 20px。 */
   .music-track-row,
-  .music-theme-option,
   .music-lyric-row {
     min-height: 2.75rem;
     touch-action: manipulation;

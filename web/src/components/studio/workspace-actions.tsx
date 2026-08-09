@@ -48,16 +48,14 @@ export function WorkspaceActions({
         </span>
       </div>
       {onPreview && (
-        <Button type="button" size="sm" disabled={locked} loading={busy === "preview"} onClick={onPreview}>
+        <Button type="button" disabled={locked} loading={busy === "preview"} onClick={onPreview}>
           <RefreshCw />
           {busy === "preview" ? "渲染中" : "预览"}
         </Button>
       )}
       <Button
         type="button"
-        size="sm"
         color="brand"
-        variant="solid-fill"
         disabled={Boolean(disabled) || (busy !== null && !pushing)}
         readOnly={pushing}
         aria-busy={pushing}

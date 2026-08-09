@@ -183,9 +183,7 @@ export function PixelAssetLibrary({
           />
           <Button
             type="submit"
-            size="sm"
             color="brand"
-            variant="solid-fill"
             disabled={!source.trim() || importing !== null}
           ><Link2 />{importing === `${source.trim()}:channel` ? "导入中" : "加入所选频道"}</Button>
         </form>
@@ -198,7 +196,7 @@ export function PixelAssetLibrary({
               inputComponentProps={{ "aria-label": "搜索像素素材" }}
               onChange={setQueryDraft}
             />
-            <Button type="submit" size="sm" square aria-label="搜索"><Search /></Button>
+            <Button type="submit" square aria-label="搜索"><Search /></Button>
           </form>
           <div className="pixel-library-filters">
             <Select

@@ -138,6 +138,8 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
   const [accessCopied, setAccessCopied] = useState(false);
   const [accessPopoverOpen, setAccessPopoverOpen] = useState(false);
   const loadRevisionRef = useRef(0);
+  // 已经有草稿时，重读失败不该顶掉正在编辑的表单——走 toast，和同对话框的保存失败一致。
+  const hasDraftRef = useRef(false);
   const accessRevisionRef = useRef(0);
   const copyResetRef = useRef<number | null>(null);
 
@@ -153,9 +155,11 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
       const next = copySettings(response.settings);
       setSaved(next);
       setDraft(copySettings(next));
+      hasDraftRef.current = true;
     } catch (error) {
       if (revision !== loadRevisionRef.current) return;
-      setLoadError(errorMessage(error));
+      if (hasDraftRef.current) toast.error("重新读取设置失败", { description: errorMessage(error) });
+      else setLoadError(errorMessage(error));
     } finally {
       if (revision === loadRevisionRef.current) setLoading(false);
     }
@@ -276,7 +280,7 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
                 type="button"
                 size="sm"
                 color={accessPopoverOpen ? "brand" : "neutral"}
-                variant={accessPopoverOpen ? "solid-fill" : "transparent"}
+                variant="transparent"
                 outline={false}
                 className="device-access-trigger"
                 aria-label="打开手机控制"
@@ -393,12 +397,6 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
         </div>
       ) : draft ? (
         <div className="device-settings-form">
-          {loadError && (
-            <div className="device-settings-inline-error" role="alert">
-              重新读取失败：{loadError}
-            </div>
-          )}
-
           <section className="device-settings-section" aria-labelledby="settings-display-title">
             <div className="device-settings-section__heading">
               <span>01</span>
