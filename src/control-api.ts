@@ -9,7 +9,16 @@ import {
 } from "./device-settings.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
-import { MusicServiceError, type NeteaseMusicService } from "./netease-music.ts";
+import {
+  isMusicProviderId,
+  isSafeMediaId,
+  MusicServiceError,
+  proxyMusicArt,
+  type MusicProvider,
+  type MusicProviderId,
+  type MusicRemoteSnapshot,
+} from "./music/core.ts";
+import type { MusicHub } from "./music/hub.ts";
 import { PWA_ICONS, PWA_MANIFEST, pwaServiceWorker } from "./pwa.ts";
 import { SettingsValidationError } from "./settings.ts";
 import { getStockIconPng, isStockIconId } from "./stock-icons.ts";
@@ -63,7 +72,7 @@ export interface ControlApiOptions {
     client: UlanziPixelAssetClient;
     store: PixelAssetStore;
   };
-  music?: NeteaseMusicService;
+  music?: MusicHub;
   musicInstaller?: Tc002MusicInstaller;
   musicMirror?: {
     push: (payload: ClockPayload) => Promise<{ status: number }>;
@@ -79,7 +88,10 @@ export interface ControlApiOptions {
 type LyricMode = "ticker" | "skyline" | "spotlight" | "cascade";
 type LyricSkin = "signal" | "tape" | "blueprint" | "arcade";
 interface DeviceMusicState {
-  trackId: number | null;
+  // Which music source the selection belongs to. NetEase IDs are decimal and
+  // Spotify IDs are base62, so the device needs both to interpret trackId.
+  provider: MusicProviderId;
+  trackId: string | null;
   playing: boolean;
   mode: LyricMode;
   skin: LyricSkin;
@@ -90,6 +102,7 @@ interface DeviceMusicState {
 const LYRIC_MODES: readonly LyricMode[] = ["ticker", "skyline", "spotlight", "cascade"];
 const LYRIC_SKINS: readonly LyricSkin[] = ["signal", "tape", "blueprint", "arcade"];
 const sDeviceState: DeviceMusicState = {
+  provider: "netease",
   trackId: null,
   playing: true,
   mode: "spotlight",
@@ -98,6 +111,18 @@ const sDeviceState: DeviceMusicState = {
   seekMs: -1,
   seq: 0,
 };
+
+// Switching sources invalidates the selection: the new provider cannot resolve
+// the old provider's track ID, so the device falls back to its idle screen.
+export function resetDeviceMusicSelection(provider: MusicProviderId): void {
+  sDeviceState.provider = provider;
+  sDeviceState.trackId = null;
+  sDeviceState.seekMs = -1;
+  sDeviceState.playing = provider === "netease";
+  sDeviceState.seq += 1;
+  sDeviceLive.trackId = null;
+  sDeviceLive.playheadMs = 0;
+}
 
 // Merge a partial control patch (from /control or /report) into the state,
 // validating each field, and bump seq if anything actually changed.
@@ -132,13 +157,7 @@ function applyControlPatch(input: unknown): void {
     changed = true;
   }
   if ("trackId" in patch) {
-    if (patch.trackId === null) {
-      sDeviceState.trackId = null;
-    } else if (typeof patch.trackId === "number" && Number.isSafeInteger(patch.trackId) && patch.trackId > 0) {
-      sDeviceState.trackId = patch.trackId;
-    } else {
-      throw new SettingsValidationError("trackId is invalid");
-    }
+    sDeviceState.trackId = patch.trackId === null ? null : mediaId(patch.trackId, "trackId");
     changed = true;
   }
   if ("seekMs" in patch) {
@@ -157,7 +176,7 @@ function applyControlPatch(input: unknown): void {
 interface DeviceLiveStatus {
   heartbeatAt: number; // Date.now() of the last heartbeat, 0 if never
   firmwarePollAt: number; // Date.now() of the last firmware /state poll, 0 if never
-  trackId: number | null;
+  trackId: string | null;
   playheadMs: number;
   playing: boolean;
 }
@@ -316,6 +335,179 @@ function decodeMirrorFrames(
       }
     }
     return { canvas, delayMs };
+  });
+}
+
+// Track and playlist IDs are opaque strings now that two providers share the
+// same routes: NetEase hands out decimals, Spotify base62.
+function mediaId(value: unknown, label: string): string {
+  const raw = typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? String(value) // tolerated so an older firmware build's numeric report still lands
+    : typeof value === "string"
+      ? value
+      : "";
+  if (!isSafeMediaId(raw)) throw new SettingsValidationError(`${label} is invalid`);
+  return raw;
+}
+
+function optionalMediaId(value: unknown): string | null {
+  try {
+    return value === null || value === undefined ? null : mediaId(value, "trackId");
+  } catch {
+    return null;
+  }
+}
+
+function activeMusicProvider(hub: MusicHub): MusicProvider {
+  return hub.activeProvider();
+}
+
+// Read the Connect player and fold it into the shared device state. Both the
+// firmware and the web poll /state on their own cadence, and the provider
+// caches the upstream call, so this stays one Spotify request every couple of
+// seconds no matter how many readers there are.
+async function pollRemote(hub: MusicHub): Promise<MusicRemoteSnapshot | null> {
+  const provider = hub.activeProvider();
+  if (!provider.remote || !provider.status().loggedIn) return null;
+  let snapshot: MusicRemoteSnapshot;
+  try {
+    snapshot = await provider.remote.snapshot();
+  } catch {
+    return null;
+  }
+  // Whatever the Connect player moved to becomes the device's selection, so
+  // starting a song on your phone re-targets the lyrics on the clock.
+  if (snapshot.trackId && snapshot.trackId !== sDeviceState.trackId) {
+    sDeviceState.provider = provider.id;
+    sDeviceState.trackId = snapshot.trackId;
+    sDeviceState.seekMs = -1;
+    sDeviceState.seq += 1;
+  }
+  if (snapshot.playing !== sDeviceState.playing) {
+    sDeviceState.playing = snapshot.playing;
+    sDeviceState.seq += 1;
+  }
+  return snapshot;
+}
+
+type RemoteAction = "play" | "pause" | "next" | "previous" | "seek" | "volume" | "transfer";
+const REMOTE_ACTIONS: readonly RemoteAction[] = [
+  "play",
+  "pause",
+  "next",
+  "previous",
+  "seek",
+  "volume",
+  "transfer",
+];
+
+// One command shape for both callers: the web studio posts to /api/music/remote,
+// and the TC002's key presses arrive as the same fields on /device/report.
+function readRemoteAction(patch: Record<string, unknown>): RemoteAction | null {
+  if (typeof patch.action === "string") {
+    if (!REMOTE_ACTIONS.includes(patch.action as RemoteAction)) {
+      throw new SettingsValidationError("action is invalid");
+    }
+    return patch.action as RemoteAction;
+  }
+  if (typeof patch.playing === "boolean") return patch.playing ? "play" : "pause";
+  if (patch.volume !== undefined) return "volume";
+  return null;
+}
+
+async function applyRemoteAction(
+  provider: MusicProvider,
+  input: unknown,
+  options: { required?: boolean } = {},
+): Promise<MusicRemoteSnapshot | null> {
+  const remote = provider.remote;
+  if (!remote) {
+    throw new SettingsValidationError(`${provider.label} does not support remote playback control`);
+  }
+  const patch = (input ?? {}) as Record<string, unknown>;
+  const action = readRemoteAction(patch);
+  if (action === null) {
+    if (options.required) throw new SettingsValidationError("action is required");
+    return null;
+  }
+
+  switch (action) {
+    case "play": {
+      const trackId = patch.trackId === undefined || patch.trackId === null
+        ? undefined
+        : mediaId(patch.trackId, "trackId");
+      const positionMs = patch.positionMs === undefined
+        ? undefined
+        : boundedInteger(patch.positionMs, 0, 86_400_000, "positionMs");
+      await remote.play({
+        ...(trackId ? { trackId } : {}),
+        ...(positionMs === undefined ? {} : { positionMs }),
+      });
+      break;
+    }
+    case "pause":
+      await remote.pause();
+      break;
+    case "next":
+      await remote.next();
+      break;
+    case "previous":
+      await remote.previous();
+      break;
+    case "seek":
+      await remote.seek(boundedInteger(patch.positionMs, 0, 86_400_000, "positionMs"));
+      break;
+    case "volume":
+      await remote.setVolume(
+        boundedInteger(patch.percent ?? patch.volume, 0, 100, "volume percent"),
+      );
+      break;
+    case "transfer": {
+      if (typeof patch.deviceId !== "string") {
+        throw new SettingsValidationError("deviceId is required");
+      }
+      await remote.transfer(patch.deviceId, patch.play !== false);
+      break;
+    }
+  }
+  // The caller wants the state the command produced, not the one before it.
+  return await remote.snapshot(true).catch(() => null);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[character] ?? character));
+}
+
+// The page Spotify's redirect lands on. Self-contained so it renders before the
+// studio bundle exists, and it closes itself when it was opened as a popup.
+function spotifyCallbackPage(ok: boolean, message: string): Response {
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>${ok ? "Spotify 已连接" : "Spotify 连接失败"}</title>` +
+    `<style>body{margin:0;min-height:100vh;display:grid;place-items:center;` +
+    `font:16px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif;background:#0b0d0c;color:#e9f0ec}` +
+    `main{max-width:32rem;padding:2rem;text-align:center}` +
+    `h1{font-size:1.25rem;margin:0 0 .5rem;color:${ok ? "#1ed760" : "#ff6b6b"}}` +
+    `p{margin:0;color:#9bb0a5}</style></head><body><main>` +
+    `<h1>${ok ? "Spotify 已连接" : "Spotify 连接失败"}</h1>` +
+    `<p>${escapeHtml(message)}</p>` +
+    `<p>${ok ? "可以关闭此页面，回到 Pixel Studio 继续。" : "请回到 Pixel Studio 重试。"}</p>` +
+    `</main><script>if(window.opener){setTimeout(function(){window.close()},1200)}</script>` +
+    `</body></html>`;
+  return new Response(html, {
+    status: ok ? 200 : 400,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+    },
   });
 }
 
@@ -555,20 +747,55 @@ export function createControlHandler(
         return jsonResponse({ access: await options.controlAccess() });
       }
 
+      if (request.method === "GET" && url.pathname === "/api/music/providers") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        return jsonResponse({ music: options.music.overview() });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/music/provider") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { provider?: unknown };
+        if (!isMusicProviderId(input.provider)) {
+          throw new SettingsValidationError("provider must be netease or spotify");
+        }
+        return jsonResponse({ music: await options.music.setActive(input.provider) });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/music/session") {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
-        return jsonResponse({ session: options.music.status() });
+        return jsonResponse({ session: activeMusicProvider(options.music).status() });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/music/art") {
+        // Same-origin album art. The `url` must be one the providers handed us,
+        // which the host allowlist enforces; nothing else is fetchable through
+        // this route.
+        const target = url.searchParams.get("url") ?? "";
+        if (target.length < 8 || target.length > 2_048) {
+          throw new SettingsValidationError("cover url is invalid");
+        }
+        return await proxyMusicArt(target);
       }
 
       if (request.method === "GET" && url.pathname === "/api/music/avatar") {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
-        return await options.music.avatar();
+        // The caller may name the source it wants. Without that, a switch and an
+        // in-flight avatar request race to decide whose face is shown.
+        const requested = url.searchParams.get("provider");
+        if (requested !== null && !isMusicProviderId(requested)) {
+          throw new SettingsValidationError("provider must be netease or spotify");
+        }
+        const provider = requested === null
+          ? activeMusicProvider(options.music)
+          : options.music.provider(requested);
+        return await provider.avatar();
       }
 
       if (request.method === "POST" && url.pathname === "/api/music/qr") {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
         assertSameOrigin(request);
-        return jsonResponse({ login: await options.music.createQrLogin() }, 201);
+        return jsonResponse({ login: await options.music.netease.createQrLogin() }, 201);
       }
 
       if (request.method === "POST" && url.pathname === "/api/music/qr/check") {
@@ -576,49 +803,130 @@ export function createControlHandler(
         assertSameOrigin(request);
         const input = await readJson(request) as { id?: unknown };
         if (typeof input.id !== "string") throw new SettingsValidationError("QR session ID is required");
-        return jsonResponse({ login: await options.music.checkQrLogin(input.id) });
+        return jsonResponse({ login: await options.music.netease.checkQrLogin(input.id) });
       }
 
       if (request.method === "POST" && url.pathname === "/api/music/logout") {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
         assertSameOrigin(request);
-        await options.music.logout();
-        return jsonResponse({ session: options.music.status() });
+        const provider = activeMusicProvider(options.music);
+        await provider.logout();
+        resetDeviceMusicSelection(provider.id);
+        return jsonResponse({ session: provider.status(), music: options.music.overview() });
       }
 
       if (request.method === "GET" && url.pathname === "/api/music/search") {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
-        return jsonResponse({ tracks: await options.music.search(url.searchParams.get("query") ?? "") });
+        return jsonResponse({
+          tracks: await activeMusicProvider(options.music).search(url.searchParams.get("query") ?? ""),
+        });
       }
 
       if (request.method === "GET" && url.pathname === "/api/music/playlists") {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
-        return jsonResponse({ playlists: await options.music.playlists() });
+        return jsonResponse({ playlists: await activeMusicProvider(options.music).playlists() });
       }
 
-      const playlistTracksMatch = url.pathname.match(/^\/api\/music\/playlists\/(\d+)\/tracks$/);
+      const playlistTracksMatch = url.pathname.match(/^\/api\/music\/playlists\/([A-Za-z0-9_-]{1,64})\/tracks$/);
       if (request.method === "GET" && playlistTracksMatch) {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
         return jsonResponse({
-          tracks: await options.music.playlistTracks(positivePathId(playlistTracksMatch[1], "playlist")),
+          tracks: await activeMusicProvider(options.music).playlistTracks(playlistTracksMatch[1]!),
         });
       }
 
-      const musicTrackMatch = url.pathname.match(/^\/api\/music\/tracks\/(\d+)$/);
+      const musicTrackMatch = url.pathname.match(/^\/api\/music\/tracks\/([A-Za-z0-9_-]{1,64})$/);
       if (request.method === "GET" && musicTrackMatch) {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
         return jsonResponse({
-          detail: await options.music.trackDetail(positivePathId(musicTrackMatch[1], "track")),
+          detail: await activeMusicProvider(options.music).trackDetail(musicTrackMatch[1]!),
         });
       }
 
-      const musicStreamMatch = url.pathname.match(/^\/api\/music\/tracks\/(\d+)\/stream$/);
+      const musicStreamMatch = url.pathname.match(/^\/api\/music\/tracks\/([A-Za-z0-9_-]{1,64})\/stream$/);
       if (request.method === "GET" && musicStreamMatch) {
         if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
-        return options.music.stream(
-          positivePathId(musicStreamMatch[1], "track"),
-          request.headers.get("Range"),
+        const provider = activeMusicProvider(options.music);
+        if (!provider.stream) {
+          // Spotify audio never leaves Spotify's own clients; the studio player
+          // is a Connect remote there, not an audio element.
+          return jsonResponse({ error: `${provider.label} 不提供音频流，请使用远程播放` }, 409);
+        }
+        return await provider.stream(musicStreamMatch[1]!, request.headers.get("Range"));
+      }
+
+      /* ------------------------------ Spotify ------------------------------ */
+
+      if (request.method === "GET" && url.pathname === "/api/music/spotify/app") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        return jsonResponse({ app: options.music.spotify.appStatus() });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/music/spotify/app") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { clientId?: unknown };
+        if (typeof input.clientId !== "string") {
+          throw new SettingsValidationError("clientId is required");
+        }
+        return jsonResponse({ app: await options.music.spotify.saveApp(input.clientId) });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/music/spotify/login") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        assertSameOrigin(request);
+        return jsonResponse({ login: options.music.spotify.beginLogin() }, 201);
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/music/spotify/callback") {
+        // Spotify redirects the browser here after consent. This is a top-level
+        // navigation from accounts.spotify.com, so it carries no Origin header
+        // and the state parameter is what proves the request is ours.
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        const denied = url.searchParams.get("error");
+        if (denied) return spotifyCallbackPage(false, `Spotify 拒绝了授权：${denied}`);
+        const code = url.searchParams.get("code") ?? "";
+        const state = url.searchParams.get("state") ?? "";
+        try {
+          const profile = await options.music.spotify.completeLogin({ code, state });
+          return spotifyCallbackPage(true, `已连接 ${profile.nickname}`);
+        } catch (error) {
+          return spotifyCallbackPage(
+            false,
+            error instanceof Error ? error.message : "登录失败，请重试",
+          );
+        }
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/music/spotify/complete") {
+        // Fallback for a browser that is not on this machine: the loopback
+        // redirect cannot reach the service, so the user pastes the URL back.
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { redirectUrl?: unknown };
+        if (typeof input.redirectUrl !== "string") {
+          throw new SettingsValidationError("redirectUrl is required");
+        }
+        const profile = await options.music.spotify.completeLoginFromRedirect(input.redirectUrl);
+        return jsonResponse({ session: { loggedIn: true, profile } });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/music/spotify/devices") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        return jsonResponse({ devices: await options.music.spotify.devices() });
+      }
+
+      /* --------------------------- Remote transport -------------------------- */
+
+      if (request.method === "POST" && url.pathname === "/api/music/remote") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        assertSameOrigin(request);
+        const snapshot = await applyRemoteAction(
+          activeMusicProvider(options.music),
+          await readJson(request),
+          { required: true },
         );
+        return jsonResponse({ snapshot });
       }
 
       if (request.method === "GET" && url.pathname === "/api/music/device-app") {
@@ -701,21 +1009,27 @@ export function createControlHandler(
 
       if (request.method === "POST" && url.pathname === "/api/music/device/select") {
         // The web UI reports the track it just selected (same-origin). Selecting
-        // a track also (re)starts playback.
+        // a track also (re)starts playback — locally on the TC002 for NetEase,
+        // or on the chosen Spotify Connect device for Spotify.
         assertSameOrigin(request);
         const input = await readJson(request) as { trackId?: unknown };
+        const provider = options.music ? activeMusicProvider(options.music) : null;
         if (input.trackId === null) {
           sDeviceState.trackId = null;
           sDeviceState.seq += 1;
           return jsonResponse({ ok: true });
         }
-        if (typeof input.trackId !== "number" || !Number.isSafeInteger(input.trackId) || input.trackId <= 0) {
-          throw new SettingsValidationError("trackId is invalid");
-        }
-        sDeviceState.trackId = input.trackId;
+        const trackId = mediaId(input.trackId, "trackId");
+        sDeviceState.provider = provider?.id ?? sDeviceState.provider;
+        sDeviceState.trackId = trackId;
         sDeviceState.playing = true;
         sDeviceState.seekMs = -1; // a fresh track starts from 0, no pending seek
         sDeviceState.seq += 1;
+        if (provider?.remote) {
+          // Errors here are the user's real answer ("no active device", "needs
+          // Premium"), so they surface instead of being swallowed.
+          await provider.remote.play({ trackId });
+        }
         return jsonResponse({ ok: true });
       }
 
@@ -734,17 +1048,33 @@ export function createControlHandler(
         // the web tags itself with ?viewer=web so a bare poll marks the firmware
         // as alive (it polls from boot, long before the first heartbeat).
         if (url.searchParams.get("viewer") !== "web") sDeviceLive.firmwarePollAt = Date.now();
+        // In remote mode the authority on "what is playing" is the Connect
+        // player, not the device: fold its reading into the state both readers
+        // already poll, so neither needs a second request.
+        const remote = options.music ? await pollRemote(options.music) : null;
+        // RMT tracks the *source*, not whether this poll reached it: a transient
+        // Spotify outage must not tell the device to start playing audio itself.
+        const remoteSource = options.music
+          ? activeMusicProvider(options.music).remote !== undefined
+          : false;
         const s = sDeviceState;
         const hbAge = sDeviceLive.heartbeatAt > 0 ? Date.now() - sDeviceLive.heartbeatAt : -1;
         const fwPollAge = sDeviceLive.firmwarePollAt > 0 ? Date.now() - sDeviceLive.firmwarePollAt : -1;
         const body =
           `SEQ\t${s.seq}\n` +
+          `SRC\t${s.provider}\n` +
+          `RMT\t${remoteSource ? 1 : 0}\n` +
           `TID\t${s.trackId === null ? "-" : s.trackId}\n` +
           `PLAY\t${s.playing ? 1 : 0}\n` +
           `MODE\t${s.mode}\n` +
           `SKIN\t${s.skin}\n` +
           `ACCENT\t${s.accent ?? "-"}\n` +
           `SEEK\t${s.seekMs}\n` +
+          // Remote-player status; only meaningful while RMT is 1.
+          `RPOS\t${remote ? Math.round(remote.positionMs) : -1}\n` +
+          `RDUR\t${remote ? Math.round(remote.durationMs) : -1}\n` +
+          `RPLAY\t${remote?.playing ? 1 : 0}\n` +
+          `RVOL\t${remote?.volumePercent ?? -1}\n` +
           // Device-reported live status (web reads these; the device ignores them).
           `HBAGE\t${hbAge}\n` +
           `FWPOLL\t${fwPollAge}\n` +
@@ -766,7 +1096,14 @@ export function createControlHandler(
       if (request.method === "POST" && url.pathname === "/api/music/device/report") {
         // The device reports its own key-press changes back (cross-origin: this
         // caller is the TC002, not the browser), so the web UI can reflect them.
-        applyControlPatch(await readJson(request));
+        // In remote mode a key press is also a Connect command — the device has
+        // no audio of its own to pause.
+        const report = await readJson(request);
+        const provider = options.music ? activeMusicProvider(options.music) : null;
+        if (provider?.remote) {
+          await applyRemoteAction(provider, report).catch(() => null);
+        }
+        applyControlPatch(report);
         return jsonResponse({ ok: true, seq: sDeviceState.seq });
       }
 
@@ -778,8 +1115,10 @@ export function createControlHandler(
           trackId?: unknown; playheadMs?: unknown; playing?: unknown;
         };
         sDeviceLive.heartbeatAt = Date.now();
-        sDeviceLive.trackId =
-          typeof input.trackId === "number" && input.trackId > 0 ? input.trackId : null;
+        // Firmware built before the multi-provider split sends a bare number.
+        // A heartbeat is best-effort telemetry: an unparseable ID reads as
+        // "nothing playing" rather than failing the device's request.
+        sDeviceLive.trackId = optionalMediaId(input.trackId);
         sDeviceLive.playheadMs =
           typeof input.playheadMs === "number" && input.playheadMs >= 0 ? input.playheadMs : 0;
         sDeviceLive.playing = input.playing === true;
@@ -797,7 +1136,7 @@ export function createControlHandler(
         if (!options.music || sDeviceState.trackId === null) {
           return new Response("", { headers });
         }
-        const detail = await options.music.trackDetail(sDeviceState.trackId);
+        const detail = await activeMusicProvider(options.music).trackDetail(sDeviceState.trackId);
         let body = `DUR\t${Math.round(detail.track.durationMs)}\n`;
         for (const line of detail.lyrics) {
           const text = line.text.replace(/[\t\r\n]+/g, " ").trim();
@@ -810,8 +1149,13 @@ export function createControlHandler(
       if (request.method === "GET" && url.pathname === "/api/music/device/audio") {
         // Device downloads this and plays it through MI_AO: the selected track's
         // stream, or the demo tone before anything is selected.
-        if (options.music && sDeviceState.trackId !== null) {
-          return options.music.stream(sDeviceState.trackId, request.headers.get("Range"));
+        const audioProvider = options.music ? activeMusicProvider(options.music) : null;
+        if (audioProvider && !audioProvider.stream) {
+          // Remote mode — the device must not try to play anything locally.
+          return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+        }
+        if (audioProvider?.stream && sDeviceState.trackId !== null) {
+          return await audioProvider.stream(sDeviceState.trackId, request.headers.get("Range"));
         }
         return new Response(
           Bun.file(new URL("./assets/demo-audio.mp3", import.meta.url)),

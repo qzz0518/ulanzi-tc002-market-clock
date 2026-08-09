@@ -81,6 +81,10 @@ std::string serviceUrl(const char* path) {
 }
 
 volatile bool sPolling = true;
+// Remote mode: the service's active source plays somewhere else (Spotify
+// Connect), so there is no audio to download — the lyric clock follows the
+// position the service reports and the keys become transport commands.
+volatile bool sRemoteMode = false;
 
 int modeToInt(const std::string& m) {
 	if (m == "skyline") return 1;
@@ -118,10 +122,18 @@ void reportChange(const std::string& json) {
 	else delete copy;
 }
 
-// Load the currently selected track's lyrics + audio and start playback.
-// setFetching() switches the screen from the idle hint to the loading pulse
-// for the whole (blocking, ~5-7s) download.
-void loadAndPlaySelection() {
+// The knob is a 0-6 notch scale; Spotify Connect wants a percentage.
+void reportVolume() {
+	char json[48];
+	snprintf(json, sizeof(json), "{\"volume\":%d}", (sVolume * 100) / 6);
+	reportChange(json);
+}
+
+// Load the currently selected track's lyrics and start the lyric clock.
+// setFetching() switches the screen from the idle hint to the loading pulse for
+// the whole blocking fetch. In device-audio mode that also means a ~5-7s track
+// download; in remote mode only the lyrics are fetched, so it returns fast.
+void loadAndPlaySelection(bool remote) {
 	LyricsPage* fetchingPage = lyricsPage();
 	if (fetchingPage) fetchingPage->setFetching(true);
 	std::string body;
@@ -130,7 +142,12 @@ void loadAndPlaySelection() {
 		if (lp) lp->loadRemoteLyrics(body);
 	}
 	awtrix::AudioManager::getInstance().stopAudio();
-	if (pixelnet::downloadFile(serviceUrl("/api/music/device/audio"), kLocalTrackPath)) {
+	if (remote) {
+		// Nothing to play locally — the poll loop below keeps the lyric clock
+		// aligned to the Connect player's reported position.
+		LyricsPage* lp = lyricsPage();
+		if (lp) lp->startPlayback();
+	} else if (pixelnet::downloadFile(serviceUrl("/api/music/device/audio"), kLocalTrackPath)) {
 		awtrix::AudioManager::getInstance().playAudio(kLocalTrackPath);
 		LyricsPage* lp = lyricsPage();
 		if (lp) lp->startPlayback();
@@ -166,6 +183,8 @@ void* pollThread(void*) {
 	while (sPolling) {
 		std::string body;
 		if (pixelnet::httpGet(serviceUrl("/api/music/device/state"), body) && !body.empty()) {
+			bool remote = (stateField(body, "RMT") == "1");
+			sRemoteMode = remote;
 			int seq = atoi(stateField(body, "SEQ").c_str());
 			if (seq != lastSeq) {
 				lastSeq = seq;
@@ -183,8 +202,8 @@ void* pollThread(void*) {
 					if (trackChanged) {
 						lastTrackId = tid;
 						lastSeekApplied = -1;
-						loadAndPlaySelection();
-					} else {
+						loadAndPlaySelection(remote);
+					} else if (!remote) {
 						// Web-requested seek: jump both the audio and the lyric clock.
 						long seekMs = atol(stateField(body, "SEEK").c_str());
 						if (seekMs >= 0 && seekMs != lastSeekApplied) {
@@ -199,14 +218,29 @@ void* pollThread(void*) {
 					}
 				}
 			}
+			// Remote mode re-syncs every poll, not only when seq moves: the
+			// Connect player's position advances on its own and nobody bumps
+			// seq for it. The local 60ms tick carries the animation between
+			// polls, so only a real drift is worth a correction.
+			if (remote) {
+				LyricsPage* lp = lyricsPage();
+				long remotePos = atol(stateField(body, "RPOS").c_str());
+				if (lp && remotePos >= 0) {
+					long localPos = (long)lp->getPlayheadMs();
+					long drift = localPos > remotePos ? localPos - remotePos : remotePos - localPos;
+					if (drift > 900) lp->seekTo((uint32_t)remotePos);
+					lp->setPlaying(stateField(body, "RPLAY") == "1");
+				}
+			}
 		}
 		// Heartbeat: tell the service what we're actually playing so the web can
 		// detect the music firmware and sync its preview to our real playhead.
+		// The ID is quoted because Spotify track IDs are base62, not numbers.
 		{
 			LyricsPage* lp = lyricsPage();
 			if (lp && !lastTrackId.empty() && lastTrackId != "-") {
-				char hb[160];
-				snprintf(hb, sizeof(hb), "{\"trackId\":%s,\"playheadMs\":%u,\"playing\":%s}",
+				char hb[192];
+				snprintf(hb, sizeof(hb), "{\"trackId\":\"%s\",\"playheadMs\":%u,\"playing\":%s}",
 					lastTrackId.c_str(), (unsigned)lp->getPlayheadMs(),
 					lp->getPlaying() ? "true" : "false");
 				pixelnet::httpPost(serviceUrl("/api/music/device/heartbeat"), hb);
@@ -229,29 +263,46 @@ void keyEventCb(int keyCode, int keyStatus) {
 	if (keyStatus != 1 && keyCode != E_KEYCODE_CLOCKWISE && keyCode != E_KEYCODE_ANTI_CLOCKWISE) {
 		return;
 	}
+	bool remote = sRemoteMode;
 	switch (keyCode) {
 	case E_KEYCODE_MIDDLE_BUTTON: {         // play / pause, and report it back
 		bool nowPlaying = lp->togglePlay();
-		if (nowPlaying) awtrix::AudioManager::getInstance().resumeAudio();
-		else awtrix::AudioManager::getInstance().pauseAudio();
+		// In remote mode the report *is* the pause: the service turns it into a
+		// Connect command, and the next poll confirms what actually happened.
+		if (!remote) {
+			if (nowPlaying) awtrix::AudioManager::getInstance().resumeAudio();
+			else awtrix::AudioManager::getInstance().pauseAudio();
+		}
 		reportChange(nowPlaying ? "{\"playing\":true}" : "{\"playing\":false}");
 		break;
 	}
 	case E_KEYCODE_LEFT_BUTTON:
-		lp->prevLine();
-		awtrix::AudioManager::getInstance().seekAudio(lp->getPlayheadMs());
+		// Remote mode has a queue to skip through; local mode only has this
+		// track's lyric lines.
+		if (remote) {
+			reportChange("{\"action\":\"previous\"}");
+		} else {
+			lp->prevLine();
+			awtrix::AudioManager::getInstance().seekAudio(lp->getPlayheadMs());
+		}
 		break;
 	case E_KEYCODE_RIGHT_BUTTON:
-		lp->nextLine();
-		awtrix::AudioManager::getInstance().seekAudio(lp->getPlayheadMs());
+		if (remote) {
+			reportChange("{\"action\":\"next\"}");
+		} else {
+			lp->nextLine();
+			awtrix::AudioManager::getInstance().seekAudio(lp->getPlayheadMs());
+		}
 		break;
 	case E_KEYCODE_CLOCKWISE:               // knob right → louder
 		if (sVolume < 6) ++sVolume;
 		applyVolume();
+		if (remote) reportVolume();
 		break;
 	case E_KEYCODE_ANTI_CLOCKWISE:          // knob left → quieter
 		if (sVolume > 0) --sVolume;
 		applyVolume();
+		if (remote) reportVolume();
 		break;
 	case E_KEYCODE_KNOB_BUTTON: {           // knob press → cycle display mode, report it
 		int m = lp->cycleMode();

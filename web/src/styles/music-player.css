@@ -46,11 +46,12 @@
   background: transparent;
 }
 
+/* The rail header is pure heading now: device/firmware actions live with the
+   52×16 screen, and the hairline below is carried by the source bar itself. */
 .music-library__header {
   display: grid;
   gap: 1rem;
-  padding-bottom: 1.15rem;
-  border-bottom: 1px solid var(--music-line);
+  padding-bottom: 0.35rem;
 }
 
 .music-section-heading {
@@ -60,7 +61,7 @@
 }
 
 .music-section-heading > span,
-.music-stage__header > div > span,
+.music-stage__heading > span,
 .music-lyrics-panel > header span,
 .music-firmware-dialog__title span {
   color: var(--music-ink-soft);
@@ -127,27 +128,197 @@
   font-weight: 650;
 }
 
+/* Source + account merge into one hairline-bounded bar: both are "where the
+   music comes from" facts, secondary to searching and playing. */
+.music-source-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 1.1rem;
+  padding: 0.62rem 0;
+  border-block: 1px solid var(--music-line);
+}
+
+.music-source-switch {
+  flex: none;
+}
+
+.music-source-switch button {
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.music-spotify-setup {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--music-line);
+  border-radius: 0.65rem;
+  background: var(--music-paper-raised);
+}
+
+.music-spotify-setup__head {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.music-spotify-setup__head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: var(--music-ink-soft);
+  font-family: var(--mono);
+  font-size: 0.61rem;
+  letter-spacing: 0.1em;
+}
+
+.music-spotify-setup__head svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.music-spotify-setup__head p,
+.music-spotify-paste p {
+  margin: 0;
+  color: var(--music-ink-soft);
+  font-size: 0.66rem;
+  line-height: 1.55;
+}
+
+.music-spotify-steps {
+  display: grid;
+  gap: 0.42rem;
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--music-ink);
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
+.music-spotify-steps a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  color: var(--music-signal);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.music-spotify-steps a svg {
+  width: 0.72rem;
+  height: 0.72rem;
+}
+
+.music-spotify-steps code {
+  display: block;
+  margin-top: 0.28rem;
+  padding: 0.32rem 0.45rem;
+  overflow-x: auto;
+  border: 1px solid var(--music-line);
+  border-radius: 0.3rem;
+  background: var(--music-paper);
+  font-family: var(--mono);
+  font-size: 0.63rem;
+  white-space: nowrap;
+}
+
+.music-spotify-field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.music-spotify-field > span {
+  color: var(--music-ink);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.music-spotify-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.music-spotify-paste {
+  display: grid;
+  gap: 0.6rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--music-line);
+  justify-items: start;
+}
+
+.music-spotify-paste .music-spotify-field {
+  width: 100%;
+}
+
+/* Spotify Connect output routing — a hairline row inside the player console,
+   because "where is this playing" is a transport concern, not a library one. */
+.music-console-output {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.42rem 0.6rem;
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--music-line);
+}
+
+.music-console-output > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: var(--music-ink);
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.music-console-output > span:first-child svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.music-console-output__control {
+  width: 100%;
+  min-width: 0;
+}
+
+.music-connect-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--music-ink-soft);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.music-console-output__control [data-part="value"] {
+  overflow: hidden;
+  font-size: 0.76rem;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .music-account-strip {
   display: grid;
-  min-height: 4rem;
-  grid-template-columns: 2.8rem minmax(0, 1fr) auto;
+  flex: 1 1 14rem;
+  min-width: 0;
+  min-height: 2.6rem;
+  grid-template-columns: 2.15rem minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.65rem 0;
-  border-block: 1px solid var(--music-line);
+  gap: 0.6rem;
 }
 
 .music-account-strip__avatar {
   display: grid;
   overflow: hidden;
-  width: 2.65rem;
+  width: 2.15rem;
   aspect-ratio: 1;
   place-items: center;
   border-radius: 999px;
   background: var(--music-ink);
   color: var(--music-paper);
   font-family: var(--mono);
-  font-size: 0.78rem;
+  font-size: 0.72rem;
 }
 
 .music-account-strip__avatar-fallback,
@@ -392,11 +563,11 @@
   display: grid !important;
   width: 100%;
   min-height: 3.6rem;
-  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  grid-template-columns: 2.5rem minmax(0, 1fr) auto;
   align-items: center;
   justify-content: stretch !important;
   gap: 0.65rem !important;
-  padding: 0.5rem 0.55rem 0.5rem 0.35rem !important;
+  padding: 0.5rem 0.55rem 0.5rem 0 !important;
 }
 
 .music-track-row[data-disabled] {
@@ -409,18 +580,58 @@
   background: color-mix(in oklab, var(--music-acid) 9%, transparent);
 }
 
-.music-track-index,
 .music-track-row time {
   font-family: var(--mono);
   font-size: 0.61rem;
   font-variant-numeric: tabular-nums;
 }
 
-.music-track-index {
-  color: var(--music-ink-soft);
+/* Album art, always through the same-origin proxy. The mono fallback sits in
+   the layer beneath the <img>, so a missing/failed cover degrades to print:
+   track rows show their index, the console shows the title's first glyph. */
+.music-cover {
+  display: grid;
+  overflow: hidden;
+  flex: none;
+  aspect-ratio: 1;
+  place-items: center;
+  background: var(--music-ink);
+  color: var(--music-paper);
+  font-family: var(--mono);
 }
 
-.music-track-row.is-active .music-track-index {
+.music-cover__fallback,
+.music-cover__image {
+  grid-area: 1 / 1;
+}
+
+.music-cover__fallback {
+  color: color-mix(in oklab, var(--music-paper) 88%, var(--music-ink));
+  font-variant-numeric: tabular-nums;
+}
+
+.music-cover__image {
+  /* Grid items honor z-index without being positioned; an opacity/filter on
+     the fallback must never lift it above the artwork. */
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.music-cover--row {
+  width: 2.5rem;
+  font-size: 0.61rem;
+}
+
+.music-cover--console {
+  width: clamp(4.75rem, 8vw, 6.75rem);
+  box-shadow: 0 0.45rem 1.1rem oklch(0.2 0.02 130 / 0.12);
+  font-size: 1.5rem;
+  font-weight: 650;
+}
+
+.music-track-row.is-active .music-cover__fallback {
   color: var(--music-acid);
 }
 
@@ -517,21 +728,37 @@
   display: grid;
   min-width: 0;
   max-height: none;
-  gap: 0.9rem;
+  gap: 1.3rem;
   overflow: visible;
   overscroll-behavior: auto;
 }
 
+/* Screen + timed lyrics sit side by side once the column is wide enough:
+   both are monitors of the same lyric surface, neither is the hero. */
+.music-lyric-band {
+  display: grid;
+  align-items: start;
+  gap: 1.15rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+}
+
+.music-screen {
+  display: grid;
+  min-width: 0;
+  gap: 0.9rem;
+}
+
 .music-stage__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.6rem 1rem;
   padding-bottom: 0.7rem;
   border-bottom: 1px solid var(--music-line);
 }
 
-.music-stage__header > div {
+.music-stage__heading {
   display: grid;
   gap: 0.18rem;
 }
@@ -607,8 +834,11 @@
   height: 0.85rem;
 }
 
+/* The 52×16 preview is a monitor, not a poster: cap it so the transport and
+   the library never compete with an oversized canvas. */
 .pixel-lyric-screen {
   margin: 0;
+  max-width: 26rem;
 }
 
 .pixel-lyric-screen__frame {
@@ -836,11 +1066,11 @@
 }
 
 .music-now-playing.is-empty {
-  padding: 0.85rem;
-  border: 1px solid var(--music-line);
-  border-radius: 0.65rem;
-  background: var(--music-paper-raised);
-  color: var(--music-ink);
+  padding: 0.9rem 0;
+}
+
+.music-now-playing > .music-inline-error {
+  margin: 0.7rem 0 0.8rem;
 }
 
 .music-now-playing__header {
@@ -883,9 +1113,9 @@
 .music-now-playing__main {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 1.25rem;
+  gap: 1rem 1.1rem;
   padding: 0.95rem 0;
 }
 
@@ -1489,11 +1719,6 @@
 }
 
 @media (min-width: 40rem) {
-  .music-library__header {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: start;
-  }
-
   .music-theme-options {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -1529,14 +1754,6 @@
     padding: 1rem;
   }
 
-  .music-account-strip {
-    grid-template-columns: 2.5rem minmax(0, 1fr) auto;
-  }
-
-  .music-account-strip__avatar {
-    width: 2.35rem;
-  }
-
   .music-account-strip button:not([aria-label]) {
     padding-inline: 0.55rem;
     font-size: 0.62rem;
@@ -1560,7 +1777,11 @@
   }
 
   .music-track-row__content {
-    grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+    grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  }
+
+  .music-cover--row {
+    width: 2.25rem;
   }
 
   .music-track-row__after {
@@ -1584,14 +1805,28 @@
   }
 
   .music-now-playing__main {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.75rem;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.75rem 0.8rem;
+  }
+
+  .music-cover--console {
+    width: 4rem;
+    font-size: 1.15rem;
   }
 
   .music-transport {
+    grid-column: 1 / -1;
     justify-content: flex-start;
     padding-left: 0;
     border-left: 0;
+  }
+
+  .music-console-output {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .music-console-output > span:first-child {
+    grid-column: 1 / -1;
   }
 
   .music-lyrics-panel > header > small {

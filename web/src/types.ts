@@ -148,10 +148,15 @@ export interface ControlAccessInfo {
   sameSubnetAsClock: boolean;
 }
 
+export type MusicProviderId = "netease" | "spotify";
+export type MusicPlaybackMode = "device-audio" | "remote";
+
 export interface MusicProfile {
-  userId: number;
+  provider: MusicProviderId;
+  id: string;
   nickname: string;
   avatarUrl?: string;
+  plan?: string;
 }
 
 export interface MusicSessionStatus {
@@ -159,15 +164,43 @@ export interface MusicSessionStatus {
   profile?: MusicProfile;
 }
 
+export interface MusicProviderSummary {
+  id: MusicProviderId;
+  label: string;
+  playbackMode: MusicPlaybackMode;
+  loggedIn: boolean;
+  profile?: MusicProfile;
+  ready: boolean;
+}
+
+export interface MusicOverview {
+  active: MusicProviderId;
+  providers: MusicProviderSummary[];
+}
+
+export interface SpotifyAppStatus {
+  configured: boolean;
+  clientId: string | null;
+  redirectUri: string;
+}
+
+export interface MusicRemoteDevice {
+  id: string;
+  name: string;
+  type: string;
+  active: boolean;
+  volumePercent?: number;
+}
+
 export interface MusicPlaylist {
-  id: number;
+  id: string;
   name: string;
   trackCount: number;
   coverUrl?: string;
 }
 
 export interface MusicTrack {
-  id: number;
+  id: string;
   title: string;
   artists: string[];
   album: string;

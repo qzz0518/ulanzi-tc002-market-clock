@@ -7,8 +7,11 @@ import {
   writeClockGeneralSettings,
 } from "./clock-client.ts";
 import { loadConfig } from "./config.ts";
-import { createControlHandler } from "./control-api.ts";
-import { MusicSessionStore, NeteaseMusicService } from "./netease-music.ts";
+import { createControlHandler, resetDeviceMusicSelection } from "./control-api.ts";
+import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
+import { MusicHub, MusicProviderStore } from "./music/hub.ts";
+import { LrclibLyricsClient } from "./music/lyrics.ts";
+import { SpotifyAppStore, SpotifyMusicService, SpotifySessionStore } from "./music/spotify.ts";
 import { discoverControlAccess } from "./network-access.ts";
 import { WorkspaceStore, createDefaultWorkspace } from "./workspace.ts";
 import { WorkspaceController } from "./workspace-controller.ts";
@@ -55,13 +58,36 @@ for (const issue of marketCatalog.getIssues()) {
   log("market_store_issue", { error: issue });
 }
 const ulanziPixelAssets = new UlanziPixelAssetClient({ timeoutMs: config.requestTimeoutMs });
-const music = new NeteaseMusicService({
+const netease = new NeteaseMusicService({
   sessionStore: new MusicSessionStore(".runtime/music-session.json"),
 });
-try {
-  await music.initialize();
-} catch (error) {
-  log("music_session_load_failed", { error: errorMessage(error), fallback: "signed_out" });
+const spotify = new SpotifyMusicService({
+  appStore: new SpotifyAppStore(".runtime/spotify-app.json"),
+  sessionStore: new SpotifySessionStore(".runtime/spotify-session.json"),
+  // Spotify only accepts loopback for plaintext redirects, so the callback
+  // always comes back to this machine regardless of which host the studio was
+  // opened on; a LAN browser finishes the login by pasting the URL back.
+  redirectUri: `http://127.0.0.1:${config.healthPort}/api/music/spotify/callback`,
+  // Spotify publishes no lyric API; LRCLIB covers most catalogues and NetEase
+  // fills in the Mandarin and Cantopop it misses.
+  lyrics: new LrclibLyricsClient({
+    timeoutMs: config.requestTimeoutMs,
+    fallback: new NeteaseLyricsFallback(netease),
+  }),
+  timeoutMs: Math.max(config.requestTimeoutMs, 8_000),
+});
+const music = new MusicHub({
+  netease,
+  spotify,
+  store: new MusicProviderStore(".runtime/music-provider.json"),
+  onSwitch: (provider) => {
+    resetDeviceMusicSelection(provider.id);
+    log("music_provider_switched", { provider: provider.id });
+  },
+});
+await music.initialize();
+for (const [provider, error] of music.initializeFailures) {
+  log("music_session_load_failed", { provider, error, fallback: "signed_out" });
 }
 const controlAccess = discoverControlAccess({
   clockHost: config.clockHost,

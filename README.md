@@ -111,12 +111,42 @@ PWA 安装需要可信 HTTPS，纯局域网 HTTP 下响应式控制台不受影�
 
 ## 音乐歌词播放器
 
-![音乐工作台：搜索选歌、主题设置与 52×16 实时像素预览](docs/images/tc002-music-studio.png)
+![音乐工作台：网易云 / Spotify 双音源切换、带封面的曲目列表、播放控制台与 52×16 实时像素预览](docs/images/tc002-music-studio.png)
 
-顶部「音乐」是一个完整的音乐工作台：网易云扫码登录、搜索（20 首/页）、歌单、逐行歌词
-（含翻译）、同源音频代理和 52×16 像素歌词实时预览。登录 Cookie 只存本机
-`.runtime/music-session.json`（权限 `0600`），浏览器和时钟都拿不到原始凭据，登出即删除；
-歌曲能否播放仍受账号、会员、版权和地区限制，45 秒试听不会被显示成完整歌曲。
+顶部「音乐」是一个完整的音乐工作台：**网易云音乐**与 **Spotify** 两个音源随时切换，
+搜索（20 首/页）、歌单、逐行歌词（含翻译）和 52×16 像素歌词实时预览是共用的。
+当前音源记在 `.runtime/music-provider.json`，重启后保持不变；切换会清空上一个音源的
+选曲——两边的曲目 ID 互不通用。
+
+- **网易云**：扫码登录，音频走同源代理，TC002 自己下载并用扬声器播放。登录 Cookie 只存
+  本机 `.runtime/music-session.json`（权限 `0600`），浏览器和时钟都拿不到原始凭据，
+  登出即删除；歌曲能否播放仍受账号、会员、版权和地区限制。
+- **Spotify**：走官方 Spotify Connect。音频不落地到本机或时钟——播放发生在你选中的
+  Connect 设备（手机、桌面客户端、音箱）上，工作台和 TC002 都是遥控器加歌词屏。
+
+### Spotify Connect 接入
+
+Spotify 不发放公共密钥，需要你在自己的开发者后台建一个免费应用（一次性，两分钟）：
+
+1. 打开 [Spotify 开发者后台](https://developer.spotify.com/dashboard) → Create app
+2. Redirect URI 精确填 `http://127.0.0.1:43820/api/music/spotify/callback`
+   （端口跟随 `HEALTH_PORT`；Spotify 只接受回环地址作为明文 http 回调，`localhost` 已不再受理）
+3. 勾选 **Web API**，保存后把 Client ID 粘进工作台的 Spotify 面板
+
+授权用 **Authorization Code + PKCE**，因此不需要也不会存 Client Secret；刷新令牌写在
+`.runtime/spotify-session.json`（权限 `0600`），登出即删除。回调只能落到运行服务的这台
+机器，所以用手机或平板打开工作台时，把浏览器地址栏里那条打不开的 `127.0.0.1` 链接粘回
+面板即可完成登录。
+
+接上之后：搜索、歌单（含「喜欢的音乐」）、选歌播放、暂停、上一首/下一首、拖动进度、
+切换 Connect 播放设备、调音量全部走 Web API；**反过来也成立**——在手机上换一首歌，
+时钟和工作台会在两秒内跟上，歌词自动切换。Connect 的播放控制需要 Premium 账号，
+免费账号会收到明确提示而不是一个静默失败。Spotify 没有公开歌词接口，歌词来自
+[LRCLIB](https://lrclib.net)（免 key），中文歌再回落到网易云的逐行歌词。
+
+播放本身留在你自己的 Spotify 客户端里 —— 工作台不做网页播放器。这不是能力缺口而是取舍：
+浏览器播放要引入 Spotify CDN 的第三方脚本、放宽页面 CSP、并把访问令牌交到前端，而你电脑上
+本来就开着客户端，用它选歌更快，状态还是双向同步的。
 
 预览与设备共用同一套主题系统：四种显示形式（走带 / 天际 / 聚光 / 升降）× 四套配色
 （信号绿 / 磁带橙 / 蓝晒 / 街机红），另可用取色器覆盖自定义主色。字模也是同一份：
@@ -129,7 +159,10 @@ PWA 安装需要可信 HTTPS，纯局域网 HTTP 下响应式控制台不受影�
   Custom App 通道显示；声音由浏览器播放。
 - **原生音乐固件（非持久化侧载）**：仓库内含完整的 FlyThings C++ 播放器（Docker 交叉
   编译，无需 Windows IDE），在网页上一键侧载——服务地址会在侧载时自动写入设备，
-  换网络、换机器都无需重新编译。固件在真机上下载音频、扬声器播放、毫秒级进度跳转，
+  换网络、换机器都无需重新编译。同一个固件按音源自动切换两种工作方式：网易云下
+  载音频本地播放；Spotify 下不下载任何音频，改为跟随服务端上报的 Connect 播放位置
+  （漂移超过 0.9 秒才校正，中间由本地 60ms 时钟补帧），左右键变成上一首/下一首，
+  旋钮直接调 Connect 设备音量。固件在真机上下载音频、扬声器播放、毫秒级进度跳转，
   用离线光栅化的 12×12 中日文字模直接驱动 LED，并自带六秒开机动画与「选择歌曲」
   待机画面。网页与固件通过控制序列 + 心跳协议**双向实时同步**：网页选歌/暂停/换主题/
   拖进度 2 秒内落到设备，设备按键即时回流，预览动画锚定真机播放头。固件上线数秒内
@@ -183,10 +216,16 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/library/ulanzi/media` | 安全代理官方素材缩略图 |
 | `POST` | `/api/library/ulanzi/import` | 校验并导入官方 `contentView` 链接或作品 ID |
 | `GET` | `/api/library/ulanzi/imported/:ref` | 读取已归一化的本地素材快照 |
-| `GET` | `/api/music/session`、`/api/music/avatar` | 脱敏的网易云登录状态与头像代理 |
-| `POST` | `/api/music/qr`、`/api/music/qr/check`、`/api/music/logout` | 服务端二维码会话；登出并删除本机凭据 |
-| `GET` | `/api/music/search`、`/api/music/playlists`、`/api/music/playlists/:id/tracks` | 搜索歌曲、读取歌单及曲目 |
-| `GET` | `/api/music/tracks/:id`、`/api/music/tracks/:id/stream` | 歌曲信息与逐行歌词；同源音频代理（支持 Range） |
+| `GET` / `POST` | `/api/music/providers`、`/api/music/provider` | 列出两个音源及其登录状态；切换当前音源 |
+| `GET` | `/api/music/session`、`/api/music/avatar` | 当前音源的脱敏登录状态与头像代理 |
+| `POST` | `/api/music/qr`、`/api/music/qr/check`、`/api/music/logout` | 网易云服务端二维码会话；登出并删除本机凭据 |
+| `GET` / `PUT` | `/api/music/spotify/app` | 读取或保存 Spotify 应用 Client ID（PKCE，无 Secret） |
+| `POST` | `/api/music/spotify/login`、`/api/music/spotify/complete` | 生成 PKCE 授权链接；用粘回的回调链接完成登录 |
+| `GET` | `/api/music/spotify/callback` | Spotify 授权回调（自包含结果页，校验 state） |
+| `GET` | `/api/music/spotify/devices` | 列出可用的 Spotify Connect 播放设备 |
+| `POST` | `/api/music/remote` | Connect 播放控制：播放/暂停/上下曲/seek/音量/转移设备 |
+| `GET` | `/api/music/search`、`/api/music/playlists`、`/api/music/playlists/:id/tracks` | 按当前音源搜索歌曲、读取歌单及曲目 |
+| `GET` | `/api/music/tracks/:id`、`/api/music/tracks/:id/stream` | 歌曲信息与逐行歌词；同源音频代理（支持 Range，仅网易云） |
 | `GET` / `POST` | `/api/music/device-app/*` | 校验固件包、检测真机、侧载固件与恢复官方固件（内存盘会话） |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤60）推到官方固件 Custom App（设备同屏） |
 | `POST` | `/api/music/device/select`、`/api/music/device/control` | 网页下发选歌与控制补丁（播放/主题/配色/主色/seek） |
@@ -204,6 +243,11 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 可靠 24H 开盘字段，不伪造涨跌）；USD/CNY 为 Frankfurter/ECB 日参考汇率；四只美股用 Yahoo
 Chart（1D 前收盘变化）。搜索添加的运行时资产每类固定单一来源（Coinbase / Yahoo /
 Frankfurter / Gold API，无备用路由），报价失败即降级显示。
+
+音乐音源：网易云音乐（非官方接口，凭据只存本机）、Spotify Web API + Spotify Connect
+（官方接口，需你自己的开发者应用；Connect 控制需 Premium）。歌词来自各音源自带的
+逐行歌词与 [LRCLIB](https://lrclib.net) 社区库。本项目与网易云、Spotify、Ulanzi 均无
+从属或背书关系；Spotify 音频受 DRM 保护，本项目从不下载、代理或转码它。
 
 本项目因迁移和修改 GPL‑3.0 的 PixDeck 内容而采用 **GPL‑3.0-only**。分发源码或二进制前请
 阅读 [LICENSE](LICENSE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
