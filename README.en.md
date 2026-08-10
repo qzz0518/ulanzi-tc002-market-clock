@@ -17,9 +17,9 @@ multiple items in one channel are composed into an ordered carousel.
 | Category | Content |
 | --- | --- |
 | Market | 10 built-in assets (BTC, gold, AAPL, …); search-and-add any crypto, stock / ETF, FX pair, or precious metal — no API keys |
-| Tools | Notice board, interval timer column |
-| Visual | Langton's ant, aquarium, fire, flip clock, Matrix clock, maze, pixel pet, falling sand, starfield |
-| Creative | 52×16 canvas (pen, pixel text, image pixelization); Ulanzi community pixel assets imported through the Library (PNG / GIF) |
+| Tools | Notice board (with a key-free webhook: one POST from curl / iOS Shortcuts / Home Assistant puts a message on the clock), interval timer column, pomodoro, countdown days |
+| Visual | Langton's ant, aquarium, fire, flip clock, Matrix clock, maze, pixel pet, falling sand, starfield, Game of Life, fireworks, weather particles, sunrise/sunset color clock (weather visuals locate by place-name search — no raw coordinates) |
+| Creative | 52×16 canvas (pen, pixel text, image pixelization, optional live streaming to the clock plus QR-code collaborative doodling); Library imports of Ulanzi community assets (PNG / GIF) or local videos (ffmpeg to 52×16 pixel animation) |
 
 The top-right settings dialog reads and writes the clock's brightness, volume, timezone, and
 other general settings directly; phone browsers get a dedicated touch layout with
@@ -59,6 +59,21 @@ Two paths put lyrics on the clock:
   <img src="docs/images/tc002-music-firmware-preview.png" width="720" alt="The 52×16 pixel lyric screen — the preview and the music firmware share one rendering algorithm">
 </p>
 
+## Game arcade and arcade firmware
+
+The "Games" tab is a pixel arcade: **time breakout, flappy bird, snake, and two-player
+Pong** run right in the browser (touch / mouse / keyboard), and flipping "Screen" on
+mirrors the picture to the clock at ~25fps in real time — no flashing, the clock is
+simply a second screen. Two-player Pong turns a phone into the second paddle via a
+QR code.
+
+To play on the clock itself with its knob and buttons, sideload the bundled
+**arcade firmware**: a boot animation, a cartridge-style game menu, a device info
+page (battery / USB / versions / IP, knob-adjustable volume), and **seven games**
+(the four above plus lane racer, space shooter, and a sideways Tetris) with 8-bit
+sound effects. Sideloading works exactly like the music firmware: memory-only,
+a power cycle or one click restores the official firmware, flash is never written.
+
 ## Quick start
 
 Requires [Bun](https://bun.sh) (`mise.toml` pins 1.3.14 — with mise, just `mise install`):
@@ -79,6 +94,7 @@ bash scripts/install-docker.sh --host TC002_IP   # Docker Compose
 
 - [Technical reference](docs/reference.en.md): environment variables, market data sources, Library and Music details, architecture, and the local API
 - [Music firmware](device/tc002-lyrics-player/README.md): firmware sources, protocol, build, and sideload safety
+- [Arcade firmware](device/tc002-arcade/README.md): the seven games' controls, build, and packaging
 - [ADRs](docs/adr/): key architecture decisions
 
 ## License
