@@ -30,11 +30,13 @@ describe("loadConfig", () => {
       CONTROL_HOST: "0.0.0.0",
       APP_NAME: "btc_price",
       CLOCK_HTTP_PROXY: "http://127.0.0.1:6152",
+      NOTIFY_TOKEN: "notify-test-token",
     });
     expect(config.clockHost).toBe("tc002.local");
     expect(config.controlHost).toBe("0.0.0.0");
     expect(config.appName).toBe("btc_price");
     expect(config.clockHttpProxy).toBe("http://127.0.0.1:6152");
+    expect(config.notifyToken).toBe("notify-test-token");
   });
 
   test("rejects URLs and over-aggressive polling", () => {

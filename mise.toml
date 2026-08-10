@@ -17,6 +17,10 @@ run = "bun run typecheck"
 description = "Validate and stage a FlyThings TC002 lyrics-player sideload bundle"
 run = "bun run music-release"
 
+[tasks.arcade-release]
+description = "Validate and stage a FlyThings TC002 arcade sideload bundle"
+run = "bun run arcade-release"
+
 [tasks.install-macos]
 description = "Build and install the native macOS background service"
 run = "bash scripts/install.sh"
@@ -32,3 +36,7 @@ run = "bash scripts/install-docker.sh"
 [tasks.uninstall-docker]
 description = "Stop and remove the Docker Compose service"
 run = "bash scripts/uninstall-docker.sh"
+
+[tasks.arcade-hostcheck]
+description = "Compile and run the arcade engine self-checks on the host"
+run = "clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-arcade/app/src' device/tc002-arcade/hostcheck/selfcheck.cpp device/tc002-arcade/app/src/games/*.cpp device/tc002-arcade/app/src/utils/Surface.cpp -o .runtime/arcade-selfcheck && .runtime/arcade-selfcheck"

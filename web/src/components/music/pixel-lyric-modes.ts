@@ -95,7 +95,14 @@ export function skylineBarLevel(
   playing: boolean,
   kick: number,
   maxLevel: number,
+  realLevel?: number,
 ): number {
+  if (realLevel !== undefined && Number.isFinite(realLevel)) {
+    const energy = playing
+      ? unit(realLevel) * 0.9 + unit(kick) * 0.1
+      : Math.min(0.18, unit(realLevel));
+    return Math.round(Math.min(1, energy) * Math.max(0, maxLevel));
+  }
   const slot = Math.floor(Math.max(0, timeMs) / SKYLINE_SLOT_MS);
   const t = slot * (SKYLINE_SLOT_MS / 1000);
   const noise = fract(Math.sin((bar + 1) * 127.1 + slot * 311.7) * 43758.5453);

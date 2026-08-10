@@ -5,29 +5,40 @@ import {
   computeBundleId,
   isValidBundleEntry,
   isValidBundlePath,
+  MUSIC_SIDELOAD_PROFILE,
   type BundleFile,
 } from "./tc002-music-installer.ts";
 
 const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_FILES = 512;
 
-export interface MusicReleaseManifest {
+export interface SideloadReleaseManifest {
   schemaVersion: 3;
-  appId: "tc002-lyrics-player";
+  appId: string;
   version: string;
   entry: string;
   bundleId: string;
   files: BundleFile[];
 }
 
-export async function createMusicRelease(input: {
+// Backward-compatible name from the music-only era; same shape.
+export type MusicReleaseManifest = SideloadReleaseManifest;
+
+export async function createSideloadRelease(input: {
   sourceDir: string;
   version: string;
   entry?: string;
   releaseDirectory: string;
-}): Promise<MusicReleaseManifest> {
+  // Which sideloadable app this bundle belongs to; the installer's bundle
+  // store refuses a manifest whose appId does not match its own profile.
+  appId?: string;
+}): Promise<SideloadReleaseManifest> {
   if (!/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/i.test(input.version)) {
     throw new Error("version must be semantic, for example 0.1.0");
+  }
+  const appId = input.appId ?? MUSIC_SIDELOAD_PROFILE.appId;
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(appId)) {
+    throw new Error("appId must be a plain lowercase identifier, for example tc002-arcade");
   }
   const entry = input.entry ?? "player";
   if (!isValidBundleEntry(entry)) {
@@ -52,9 +63,9 @@ export async function createMusicRelease(input: {
     throw new Error(`entry "${entry}" is not present in the source directory`);
   }
 
-  const manifest: MusicReleaseManifest = {
+  const manifest: SideloadReleaseManifest = {
     schemaVersion: 3,
-    appId: "tc002-lyrics-player",
+    appId,
     version: input.version,
     entry,
     bundleId: computeBundleId(files),
@@ -71,6 +82,9 @@ export async function createMusicRelease(input: {
   await rename(temporaryManifest, join(input.releaseDirectory, "manifest.json"));
   return manifest;
 }
+
+// Backward-compatible name from the music-only era; same function.
+export { createSideloadRelease as createMusicRelease };
 
 async function collectFiles(bundleDir: string): Promise<BundleFile[]> {
   const files: BundleFile[] = [];

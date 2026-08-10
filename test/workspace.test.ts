@@ -68,6 +68,20 @@ describe("versioned content workspace", () => {
     })).toThrow("at least one item");
   });
 
+  test("reserves notification, music mirror, and live app names", () => {
+    const channel = createDefaultWorkspace("market").channels[0]!;
+    for (const appName of ["notify", "music_lyrics", "live_game"]) {
+      expect(() => validateWorkspace({
+        version: 3,
+        channels: [{ ...channel, appName }],
+      })).toThrow("reserved for a system channel");
+    }
+    expect(validateWorkspace({
+      version: 3,
+      channels: [{ ...channel, appName: "lively" }],
+    }).channels[0]?.appName).toBe("lively");
+  });
+
   test("atomically upgrades the old settings file on first load", async () => {
     const directory = await mkdtemp(join(tmpdir(), "ulanzi-workspace-"));
     directories.push(directory);

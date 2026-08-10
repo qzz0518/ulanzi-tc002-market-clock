@@ -248,6 +248,18 @@ export interface MusicDeviceProbe {
   message: string;
 }
 
-export type StudioView = "console" | "canvas" | "library" | "music";
+// GET /api/arcade/status —— 游戏固件的在线快照（心跳记忆 + 会话状态）。
+export interface ArcadeStatus {
+  online: boolean;
+  ageMs: number;
+  game: string;
+  phase: string;
+  score: number;
+}
+
+// 哪种侧载固件正在直连；两种固件互斥，最多一种在线。
+export type FirmwareKind = "music" | "arcade";
+
+export type StudioView = "console" | "canvas" | "library" | "music" | "game";
 export type PreviewScope = "item" | "channel";
 export type BusyAction = "preview" | "push" | null;

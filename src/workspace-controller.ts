@@ -31,6 +31,11 @@ import {
   DynamicMarketDataClient,
   type RuntimeMarketData,
 } from "./market/quotes.ts";
+import {
+  WeatherNotConfiguredError,
+  type WeatherClient,
+  type WeatherObservation,
+} from "./weather/client.ts";
 
 export interface RenderedChannel {
   frames: readonly PixelCanvas[];
@@ -108,6 +113,7 @@ export interface WorkspaceControllerOptions {
   instrumentStore?: InstrumentStore;
   marketIconStore?: MarketIconStore;
   dynamicMarketClient?: DynamicMarketDataClient;
+  weatherClient?: WeatherClient;
   now?: () => number;
 }
 
@@ -128,6 +134,7 @@ export class WorkspaceController {
   private readonly instrumentStore?: InstrumentStore;
   private readonly marketIconStore?: MarketIconStore;
   private readonly dynamicMarketClient: DynamicMarketDataClient;
+  private readonly weatherClient?: WeatherClient;
   private readonly now: () => number;
   private readonly startedAt: string;
   private workspace: WorkspaceSettings;
@@ -135,6 +142,7 @@ export class WorkspaceController {
   private readonly marketErrors = new Map<AssetId, string>();
   private readonly dynamicMarketCache = new Map<string, RuntimeMarketData>();
   private readonly dynamicMarketErrors = new Map<string, string>();
+  private readonly weatherCache = new Map<string, WeatherObservation>();
   private readonly channelRuntime = new Map<string, MutableChannelRuntime>();
   private readonly previewCache = new Map<string, {
     rendered: RenderedChannel;
@@ -161,6 +169,7 @@ export class WorkspaceController {
     this.dynamicMarketClient = options.dynamicMarketClient ?? new DynamicMarketDataClient({
       timeoutMs: options.config.requestTimeoutMs,
     });
+    this.weatherClient = options.weatherClient;
     this.now = options.now ?? Date.now;
     this.startedAt = new Date(this.now()).toISOString();
     this.workspace = this.validateKnownContent(options.workspace, true);
@@ -441,6 +450,27 @@ export class WorkspaceController {
     };
   }
 
+  private async getWeather(
+    latitude: number,
+    longitude: number,
+    forceRefresh: boolean,
+  ): Promise<WeatherObservation> {
+    if (!this.weatherClient) throw new WeatherNotConfiguredError();
+    const key = `${latitude},${longitude}`;
+    const cached = this.weatherCache.get(key);
+    if (!forceRefresh && cached) return cached;
+    try {
+      const observation = await this.weatherClient.getCurrent(latitude, longitude);
+      this.weatherCache.set(key, observation);
+      return observation;
+    } catch (error) {
+      if (cached && this.now() - Date.parse(cached.fetchedAt) < this.config.sourceStaleMs) {
+        return cached;
+      }
+      throw error;
+    }
+  }
+
   private validateRenderedItem(itemId: string, rendered: ContentRenderResult): void {
     if (rendered.frames.length === 0 || rendered.frames.length !== rendered.frameDelaysMs.length) {
       throw new Error(`${itemId} returned invalid frame timing`);
@@ -533,6 +563,8 @@ export class WorkspaceController {
         if (!this.pixelAssetStore) throw new Error("pixel asset store is unavailable");
         return this.pixelAssetStore.render(assetRef, durationMs);
       },
+      getWeather: (latitude: number, longitude: number, refresh: boolean) =>
+        this.getWeather(latitude, longitude, refresh),
     };
 
     for (const item of channel.items) {

@@ -8,7 +8,9 @@ import {
 import type { AssetMarketData } from "./price.ts";
 import {
   renderCanvasContent,
+  renderCountdown,
   renderNoticeBoard,
+  renderPomodoro,
   renderTimerColumn,
 } from "./tool-renderers.ts";
 import {
@@ -16,6 +18,11 @@ import {
   renderVisualEffect,
   type VisualEffectId,
 } from "./visual-effects.ts";
+import {
+  WeatherNotConfiguredError,
+  parseCoordinate,
+  type WeatherObservation,
+} from "./weather/client.ts";
 import type { RenderedPixelAsset } from "./pixel-asset-store.ts";
 import type { MarketInstrument } from "./market/instruments.ts";
 import type { RuntimeMarketData } from "./market/quotes.ts";
@@ -58,6 +65,11 @@ export interface ContentRenderContext {
     forceRefresh: boolean,
   ): Promise<{ instrument: MarketInstrument; market: RuntimeMarketData; icon: PixelCanvas }>;
   getPixelAsset(assetRef: string, durationMs: number): Promise<RenderedPixelAsset>;
+  getWeather(
+    latitude: number,
+    longitude: number,
+    forceRefresh: boolean,
+  ): Promise<WeatherObservation>;
 }
 
 export interface ContentDefinition {
@@ -225,33 +237,56 @@ const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description
   ant: { title: "兰顿蚂蚁", description: "简单转向规则演化出的元胞自动机轨迹。" },
   aquarium: { title: "鱼缸", description: "小鱼、水草和气泡组成的陪伴型像素动画。" },
   fire: { title: "火焰", description: "经典 demoscene 热量扩散火焰。" },
+  fireworks: { title: "烟花", description: "升空尾迹、随机色相爆散与重力衰减。" },
   flipclock: { title: "翻页钟", description: "深色卡片、闪烁冒号与翻页扫光。" },
+  life: { title: "生命游戏", description: "环面边界的康威生命游戏，可用当前时间播种。" },
   matrixclock: { title: "数字雨时钟", description: "Matrix 代码雨上叠加当前时间。" },
   maze: { title: "走迷宫", description: "随机生成迷宫并演示最短路径。" },
   pet: { title: "像素宠物", description: "橘猫的待机、散步、奔跑与攻击动画。" },
   sand: { title: "落沙", description: "彩色沙粒受重力下落并逐渐堆积。" },
   starfield: { title: "星空穿梭", description: "星点从中心加速飞出的曲速效果。" },
+  suncolor: { title: "日出日落色温钟", description: "按太阳高度角把整屏染成夜蓝、晨橙、日白或暮红。" },
+  weather: { title: "天气粒子", description: "按 Open-Meteo 实况自动切换晴、云、雨、雪粒子。" },
 };
 
-function visualDefinition(effectId: VisualEffectId): ContentDefinition {
-  const details = VISUAL_NAMES[effectId];
-  const isClock = effectId === "flipclock" || effectId === "matrixclock";
-  const visualOptions: ContentOptionField[] = isClock
-    ? []
-    : [{
-        key: "speed",
-        label: "速度",
-        type: "select",
-        default: "1",
-        choices: [
-          { value: "0.5", label: "慢" },
-          { value: "1", label: "标准" },
-          { value: "1.5", label: "快" },
-          { value: "2", label: "很快" },
-        ],
-      }];
+const SPEED_OPTION: ContentOptionField = {
+  key: "speed",
+  label: "速度",
+  type: "select",
+  default: "1",
+  choices: [
+    { value: "0.5", label: "慢" },
+    { value: "1", label: "标准" },
+    { value: "1.5", label: "快" },
+    { value: "2", label: "很快" },
+  ],
+};
+
+// The place text is what the studio's geocode search fills in; the hidden
+// coordinate pair keeps its old keys so existing workspaces stay valid and the
+// renderers keep reading latitude/longitude exactly as before.
+const LOCATION_OPTIONS: readonly ContentOptionField[] = [
+  {
+    key: "place",
+    label: "地点",
+    type: "text",
+    default: "",
+    help: "在下方搜索地点后自动填入。",
+  },
+  { key: "latitude", label: "纬度", type: "hidden", default: "31.2304" },
+  { key: "longitude", label: "经度", type: "hidden", default: "121.4737" },
+];
+
+// The flip clock, matrix clock and sun-colour clock all re-render on the wall
+// clock rather than on an animation seed, so they refresh on the same cadence.
+const TIME_DRIVEN_VISUALS: readonly VisualEffectId[] = ["flipclock", "matrixclock", "suncolor"];
+
+function visualOptionFields(effectId: VisualEffectId): ContentOptionField[] {
+  if (effectId === "flipclock" || effectId === "matrixclock") return [];
+  if (effectId === "suncolor") return [...LOCATION_OPTIONS];
+  const fields: ContentOptionField[] = [SPEED_OPTION];
   if (effectId === "pet") {
-    visualOptions.push({
+    fields.push({
       key: "petAction",
       label: "动作",
       type: "select",
@@ -265,25 +300,104 @@ function visualDefinition(effectId: VisualEffectId): ContentDefinition {
       ],
     });
   }
+  if (effectId === "life") {
+    fields.push({
+      key: "lifeStart",
+      label: "开局",
+      type: "select",
+      default: "digits",
+      choices: [
+        { value: "digits", label: "当前时间" },
+        { value: "soup", label: "随机汤" },
+      ],
+    });
+  }
+  if (effectId === "fireworks") {
+    fields.push({
+      key: "density",
+      label: "密度",
+      type: "select",
+      default: "2",
+      choices: [
+        { value: "1", label: "稀疏" },
+        { value: "2", label: "标准" },
+        { value: "3", label: "密集" },
+      ],
+    });
+  }
+  return fields;
+}
+
+function visualDefinition(effectId: VisualEffectId): ContentDefinition {
+  const details = VISUAL_NAMES[effectId];
+  const timeDriven = TIME_DRIVEN_VISUALS.includes(effectId);
   return {
     id: `visual:${effectId}`,
     title: details.title,
     category: "visual",
     description: details.description,
     defaultDurationMs: 10_000,
-    preferredRefreshIntervalMs: isClock ? 10_000 : 30_000,
-    options: visualOptions,
+    preferredRefreshIntervalMs: timeDriven ? 10_000 : 30_000,
+    options: visualOptionFields(effectId),
     render(context, item) {
       const animation = renderVisualEffect(effectId, item.durationMs, context.nowMs, {
         speed: valueNumber(item.options.speed, 1, 0.5, 2),
         petAction: typeof item.options.petAction === "string"
           ? item.options.petAction as "idle" | "walk" | "run" | "attack" | "random"
           : undefined,
+        lifeStart: item.options.lifeStart === "soup" ? "soup" : "digits",
+        fireworkDensity: valueNumber(item.options.density, 2, 1, 3),
+        latitude: valueNumber(item.options.latitude, 0, -90, 90),
+        longitude: valueNumber(item.options.longitude, 0, -180, 180),
       });
       return animation;
     },
   };
 }
+
+const WEATHER_DEFINITION: ContentDefinition = {
+  id: "visual:weather",
+  title: VISUAL_NAMES.weather.title,
+  category: "visual",
+  description: VISUAL_NAMES.weather.description,
+  defaultDurationMs: 10_000,
+  // Open-Meteo publishes one current block per quarter hour; the client keeps
+  // its own 10-minute floor, so the channel only has to stay in that ballpark.
+  preferredRefreshIntervalMs: 600_000,
+  options: [...LOCATION_OPTIONS, SPEED_OPTION],
+  async render(context, item) {
+    const speed = valueNumber(item.options.speed, 1, 0.5, 2);
+    const notice = (weatherNotice: string) =>
+      renderVisualEffect("weather", item.durationMs, context.nowMs, { speed, weatherNotice });
+    let latitude: number;
+    let longitude: number;
+    try {
+      latitude = parseCoordinate(item.options.latitude, 90, "latitude");
+      longitude = parseCoordinate(item.options.longitude, 180, "longitude");
+    } catch {
+      return notice("坐标错误");
+    }
+    let weather: WeatherObservation;
+    try {
+      weather = await context.getWeather(latitude, longitude, context.forceRefresh);
+    } catch (error) {
+      // A missing client is a configuration state, not a failure: say so on the
+      // panel. Anything else stays a channel error like every other data source.
+      if (!(error instanceof WeatherNotConfiguredError)) throw error;
+      return notice("未配置");
+    }
+    return renderVisualEffect("weather", item.durationMs, context.nowMs, {
+      speed,
+      weatherPlace: typeof item.options.place === "string" ? item.options.place : "",
+      weather: {
+        condition: weather.condition,
+        temperatureC: weather.temperatureC,
+        precipitationMm: weather.precipitationMm,
+        cloudCoverPercent: weather.cloudCoverPercent,
+      },
+    });
+  },
+};
 
 const NOTICE_DEFINITION: ContentDefinition = {
   id: "tools:notice",
@@ -329,6 +443,44 @@ const TIMER_DEFINITION: ContentDefinition = {
   ],
   render(context, item) {
     return renderTimerColumn(item.durationMs, item.options, context.nowMs);
+  },
+};
+
+const POMODORO_DEFINITION: ContentDefinition = {
+  id: "tools:pomodoro",
+  title: "番茄钟",
+  category: "tools",
+  description: "工作与休息交替的番茄钟：番茄图标、剩余时间大数字与底部进度条，切换相位时全屏闪烁。",
+  defaultDurationMs: 15_000,
+  preferredRefreshIntervalMs: 15_000,
+  options: [
+    { key: "workMinutes", label: "工作（分钟）", type: "number", default: 25, minimum: 1, maximum: 180, step: 1 },
+    { key: "breakMinutes", label: "休息（分钟）", type: "number", default: 5, minimum: 0, maximum: 60, step: 1 },
+    { key: "workColor", label: "工作颜色", type: "color", default: "#ff4830" },
+    { key: "breakColor", label: "休息颜色", type: "color", default: "#00d67a" },
+    { key: "digitColor", label: "数字颜色", type: "color", default: "#ffffff" },
+    { key: "running", label: "运行中", type: "boolean", default: false },
+    { key: "startedAtMs", label: "开始时间", type: "hidden", default: 0 },
+  ],
+  render(context, item) {
+    return renderPomodoro(item.durationMs, item.options, context.nowMs);
+  },
+};
+
+const COUNTDOWN_DEFINITION: ContentDefinition = {
+  id: "tools:countdown",
+  title: "倒数日",
+  category: "tools",
+  description: "距离目标日期还有多少天；标题支持中文，当天播放全屏庆祝动画。",
+  defaultDurationMs: 12_000,
+  preferredRefreshIntervalMs: 600_000,
+  options: [
+    { key: "title", label: "标题", type: "text", default: "倒数日", help: "支持中文，最多 16 个字符。" },
+    { key: "targetDate", label: "目标日期", type: "text", default: "2027-01-01", help: "格式 YYYY-MM-DD，按本地时区计算天数。" },
+    { key: "accentColor", label: "主题色", type: "color", default: "#00e5ff", help: "天数与「天」的颜色；已过期的日子固定用暖橙。" },
+  ],
+  render(context, item) {
+    return renderCountdown(item.durationMs, item.options, context.nowMs);
   },
 };
 
@@ -385,7 +537,12 @@ export const CONTENT_DEFINITIONS: readonly ContentDefinition[] = [
   RUNTIME_MARKET_DEFINITION,
   NOTICE_DEFINITION,
   TIMER_DEFINITION,
-  ...VISUAL_EFFECT_IDS.map(visualDefinition),
+  POMODORO_DEFINITION,
+  COUNTDOWN_DEFINITION,
+  // Weather carries its own coordinate options and data dependency, so it is
+  // registered explicitly instead of through the generic visual factory.
+  ...VISUAL_EFFECT_IDS.filter((effectId) => effectId !== "weather").map(visualDefinition),
+  WEATHER_DEFINITION,
   CANVAS_DEFINITION,
   PIXEL_ASSET_DEFINITION,
 ];

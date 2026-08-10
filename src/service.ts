@@ -12,18 +12,26 @@ import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from ".
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
 import { LrclibLyricsClient } from "./music/lyrics.ts";
 import { SpotifyAppStore, SpotifyMusicService, SpotifySessionStore } from "./music/spotify.ts";
+import { createGameSocketHub } from "./game-socket.ts";
 import { discoverControlAccess } from "./network-access.ts";
 import { WorkspaceStore, createDefaultWorkspace } from "./workspace.ts";
 import { WorkspaceController } from "./workspace-controller.ts";
 import { PixelAssetStore } from "./pixel-asset-store.ts";
 import { UlanziPixelAssetClient } from "./ulanzi-pixel-assets.ts";
-import { MusicPlayerBundleStore, Tc002MusicInstaller } from "./tc002-music-installer.ts";
+import {
+  ARCADE_SIDELOAD_PROFILE,
+  MUSIC_SIDELOAD_PROFILE,
+  MusicPlayerBundleStore,
+  Tc002SideloadInstaller,
+} from "./tc002-music-installer.ts";
 import { InstrumentStore } from "./market/instruments.ts";
 import { MarketIconStore } from "./market/icon-store.ts";
 import { MarketSearchService } from "./market/search.ts";
 import { MarketCatalogService } from "./market/catalog-service.ts";
 import { DynamicMarketDataClient } from "./market/quotes.ts";
 import { BundledCryptoLogoCatalog } from "./market/logo-catalog.ts";
+import { NotifyManager } from "./notify.ts";
+import { WeatherClient } from "./weather/client.ts";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown error";
@@ -111,32 +119,63 @@ const controller = new WorkspaceController({
   instrumentStore,
   marketIconStore,
   dynamicMarketClient,
+  weatherClient: new WeatherClient({ timeoutMs: config.requestTimeoutMs }),
 });
-const musicInstaller = new Tc002MusicInstaller({
+// Both sideloadable apps (music player, arcade) share one installer class and
+// the same clock verification / service-origin closures; only the profile
+// differs (ADR 0004).
+const verifySideloadClock = async () => {
+  const info = await readClockInfo(config);
+  return { mcuVersion: info.mcuVersion, appVersion: info.appVersion };
+};
+const sideloadServiceOrigin = async () => {
+  const access = await discoverControlAccess({
+    clockHost: config.clockHost,
+    controlHost: config.controlHost,
+    port: config.healthPort,
+  });
+  return access.address ? `http://${access.address}:${config.healthPort}` : null;
+};
+const musicInstaller = new Tc002SideloadInstaller({
   clockHost: config.clockHost,
   adbPath: process.env.ADB_BIN,
-  bundleStore: new MusicPlayerBundleStore("device/tc002-lyrics-player/release"),
-  verifyClock: async () => {
-    const info = await readClockInfo(config);
-    return { mcuVersion: info.mcuVersion, appVersion: info.appVersion };
-  },
-  serviceOrigin: async () => {
-    const access = await discoverControlAccess({
-      clockHost: config.clockHost,
-      controlHost: config.controlHost,
-      port: config.healthPort,
-    });
-    return access.address ? `http://${access.address}:${config.healthPort}` : null;
-  },
+  profile: MUSIC_SIDELOAD_PROFILE,
+  bundleStore: new MusicPlayerBundleStore(
+    MUSIC_SIDELOAD_PROFILE.releaseDirectory,
+    MUSIC_SIDELOAD_PROFILE,
+  ),
+  verifyClock: verifySideloadClock,
+  serviceOrigin: sideloadServiceOrigin,
+});
+const arcadeInstaller = new Tc002SideloadInstaller({
+  clockHost: config.clockHost,
+  adbPath: process.env.ADB_BIN,
+  profile: ARCADE_SIDELOAD_PROFILE,
+  bundleStore: new MusicPlayerBundleStore(
+    ARCADE_SIDELOAD_PROFILE.releaseDirectory,
+    ARCADE_SIDELOAD_PROFILE,
+  ),
+  verifyClock: verifySideloadClock,
+  serviceOrigin: sideloadServiceOrigin,
 });
 
-const MUSIC_MIRROR_APP = "music_lyrics";
-let musicMirrorQueue: Promise<unknown> = Promise.resolve();
-function queueMusicMirror<T>(operation: () => Promise<T>): Promise<T> {
-  const next = musicMirrorQueue.then(operation, operation);
-  musicMirrorQueue = next.catch(() => undefined);
+const NOTIFY_APP = "notify";
+let liveWriteQueue: Promise<unknown> = Promise.resolve();
+function queueLiveWrite<T>(operation: () => Promise<T>): Promise<T> {
+  const next = liveWriteQueue.then(operation, operation);
+  liveWriteQueue = next.catch(() => undefined);
   return next;
 }
+// Latency-critical device writes (live frames, notifications) use Bun's native
+// fetch: spawning a curl subprocess per write costs ~170ms while a direct fetch
+// is ~16ms, which is the difference between 25fps animation and a slideshow.
+// Channel pushes keep curl because they are not latency-bound and curl carries
+// the CLOCK_HTTP_PROXY scenario; live/notify therefore bypass that proxy.
+const notify = new NotifyManager({
+  pushPayload: (payload) => queueLiveWrite(() => pushClockPayloadNamed(config, NOTIFY_APP, payload, fetch)),
+  clearApp: () => queueLiveWrite(() => deleteClockApp(config, NOTIFY_APP, fetch)),
+  onCleanupError: (error) => log("notify_cleanup_failed", { error: errorMessage(error) }),
+});
 
 let stopping = false;
 let wakeSleep: (() => void) | undefined;
@@ -167,18 +206,32 @@ const controlHandler = createControlHandler(controller, {
   pixelAssetLibrary: { client: ulanziPixelAssets, store: pixelAssetStore },
   music,
   musicInstaller,
-  musicMirror: {
-    push: (payload) => queueMusicMirror(() => pushClockPayloadNamed(config, MUSIC_MIRROR_APP, payload)),
-    clear: () => queueMusicMirror(() => deleteClockApp(config, MUSIC_MIRROR_APP)),
+  arcadeInstaller,
+  live: {
+    push: (appName, payload) => queueLiveWrite(() => pushClockPayloadNamed(config, appName, payload, fetch)),
+    clear: (appName) => queueLiveWrite(() => deleteClockApp(config, appName, fetch)),
   },
+  notify,
+  notifyToken: config.notifyToken,
   marketCatalog,
+});
+const gameSockets = await createGameSocketHub({
+  doodlePath: ".runtime/doodle.json",
+  onError: (scope, error) => log("game_socket_error", { scope, error: errorMessage(error) }),
 });
 const controlServer = Bun.serve({
   // 0.0.0.0 so the TC002 on the LAN can reach the device-facing endpoints
   // (e.g. /api/music/device/audio); localhost clients still work.
   hostname: "0.0.0.0",
   port: config.healthPort,
-  fetch: controlHandler,
+  fetch: (request, server) => {
+    // Gamepad/doodle WebSocket upgrades are decided before the REST handler;
+    // a matched route either upgrades (undefined) or answers with the reason.
+    const upgrade = gameSockets.handleUpgrade(request, server);
+    if (upgrade.matched) return upgrade.response;
+    return controlHandler(request);
+  },
+  websocket: gameSockets.websocket,
 });
 
 function beginShutdown(signal: string): void {
@@ -186,6 +239,8 @@ function beginShutdown(signal: string): void {
   stopping = true;
   log("shutdown_requested", { signal });
   wakeSleep?.();
+  // Closes game sockets and flushes the doodle wall before the listener dies.
+  void gameSockets.stop();
   controlServer.stop(true);
 }
 

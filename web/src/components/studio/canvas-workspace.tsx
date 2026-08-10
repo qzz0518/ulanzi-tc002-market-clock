@@ -11,6 +11,7 @@ import {
   ImagePlus,
   Move,
   Pencil,
+  QrCode,
   Redo2,
   RotateCcw,
   Save,
@@ -19,10 +20,18 @@ import {
 } from "lucide-react";
 import { Button, Input, NumberScrubber, Select, Switch } from "@cladd-ui/react";
 import { pixelizeImage, type PixelView, type PixelizeMethod } from "@/lib/canvas-pixelize";
+import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
+import {
+  createLiveScreen,
+  LIVE_BATCH_FRAMES,
+  LIVE_FRAME_MS,
+  type LiveScreen,
+} from "@/lib/live-screen";
 import { renderPixelText } from "@/lib/pixel-font";
-import { cn } from "@/lib/utils";
+import { cn, errorMessage } from "@/lib/utils";
 import { useAppToast } from "@/lib/use-app-toast";
 import type { BusyAction, ContentItemConfig } from "@/types";
+import { InviteQrDialog } from "@/components/game/invite-qr-dialog";
 import { WorkspaceActions } from "./workspace-actions";
 
 const WIDTH = 52;
@@ -38,6 +47,11 @@ const IMAGE_METHODS: Record<PixelizeMethod, string> = {
   nearest: "最近邻",
   smooth: "平滑采样",
 };
+// Doodle-wall live mode (pixel-playground.md §7): static art does not chase
+// frame rate, one device frame per 300ms window is plenty.
+const DOODLE_LIVE_THROTTLE_MS = 300;
+// Board edits touching more cells than this travel as one snapshot message.
+const DOODLE_STROKE_SYNC_LIMIT = 32;
 
 type CanvasTool = "pen" | "eraser" | "select" | "text" | "image";
 
@@ -116,6 +130,15 @@ export function CanvasWorkspace({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointerActionRef = useRef<PointerAction | null>(null);
   const imageUrlRef = useRef<string | null>(null);
+  const liveScreenRef = useRef<LiveScreen | null>(null);
+  const liveSocketRef = useRef<RoomSocket | null>(null);
+  const liveFrameRef = useRef<HTMLCanvasElement | null>(null);
+  // Fake capture clock — see pushLiveFrame for why it steps a whole batch.
+  const liveClockRef = useRef(0);
+  const livePushTimerRef = useRef<number | null>(null);
+  const livePendingRef = useRef(false);
+  // The wall state this board last agreed on; null until the join snapshot.
+  const lastSyncedRef = useRef<number[] | null>(null);
   const [pixels, setPixels] = useState<number[]>(() => new Array(PIXEL_COUNT).fill(0));
   const [history, setHistory] = useState<number[][]>([]);
   const [future, setFuture] = useState<number[][]>([]);
@@ -137,6 +160,10 @@ export function CanvasWorkspace({
   const [snapPalette, setSnapPalette] = useState(true);
   const [invertImage, setInvertImage] = useState(false);
   const [exportScale, setExportScale] = useState(12);
+  const [live, setLive] = useState(false);
+  const [liveInviteOpen, setLiveInviteOpen] = useState(false);
+  const pixelsRef = useRef(pixels);
+  pixelsRef.current = pixels;
 
   useEffect(() => {
     const stored = validPixels(targetItem?.options.pixels);
@@ -242,6 +269,167 @@ export function CanvasWorkspace({
     setHistory((current) => [...current.slice(-49), value.slice()]);
     setFuture([]);
   }, [pixels]);
+
+  // One call = one recorded batch of the same picture. createLiveScreen flushes
+  // after LIVE_BATCH_FRAMES cadence slots, so a fake clock steps the full batch
+  // per call instead of waiting for four separate edits; the board renders into
+  // a clean offscreen 52×16 canvas (no grid, cursor, or selection overlays).
+  const pushLiveFrame = useCallback(() => {
+    const screen = liveScreenRef.current;
+    if (!screen) return;
+    let frame = liveFrameRef.current;
+    if (!frame) {
+      frame = document.createElement("canvas");
+      frame.width = WIDTH;
+      frame.height = HEIGHT;
+      liveFrameRef.current = frame;
+    }
+    const context = frame.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
+    pixelsRef.current.forEach((pixel, index) => {
+      context.fillStyle = hexColor(pixel || 0);
+      context.fillRect(index % WIDTH, Math.floor(index / WIDTH), 1, 1);
+    });
+    for (let step = 0; step < LIVE_BATCH_FRAMES; step += 1) {
+      liveClockRef.current += LIVE_FRAME_MS;
+      screen.capture(context, liveClockRef.current);
+    }
+  }, []);
+
+  // Leading + trailing 300ms throttle: a drawing stroke shows up immediately,
+  // a burst of edits collapses into one refresh per window.
+  const scheduleLivePush = useCallback(() => {
+    if (livePushTimerRef.current !== null) {
+      livePendingRef.current = true;
+      return;
+    }
+    pushLiveFrame();
+    livePushTimerRef.current = window.setTimeout(() => {
+      livePushTimerRef.current = null;
+      if (livePendingRef.current) {
+        livePendingRef.current = false;
+        scheduleLivePush();
+      }
+    }, DOODLE_LIVE_THROTTLE_MS);
+  }, [pushLiveFrame]);
+
+  // Wall messages need the freshest board state and helpers, so the handler
+  // lives in a ref (same render-assign pattern as pixelsRef above).
+  const applyRemoteRef = useRef<(message: Record<string, unknown>) => void>(() => undefined);
+  applyRemoteRef.current = (message) => {
+    if (
+      message.type === "snapshot"
+      && Array.isArray(message.pixels)
+      && message.pixels.length === PIXEL_COUNT
+    ) {
+      const incoming = message.pixels.map((value) =>
+        typeof value === "number" && Number.isFinite(value) ? value : 0
+      );
+      const local = pixelsRef.current;
+      const wallEmpty = incoming.every((value) => value === 0);
+      const boardEmpty = local.every((value) => value === 0);
+      if (wallEmpty && !boardEmpty) {
+        // Fresh wall, existing board art: seed the wall from the board.
+        lastSyncedRef.current = local.slice();
+        liveSocketRef.current?.send({ type: "snapshot", pixels: local });
+        return;
+      }
+      lastSyncedRef.current = incoming.slice();
+      if (!wallEmpty) {
+        // The wall already has a session going — adopt it, undo can recover.
+        snapshot();
+        setPixels(incoming);
+        setStatus("已同步涂鸦墙内容，访客笔画会实时合并进来。");
+      }
+      return;
+    }
+    if (message.type === "stroke" && typeof message.x === "number" && typeof message.y === "number") {
+      const x = Math.floor(message.x);
+      const y = Math.floor(message.y);
+      if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+      const value = typeof message.color === "number" && Number.isFinite(message.color)
+        ? message.color
+        : 0;
+      const index = y * WIDTH + x;
+      // Mirror into the agreed state too, so the local diff won't echo it back.
+      const synced = lastSyncedRef.current;
+      if (synced) synced[index] = value;
+      setPixels((current) => {
+        if (current[index] === value) return current;
+        const next = current.slice();
+        next[index] = value;
+        return next;
+      });
+    }
+  };
+
+  // Live mode: one screen recorder for the device, one host socket for guests.
+  useEffect(() => {
+    if (!live) return;
+    const screen = createLiveScreen("draw", {
+      onError: (error) => setStatus(`直播上屏失败：${errorMessage(error)}`),
+    });
+    liveScreenRef.current = screen;
+    const socket = connectRoomSocket({
+      room: "draw",
+      role: "host",
+      onMessage: (message) => applyRemoteRef.current(message),
+      // A dropped socket resyncs from the next join snapshot after reconnect.
+      onOpenChange: (connected) => {
+        if (!connected) lastSyncedRef.current = null;
+      },
+    });
+    liveSocketRef.current = socket;
+    return () => {
+      socket.dispose();
+      liveSocketRef.current = null;
+      if (livePushTimerRef.current !== null) {
+        window.clearTimeout(livePushTimerRef.current);
+        livePushTimerRef.current = null;
+      }
+      livePendingRef.current = false;
+      lastSyncedRef.current = null;
+      // dispose() wipes the live_draw app from the device.
+      screen.dispose();
+      liveScreenRef.current = null;
+    };
+  }, [live]);
+
+  // While live: every board change refreshes the device frame (throttled) and
+  // mirrors to the wall — strokes for small diffs, one snapshot for bulk edits.
+  useEffect(() => {
+    if (!live) return;
+    scheduleLivePush();
+    const synced = lastSyncedRef.current;
+    const socket = liveSocketRef.current;
+    if (!synced || !socket) return;
+    const changed: number[] = [];
+    for (let index = 0; index < PIXEL_COUNT; index += 1) {
+      if ((pixels[index] ?? 0) !== (synced[index] ?? 0)) changed.push(index);
+    }
+    if (changed.length === 0) return;
+    if (changed.length <= DOODLE_STROKE_SYNC_LIMIT) {
+      for (const index of changed) {
+        const value = pixels[index] ?? 0;
+        socket.send({
+          type: "stroke",
+          x: index % WIDTH,
+          y: Math.floor(index / WIDTH),
+          color: value === 0 ? null : value,
+        });
+      }
+    } else {
+      socket.send({ type: "snapshot", pixels });
+    }
+    lastSyncedRef.current = pixels.slice();
+  }, [live, pixels, scheduleLivePush]);
+
+  const toggleLive = (checked: boolean) => {
+    setLive(checked);
+    setStatus(checked
+      ? "直播已开启：画布实时上屏，扫码邀请朋友一起涂鸦。"
+      : "直播已关闭，设备上的涂鸦画面已清除。");
+  };
 
   const canvasPoint = useCallback((event: ReactPointerEvent<HTMLCanvasElement>): [number, number] => {
     const rectangle = event.currentTarget.getBoundingClientRect();
@@ -627,6 +815,15 @@ export function CanvasWorkspace({
             <Switch as="span" input checked={showGrid} onChange={setShowGrid} />
             显示网格
           </label>
+          <label className="grid-toggle">
+            <Switch as="span" input checked={live} onChange={toggleLive} />
+            直播上屏
+          </label>
+          {live && (
+            <Button type="button" size="sm" variant="transparent" onClick={() => setLiveInviteOpen(true)}>
+              <QrCode />邀请涂鸦
+            </Button>
+          )}
           <div className="canvas-history-actions">
             <Button type="button" variant="transparent" outline={false} size="sm" square disabled={history.length === 0} onClick={undo} aria-label="撤销" title="撤销"><RotateCcw /></Button>
             <Button type="button" variant="transparent" outline={false} size="sm" square disabled={future.length === 0} onClick={redo} aria-label="重做" title="重做"><Redo2 /></Button>
@@ -754,6 +951,14 @@ export function CanvasWorkspace({
           </section>
         </div>
       </aside>
+
+      <InviteQrDialog
+        open={liveInviteOpen}
+        onOpenChange={setLiveInviteOpen}
+        title="邀请朋友来涂鸦"
+        description="手机连到同一 Wi-Fi，扫码打开涂鸦墙访客页，笔画会实时出现在画板和时钟屏幕上。"
+        path="draw"
+      />
     </>
   );
 }

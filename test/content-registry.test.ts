@@ -60,6 +60,18 @@ describe("built-in content registry", () => {
           icon: renderInstrumentFallbackIcon(instrument),
         };
       },
+      async getWeather(latitude: number, longitude: number) {
+        return {
+          latitude,
+          longitude,
+          condition: "rain" as const,
+          weatherCode: 61,
+          temperatureC: 18.4,
+          precipitationMm: 1.2,
+          cloudCoverPercent: 88,
+          fetchedAt: "2026-08-06T06:00:00Z",
+        };
+      },
       async getPixelAsset(_assetRef: string, durationMs: number) {
         return {
           metadata: {
@@ -79,7 +91,7 @@ describe("built-in content registry", () => {
         };
       },
     };
-    expect(CONTENT_DEFINITIONS).toHaveLength(24);
+    expect(CONTENT_DEFINITIONS).toHaveLength(30);
     expect(new Set(getContentCatalog().map((entry) => entry.category))).toEqual(
       new Set(["market", "tools", "visual", "creative"]),
     );

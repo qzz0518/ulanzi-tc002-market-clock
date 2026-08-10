@@ -17,6 +17,7 @@ import {
 import {
   focusGlyphIndexForProgress,
   lyricScrollOffsetForProgress,
+  MusicThemePanel,
   projectedLyricProgress,
 } from "../web/src/components/music/pixel-lyrics-preview";
 
@@ -90,30 +91,37 @@ describe("music player UI", () => {
   });
 
   test("keeps the guarded sideload session flow in the secondary drawer", async () => {
-    const source = await Bun.file(
-      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
-    ).text();
+    // 抽屉本体抽成了两页共用的 FirmwarePanel；音乐页保留触发按钮、口令与
+    // 固件轮询，流程细节在共享组件里检查。
+    const [source, panelSource] = await Promise.all([
+      Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/firmware-panel.tsx", import.meta.url)).text(),
+    ]);
 
-    expect(source).toContain('className="music-firmware-dialog"');
-    expect(source).toContain("我知道如何回到官方固件");
-    expect(source).toContain("按住 USB-C 旁的复位按钮");
+    expect(source).toContain('dialogClassName="music-firmware-dialog"');
     expect(source).toContain("侧载音乐固件");
-    expect(source).toContain("侧载固件");
-    expect(source).toContain("恢复官方固件");
     expect(source).toContain("/api/music/device/state?viewer=web");
     expect(source).toContain("FWPOLL");
     expect(source).toContain("START_TC002_MUSIC_SESSION");
     expect(source).not.toContain("刷入");
     expect(source).not.toContain("update.img");
-    expect(source.indexOf('className="music-recovery-acknowledgement"')).toBeLessThan(
-      source.indexOf('className="music-deploy-actions"'),
+
+    expect(panelSource).toContain("我知道如何回到官方固件");
+    expect(panelSource).toContain("按住 USB-C 旁的复位按钮");
+    expect(panelSource).toContain("侧载固件");
+    expect(panelSource).toContain("恢复官方固件");
+    expect(panelSource).not.toContain("刷入");
+    expect(panelSource).not.toContain("update.img");
+    expect(panelSource.indexOf('className="fw-recovery-acknowledgement"')).toBeLessThan(
+      panelSource.indexOf('className="fw-deploy-actions"'),
     );
   });
 
   test("uses Cladd UI for every replaceable music interaction primitive", async () => {
-    const [playerSource, previewSource] = await Promise.all([
+    const [playerSource, previewSource, panelSource] = await Promise.all([
       Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
       Bun.file(new URL("../web/src/components/music/pixel-lyrics-preview.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/firmware-panel.tsx", import.meta.url)).text(),
     ]);
 
     for (const component of [
@@ -122,15 +130,18 @@ describe("music player UI", () => {
       "<List",
       "<ListButton",
       "<Slider",
-      "<Checkbox",
       "<Chip",
     ]) {
       expect(playerSource).toContain(component);
     }
+    // 固件抽屉（含恢复确认的 Checkbox）抽到了共享面板里。
+    expect(panelSource).toContain("<Checkbox");
+    expect(panelSource).toContain("<Dialog");
     expect(previewSource).toContain("<ToggleGroup");
     expect(previewSource).toContain("<ToggleButton");
     expect(playerSource).not.toMatch(/<(button|input|select)\b/);
     expect(previewSource).not.toMatch(/<(button|input|select)\b/);
+    expect(panelSource).not.toMatch(/<(button|input|select)\b/);
     expect(playerSource.indexOf('className="music-timeline__slider"')).toBeLessThan(
       playerSource.indexOf('className="music-timeline-slider"'),
     );
@@ -236,6 +247,23 @@ describe("music player UI", () => {
       }
     }
     expect(peak).toBeGreaterThanOrEqual(2);
+    expect(skylineBarLevel(0, 0, true, 0, 12, 1)).toBe(11);
+    expect(skylineBarLevel(0, 99_999, true, 1, 12, 1)).toBe(12);
+    expect(skylineBarLevel(0, 0, true, 1, 12, 0)).toBe(1);
+  });
+
+  test("labels sources that cannot provide real spectrum audio", () => {
+    const html = renderToStaticMarkup(createElement(MusicThemePanel, {
+      mode: "skyline",
+      skin: "signal",
+      accent: null,
+      onModeChange: () => {},
+      onSkinChange: () => {},
+      onAccentChange: () => {},
+      syncsToDevice: false,
+      simulatedSpectrum: true,
+    }));
+    expect(html).toContain("此音源为模拟律动");
   });
 
   test("hands the bright focus from the first glyph to the last", () => {
@@ -313,10 +341,10 @@ describe("music player UI", () => {
     expect(css).toContain(".music-firmware-dialog[data-open]");
     expect(css).toContain("--tw-translate-x: 0px !important");
     expect(globals).toMatch(
-      /@media \(max-width: 52rem\)[\s\S]*?\.main-tabs\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\);/,
+      /@media \(max-width: 52rem\)[\s\S]*?\.main-tabs\s*\{[\s\S]*?grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);/,
     );
     expect(globals).toMatch(
-      /@media \(max-width: 60rem\) and \(max-height: 34rem\)[\s\S]*?\.main-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\);/,
+      /@media \(max-width: 60rem\) and \(max-height: 34rem\)[\s\S]*?\.main-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);/,
     );
   });
 

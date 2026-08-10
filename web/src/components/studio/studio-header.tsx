@@ -1,15 +1,17 @@
 import { useState } from "react";
-import { Circle, Images, LayoutGrid, Music2, Palette, Settings2 } from "lucide-react";
+import { Circle, Gamepad2, Images, LayoutGrid, Music2, Palette, Settings2 } from "lucide-react";
 import { Button, Tab, Tabs, TabsList, Tooltip } from "@cladd-ui/react";
-import type { RuntimeState, StudioView } from "@/types";
+import type { FirmwareKind, RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
 
 interface StudioHeaderProps {
   view: StudioView;
   onViewChange: (view: StudioView) => void;
   runtime: RuntimeState | null;
-  // 音乐固件直连中：其他视图与常规设置都走官方固件通道，此时全部禁用。
-  musicLocked?: boolean;
+  // 侧载固件直连中：其他视图与常规设置都走官方固件通道，此时全部禁用。
+  firmwareLocked?: boolean;
+  // 哪种固件在直连（音乐/游戏），决定状态 Chip 与 tooltip 的文案。
+  firmwareKind?: FirmwareKind | null;
 }
 
 function runtimeLabel(runtime: RuntimeState | null): string {
@@ -20,12 +22,19 @@ function runtimeLabel(runtime: RuntimeState | null): string {
   return "设备离线";
 }
 
-export function StudioHeader({ view, onViewChange, runtime, musicLocked = false }: StudioHeaderProps) {
+export function StudioHeader({
+  view,
+  onViewChange,
+  runtime,
+  firmwareLocked = false,
+  firmwareKind = null,
+}: StudioHeaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const tone = musicLocked
+  const kindLabel = firmwareKind === "arcade" ? "游戏固件" : "音乐固件";
+  const tone = firmwareLocked
     ? "is-good"
     : runtime?.healthy ? "is-good" : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
-  const statusLabel = musicLocked ? "音乐固件直连" : runtimeLabel(runtime);
+  const statusLabel = firmwareLocked ? `${kindLabel}直连` : runtimeLabel(runtime);
   return (
     <header className="studio-header">
       <div className="brand-lockup" aria-label="Pixel Market，Ulanzi TC002">
@@ -38,10 +47,11 @@ export function StudioHeader({ view, onViewChange, runtime, musicLocked = false 
 
       <Tabs value={view} onValueChange={(value) => onViewChange(value as StudioView)}>
         <TabsList aria-label="主视图" className="main-tabs">
-          <Tab value="console" disabled={musicLocked}><LayoutGrid />内容</Tab>
-          <Tab value="canvas" disabled={musicLocked}><Palette />画板</Tab>
-          <Tab value="library" disabled={musicLocked}><Images />素材库</Tab>
+          <Tab value="console" disabled={firmwareLocked}><LayoutGrid />内容</Tab>
+          <Tab value="canvas" disabled={firmwareLocked}><Palette />画板</Tab>
+          <Tab value="library" disabled={firmwareLocked}><Images />素材库</Tab>
           <Tab value="music"><Music2 />音乐</Tab>
+          <Tab value="game"><Gamepad2 />游戏</Tab>
         </TabsList>
       </Tabs>
 
@@ -50,7 +60,7 @@ export function StudioHeader({ view, onViewChange, runtime, musicLocked = false 
           <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
           <span>{statusLabel}</span>
         </div>
-        <Tooltip tooltip={musicLocked ? "音乐固件运行中，恢复官方固件后可用" : "常规设置"}>
+        <Tooltip tooltip={firmwareLocked ? `${kindLabel}运行中，恢复官方固件后可用` : "常规设置"}>
           <Button
             type="button"
             size="sm"
@@ -60,7 +70,7 @@ export function StudioHeader({ view, onViewChange, runtime, musicLocked = false 
             outline={false}
             className="device-settings-trigger"
             aria-label="打开常规设置"
-            disabled={musicLocked}
+            disabled={firmwareLocked}
             onClick={() => setSettingsOpen(true)}
           >
             <Settings2 />

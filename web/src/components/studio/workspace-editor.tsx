@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -6,15 +6,20 @@ import {
   Eye,
   EyeOff,
   GripVertical,
+  MapPin,
   Pause,
   Play,
   Plus,
+  Search,
   Settings2,
   Trash2,
 } from "lucide-react";
 import {
   Button,
+  ColorPicker,
   Input,
+  List,
+  ListButton,
   NumberScrubber,
   Select,
   SurfaceCut,
@@ -23,8 +28,11 @@ import {
   Tabs,
   TabsList,
   Tooltip,
+  Spinner,
 } from "@cladd-ui/react";
-import { cn, seconds } from "@/lib/utils";
+import { jsonApi } from "@/lib/api";
+import { useAppToast } from "@/lib/use-app-toast";
+import { cn, errorMessage, seconds } from "@/lib/utils";
 import type {
   BusyAction,
   ChannelConfig,
@@ -36,6 +44,19 @@ import type {
 } from "@/types";
 import { ContentIcon } from "./content-icon";
 import { WorkspaceActions } from "./workspace-actions";
+
+// High-saturation presets that read well on the LED panel, offered as
+// one-click swatches in every color option's picker.
+const LED_COLOR_SWATCHES = [
+  "#ff4830",
+  "#ff8a2a",
+  "#ffd43b",
+  "#00ff66",
+  "#00d67a",
+  "#00e5ff",
+  "#5b8cff",
+  "#ffffff",
+];
 
 function contentTitle(
   item: ContentItemConfig,
@@ -134,6 +155,131 @@ function NumberInput({
   );
 }
 
+interface GeocodePlace {
+  name: string;
+  admin1?: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+}
+
+// One selection fills all three location options: the display text plus the
+// hidden coordinate pair the renderers actually read.
+export function placeSelectionPatches(place: GeocodePlace): Array<[string, JsonValue]> {
+  return [
+    ["place", [place.name, place.country].filter(Boolean).join(", ")],
+    ["latitude", String(place.latitude)],
+    ["longitude", String(place.longitude)],
+  ];
+}
+
+interface PlaceSearchFieldProps {
+  controlId: string;
+  label: string;
+  value: string;
+  onChange: (key: string, value: JsonValue) => void;
+}
+
+function PlaceSearchField({ controlId, label, value, onChange }: PlaceSearchFieldProps) {
+  const [results, setResults] = useState<GeocodePlace[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const sequence = useRef(0);
+  // The mounted value is a saved place, and a picked candidate writes one
+  // back; neither should reopen the dropdown — only fresh typing searches.
+  const settledValue = useRef<string | null>(value);
+  const toast = useAppToast();
+
+  useEffect(() => {
+    if (settledValue.current === value) return;
+    const query = value.trim();
+    if (!query) {
+      sequence.current += 1;
+      setResults([]);
+      setSearching(false);
+      setSearched(false);
+      return;
+    }
+    const currentSequence = ++sequence.current;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await jsonApi<{ places: GeocodePlace[] }>(
+            `/api/weather/geocode?${new URLSearchParams({ q: query.slice(0, 64) })}`,
+          );
+          if (currentSequence !== sequence.current) return;
+          setResults(response.places);
+          setSearched(true);
+        } catch (error) {
+          if (currentSequence !== sequence.current) return;
+          setResults([]);
+          setSearched(false);
+          toast.error("地点搜索失败", { description: errorMessage(error) });
+        } finally {
+          if (currentSequence === sequence.current) setSearching(false);
+        }
+      })();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [value, toast]);
+
+  const pick = (place: GeocodePlace) => {
+    const patches = placeSelectionPatches(place);
+    sequence.current += 1;
+    settledValue.current = String(patches[0]![1]);
+    setResults([]);
+    setSearched(false);
+    setSearching(false);
+    for (const [key, patchValue] of patches) onChange(key, patchValue);
+  };
+
+  return (
+    <div className="place-search flex min-w-0 flex-col gap-1.5">
+      <Input
+        inputId={controlId}
+        icon={<Search aria-hidden="true" />}
+        value={value}
+        maxLength={64}
+        placeholder="输入城市或地点，如 Shanghai"
+        inputComponentProps={{ "aria-label": label, spellCheck: false, autoComplete: "off" }}
+        onChange={(nextValue) => {
+          settledValue.current = null;
+          onChange("place", nextValue);
+        }}
+      />
+      {searching && (
+        <p className="place-search__status m-0 flex items-center gap-1.5 text-sm text-cladd-fg-soft" role="status">
+          <Spinner size="sm" aria-hidden="true" />正在搜索地点…
+        </p>
+      )}
+      {searched && !searching && results.length === 0 && (
+        <p className="place-search__status m-0 text-sm text-cladd-fg-soft" role="status">
+          没有找到匹配的地点，换个写法再试。
+        </p>
+      )}
+      {results.length > 0 && (
+        <List className="place-search__results max-h-56 overflow-y-auto" aria-label="地点候选">
+          {results.map((place) => (
+            <ListButton
+              key={`${place.name}|${place.latitude}|${place.longitude}`}
+              type="button"
+              color="neutral"
+              rounded={false}
+              tightFocusRing
+              icon={<MapPin aria-hidden="true" />}
+              footer={[place.admin1, place.country].filter(Boolean).join(" · ") || undefined}
+              onClick={() => pick(place)}
+            >
+              {place.name}
+            </ListButton>
+          ))}
+        </List>
+      )}
+    </div>
+  );
+}
+
 function OptionEditor({
   item,
   definition,
@@ -143,6 +289,12 @@ function OptionEditor({
   onTimerPause,
 }: OptionEditorProps) {
   const visibleFields = definition.options.filter((field) => field.type !== "hidden");
+  const optionKeys = new Set(definition.options.map((field) => field.key));
+  // place + latitude + longitude together mark a geocoded location content:
+  // the place text turns into a search box that fills the hidden coordinates.
+  const hasPlaceSearch = optionKeys.has("place")
+    && optionKeys.has("latitude")
+    && optionKeys.has("longitude");
   const hasMetadata = item.contentId === "creative:pixel-asset" || item.contentId === "market:instrument";
 
   return (
@@ -157,6 +309,24 @@ function OptionEditor({
             const value = item.options[field.key] ?? field.default;
             const displayAsSeconds = field.type === "number" && field.key.endsWith("Ms");
             const displayScale = displayAsSeconds ? 1_000 : 1;
+
+            if (field.key === "place" && hasPlaceSearch) {
+              return (
+                <div key={field.key} className="option-field option-field--wide place-search-field">
+                  <div className="option-copy">
+                    <label htmlFor={controlId} className="option-label">{field.label}</label>
+                    {field.help && <span className="option-help">{field.help}</span>}
+                  </div>
+                  <PlaceSearchField
+                    key={item.id}
+                    controlId={controlId}
+                    label={field.label}
+                    value={String(value)}
+                    onChange={onChange}
+                  />
+                </div>
+              );
+            }
 
             if (field.type === "boolean") {
               return (
@@ -208,12 +378,26 @@ function OptionEditor({
                       displayAsSeconds ? Math.round(nextValue * displayScale) : nextValue,
                     )}
                   />
+                ) : field.type === "color" ? (
+                  <ColorPicker
+                    size="sm"
+                    alpha={false}
+                    inputs={false}
+                    debounce={200}
+                    swatches={LED_COLOR_SWATCHES}
+                    value={String(value)}
+                    popoverPosition="top-start"
+                    aria-label={field.label}
+                    onChange={(next) => onChange(field.key, next.hex.slice(0, 7).toLowerCase())}
+                  >
+                    {String(value)}
+                  </ColorPicker>
                 ) : (
                   <Input
                     inputId={controlId}
-                    type={field.type === "color" ? "color" : "text"}
+                    type="text"
                     value={String(value)}
-                    maxLength={field.type === "text" ? 96 : undefined}
+                    maxLength={96}
                     onChange={(nextValue) => onChange(field.key, nextValue)}
                   />
                 )}

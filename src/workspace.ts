@@ -42,6 +42,7 @@ export const WORKSPACE_LIMITS = {
 
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 const APP_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,32}$/;
+const RESERVED_APP_NAMES = new Set(["notify", "music_lyrics"]);
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -75,7 +76,11 @@ function validateAppName(value: unknown): string {
       "appName must contain 1-32 ASCII letters, numbers, underscores, or hyphens",
     );
   }
-  return value.trim();
+  const appName = value.trim();
+  if (RESERVED_APP_NAMES.has(appName) || appName.startsWith("live_")) {
+    throw new SettingsValidationError("appName is reserved for a system channel");
+  }
+  return appName;
 }
 
 function validateDuration(

@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMusicRelease } from "../src/tc002-music-release.ts";
-import { MusicPlayerBundleStore } from "../src/tc002-music-installer.ts";
+import { createMusicRelease, createSideloadRelease } from "../src/tc002-music-release.ts";
+import {
+  ARCADE_SIDELOAD_PROFILE,
+  MusicPlayerBundleStore,
+} from "../src/tc002-music-installer.ts";
 
 const directories: string[] = [];
 
@@ -63,6 +66,45 @@ describe("TC002 music sideload release staging", () => {
 
     expect(manifest.files.map((file) => file.path)).toEqual(["player"]);
     expect((await new MusicPlayerBundleStore(releaseDirectory).inspect()).state).toBe("ready");
+  });
+
+  test("stages an arcade bundle whose manifest only the arcade store accepts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc002-arcade-release-"));
+    directories.push(root);
+    const sourceDirectory = join(root, "build");
+    const releaseDirectory = join(root, "release");
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(join(sourceDirectory, "player"), new Uint8Array([7, 7, 7]));
+    await writeFile(join(sourceDirectory, "libzkgui.so"), new Uint8Array([1, 2]));
+
+    const manifest = await createSideloadRelease({
+      sourceDir: sourceDirectory,
+      version: "0.1.0",
+      appId: "tc002-arcade",
+      releaseDirectory,
+    });
+    expect(manifest.appId).toBe("tc002-arcade");
+    expect(manifest.schemaVersion).toBe(3);
+
+    const arcadeStore = new MusicPlayerBundleStore(releaseDirectory, ARCADE_SIDELOAD_PROFILE);
+    expect((await arcadeStore.inspect()).state).toBe("ready");
+    // The music store must refuse it: appId is part of the manifest contract.
+    const musicStore = new MusicPlayerBundleStore(releaseDirectory);
+    expect((await musicStore.inspect()).state).toBe("invalid");
+  });
+
+  test("refuses a malformed appId before touching the filesystem layout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc002-appid-release-"));
+    directories.push(root);
+    const sourceDirectory = join(root, "build");
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(join(sourceDirectory, "player"), new Uint8Array([1]));
+    await expect(createSideloadRelease({
+      sourceDir: sourceDirectory,
+      version: "0.1.0",
+      appId: "TC002 Arcade!",
+      releaseDirectory: join(root, "release"),
+    })).rejects.toThrow("appId");
   });
 
   test("refuses a source missing the declared entry", async () => {

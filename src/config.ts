@@ -1,6 +1,7 @@
 export interface AppConfig {
   clockHost: string;
   clockHttpProxy?: string;
+  notifyToken?: string;
   controlHost: "127.0.0.1" | "0.0.0.0";
   appName: string;
   requestTimeoutMs: number;
@@ -38,7 +39,7 @@ const DEFAULTS = {
   sourceStaleMs: 120_000,
   displayDurationSeconds: 90,
   healthPort: 43_820,
-} satisfies Omit<AppConfig, "clockHost" | "clockHttpProxy">;
+} satisfies Omit<AppConfig, "clockHost" | "clockHttpProxy" | "notifyToken">;
 
 function validateControlHost(value: string): AppConfig["controlHost"] {
   if (value !== "127.0.0.1" && value !== "0.0.0.0") {
@@ -116,9 +117,11 @@ export function loadConfig(
     throw new Error("CLOCK_HOST is required; set it to the TC002 IPv4 address or hostname");
   }
   const clockHttpProxy = validateClockHttpProxy(env.CLOCK_HTTP_PROXY);
+  const notifyToken = env.NOTIFY_TOKEN?.trim();
   return {
     clockHost: validateClockHost(clockHost),
     ...(clockHttpProxy ? { clockHttpProxy } : {}),
+    ...(notifyToken ? { notifyToken } : {}),
     controlHost: validateControlHost(env.CONTROL_HOST ?? DEFAULTS.controlHost),
     appName: validateAppName(env.APP_NAME ?? DEFAULTS.appName),
     requestTimeoutMs: loadRequestTimeoutMs(env),

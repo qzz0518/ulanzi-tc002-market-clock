@@ -556,6 +556,91 @@ describe("local control API", () => {
     expect(started).toBe(false);
   });
 
+  test("serves the same device-app lifecycle under the arcade prefix", async () => {
+    let probed = 0;
+    const installer = {
+      status: async () => ({
+        artifact: { state: "ready", appId: "tc002-arcade", bundleId: "b".repeat(64), message: "ok" },
+        adb: "ready",
+        busy: false,
+        session: { active: false },
+        restore: { title: "恢复", steps: [] },
+      }),
+      probe: async () => {
+        probed += 1;
+        return { adb: "ready", connected: true, message: "ok" };
+      },
+      sessionState: () => ({ active: false }),
+    } as unknown as Tc002MusicInstaller;
+    const handler = createControlHandler(fakeWorkspaceController(), { arcadeInstaller: installer });
+
+    const status = await handler(new Request("http://127.0.0.1:43820/api/arcade/device-app"));
+    expect(status.status).toBe(200);
+    expect((await status.json()).deviceApp.artifact.appId).toBe("tc002-arcade");
+
+    const probe = await handler(new Request("http://127.0.0.1:43820/api/arcade/device-app/probe", {
+      method: "POST",
+    }));
+    expect(probe.status).toBe(200);
+    expect(probed).toBe(1);
+
+    // The music prefix stays independent: no music installer configured here.
+    const music = await handler(new Request("http://127.0.0.1:43820/api/music/device-app"));
+    expect(music.status).toBe(404);
+    expect((await music.json()).error).toContain("music device installer");
+  });
+
+  test("records arcade heartbeats and answers the status poll from memory", async () => {
+    const handler = createControlHandler(fakeWorkspaceController(), {});
+
+    // Before any heartbeat (module state starts cold in this suite): offline.
+    const before = await handler(new Request("http://127.0.0.1:43820/api/arcade/status"));
+    expect(before.status).toBe(200);
+    const beforeBody = await before.json();
+    expect(beforeBody.online).toBe(false);
+    expect(beforeBody.ageMs).toBe(-1);
+
+    // Malformed heartbeats are refused before touching the snapshot.
+    const bad = await handler(new Request("http://127.0.0.1:43820/api/arcade/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game: "DROP TABLE", phase: "playing", score: 3, uptimeMs: 1 }),
+    }));
+    expect(bad.status).toBe(400);
+    const negative = await handler(new Request("http://127.0.0.1:43820/api/arcade/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game: "breakout", phase: "playing", score: -1, uptimeMs: 1 }),
+    }));
+    expect(negative.status).toBe(400);
+
+    // The firmware calls cross-origin (no browser Origin header): accepted.
+    const beat = await handler(new Request("http://127.0.0.1:43820/api/arcade/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game: "breakout", phase: "playing", score: 128, uptimeMs: 60_000 }),
+    }));
+    expect(beat.status).toBe(200);
+
+    const after = await handler(new Request("http://127.0.0.1:43820/api/arcade/status"));
+    const afterBody = await after.json();
+    expect(afterBody.online).toBe(true);
+    expect(afterBody.ageMs).toBeGreaterThanOrEqual(0);
+    expect(afterBody.ageMs).toBeLessThan(12_000);
+    expect(afterBody.game).toBe("breakout");
+    expect(afterBody.phase).toBe("playing");
+    expect(afterBody.score).toBe(128);
+  });
+
+  test("an active installer session counts as online before the first heartbeat", async () => {
+    const installer = {
+      sessionState: () => ({ active: true, version: "0.1.0" }),
+    } as unknown as Tc002MusicInstaller;
+    const handler = createControlHandler(fakeWorkspaceController(), { arcadeInstaller: installer });
+    const status = await handler(new Request("http://127.0.0.1:43820/api/arcade/status"));
+    expect((await status.json()).online).toBe(true);
+  });
+
   test("encodes mirror frames into one custom-app push and supports clearing", async () => {
     const payloads: { duration: number; image: { data: string }[] }[] = [];
     let cleared = 0;
@@ -655,7 +740,7 @@ describe("local control API", () => {
     const handler = createControlHandler(fakeWorkspaceController(previewCalls));
     const catalog = await handler(new Request("http://127.0.0.1:43820/api/catalog"));
     const catalogBody = await catalog.json();
-    expect(catalogBody.contents).toHaveLength(24);
+    expect(catalogBody.contents).toHaveLength(30);
     expect(catalogBody.categories.map((category: { id: string }) => category.id)).toEqual([
       "market", "tools", "visual", "creative",
     ]);
@@ -821,5 +906,56 @@ describe("local control API", () => {
       },
     ));
     expect(removedUploadEndpoint.status).toBe(404);
+  });
+
+  test("geocodes place queries through the injected client and validates them first", async () => {
+    const queries: string[] = [];
+    const places = [
+      { name: "Shanghai", admin1: "Shanghai", country: "China", latitude: 31.2222, longitude: 121.4581 },
+      { name: "Shanghai Reef", country: "PH", latitude: 9.9, longitude: 114.1 },
+    ];
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      weatherGeocode: {
+        search: async (query: string) => {
+          queries.push(query);
+          return places;
+        },
+      },
+    });
+
+    const found = await handler(new Request(
+      "http://127.0.0.1:43820/api/weather/geocode?q=%20shanghai%20",
+    ));
+    expect(found.status).toBe(200);
+    expect(await found.json()).toEqual({ places });
+    // The route trims before delegating, so the client caches a clean key.
+    expect(queries).toEqual(["shanghai"]);
+
+    const missing = await handler(new Request("http://127.0.0.1:43820/api/weather/geocode"));
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).error).toContain("q must contain 1-64 characters");
+    const tooLong = await handler(new Request(
+      `http://127.0.0.1:43820/api/weather/geocode?q=${"a".repeat(65)}`,
+    ));
+    expect(tooLong.status).toBe(400);
+    const crossOrigin = await handler(new Request(
+      "http://127.0.0.1:43820/api/weather/geocode?q=paris",
+      { headers: { Origin: "https://example.com" } },
+    ));
+    expect(crossOrigin.status).toBe(400);
+    // None of the rejected requests reached the geocoder.
+    expect(queries).toEqual(["shanghai"]);
+
+    const failingHandler = createControlHandler(fakeWorkspaceController(), {
+      weatherGeocode: {
+        search: async () => {
+          throw new Error("open-meteo geocoding returned HTTP 503");
+        },
+      },
+    });
+    const upstream = await failingHandler(new Request(
+      "http://127.0.0.1:43820/api/weather/geocode?q=paris",
+    ));
+    expect(upstream.status).toBe(503);
   });
 });

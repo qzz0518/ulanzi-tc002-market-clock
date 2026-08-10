@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { ASSET_PRESETS, isAssetId, type AssetId } from "./assets.ts";
 import { getContentCatalog } from "./content-registry.ts";
 import type { DashboardController } from "./controller.ts";
@@ -22,13 +22,13 @@ import type { MusicHub } from "./music/hub.ts";
 import { PWA_ICONS, PWA_MANIFEST, pwaServiceWorker } from "./pwa.ts";
 import { SettingsValidationError } from "./settings.ts";
 import { getStockIconPng, isStockIconId } from "./stock-icons.ts";
-import { controlPageHtml } from "./web-ui.ts";
+import { controlPageHtml, drawPageHtml, padPageHtml } from "./web-ui.ts";
 import { WORKSPACE_LIMITS, type ChannelConfig } from "./workspace.ts";
 import type { WorkspaceController } from "./workspace-controller.ts";
 import type { PixelAssetStore } from "./pixel-asset-store.ts";
 import {
   MusicInstallerError,
-  type Tc002MusicInstaller,
+  type Tc002SideloadInstaller,
 } from "./tc002-music-installer.ts";
 import { buildImagePayload, type ClockPayload } from "./display.ts";
 import {
@@ -43,11 +43,20 @@ import {
   type UlanziPixelAssetSort,
   type UlanziPixelAssetClient,
 } from "./ulanzi-pixel-assets.ts";
+import {
+  importVideoAsGif,
+  VIDEO_IMPORT_MAX_BYTES,
+  VideoImportError,
+  type VideoImportRequest,
+  type VideoImportResult,
+} from "./video-import.ts";
 import type { MarketCatalogService } from "./market/catalog-service.ts";
+import { parseNotifyMessage, type NotifyMessage } from "./notify.ts";
 import {
   type MarketInstrument,
   type MarketInstrumentKind,
 } from "./market/instruments.ts";
+import { GeocodeClient, parseGeocodeQuery, type GeocodePlace } from "./weather/geocode.ts";
 
 const CLOCK_FRAME_FILE = Bun.file(new URL("./assets/tc002-frame.png", import.meta.url));
 const WEB_ASSETS = new Map([
@@ -71,14 +80,29 @@ export interface ControlApiOptions {
   pixelAssetLibrary?: {
     client: UlanziPixelAssetClient;
     store: PixelAssetStore;
+    // Test seam; defaults to the real ffmpeg pipeline in video-import.ts.
+    importVideo?: (input: VideoImportRequest) => Promise<VideoImportResult>;
   };
   music?: MusicHub;
-  musicInstaller?: Tc002MusicInstaller;
+  musicInstaller?: Tc002SideloadInstaller;
+  arcadeInstaller?: Tc002SideloadInstaller;
   musicMirror?: {
     push: (payload: ClockPayload) => Promise<{ status: number }>;
     clear: () => Promise<{ status: number }>;
   };
+  live?: {
+    push: (appName: string, payload: ClockPayload) => Promise<{ status: number }>;
+    clear: (appName: string) => Promise<{ status: number }>;
+  };
+  notify?: {
+    push: (input: NotifyMessage) => Promise<{ status: number }>;
+    clear: () => Promise<{ status: number }>;
+  };
+  notifyToken?: string;
+  notifyNow?: () => number;
   marketCatalog?: MarketCatalogService;
+  // Test seam; defaults to the real Open-Meteo geocoding client (free, no key).
+  weatherGeocode?: { search(query: string): Promise<GeocodePlace[]> };
 }
 
 // The device's live music control state. The web UI mutates it via /control (and
@@ -188,6 +212,27 @@ const sDeviceLive: DeviceLiveStatus = {
   playing: false,
 };
 
+// The arcade firmware's liveness channel: a 5s POST with the current game,
+// phase and score. Unlike the music firmware there is no control state for
+// the device to pull, so a tiny push endpoint plus this in-memory snapshot is
+// the whole protocol. Single-device service, so module state is fine.
+interface ArcadeLiveStatus {
+  heartbeatAt: number; // Date.now() of the last heartbeat, 0 if never
+  game: string;        // "menu" | "breakout" | "flappy" | "snake" | "pong" | ...
+  phase: string;       // "ready" | "playing" | "over" | ...
+  score: number;
+  uptimeMs: number;
+}
+const sArcadeLive: ArcadeLiveStatus = {
+  heartbeatAt: 0,
+  game: "",
+  phase: "",
+  score: 0,
+  uptimeMs: 0,
+};
+// Heartbeats come every 5s; two misses plus network slack means offline.
+const ARCADE_ONLINE_WINDOW_MS = 12_000;
+
 interface IconAsset {
   bytes: Uint8Array;
   version: string;
@@ -262,6 +307,58 @@ async function readJson(
   }
 }
 
+/**
+ * The four-route device-app lifecycle (status/probe/session start/stop) is
+ * identical for every sideloadable app; one helper serves it under each
+ * prefix so the two firmwares' behavior cannot drift apart. Returns null for
+ * paths outside `/api/<scope>/device-app`.
+ */
+async function deviceAppResponse(
+  request: Request,
+  url: URL,
+  scope: "music" | "arcade",
+  installer: Tc002SideloadInstaller | undefined,
+): Promise<Response | null> {
+  const base = `/api/${scope}/device-app`;
+  if (url.pathname !== base && !url.pathname.startsWith(`${base}/`)) return null;
+  if (!installer) {
+    return jsonResponse({ error: `${scope} device installer is unavailable` }, 404);
+  }
+
+  if (request.method === "GET" && url.pathname === base) {
+    return jsonResponse({ deviceApp: await installer.status() });
+  }
+
+  if (request.method === "POST" && url.pathname === `${base}/probe`) {
+    assertSameOrigin(request);
+    return jsonResponse({ device: await installer.probe() });
+  }
+
+  if (request.method === "POST" && url.pathname === `${base}/session/start`) {
+    assertSameOrigin(request);
+    const input = await readJson(request) as {
+      confirmation?: unknown;
+      expectedBundleId?: unknown;
+    };
+    if (typeof input.confirmation !== "string" || typeof input.expectedBundleId !== "string") {
+      throw new SettingsValidationError("session confirmation and bundleId are required");
+    }
+    return jsonResponse({
+      result: await installer.startSession({
+        confirmation: input.confirmation,
+        expectedBundleId: input.expectedBundleId,
+      }),
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === `${base}/session/stop`) {
+    assertSameOrigin(request);
+    return jsonResponse({ result: await installer.stopSession() });
+  }
+
+  return null;
+}
+
 function marketInstrumentPayload(
   catalog: MarketCatalogService,
   instrument: MarketInstrument,
@@ -308,6 +405,37 @@ function boundedInteger(
   return value;
 }
 
+function tokensMatch(expected: string, candidate: string | null): boolean {
+  if (candidate === null) return false;
+  const expectedBytes = Buffer.from(expected);
+  const candidateBytes = Buffer.from(candidate);
+  return expectedBytes.length === candidateBytes.length
+    && timingSafeEqual(expectedBytes, candidateBytes);
+}
+
+function notifyAuthorized(request: Request, url: URL, expected: string | undefined): boolean {
+  if (!expected) return true;
+  const authorization = request.headers.get("Authorization");
+  const bearer = authorization?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+  return tokensMatch(expected, bearer) || tokensMatch(expected, url.searchParams.get("token"));
+}
+
+function createNotifyRateLimiter(now: () => number): () => boolean {
+  const capacity = 6;
+  const refillPerMs = capacity / 10_000;
+  let tokens = capacity;
+  let lastRefillAt = now();
+  return () => {
+    const current = now();
+    const elapsed = Math.max(0, current - lastRefillAt);
+    tokens = Math.min(capacity, tokens + elapsed * refillPerMs);
+    lastRefillAt = current;
+    if (tokens < 1) return false;
+    tokens -= 1;
+    return true;
+  };
+}
+
 const MIRROR_FRAME_BYTES = DISPLAY_WIDTH * DISPLAY_HEIGHT * 3;
 // 400 帧覆盖一句 12 秒的歌词跑满 33fps。真机实测官方固件 400 帧 / 48KB 请求体照收，只用
 // 109ms，所以这个上限管的是渲染与传输成本，不是设备容量。
@@ -348,6 +476,41 @@ function decodeMirrorFrames(
     }
     return { canvas, delayMs };
   });
+}
+
+function liveAppName(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9]{0,15}$/.test(value)) {
+    throw new SettingsValidationError("live app must match ^[a-z][a-z0-9]{0,15}$");
+  }
+  return `live_${value}`;
+}
+
+function buildLiveFramePayload(input: {
+  frames?: unknown;
+  holdSeconds?: unknown;
+}): { payload: ClockPayload; frameCount: number; holdSeconds: number } {
+  const frames = decodeMirrorFrames(input.frames);
+  const totalMs = frames.reduce((sum, frame) => sum + frame.delayMs, 0);
+  const holdSeconds = input.holdSeconds === undefined
+    ? Math.min(86_400, Math.ceil(totalMs / 1_000) + 30)
+    : boundedInteger(input.holdSeconds, 5, 86_400, "holdSeconds");
+  const image = frames.length === 1
+    ? { bytes: frames[0]!.canvas.toPng(), mimeType: "image/png" as const }
+    : {
+      // One submitted batch plays once and holds its final frame. Producers
+      // that need freshness submit the next batch through the single-flight queue.
+      bytes: encodePixelAnimation(
+        frames.map((frame) => frame.canvas),
+        frames.map((frame) => frame.delayMs),
+        { repeat: -1 },
+      ),
+      mimeType: "image/gif" as const,
+    };
+  return {
+    payload: buildImagePayload(image.bytes, image.mimeType, holdSeconds),
+    frameCount: frames.length,
+    holdSeconds,
+  };
 }
 
 // Track and playlist IDs are opaque strings now that two providers share the
@@ -555,6 +718,10 @@ export function createControlHandler(
   controller: ControlController,
   options: ControlApiOptions = {},
 ): (request: Request) => Promise<Response> {
+  const consumeNotifyToken = createNotifyRateLimiter(options.notifyNow ?? (() => Date.now()));
+  // Same token-bucket policy as /api/notify (6 per 10s), but a separate bucket:
+  // a burst of webhook notifications must not lock players out of the board.
+  const weatherGeocode = options.weatherGeocode ?? new GeocodeClient();
   return async (request) => {
     const url = new URL(request.url);
     try {
@@ -575,6 +742,29 @@ export function createControlHandler(
               "base-uri 'none'",
               "frame-ancestors 'none'",
               "form-action 'self'",
+            ].join("; "),
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+          },
+        });
+      }
+
+      // Self-contained companion pages (QR targets): the Pong gamepad and the
+      // doodle wall. Inline script/style only, talking to the same-origin
+      // /api/game/socket relay — hence the ws: allowance in connect-src.
+      if (request.method === "GET" && (url.pathname === "/pad" || url.pathname === "/draw")) {
+        return new Response(url.pathname === "/pad" ? padPageHtml() : drawPageHtml(), {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Content-Security-Policy": [
+              "default-src 'none'",
+              "style-src 'unsafe-inline'",
+              "script-src 'unsafe-inline'",
+              "connect-src 'self' ws: wss:",
+              "base-uri 'none'",
+              "form-action 'none'",
             ].join("; "),
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
@@ -750,6 +940,19 @@ export function createControlHandler(
         return jsonResponse({
           instrument: marketInstrumentPayload(options.marketCatalog, instrument),
         }, 201);
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/weather/geocode") {
+        assertSameOrigin(request);
+        let query: string;
+        try {
+          query = parseGeocodeQuery(url.searchParams.get("q"));
+        } catch (error) {
+          throw new SettingsValidationError(error instanceof Error ? error.message : "q is invalid");
+        }
+        // The client already slims each entry to name/admin1/country/lat/lon,
+        // so the route forwards its result as-is.
+        return jsonResponse({ places: await weatherGeocode.search(query) });
       }
 
       if (request.method === "GET" && url.pathname === "/api/access") {
@@ -941,51 +1144,94 @@ export function createControlHandler(
         return jsonResponse({ snapshot });
       }
 
-      if (request.method === "GET" && url.pathname === "/api/music/device-app") {
-        if (!options.musicInstaller) {
-          return jsonResponse({ error: "music device installer is unavailable" }, 404);
-        }
-        return jsonResponse({ deviceApp: await options.musicInstaller.status() });
-      }
+      // Sideload lifecycle for both device apps, same four routes each.
+      const deviceAppRouted =
+        await deviceAppResponse(request, url, "music", options.musicInstaller)
+        ?? await deviceAppResponse(request, url, "arcade", options.arcadeInstaller);
+      if (deviceAppRouted) return deviceAppRouted;
 
-      if (request.method === "POST" && url.pathname === "/api/music/device-app/probe") {
-        if (!options.musicInstaller) {
-          return jsonResponse({ error: "music device installer is unavailable" }, 404);
-        }
-        assertSameOrigin(request);
-        return jsonResponse({ device: await options.musicInstaller.probe() });
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/music/device-app/session/start") {
-        if (!options.musicInstaller) {
-          return jsonResponse({ error: "music device installer is unavailable" }, 404);
-        }
-        assertSameOrigin(request);
+      if (request.method === "POST" && url.pathname === "/api/arcade/heartbeat") {
+        // The arcade firmware checks in every 5s with what it is running
+        // (cross-origin: the caller is the TC002, not the browser).
         const input = await readJson(request) as {
-          confirmation?: unknown;
-          expectedBundleId?: unknown;
+          game?: unknown;
+          phase?: unknown;
+          score?: unknown;
+          uptimeMs?: unknown;
         };
-        if (typeof input.confirmation !== "string" || typeof input.expectedBundleId !== "string") {
-          throw new SettingsValidationError("session confirmation and bundleId are required");
+        if (typeof input.game !== "string" || !/^[a-z][a-z0-9-]{0,23}$/.test(input.game)) {
+          throw new SettingsValidationError("game is invalid");
         }
+        if (typeof input.phase !== "string" || !/^[a-z][a-z0-9-]{0,23}$/.test(input.phase)) {
+          throw new SettingsValidationError("phase is invalid");
+        }
+        if (
+          !Number.isSafeInteger(input.score)
+          || (input.score as number) < 0
+          || (input.score as number) > 1_000_000_000
+        ) {
+          throw new SettingsValidationError("score is invalid");
+        }
+        if (
+          typeof input.uptimeMs !== "number"
+          || !Number.isFinite(input.uptimeMs)
+          || input.uptimeMs < 0
+        ) {
+          throw new SettingsValidationError("uptimeMs is invalid");
+        }
+        sArcadeLive.heartbeatAt = Date.now();
+        sArcadeLive.game = input.game;
+        sArcadeLive.phase = input.phase;
+        sArcadeLive.score = input.score as number;
+        sArcadeLive.uptimeMs = input.uptimeMs;
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/arcade/status") {
+        // The web's "is the arcade firmware live?" read: pure memory, so the
+        // game view can poll it every 10s for free. A fresh heartbeat proves
+        // liveness; right after a sideload the installer's session bridges
+        // the gap until the first heartbeat lands.
+        assertSameOrigin(request);
+        const ageMs = sArcadeLive.heartbeatAt > 0 ? Date.now() - sArcadeLive.heartbeatAt : -1;
+        const online = (ageMs >= 0 && ageMs < ARCADE_ONLINE_WINDOW_MS)
+          || options.arcadeInstaller?.sessionState().active === true;
         return jsonResponse({
-          result: await options.musicInstaller.startSession({
-            confirmation: input.confirmation,
-            expectedBundleId: input.expectedBundleId,
-          }),
+          online,
+          ageMs,
+          game: sArcadeLive.game,
+          phase: sArcadeLive.phase,
+          score: sArcadeLive.score,
         });
       }
 
-      if (request.method === "POST" && url.pathname === "/api/music/device-app/session/stop") {
-        if (!options.musicInstaller) {
-          return jsonResponse({ error: "music device installer is unavailable" }, 404);
+      if (["POST", "DELETE"].includes(request.method) && url.pathname === "/api/notify") {
+        if (!options.notify) {
+          return jsonResponse({ error: "notification service is unavailable" }, 404);
         }
-        assertSameOrigin(request);
-        return jsonResponse({ result: await options.musicInstaller.stopSession() });
+        if (!notifyAuthorized(request, url, options.notifyToken)) {
+          return jsonResponse({ error: "notification token is invalid" }, 401);
+        }
+        if (request.method === "DELETE") {
+          await options.notify.clear();
+          return jsonResponse({ ok: true });
+        }
+        const input = parseNotifyMessage(await readJson(request));
+        if (!consumeNotifyToken()) {
+          return jsonResponse({ error: "notification rate limit exceeded" }, 429);
+        }
+        await options.notify.push(input);
+        return jsonResponse({ ok: true, holdSeconds: input.holdSeconds });
       }
 
       if (request.method === "POST" && url.pathname === "/api/music/mirror") {
-        if (!options.musicMirror) {
+        const writer = options.live
+          ? {
+            push: (payload: ClockPayload) => options.live!.push("music_lyrics", payload),
+            clear: () => options.live!.clear("music_lyrics"),
+          }
+          : options.musicMirror;
+        if (!writer) {
           return jsonResponse({ error: "music mirror is unavailable" }, 404);
         }
         assertSameOrigin(request);
@@ -993,36 +1239,42 @@ export function createControlHandler(
           frames?: unknown;
           holdSeconds?: unknown;
         };
-        const frames = decodeMirrorFrames(input.frames);
-        const totalMs = frames.reduce((sum, frame) => sum + frame.delayMs, 0);
-        const holdSeconds = input.holdSeconds === undefined
-          ? Math.min(86_400, Math.ceil(totalMs / 1_000) + 30)
-          : boundedInteger(input.holdSeconds, 5, 86_400, "holdSeconds");
-        const image = frames.length === 1
-          ? { bytes: frames[0]!.canvas.toPng(), mimeType: "image/png" as const }
-          : {
-            // 只播一次：整句的帧已经覆盖整句时长，循环只会让唱完的那一句在等
-            // 下一句推上来的空档里从头再滚一遍。
-            bytes: encodePixelAnimation(
-              frames.map((frame) => frame.canvas),
-              frames.map((frame) => frame.delayMs),
-              { repeat: -1 },
-            ),
-            mimeType: "image/gif" as const,
-          };
-        const pushed = await options.musicMirror.push(
-          buildImagePayload(image.bytes, image.mimeType, holdSeconds),
-        );
-        return jsonResponse({ mirror: { status: pushed.status, frames: frames.length } });
+        const encoded = buildLiveFramePayload(input);
+        const pushed = await writer.push(encoded.payload);
+        return jsonResponse({ mirror: { status: pushed.status, frames: encoded.frameCount } });
       }
 
       if (request.method === "DELETE" && url.pathname === "/api/music/mirror") {
-        if (!options.musicMirror) {
+        const writer = options.live
+          ? { clear: () => options.live!.clear("music_lyrics") }
+          : options.musicMirror;
+        if (!writer) {
           return jsonResponse({ error: "music mirror is unavailable" }, 404);
         }
         assertSameOrigin(request);
-        const cleared = await options.musicMirror.clear();
+        const cleared = await writer.clear();
         return jsonResponse({ mirror: { status: cleared.status, frames: 0 } });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/live/frames") {
+        if (!options.live) return jsonResponse({ error: "live frame service is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request, MIRROR_REQUEST_BYTES) as {
+          app?: unknown;
+          frames?: unknown;
+          holdSeconds?: unknown;
+        };
+        const appName = liveAppName(input.app);
+        const encoded = buildLiveFramePayload(input);
+        await options.live.push(appName, encoded.payload);
+        return new Response(null, { status: 204 });
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/api/live/frames") {
+        if (!options.live) return jsonResponse({ error: "live frame service is unavailable" }, 404);
+        assertSameOrigin(request);
+        await options.live.clear(liveAppName(url.searchParams.get("app")));
+        return new Response(null, { status: 204 });
       }
 
       if (request.method === "POST" && url.pathname === "/api/music/device/select") {
@@ -1262,6 +1514,67 @@ export function createControlHandler(
             previewUrl: `/api/library/ulanzi/imported/${metadata.ref}`,
           },
         });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/library/video/import") {
+        if (!options.pixelAssetLibrary) {
+          return jsonResponse({ error: "pixel asset library is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        // Dedicated 100MB cap for this endpoint; the declared length gets 1MB
+        // of slack for multipart framing, the file itself is checked exactly.
+        const declaredBytes = Number(request.headers.get("Content-Length") ?? 0);
+        if (declaredBytes > VIDEO_IMPORT_MAX_BYTES + 1024 * 1024) {
+          return jsonResponse({ error: "视频超出 100MB 上限" }, 413);
+        }
+        const contentType = (request.headers.get("Content-Type") ?? "").toLowerCase();
+        if (!contentType.startsWith("multipart/form-data")) {
+          throw new SettingsValidationError("Content-Type must be multipart/form-data");
+        }
+        const form = await request.formData();
+        const file = form.get("file");
+        if (!(file instanceof File)) {
+          throw new SettingsValidationError("缺少 file 字段（视频文件）");
+        }
+        const fit = form.get("fit") ?? "cover";
+        if (fit !== "cover" && fit !== "contain") {
+          throw new SettingsValidationError("fit 只支持 cover 或 contain");
+        }
+        if (file.size > VIDEO_IMPORT_MAX_BYTES) {
+          return jsonResponse({ error: "视频超出 100MB 上限" }, 413);
+        }
+        try {
+          const importVideo = options.pixelAssetLibrary.importVideo ?? importVideoAsGif;
+          const converted = await importVideo({
+            bytes: new Uint8Array(await file.arrayBuffer()),
+            fileName: file.name || "video",
+            fit,
+          });
+          // Same shape as the Ulanzi import above, so the web library, channel
+          // and push flows consume the result without special cases. Local
+          // uploads have no official id; the digits-only timestamp satisfies
+          // the store's metadata contract and keeps refs unique per upload.
+          const title = (file.name || "").replace(/\.[A-Za-z0-9]{1,5}$/, "").trim();
+          const metadata = await options.pixelAssetLibrary.store.save({
+            officialId: String(Date.now()),
+            title: title || "导入视频",
+            author: "本地视频",
+            sourceUrl: `upload://${file.name || "video"}`,
+            mimeType: "image/gif",
+            bytes: converted.gifBytes,
+          });
+          return jsonResponse({
+            asset: {
+              ...metadata,
+              previewUrl: `/api/library/ulanzi/imported/${metadata.ref}`,
+            },
+          });
+        } catch (error) {
+          if (error instanceof VideoImportError) {
+            return jsonResponse({ error: error.message }, error.status);
+          }
+          throw error;
+        }
       }
 
       if (request.method === "GET" && url.pathname === "/api/workspace") {

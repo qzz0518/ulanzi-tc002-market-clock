@@ -142,7 +142,8 @@
   padding: 0 1.5rem 1.25rem;
   overflow: hidden;
 }
-.studio-page.is-canvas-page { grid-template-rows: auto auto minmax(0, 1fr); }
+.studio-page.is-canvas-page,
+.studio-page.is-game-page { grid-template-rows: auto auto minmax(0, 1fr); }
 
 .studio-header {
   position: relative;
@@ -358,6 +359,107 @@
 }
 .studio-layout.is-canvas { grid-template-columns: 12.5rem minmax(34rem, 1fr) minmax(17rem, 19rem); }
 .studio-layout.is-library { grid-template-columns: 12.5rem minmax(0, 1fr); }
+.studio-layout.is-game { display: block; min-height: 0; overflow-y: auto; }
+
+/* 游戏厅：顶栏（选游戏 + 上屏）+ 舞台（LED 屏 + HUD + 控制台）。
+   LED 屏沿用 .pixel-lyric-screen 的网格质感配方。 */
+.game-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
+.game-topbar {
+  display: flex;
+  width: min(100%, 72rem);
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  flex-wrap: wrap;
+  margin-inline: auto;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.game-picker svg { width: 0.95rem; height: 0.95rem; }
+.game-topbar__status { display: inline-flex; align-items: center; gap: 0.85rem; flex-wrap: wrap; }
+/* 复用 .music-device-trigger 的排版；它的 --music-ink 只在音乐页定义，
+   游戏页里换回全局前景色（更高特异性盖过同为 !important 的原规则）。 */
+.game-topbar .music-device-trigger { color: var(--foreground) !important; }
+.game-topbar .music-device-trigger .music-device-trigger__content > svg { color: var(--muted-foreground); }
+.game-screen-toggle { display: inline-flex; flex: none; align-items: center; gap: 0.55rem; cursor: pointer; }
+.game-screen-toggle > span:first-child { color: var(--foreground); font-family: var(--sans); font-size: 0.68rem; letter-spacing: 0; }
+
+.game-body {
+  width: min(100%, 72rem);
+  margin-inline: auto;
+  padding-top: 1rem;
+}
+.game-stage { width: min(100%, 45rem); min-width: 0; margin-inline: auto; }
+
+.game-screen { width: 100%; margin: 0; }
+.game-screen__frame {
+  position: relative;
+  aspect-ratio: 52 / 16;
+  overflow: hidden;
+  border: clamp(0.46rem, 0.85vw, 0.65rem) solid #111612;
+  border-radius: 0.72rem;
+  background: #000;
+  box-shadow: 0 0.65rem 1.5rem rgb(12 18 12 / 0.12);
+  isolation: isolate;
+}
+.game-screen__frame canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  cursor: crosshair;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+}
+.game-screen__frame canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--primary); }
+.game-screen__frame::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-image:
+    linear-gradient(90deg, transparent calc(100% - 1px), rgb(255 255 255 / 0.18) 0),
+    linear-gradient(transparent calc(100% - 1px), rgb(255 255 255 / 0.18) 0);
+  background-size: calc(100% / 52) 100%, 100% calc(100% / 16);
+  content: "";
+  opacity: 0.14;
+  pointer-events: none;
+}
+.game-screen figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.42rem;
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: 0.58rem;
+}
+.game-screen__status { color: var(--primary); }
+
+.game-hud { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0.8rem; border-block: 1px solid var(--border); }
+.game-hud > span { display: grid; gap: 0.18rem; min-width: 0; padding: 0.65rem 0.8rem; }
+.game-hud > span + span { border-left: 1px solid var(--border); }
+.game-hud small { color: var(--muted-foreground); font-size: 0.58rem; font-weight: 500; }
+.game-hud strong {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game-console { margin-top: 0.85rem; border-radius: 0.6rem; }
+.game-console__row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; padding: 0.55rem 0.65rem; }
+.game-console__row svg { width: 0.85rem; height: 0.85rem; }
+.game-console__options { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-left: auto; }
+.game-console__options > span { color: var(--muted-foreground); font-size: 0.62rem; }
+
+.game-note { display: flex; align-items: center; gap: 0.4rem; margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 0.65rem; }
+.game-note svg { width: 0.8rem; height: 0.8rem; }
+.game-note--warning { color: oklch(0.52 0.13 75); }
+.game-note--error { color: var(--destructive); }
 
 .channel-sidebar {
   display: grid;
@@ -570,7 +672,8 @@
 .pixel-asset-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.75rem; padding: 0.65rem 0.75rem; color: var(--muted-foreground); font-size: 0.6rem; }
 .pixel-asset-metadata a { margin-left: auto; color: var(--primary); text-underline-offset: 0.18rem; }
 
-.canvas-orientation-gate { display: none; }
+.canvas-orientation-gate,
+.game-orientation-gate { display: none; }
 
 .toast-content { display: flex; align-items: center; gap: 0.75rem; }
 .toast-action { padding: 0; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: var(--foreground); font-weight: 600; cursor: pointer; }
@@ -715,7 +818,7 @@
     bottom: max(0.65rem, env(safe-area-inset-bottom));
     left: max(0.75rem, env(safe-area-inset-left));
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     min-height: 3.45rem;
     justify-self: stretch;
     justify-content: stretch;
@@ -735,7 +838,11 @@
   .page-heading span { display: none; }
   .page-heading h1 { font-size: 1.12rem; letter-spacing: -0.02em; }
   .page-heading p { display: none; }
-  .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library { display: block; padding-top: 0; }
+  .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library, .studio-layout.is-game { display: block; padding-top: 0; }
+  .game-shell { padding-top: 0.65rem; }
+  .game-body { padding-top: 0.75rem; }
+  .game-stage { width: 100%; }
+  .game-console__options { width: 100%; margin-left: 0; }
   .channel-sidebar { display: block; padding: 0.5rem 0 0.45rem; border-right: 0; border-bottom: 0; }
   .section-kicker { display: none; }
   .channel-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scrollbar-width: none; }
@@ -927,8 +1034,10 @@
 }
 
 @media (max-width: 40rem) and (orientation: portrait) {
-  .is-canvas-page .studio-layout.is-canvas { display: none; }
-  .is-canvas-page .canvas-orientation-gate {
+  .is-canvas-page .studio-layout.is-canvas,
+  .is-game-page .studio-layout.is-game { display: none; }
+  .is-canvas-page .canvas-orientation-gate,
+  .is-game-page .game-orientation-gate {
     display: flex;
     min-height: calc(100dvh - 12.5rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     align-items: center;
@@ -938,22 +1047,44 @@
     border-top: 1px solid var(--border);
     text-align: left;
   }
-  .canvas-orientation-gate__icon { display: grid; width: 3.5rem; height: 3.5rem; flex: none; place-items: center; border-radius: 999px; background: var(--green-soft); color: var(--primary); }
-  .canvas-orientation-gate__icon svg { width: 1.5rem; height: 1.5rem; }
-  .canvas-orientation-gate div > span { color: var(--primary); font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em; }
-  .canvas-orientation-gate h2 { margin: 0.25rem 0 0; font-size: 1.15rem; }
-  .canvas-orientation-gate p { max-width: 22rem; margin: 0.4rem 0 0; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+  .canvas-orientation-gate__icon,
+  .game-orientation-gate__icon { display: grid; width: 3.5rem; height: 3.5rem; flex: none; place-items: center; border-radius: 999px; background: var(--green-soft); color: var(--primary); }
+  .canvas-orientation-gate__icon svg,
+  .game-orientation-gate__icon svg { width: 1.5rem; height: 1.5rem; }
+  .canvas-orientation-gate div > span,
+  .game-orientation-gate div > span { color: var(--primary); font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em; }
+  .canvas-orientation-gate h2,
+  .game-orientation-gate h2 { margin: 0.25rem 0 0; font-size: 1.15rem; }
+  .canvas-orientation-gate p,
+  .game-orientation-gate p { max-width: 22rem; margin: 0.4rem 0 0; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
 }
 
 @media (max-width: 60rem) and (max-height: 34rem) and (orientation: landscape) {
   .studio-page { min-height: 100dvh; padding: 0 max(0.75rem, env(safe-area-inset-right)) calc(4.65rem + env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left)); }
   .studio-header { position: sticky; z-index: 30; top: 0; grid-template-columns: 1fr auto; min-height: calc(3.2rem + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); background: var(--background); }
-  .brand-device, .is-canvas-page .page-heading { display: none; }
+  .brand-device, .is-canvas-page .page-heading, .is-game-page .page-heading { display: none; }
   .header-actions { grid-column: 2; grid-row: 1; }
   .device-settings-trigger { min-width: 2.75rem; }
-  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
+  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
   .main-tabs button { justify-content: center; }
   .studio-layout.is-canvas { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); }
+  .studio-layout.is-game { display: block; }
+  .game-shell { padding: 0.35rem 0 1rem; }
+  .game-topbar { padding-bottom: 0.5rem; }
+  /* 手机横屏：舞台优先撑满，控制台收成主导航上方的悬浮条。 */
+  .game-body { padding-top: 0.6rem; padding-bottom: 4.9rem; }
+  .game-stage { width: min(100%, 42rem); }
+  .game-console {
+    position: fixed;
+    z-index: 40;
+    right: max(0.75rem, env(safe-area-inset-right));
+    bottom: calc(4.15rem + env(safe-area-inset-bottom));
+    left: max(0.75rem, env(safe-area-inset-left));
+    margin-top: 0;
+    box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.18);
+  }
+  .game-console__row { flex-wrap: nowrap; overflow-x: auto; }
+  .game-console__options { flex-wrap: nowrap; }
   .is-canvas-page .channel-sidebar { padding: 0.55rem 0.65rem 0.8rem 0; }
   .is-canvas-page .section-kicker { padding-bottom: 0.4rem; font-size: 0.6rem; }
   .is-canvas-page .channel-entry { grid-template-columns: minmax(0, 1fr); }

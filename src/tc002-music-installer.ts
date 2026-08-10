@@ -4,16 +4,91 @@ import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 export const MUSIC_SESSION_CONFIRMATION = "START_TC002_MUSIC_SESSION";
+export const ARCADE_SESSION_CONFIRMATION = "START_TC002_ARCADE_SESSION";
 
-const REMOTE_DIR = "/tmp/tc002-music";
-// A shebang entry runs as `sh`, so pidof/killall on the entry name are not
-// reliable; the launcher records $! into this file for the pre-launch cleanup.
-const REMOTE_PID = `${REMOTE_DIR}/session.pid`;
+/**
+ * The sideload stack is shared by every sideloadable TC002 app (ADR 0004): the
+ * installer class encodes the tmpfs/busybox constraints once, and a profile
+ * carries the per-app facts. Both apps claim the same framework load path
+ * (/tmp/EasyUI.cfg + zkswe restart), so they are mutually exclusive by
+ * construction.
+ */
+export interface SideloadProfile {
+  appId: string;             // manifest appId; also the session identity value
+  slug: string;              // remote bundle dir = /tmp/tc002-<slug>
+  confirmation: string;      // explicit user acknowledgement phrase
+  releaseDirectory: string;
+  packagingDoc: string;      // where the missing-bundle message points to
+  extraCleanupPaths: string[]; // extra /tmp files this app leaves behind
+  copy: { running: string; started: string };
+}
+
+export const MUSIC_SIDELOAD_PROFILE: SideloadProfile = {
+  appId: "tc002-lyrics-player",
+  slug: "music",
+  confirmation: MUSIC_SESSION_CONFIRMATION,
+  releaseDirectory: "device/tc002-lyrics-player/release",
+  packagingDoc: "device/tc002-lyrics-player/README.md",
+  extraCleanupPaths: ["/tmp/track.mp3"],
+  copy: {
+    running: "设备在线，音乐固件正在运行",
+    started: "音乐固件已在时钟内存运行；点「恢复官方固件」或断电重启即可回到原样",
+  },
+};
+
+export const ARCADE_SIDELOAD_PROFILE: SideloadProfile = {
+  appId: "tc002-arcade",
+  slug: "arcade",
+  confirmation: ARCADE_SESSION_CONFIRMATION,
+  releaseDirectory: "device/tc002-arcade/release",
+  packagingDoc: "device/tc002-arcade/README.md",
+  extraCleanupPaths: [],
+  copy: {
+    running: "设备在线，游戏固件正在运行",
+    started: "游戏固件已在时钟内存运行；点「恢复官方固件」或断电重启即可回到原样",
+  },
+};
+
+// Both apps' entry scripts write their appId here so each installer can tell
+// whose session is live; the file lives in tmpfs like everything else.
+const SESSION_ID_FILE = "/tmp/tc002-sideload.id";
+// Every remote dir any profile may have used; the start cleanup clears them
+// all so switching apps never pushes on top of a full tmpfs.
+const ALL_REMOTE_DIRS = ["/tmp/tc002-music", "/tmp/tc002-arcade"] as const;
+
+function remoteDir(profile: SideloadProfile): string {
+  return `/tmp/tc002-${profile.slug}`;
+}
+
 // A firmware session counts as alive while the framework is up on the
-// sideloaded /tmp config. The entry script deploys and exits (the device
-// busybox has no `sleep`, so it cannot linger), so no PID is watched.
-const SESSION_ALIVE_CHECK =
-  '[ -f /tmp/EasyUI.cfg ] && [ "$(getprop init.svc.zkswe)" = "running" ] && echo running';
+// sideloaded /tmp config AND the identity file names this app. The entry
+// script deploys and exits (the device busybox has no `sleep`, so it cannot
+// linger), so no PID is watched. Music bundles released before the id file
+// existed write none: an id-less session can only be the music player's own
+// (backward compatible per ADR 0004), while every other app requires an
+// exact match.
+function sessionAliveCheck(profile: SideloadProfile): string {
+  const identity = `[ "$(cat ${SESSION_ID_FILE} 2>/dev/null)" = "${profile.appId}" ]`;
+  const match = profile.appId === MUSIC_SIDELOAD_PROFILE.appId
+    ? `{ ${identity} || [ ! -f ${SESSION_ID_FILE} ]; }`
+    : identity;
+  return `[ -f /tmp/EasyUI.cfg ] && [ "$(getprop init.svc.zkswe)" = "running" ] && ${match} && echo running`;
+}
+
+function assertSafeProfile(profile: SideloadProfile): void {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(profile.appId)) {
+    throw new Error("sideload profile appId is invalid");
+  }
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(profile.slug)) {
+    throw new Error("sideload profile slug is invalid");
+  }
+  for (const path of profile.extraCleanupPaths) {
+    // The paths are embedded into an adb shell command line; keep them plain.
+    if (!/^\/tmp\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(path)) {
+      throw new Error(`sideload profile cleanup path is invalid: ${path}`);
+    }
+  }
+}
 
 export interface MusicPlayerBundle {
   state: "missing" | "invalid" | "ready";
@@ -62,7 +137,7 @@ export interface BundleFile {
 
 interface BundleManifest {
   schemaVersion: 3;
-  appId: "tc002-lyrics-player";
+  appId: string;
   version: string;
   entry: string;
   bundleId: string;
@@ -122,6 +197,8 @@ export const defaultProcessRunner: ProcessRunner = {
   },
 };
 
+// The name is load-bearing: control-api maps this error class to HTTP status
+// codes for every sideloadable app, not only music.
 export class MusicInstallerError extends Error {
   constructor(message: string, readonly status = 400) {
     super(message);
@@ -130,7 +207,16 @@ export class MusicInstallerError extends Error {
 }
 
 export class MusicPlayerBundleStore {
-  constructor(private readonly releaseDirectory: string) {}
+  private readonly appId: string;
+  private readonly packagingDoc: string;
+
+  constructor(
+    private readonly releaseDirectory: string,
+    profile?: Pick<SideloadProfile, "appId" | "packagingDoc">,
+  ) {
+    this.appId = profile?.appId ?? MUSIC_SIDELOAD_PROFILE.appId;
+    this.packagingDoc = profile?.packagingDoc ?? MUSIC_SIDELOAD_PROFILE.packagingDoc;
+  }
 
   async inspect(): Promise<MusicPlayerBundle> {
     try {
@@ -149,13 +235,13 @@ export class MusicPlayerBundleStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return {
           state: "missing",
-          appId: "tc002-lyrics-player",
-          message: "还没有固件包：按 device/tc002-lyrics-player/README.md 打包 FlyThings 构建产物",
+          appId: this.appId,
+          message: `还没有固件包：按 ${this.packagingDoc} 打包 FlyThings 构建产物`,
         };
       }
       return {
         state: "invalid",
-        appId: "tc002-lyrics-player",
+        appId: this.appId,
         message: error instanceof Error ? error.message : "固件包校验失败",
       };
     }
@@ -164,7 +250,7 @@ export class MusicPlayerBundleStore {
   async requireReady(): Promise<ReadyBundle> {
     const manifestPath = join(this.releaseDirectory, "manifest.json");
     const raw = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
-    const manifest = validateManifest(raw);
+    const manifest = validateManifest(raw, this.appId);
     const bundleDir = join(this.releaseDirectory, "bundle");
     let bytes = 0;
     for (const file of manifest.files) {
@@ -190,19 +276,27 @@ export class MusicPlayerBundleStore {
 }
 
 /**
- * Path-A device model: the sideload session deploys the FlyThings player into
+ * Path-A device model: the sideload session deploys the FlyThings app into
  * the framework's /tmp load path and restarts the UI service (zkswe) on it.
- * A session counts as alive while /tmp/EasyUI.cfg exists and zkswe runs.
- * Nothing is written to flash, so restoring — or simply power-cycling the
- * clock — always returns the device to the official firmware.
+ * A session counts as alive while /tmp/EasyUI.cfg exists, zkswe runs, and the
+ * identity file names this profile's app. Nothing is written to flash, so
+ * restoring — or simply power-cycling the clock — always returns the device
+ * to the official firmware.
  */
-export class Tc002MusicInstaller {
+export class Tc002SideloadInstaller {
   private busy = false;
   private session: MusicSessionState = { active: false };
+  private readonly profile: SideloadProfile;
+  private readonly remoteDir: string;
+  // A shebang entry runs as `sh`, so pidof/killall on the entry name are not
+  // reliable; the launcher records $! into this file for the pre-launch cleanup.
+  private readonly remotePid: string;
+  private readonly aliveCheck: string;
 
   constructor(private readonly options: {
     clockHost: string;
     bundleStore: MusicPlayerBundleStore;
+    profile?: SideloadProfile;
     adbPath?: string;
     processRunner?: ProcessRunner;
     verifyClock: () => Promise<{ mcuVersion?: string; appVersion?: string }>;
@@ -215,6 +309,11 @@ export class Tc002MusicInstaller {
     if (adbPath && (!isAbsolute(adbPath) || adbPath.length > 1_024 || /[\r\n\0]/.test(adbPath))) {
       throw new Error("ADB_BIN must be an absolute executable path");
     }
+    this.profile = options.profile ?? MUSIC_SIDELOAD_PROFILE;
+    assertSafeProfile(this.profile);
+    this.remoteDir = remoteDir(this.profile);
+    this.remotePid = `${this.remoteDir}/session.pid`;
+    this.aliveCheck = sessionAliveCheck(this.profile);
   }
 
   async status(): Promise<MusicDeviceAppStatus> {
@@ -225,6 +324,11 @@ export class Tc002MusicInstaller {
       session: { ...this.session },
       restore: restoreGuide(),
     };
+  }
+
+  // Cheap in-memory read for liveness endpoints: no adb round-trip, no disk.
+  sessionState(): MusicSessionState {
+    return { ...this.session };
   }
 
   async probe(): Promise<MusicDeviceProbe> {
@@ -262,9 +366,9 @@ export class Tc002MusicInstaller {
     try {
       clock = await this.options.verifyClock();
     } catch (error) {
-      // The official HTTP API lives in the official firmware; while the music
-      // firmware runs it is expected to be gone, so its absence is only fatal
-      // when the player is not running either.
+      // The official HTTP API lives in the official firmware; while a
+      // sideloaded firmware runs it is expected to be gone, so its absence is
+      // only fatal when this profile's app is not running either.
       if (playerRunning !== true) throw error;
     }
     const [model, platform] = await Promise.all([
@@ -280,7 +384,7 @@ export class Tc002MusicInstaller {
       ...(clock.mcuVersion ? { mcuVersion: clock.mcuVersion } : {}),
       ...(playerRunning === undefined ? {} : { playerRunning }),
       message: playerRunning
-        ? "设备在线，音乐固件正在运行"
+        ? this.profile.copy.running
         : "已通过官方 HTTP 接口和 Wi-Fi ADB 双重确认设备",
     };
   }
@@ -289,7 +393,7 @@ export class Tc002MusicInstaller {
     confirmation: string;
     expectedBundleId: string;
   }): Promise<{ state: "running"; message: string; restore: MusicDeviceAppStatus["restore"] }> {
-    if (input.confirmation !== MUSIC_SESSION_CONFIRMATION) {
+    if (input.confirmation !== this.profile.confirmation) {
       throw new MusicInstallerError("请先确认已了解如何回到官方固件");
     }
     if (!/^[a-f0-9]{64}$/.test(input.expectedBundleId)) {
@@ -314,23 +418,30 @@ export class Tc002MusicInstaller {
       // adbd. Kill any previous session process, then stop the UI service.
       await this.requireCommand(
         adb,
-        this.shell(`[ -f ${REMOTE_PID} ] && kill "$(cat ${REMOTE_PID})" 2>/dev/null; setprop ctl.stop zkswe`),
+        this.shell(`[ -f ${this.remotePid} ] && kill "$(cat ${this.remotePid})" 2>/dev/null; setprop ctl.stop zkswe`),
         10_000,
       );
       try {
         // The device busybox has no tar/unzip, so the bundle directory is pushed
-        // recursively; `dir/.` copies its contents straight into REMOTE_DIR.
-        // tmpfs is tiny: clear every leftover from a previous session (old audio,
-        // the framework's /tmp load path) BEFORE pushing, or adbd wedges mid-transfer.
+        // recursively; `dir/.` copies its contents straight into the remote dir.
+        // tmpfs is tiny: clear every leftover from a previous session (either
+        // app's bundle dir, old audio, the framework's /tmp load path, the
+        // session identity) BEFORE pushing, or adbd wedges mid-transfer.
+        const cleanupFiles = [
+          ...this.profile.extraCleanupPaths,
+          "/tmp/EasyUI.cfg",
+          "/tmp/libzkgui.so",
+          SESSION_ID_FILE,
+        ].join(" ");
         await this.requireCommand(
           adb,
-          this.shell(`rm -rf ${REMOTE_DIR} /tmp/ui; rm -f /tmp/track.mp3 /tmp/EasyUI.cfg /tmp/libzkgui.so`),
+          this.shell(`rm -rf ${ALL_REMOTE_DIRS.join(" ")} /tmp/ui; rm -f ${cleanupFiles}`),
           10_000,
         );
-        await this.requireCommand(adb, this.shell(`mkdir -p ${REMOTE_DIR}`), 10_000);
+        await this.requireCommand(adb, this.shell(`mkdir -p ${this.remoteDir}`), 10_000);
         await this.requireCommand(
           adb,
-          ["-s", this.target, "push", `${bundle.bundleDir}/.`, `${REMOTE_DIR}/`],
+          ["-s", this.target, "push", `${bundle.bundleDir}/.`, `${this.remoteDir}/`],
           180_000,
         );
         // Zero-config key: the firmware reads this file on startup to learn the
@@ -342,26 +453,26 @@ export class Tc002MusicInstaller {
           }
           await this.requireCommand(
             adb,
-            this.shell(`echo '${origin}' > ${REMOTE_DIR}/service.origin`),
+            this.shell(`echo '${origin}' > ${this.remoteDir}/service.origin`),
             10_000,
           );
         }
-        await this.requireCommand(adb, this.shell(`chmod +x ${REMOTE_DIR}/${entry}`), 10_000);
+        await this.requireCommand(adb, this.shell(`chmod +x ${this.remoteDir}/${entry}`), 10_000);
         // The device busybox has no nohup/setsid, so detach with a subshell:
         // the background child is reparented to init when the subshell exits,
         // letting the adb command return instead of blocking on the process.
-        // The entry deploys the /tmp load path, restarts the framework, and
-        // exits; its exit code is invisible here, so the deploy is verified
-        // explicitly right after.
+        // The entry deploys the /tmp load path (and writes the session id),
+        // restarts the framework, and exits; its exit code is invisible here,
+        // so the deploy is verified explicitly right after.
         await this.requireCommand(
           adb,
           this.shell(
-            `(cd ${REMOTE_DIR} && ./${entry} </dev/null >${REMOTE_DIR}/session.log 2>&1 & echo $! > ${REMOTE_PID})`,
+            `(cd ${this.remoteDir} && ./${entry} </dev/null >${this.remoteDir}/session.log 2>&1 & echo $! > ${this.remotePid})`,
           ),
           15_000,
         );
         await new Promise((resolve) => setTimeout(resolve, this.options.settleDelayMs ?? 2_500));
-        const deployed = await this.runner.run(adb, this.shell(SESSION_ALIVE_CHECK), 8_000);
+        const deployed = await this.runner.run(adb, this.shell(this.aliveCheck), 8_000);
         if (deployed.exitCode !== 0 || !deployed.stdout.includes("running")) {
           throw new MusicInstallerError("固件未能在时钟上启动；已尝试恢复官方界面，请重新检测后再试", 503);
         }
@@ -370,7 +481,11 @@ export class Tc002MusicInstaller {
         // config and bring it back before failing so the clock never stays on
         // a dead screen. Whatever session existed before was terminated by the
         // kill+stop above, so the in-memory state must not claim it survived.
-        await this.runner.run(adb, this.shell("rm -f /tmp/EasyUI.cfg; setprop ctl.start zkswe"), 10_000).catch(() => undefined);
+        await this.runner.run(
+          adb,
+          this.shell(`rm -f /tmp/EasyUI.cfg ${SESSION_ID_FILE}; setprop ctl.start zkswe`),
+          10_000,
+        ).catch(() => undefined);
         this.session = { active: false };
         throw error;
       }
@@ -382,7 +497,7 @@ export class Tc002MusicInstaller {
       };
       return {
         state: "running",
-        message: "音乐固件已在时钟内存运行；点「恢复官方固件」或断电重启即可回到原样",
+        message: this.profile.copy.started,
         restore: restoreGuide(),
       };
     } finally {
@@ -400,22 +515,29 @@ export class Tc002MusicInstaller {
       await this.runner.run(
         adb,
         this.shell(
-          `[ -f ${REMOTE_PID} ] && kill "$(cat ${REMOTE_PID})" 2>/dev/null; `
+          `[ -f ${this.remotePid} ] && kill "$(cat ${this.remotePid})" 2>/dev/null; `
             + (entry ? `killall ${entry} 2>/dev/null; ` : "")
             + "true",
         ),
         10_000,
       ).catch(() => undefined);
       // The cleanup must actually succeed: if /tmp/EasyUI.cfg survived, the
-      // restart below would boot the player again while we report "official".
+      // restart below would boot the sideloaded app again while we report
+      // "official".
+      const cleanupFiles = [
+        "/tmp/EasyUI.cfg",
+        "/tmp/libzkgui.so",
+        SESSION_ID_FILE,
+        ...this.profile.extraCleanupPaths,
+      ].join(" ");
       await this.requireCommand(
         adb,
-        this.shell(`rm -rf ${REMOTE_DIR} /tmp/ui; rm -f /tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/track.mp3`),
+        this.shell(`rm -rf ${this.remoteDir} /tmp/ui; rm -f ${cleanupFiles}`),
         15_000,
       );
       // Restart instead of start: with the firmware bundle the framework is
-      // already running the player, so it must reload now that the /tmp config
-      // is gone; for a stopped service restart behaves like start.
+      // already running the sideloaded app, so it must reload now that the
+      // /tmp config is gone; for a stopped service restart behaves like start.
       await this.requireCommand(adb, this.shell("setprop ctl.restart zkswe"), 10_000);
       this.session = { active: false };
       return {
@@ -442,7 +564,7 @@ export class Tc002MusicInstaller {
 
   private async refreshSession(adb: string): Promise<boolean | undefined> {
     const result = await this.runner
-      .run(adb, this.shell(SESSION_ALIVE_CHECK), 8_000)
+      .run(adb, this.shell(this.aliveCheck), 8_000)
       .catch(() => undefined);
     if (!result) return undefined;
     const running = result.stdout.includes("running");
@@ -486,6 +608,9 @@ export class Tc002MusicInstaller {
   }
 }
 
+// Backward-compatible name from the music-only era; same class.
+export { Tc002SideloadInstaller as Tc002MusicInstaller };
+
 export function isValidBundleEntry(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
 }
@@ -509,14 +634,14 @@ export function computeBundleId(files: readonly BundleFile[]): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
-function validateManifest(value: unknown): BundleManifest {
+function validateManifest(value: unknown, expectedAppId: string): BundleManifest {
   const record = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
   const files = record.files;
   if (
     record.schemaVersion !== 3 ||
-    record.appId !== "tc002-lyrics-player" ||
+    record.appId !== expectedAppId ||
     !isValidBundleEntry(record.entry) ||
     typeof record.version !== "string" ||
     !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/i.test(record.version) ||

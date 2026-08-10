@@ -2,6 +2,7 @@ import { Button, Chip, ColorPicker, ToggleButton, ToggleGroup } from "@cladd-ui/
 import { AudioLines, Check, Monitor, MoveHorizontal, Radar, Radio, Rows3 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { FULL_WIDTH_CELL, GLYPH_HEIGHT, glyphCellWidth, glyphRows } from "@/lib/pixel-glyphs";
+import { SPECTRUM_HOP_MS, type SpectrumLookup } from "@/lib/spectrum-timeline";
 import {
   beatKick,
   cascadeBandY,
@@ -218,6 +219,7 @@ export interface PixelLyricsFrameInput {
   playing: boolean;
   scrollOffsetPx: number;
   timeMs: number;
+  spectrum?: SpectrumLookup;
   reducedMotion: boolean;
 }
 
@@ -335,6 +337,7 @@ function paintSkyline(
       animated && input.playing,
       kick,
       maxLevel,
+      input.spectrum?.(input.timeMs, bar),
     );
     context.fillStyle = palette.muted;
     context.fillRect(x, 15, 2, 1);
@@ -479,10 +482,12 @@ interface PixelLyricsPreviewProps {
   lyricProgress: number;
   lyricDurationMs: number;
   trackProgress: number;
+  timeMs: number;
   playing: boolean;
   skin: MusicSkin;
   accent: string | null;
   mode: MusicMode;
+  spectrum?: SpectrumLookup;
 }
 
 export function PixelLyricsPreview({
@@ -491,10 +496,12 @@ export function PixelLyricsPreview({
   lyricProgress,
   lyricDurationMs,
   trackProgress,
+  timeMs,
   playing,
   skin,
   accent,
   mode,
+  spectrum,
 }: PixelLyricsPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const latestFrameRef = useRef({
@@ -503,10 +510,12 @@ export function PixelLyricsPreview({
     lyricProgress,
     lyricDurationMs,
     trackProgress,
+    timeMs,
     playing,
     skin,
     accent,
     mode,
+    spectrum,
   });
   const lyricClockRef = useRef({
     currentText,
@@ -514,16 +523,19 @@ export function PixelLyricsPreview({
     lyricDurationMs,
     receivedAt: 0,
   });
+  const trackClockRef = useRef({ timeMs, receivedAt: 0 });
   latestFrameRef.current = {
     currentText,
     hasLyric,
     lyricProgress,
     lyricDurationMs,
     trackProgress,
+    timeMs,
     playing,
     skin,
     accent,
     mode,
+    spectrum,
   };
 
   useEffect(() => {
@@ -534,6 +546,10 @@ export function PixelLyricsPreview({
       receivedAt: performance.now(),
     };
   }, [currentText, lyricDurationMs, lyricProgress]);
+
+  useEffect(() => {
+    trackClockRef.current = { timeMs, receivedAt: performance.now() };
+  }, [timeMs]);
 
   useEffect(() => {
     const context = canvasRef.current?.getContext("2d");
@@ -551,6 +567,11 @@ export function PixelLyricsPreview({
     const render = (now: number) => {
       const frame = latestFrameRef.current;
       const lyricClock = lyricClockRef.current;
+      const trackClock = trackClockRef.current;
+      const smoothTimeMs = Math.max(
+        0,
+        trackClock.timeMs + (frame.playing ? now - trackClock.receivedAt : 0),
+      );
       const smoothLyricProgress = lyricClock.currentText === frame.currentText
         ? projectedLyricProgress(
           lyricClock.lyricProgress,
@@ -578,7 +599,10 @@ export function PixelLyricsPreview({
         focusGlyphIndexForProgress(bitmap.focusSpans.length, smoothLyricProgress),
         Math.round(smoothLyricProgress * 47),
         Math.round(frame.trackProgress * 52),
-        frame.mode === "skyline" && !reducedMotion ? Math.floor(now / 125) : 0,
+        frame.mode === "skyline" && !reducedMotion ? Math.floor(smoothTimeMs / 125) : 0,
+        frame.mode === "skyline" && frame.spectrum && !reducedMotion
+          ? Math.floor(smoothTimeMs / SPECTRUM_HOP_MS)
+          : 0,
         frame.mode === "cascade" ? cascadeBandY(smoothLyricProgress, reducedMotion) : 0,
       ].join(":");
       if (signature !== lastSignature) {
@@ -592,7 +616,8 @@ export function PixelLyricsPreview({
           trackProgress: frame.trackProgress,
           playing: frame.playing,
           scrollOffsetPx,
-          timeMs: now,
+          timeMs: smoothTimeMs,
+          spectrum: frame.spectrum,
           reducedMotion,
         });
         lastSignature = signature;
@@ -605,7 +630,7 @@ export function PixelLyricsPreview({
       window.cancelAnimationFrame(animationFrame);
       motionPreference.removeEventListener("change", handleMotionPreference);
     };
-  }, [currentText, mode, skin]);
+  }, [currentText, mode, skin, spectrum]);
 
   return (
     <figure className={`pixel-lyric-screen${playing ? " is-playing" : ""}`}>
@@ -636,6 +661,7 @@ interface MusicThemePanelProps {
   onSkinChange: (skin: MusicSkin) => void;
   onAccentChange: (accent: string | null) => void;
   syncsToDevice: boolean;
+  simulatedSpectrum: boolean;
 }
 
 const MODE_ICON: Record<MusicMode, typeof MoveHorizontal> = {
@@ -656,6 +682,7 @@ export function MusicThemePanel({
   onSkinChange,
   onAccentChange,
   syncsToDevice,
+  simulatedSpectrum,
 }: MusicThemePanelProps) {
   const accentValue = accent ? `#${accent}` : skinPrimaryHex(skin);
   return (
@@ -770,7 +797,7 @@ export function MusicThemePanel({
           debounce={200}
           swatches={MUSIC_SKINS.map((item) => PALETTES[item.id].primary)}
           value={accentValue}
-          popoverPosition="bottom-start"
+          popoverPosition="top-start"
           aria-label="自定义歌词主色"
           onChange={(value) => onAccentChange(value.hex.replace(/^#/, "").slice(0, 6).toLowerCase())}
         >
@@ -788,6 +815,9 @@ export function MusicThemePanel({
           还原预设
         </Button>
       </div>
+      {simulatedSpectrum && (
+        <p className="music-theme-panel__spectrum-note">此音源为模拟律动</p>
+      )}
     </section>
   );
 }

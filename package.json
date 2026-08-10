@@ -12,6 +12,7 @@
     "build": "bun run scripts/build.ts",
     "preview": "bun run scripts/preview.ts",
     "music-release": "bun run scripts/create-music-release.ts",
+    "arcade-release": "bun run scripts/create-arcade-release.ts",
     "status": "bun run scripts/status.ts",
     "install-macos": "bash scripts/install.sh",
     "uninstall-macos": "bash scripts/uninstall.sh",

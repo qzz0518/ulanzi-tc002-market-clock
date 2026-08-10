@@ -11,20 +11,15 @@ import {
   Music2,
   Pause,
   Play,
-  Power,
   Radio,
   RefreshCw,
   Search,
-  ShieldCheck,
   Speaker,
   Wifi,
-  X,
 } from "lucide-react";
 import {
   Button,
-  Checkbox,
   Chip,
-  Dialog,
   Input,
   List,
   ListButton,
@@ -53,14 +48,14 @@ import {
   PixelLyricsPreview,
   type MusicSkin,
 } from "@/components/music/pixel-lyrics-preview";
+import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
 import { api, jsonApi } from "@/lib/api";
 import { createLatestTaskRunner, type LatestTaskRunner } from "@/lib/latest-task-runner";
 import { clampPlaybackPositionMs } from "@/lib/music-playback";
 import { renderMirrorFrames, type MirrorFrame } from "@/lib/music-mirror";
+import { spectrumForTrack, type SpectrumLookup } from "@/lib/spectrum-timeline";
 import { errorMessage } from "@/lib/utils";
 import type {
-  MusicDeviceAppStatus,
-  MusicDeviceProbe,
   MusicOverview,
   MusicPlaylist,
   MusicProfile,
@@ -118,14 +113,9 @@ function artistLabel(track: MusicTrack | undefined): string {
   return track?.artists.join(" / ") || "未知音乐人";
 }
 
-export function DeviceReconnectGuidance() {
-  return (
-    <p className="music-device-reconnect-guidance" role="status">
-      <Power aria-hidden="true" />
-      <span><strong>仍然无法检测？</strong>如果无法检测到设备，请关机并连接到电脑再开机。</span>
-    </p>
-  );
-}
+// The guidance block moved into the shared firmware panel; the re-export
+// keeps this module the historical import site.
+export { DeviceReconnectGuidance } from "@/components/firmware-panel";
 
 export function MusicAccountAvatar({ profile }: { profile: MusicProfile }) {
   const initial = Array.from(profile.nickname.trim() || "云")[0] ?? "云";
@@ -220,16 +210,19 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
   const [durationMs, setDurationMs] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
-  const [deviceApp, setDeviceApp] = useState<MusicDeviceAppStatus | null>(null);
-  const [deviceProbe, setDeviceProbe] = useState<MusicDeviceProbe | null>(null);
-  const [deviceBusy, setDeviceBusy] = useState(false);
-  const [deviceError, setDeviceError] = useState<string | null>(null);
-  const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
-  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
-  const [devicePanelOpen, setDevicePanelOpen] = useState(false);
+  // 固件侧载的状态、动作与抽屉都在共享面板里（音乐/游戏两页同一套流程）。
+  const firmwarePanel = useFirmwarePanel({
+    apiPrefix: "/api/music",
+    confirmation: SESSION_CONFIRMATION,
+    firmwareLabel: "音乐固件",
+  });
   const [mirrorOn, setMirrorOn] = useState(false);
   const [mirrorError, setMirrorError] = useState<string | null>(null);
   const mirrorRunnerRef = useRef<LatestTaskRunner<{ frames: MirrorFrame[] }> | null>(null);
+  const [spectrum, setSpectrum] = useState<{
+    trackId: string;
+    lookup: SpectrumLookup;
+  } | null>(null);
   const trackProgressRef = useRef(0);
   const [skin, setSkin] = useState<MusicSkin>("signal");
   const [mode, setMode] = useState<MusicMode>("ticker");
@@ -279,6 +272,25 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
   const activeProviderIdRef = useRef<MusicProviderId>("netease");
   activeProviderIdRef.current = activeProviderId;
 
+  useEffect(() => {
+    let cancelled = false;
+    setSpectrum(null);
+    const trackId = selected?.track.id;
+    if (!trackId || activeProviderId !== "netease" || deviceOnline) return;
+    void spectrumForTrack(trackId).then((lookup) => {
+      if (!cancelled && lookup) setSpectrum({ trackId, lookup });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProviderId, deviceOnline, selected?.track.id]);
+  const activeSpectrum = activeProviderId === "netease"
+    && !deviceOnline
+    && spectrum !== null
+    && spectrum.trackId === selected?.track.id
+    ? spectrum.lookup
+    : undefined;
+
   // One request answers "which source is live" and "is it signed in" for both
   // providers, so the studio never shows a stale login state after a switch.
   const loadSession = useCallback(async () => {
@@ -313,21 +325,11 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
   }, [deviceOnline, onFirmwareOnlineChange]);
   useEffect(() => () => onFirmwareOnlineChange?.(false), [onFirmwareOnlineChange]);
 
-  const loadDeviceApp = useCallback(async () => {
-    try {
-      const result = await jsonApi<{ deviceApp: MusicDeviceAppStatus }>("/api/music/device-app");
-      setDeviceApp(result.deviceApp);
-      setDeviceError(null);
-    } catch (error) {
-      setDeviceError(errorMessage(error));
-    }
-  }, []);
-
   useEffect(() => {
+    // 固件包状态由 useFirmwarePanel 在挂载时自行加载。
     void loadSession();
-    void loadDeviceApp();
     void loadSpotifyApp();
-  }, [loadDeviceApp, loadSession, loadSpotifyApp]);
+  }, [loadSession, loadSpotifyApp]);
 
   useEffect(() => {
     try {
@@ -630,9 +632,11 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
       skin,
       trackProgress: trackProgressRef.current,
       playing,
+      startTimeMs: activeLyric?.startMs ?? currentMs,
+      spectrum: activeSpectrum,
     });
     if (frames.length > 0) void mirrorRunnerRef.current?.enqueue({ frames });
-  }, [activeLyric, mirrorOn, mode, playing, selected, skin]);
+  }, [activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin]);
   const effectiveDurationMs = durationMs > 0 ? durationMs : selected?.track.durationMs ?? 0;
   durationRef.current = effectiveDurationMs;
   const timelineDisplayMs = Math.min(dragMs ?? currentMs, effectiveDurationMs);
@@ -1047,67 +1051,6 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
     void selectTrack(next);
   };
 
-  const probeDevice = async () => {
-    setDeviceBusy(true);
-    setDeviceError(null);
-    try {
-      const result = await jsonApi<{ device: MusicDeviceProbe }>(
-        "/api/music/device-app/probe",
-        { method: "POST" },
-      );
-      setDeviceProbe(result.device);
-      // 探测让服务端核实了会话真实状态（断电重启后自动回落为未运行），
-      // 回读一次让按钮和步骤跟随设备现状。
-      await loadDeviceApp();
-    } catch (error) {
-      setDeviceError(errorMessage(error));
-    } finally {
-      setDeviceBusy(false);
-    }
-  };
-
-  const startDeviceSession = async () => {
-    if (!deviceApp?.artifact.bundleId || !recoveryAcknowledged) return;
-    setDeviceBusy(true);
-    setDeviceError(null);
-    try {
-      const result = await jsonApi<{ result: { message: string } }>(
-        "/api/music/device-app/session/start",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            confirmation: SESSION_CONFIRMATION,
-            expectedBundleId: deviceApp.artifact.bundleId,
-          }),
-        },
-      );
-      setSessionMessage(result.result.message);
-      await loadDeviceApp();
-    } catch (error) {
-      setDeviceError(errorMessage(error));
-    } finally {
-      setDeviceBusy(false);
-    }
-  };
-
-  const stopDeviceSession = async () => {
-    setDeviceBusy(true);
-    setDeviceError(null);
-    try {
-      const result = await jsonApi<{ result: { message: string } }>(
-        "/api/music/device-app/session/stop",
-        { method: "POST" },
-      );
-      setSessionMessage(result.result.message);
-      await loadDeviceApp();
-    } catch (error) {
-      setDeviceError(errorMessage(error));
-    } finally {
-      setDeviceBusy(false);
-    }
-  };
-
   const toggleMirror = async () => {
     const next = !mirrorOn;
     setMirrorOn(next);
@@ -1122,7 +1065,6 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
   };
 
   const displayCurrent = activeLyric?.text ?? selected?.track.title ?? "选择歌曲";
-  const sessionActive = deviceApp?.session?.active === true;
   // Music firmware is online but the track it reports playing isn't the one we
   // just selected yet — it's still downloading. Show a loading state, not the
   // old track's progress.
@@ -1194,9 +1136,6 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
     void loadSpotifyDevices();
   }, [loadSpotifyDevices, remoteMode, session?.loggedIn]);
 
-  const canStartSession = deviceApp?.artifact.state === "ready"
-    && deviceProbe?.connected === true
-    && !sessionActive;
   const spotifyReady = spotifyApp?.configured === true;
   const spotifySignedIn = remoteMode && session?.loggedIn === true;
   const activeRemoteDevice = spotifyDevices.find((device) => device.active);
@@ -1213,13 +1152,6 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
           : deviceOnline
             ? "音乐固件就绪 · 选一首歌"
             : "等待选歌";
-  const deviceStatus = sessionActive
-    ? "音乐固件运行中"
-    : deviceProbe?.connected
-      ? "TC002 已连接"
-      : deviceApp?.artifact.state === "ready"
-        ? "固件包已就绪"
-        : "侧载固件";
   const visibleLyrics = selected?.lyrics.length
     ? selected.lyrics.slice(Math.max(0, activeLyricIndex - 1), activeLyricIndex + 4)
     : [];
@@ -1813,12 +1745,8 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
                     outline
                     tightFocusRing
                     aria-haspopup="dialog"
-                    aria-label={`侧载音乐固件，${deviceStatus}`}
-                    onClick={() => {
-                      setDevicePanelOpen(true);
-                      // 打开面板即核实设备现状：断电重启后按钮要回到「侧载固件」。
-                      void probeDevice();
-                    }}
+                    aria-label={`侧载音乐固件，${firmwarePanel.statusLabel}`}
+                    onClick={firmwarePanel.openPanel}
                   >
                     <HardDrive aria-hidden="true" />
                     <span>侧载音乐固件</span>
@@ -1833,10 +1761,12 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
                 lyricProgress={lyricProgress}
                 lyricDurationMs={activeLyric ? activeLyric.endMs - activeLyric.startMs : 0}
                 trackProgress={trackProgress}
+                timeMs={currentMs}
                 playing={playing && !loadingTrack}
                 skin={skin}
                 accent={accent}
                 mode={mode}
+                spectrum={activeSpectrum}
               />
 
               {loadingTrack && (
@@ -1901,103 +1831,17 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
             onSkinChange={chooseSkin}
             onAccentChange={chooseAccent}
             syncsToDevice={deviceOnline}
+            simulatedSpectrum={remoteMode || deviceOnline}
           />
         </div>
       </div>
 
-      <Dialog
-        open={devicePanelOpen}
-        onOpenChange={(open) => {
-          if (!deviceBusy) setDevicePanelOpen(open);
-        }}
-        className="music-firmware-dialog"
-        contentClassName="music-firmware-dialog__content"
-        closeOnBackdropClick={!deviceBusy}
-        closeOnEscape={!deviceBusy}
-        title={(
-          <div className="music-firmware-dialog__title">
-            <div><span>DEVICE / FIRMWARE</span><strong>设备与固件</strong></div>
-            <Button
-              type="button"
-              size="sm"
-              square
-              variant="transparent"
-              outline={false}
-              aria-label="关闭设备与固件"
-              disabled={deviceBusy}
-              onClick={() => setDevicePanelOpen(false)}
-            >
-              <X />
-            </Button>
-          </div>
-        )}
-      >
-        <section className="music-deploy" aria-labelledby="music-deploy-title">
-          <div className="music-section-heading">
-            <span>SIDELOAD FIRMWARE</span>
-            <h2 id="music-deploy-title">侧载音乐固件</h2>
-            <p>把音乐固件推进时钟内存临时运行，绝不写入存储芯片；官方固件原封不动，断电重启即自动恢复。</p>
-          </div>
-
-          <ol className="music-deploy-steps">
-            <li className={deviceApp?.artifact.state === "ready" ? "is-done" : "is-current"}>
-              <span>1</span><div><strong>校验固件包</strong><small>{deviceApp?.artifact.message ?? "正在读取发布清单…"}</small></div>
-            </li>
-            <li className={deviceProbe?.connected ? "is-done" : deviceApp?.artifact.state === "ready" ? "is-current" : undefined}>
-              <span>2</span><div><strong>检测 TC002</strong><small>{deviceProbe?.message ?? (deviceApp?.adb === "missing" ? "后台服务尚未识别 adb；请重新运行安装脚本" : "通过 HTTP 与 Wi-Fi ADB 双重确认")}</small></div>
-            </li>
-            <li className={sessionActive ? "is-done" : canStartSession ? "is-current" : undefined}>
-              <span>3</span><div><strong>侧载固件</strong><small>{sessionMessage ?? (sessionActive ? "音乐固件运行中；点「恢复官方固件」或断电重启即可回到原样" : "固件包校验通过后解锁；由时钟系统框架从内存加载，不写入官方固件")}</small></div>
-            </li>
-          </ol>
-
-          {deviceProbe?.connected && (
-            <dl className="music-device-facts">
-              <div><dt>设备</dt><dd>{deviceProbe.model || "TC002"}</dd></div>
-              <div><dt>平台</dt><dd>{deviceProbe.platform || "Z21"}</dd></div>
-              <div><dt>应用</dt><dd>{deviceProbe.appVersion || "—"}</dd></div>
-              <div><dt>MCU</dt><dd>{deviceProbe.mcuVersion || "—"}</dd></div>
-            </dl>
-          )}
-
-          <label className="music-recovery-acknowledgement">
-            <Checkbox
-              as="span"
-              className="music-recovery-checkbox"
-              input
-              size="md"
-              color="brand"
-              checked={recoveryAcknowledged}
-              onChange={setRecoveryAcknowledged}
-            />
-            <span><strong>我知道如何回到官方固件</strong>点「恢复官方固件」立即回到官方界面；断电重启同样自动恢复。仍异常时断电后按住 USB-C 旁的复位按钮再上电。</span>
-          </label>
-
-          <div className="music-deploy-actions">
-            <Button type="button" variant="transparent" outline loading={deviceBusy} disabled={deviceBusy} onClick={() => void probeDevice()}><Wifi />检测 TC002</Button>
-            {sessionActive ? (
-              <Button type="button" color="brand" loading={deviceBusy} disabled={deviceBusy} onClick={() => void stopDeviceSession()}><Power />恢复官方固件</Button>
-            ) : (
-              <Button type="button" color="brand" loading={deviceBusy} disabled={!canStartSession || !recoveryAcknowledged || deviceBusy} onClick={() => void startDeviceSession()}><Play />侧载固件</Button>
-            )}
-          </div>
-          {deviceError && <p className="music-inline-error" role="alert">{deviceError}</p>}
-          {(deviceError || deviceProbe?.connected === false) && <DeviceReconnectGuidance />}
-
-          <div className="music-recovery-guide">
-            <span><ShieldCheck /> 非持久化设计</span>
-            <h3>{deviceApp?.restore?.title ?? "回到 Ulanzi 官方固件"}</h3>
-            <ol>
-              {(deviceApp?.restore?.steps ?? [
-                "点「恢复官方固件」，官方界面立即恢复",
-                "或直接断电重启 TC002——固件只在内存里，重启后自动回到官方固件",
-                "如界面仍异常，断电后按住 USB-C 旁的复位按钮再上电（官方恢复方式）",
-                "恢复后重新检查 Wi-Fi、亮度、时区和音量设置",
-              ]).map((step) => <li key={step}>{step}</li>)}
-            </ol>
-          </div>
-        </section>
-      </Dialog>
+      <FirmwarePanel
+        controller={firmwarePanel}
+        heading="侧载音乐固件"
+        description="把音乐固件推进时钟内存临时运行，绝不写入存储芯片；官方固件原封不动，断电重启即自动恢复。"
+        dialogClassName="music-firmware-dialog"
+      />
     </div>
   );
 }

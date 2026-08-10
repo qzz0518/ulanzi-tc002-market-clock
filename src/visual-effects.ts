@@ -4,18 +4,26 @@ import {
   PixelCanvas,
   type Rgb,
 } from "./pixel-ui.ts";
-import { drawPixelText, measurePixelText } from "./pixel-font.ts";
+import { drawPixelText, measurePixelText, sanitizePixelText } from "./pixel-font.ts";
+import { cjkTextWidth, drawCjkText } from "./pixel-cjk.ts";
+import { GLYPH_HEIGHT } from "../web/src/lib/pixel-glyphs.ts";
+import { drawBigClockText } from "./tool-renderers.ts";
+import type { WeatherCondition } from "./weather/client.ts";
 
 export const VISUAL_EFFECT_IDS = [
   "ant",
   "aquarium",
   "fire",
+  "fireworks",
   "flipclock",
+  "life",
   "matrixclock",
   "maze",
   "pet",
   "sand",
   "starfield",
+  "suncolor",
+  "weather",
 ] as const;
 
 export type VisualEffectId = (typeof VISUAL_EFFECT_IDS)[number];
@@ -26,9 +34,26 @@ export interface VisualAnimation {
   label: string;
 }
 
+/** Current conditions the weather particles read; the renderer never fetches anything itself. */
+export interface WeatherVisualInput {
+  condition: WeatherCondition;
+  temperatureC: number;
+  precipitationMm: number;
+  cloudCoverPercent: number;
+}
+
 export interface VisualEffectOptions {
   speed?: number;
   petAction?: "idle" | "walk" | "run" | "attack" | "random";
+  lifeStart?: "digits" | "soup";
+  fireworkDensity?: number;
+  weather?: WeatherVisualInput;
+  /** Short CJK hint drawn instead of the particles when weather data is unavailable. */
+  weatherNotice?: string;
+  /** Geocoded place name drawn top-left on the weather panel; empty draws nothing. */
+  weatherPlace?: string;
+  latitude?: number;
+  longitude?: number;
 }
 
 type Random = () => number;
@@ -58,6 +83,58 @@ function color(packed: number): Rgb {
 
 function setPacked(canvas: PixelCanvas, x: number, y: number, packed: number): void {
   if (packed !== 0) canvas.setPixel(x, y, color(packed));
+}
+
+function mixColor(from: Rgb, to: Rgb, ratio: number): Rgb {
+  const amount = Math.max(0, Math.min(1, ratio));
+  return [0, 1, 2].map((channel) =>
+    Math.round(from[channel]! + (to[channel]! - from[channel]!) * amount)
+  ) as unknown as Rgb;
+}
+
+function scaleColor(value: Rgb, factor: number): Rgb {
+  return value.map((channel) => Math.max(0, Math.min(255, Math.round(channel * factor)))) as unknown as Rgb;
+}
+
+/** Fully saturated HSV ramp; `value` doubles as the particle brightness. */
+function hueColor(hue: number, value: number): Rgb {
+  const sector = ((hue % 360) + 360) % 360 / 60;
+  const peak = Math.max(0, Math.min(1, value));
+  const ramp = peak * (1 - Math.abs(sector % 2 - 1));
+  const channels = sector < 1
+    ? [peak, ramp, 0]
+    : sector < 2
+      ? [ramp, peak, 0]
+      : sector < 3
+        ? [0, peak, ramp]
+        : sector < 4
+          ? [0, ramp, peak]
+          : sector < 5
+            ? [ramp, 0, peak]
+            : [peak, 0, ramp];
+  return channels.map((channel) => Math.round(channel * 255)) as unknown as Rgb;
+}
+
+function dimRegion(canvas: PixelCanvas, x: number, y: number, width: number, height: number, factor: number): void {
+  for (let row = y; row < y + height; row += 1) {
+    for (let column = x; column < x + width; column += 1) {
+      if (column < 0 || row < 0 || column >= canvas.width || row >= canvas.height) continue;
+      canvas.setPixel(column, row, scaleColor(canvas.getPixel(column, row), factor));
+    }
+  }
+}
+
+function drawCjkNotice(text: string, tint: Rgb): PixelCanvas {
+  const canvas = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  const width = cjkTextWidth(text);
+  drawCjkText(
+    canvas,
+    text,
+    Math.floor((DISPLAY_WIDTH - width) / 2),
+    Math.floor((DISPLAY_HEIGHT - GLYPH_HEIGHT) / 2),
+    tint,
+  );
+  return canvas;
 }
 
 function renderAnt(durationMs: number, random: Random, speed: number): VisualAnimation {
@@ -189,6 +266,80 @@ function renderFire(durationMs: number, random: Random, speed: number): VisualAn
   return { frames, frameDelaysMs: delays, label: "火焰" };
 }
 
+interface Rocket { x: number; y: number; vy: number; hue: number }
+interface Spark { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; hue: number }
+
+const SPARK_LIMIT = 140;
+
+function renderFireworks(durationMs: number, random: Random, speed: number, density: number): VisualAnimation {
+  const delays = animationPlan(durationMs, 60 / speed);
+  const maxRockets = Math.max(1, Math.min(3, Math.round(density)));
+  const rockets: Rocket[] = [];
+  const sparks: Spark[] = [];
+  const burst = (rocket: Rocket) => {
+    const count = 12 + Math.floor(random() * 10);
+    for (let index = 0; index < count && sparks.length < SPARK_LIMIT; index += 1) {
+      const angle = random() * Math.PI * 2;
+      const velocity = 0.35 + random() * 0.95;
+      const maxLife = 14 + Math.floor(random() * 12);
+      sparks.push({
+        x: rocket.x,
+        y: rocket.y,
+        vx: Math.cos(angle) * velocity * 1.6,
+        vy: Math.sin(angle) * velocity,
+        life: maxLife,
+        maxLife,
+        hue: rocket.hue + random() * 40 - 20,
+      });
+    }
+  };
+  const step = () => {
+    if (rockets.length < maxRockets && random() < 0.16 + 0.05 * maxRockets) {
+      rockets.push({
+        x: 5 + random() * (DISPLAY_WIDTH - 10),
+        y: DISPLAY_HEIGHT - 1,
+        vy: -(0.85 + random() * 0.45),
+        hue: random() * 360,
+      });
+    }
+    for (let index = rockets.length - 1; index >= 0; index -= 1) {
+      const rocket = rockets[index]!;
+      rocket.y += rocket.vy;
+      rocket.vy += 0.05;
+      if (rocket.vy >= -0.3 || rocket.y <= 1) {
+        burst(rocket);
+        rockets.splice(index, 1);
+      }
+    }
+    for (let index = sparks.length - 1; index >= 0; index -= 1) {
+      const spark = sparks[index]!;
+      spark.x += spark.vx;
+      spark.y += spark.vy;
+      spark.vy += 0.055;
+      spark.vx *= 0.985;
+      spark.life -= 1;
+      if (spark.life <= 0 || spark.y >= DISPLAY_HEIGHT + 2) sparks.splice(index, 1);
+    }
+  };
+  const frames = delays.map(() => {
+    step();
+    const canvas = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    for (const spark of sparks) {
+      const fade = spark.life / spark.maxLife;
+      canvas.setPixel(Math.round(spark.x), Math.round(spark.y), hueColor(spark.hue, 0.2 + fade * 0.8));
+    }
+    for (const rocket of rockets) {
+      const x = Math.round(rocket.x);
+      const y = Math.round(rocket.y);
+      canvas.setPixel(x, y + 2, hueColor(rocket.hue, 0.18));
+      canvas.setPixel(x, y + 1, hueColor(rocket.hue, 0.45));
+      canvas.setPixel(x, y, [255, 255, 235]);
+    }
+    return canvas;
+  });
+  return { frames, frameDelaysMs: delays, label: "烟花" };
+}
+
 function timeLabel(timestamp: number): string {
   const date = new Date(timestamp);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
@@ -221,6 +372,104 @@ function renderFlipClock(durationMs: number, nowMs: number): VisualAnimation {
     return canvas;
   });
   return { frames, frameDelaysMs: delays, label: "翻页钟" };
+}
+
+const LIFE_CELLS = DISPLAY_WIDTH * DISPLAY_HEIGHT;
+const LIFE_NEIGHBORS = [
+  [-1, -1], [0, -1], [1, -1],
+  [-1, 0], [1, 0],
+  [-1, 1], [0, 1], [1, 1],
+] as const;
+
+function seedLife(mode: "digits" | "soup", nowMs: number, random: Random): Uint8Array {
+  const cells = new Uint8Array(LIFE_CELLS);
+  if (mode === "digits") {
+    const label = timeLabel(nowMs);
+    const stamp = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    const width = measurePixelText(label, 2, 2);
+    drawPixelText(stamp, label, Math.floor((DISPLAY_WIDTH - width) / 2), 3, [255, 255, 255], 2, 2);
+    for (let y = 0; y < DISPLAY_HEIGHT; y += 1) {
+      for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+        if (stamp.getPixel(x, y)[0] > 0) cells[y * DISPLAY_WIDTH + x] = 1;
+      }
+    }
+    return cells;
+  }
+  for (let index = 0; index < LIFE_CELLS; index += 1) cells[index] = random() < 0.34 ? 1 : 0;
+  return cells;
+}
+
+function hashCells(cells: Uint8Array): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < cells.length; index += 1) {
+    hash = Math.imul(hash ^ cells[index]!, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function renderLife(
+  durationMs: number,
+  nowMs: number,
+  random: Random,
+  speed: number,
+  start: "digits" | "soup",
+): VisualAnimation {
+  const delays = animationPlan(durationMs, 130 / speed);
+  let cells = seedLife(start, nowMs, random);
+  let ages = new Uint8Array(LIFE_CELLS);
+  // Life on a torus settles into still lifes or short oscillators quickly; a
+  // small ring of recent hashes catches both and reseeds with fresh soup.
+  let history: number[] = [hashCells(cells)];
+  const step = () => {
+    const next = new Uint8Array(LIFE_CELLS);
+    const nextAges = new Uint8Array(LIFE_CELLS);
+    for (let y = 0; y < DISPLAY_HEIGHT; y += 1) {
+      for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+        let neighbours = 0;
+        for (const [dx, dy] of LIFE_NEIGHBORS) {
+          const nx = (x + dx + DISPLAY_WIDTH) % DISPLAY_WIDTH;
+          const ny = (y + dy + DISPLAY_HEIGHT) % DISPLAY_HEIGHT;
+          neighbours += cells[ny * DISPLAY_WIDTH + nx]!;
+        }
+        const index = y * DISPLAY_WIDTH + x;
+        const alive = cells[index] === 1;
+        const survives = alive ? neighbours === 2 || neighbours === 3 : neighbours === 3;
+        next[index] = survives ? 1 : 0;
+        nextAges[index] = survives && alive ? Math.min(255, ages[index]! + 1) : 0;
+      }
+    }
+    cells = next;
+    ages = nextAges;
+    const hash = hashCells(cells);
+    if (history.includes(hash)) {
+      cells = seedLife("soup", nowMs, random);
+      ages = new Uint8Array(LIFE_CELLS);
+      history = [hashCells(cells)];
+      return;
+    }
+    history.push(hash);
+    if (history.length > 16) history.shift();
+  };
+  const frames = delays.map(() => {
+    const canvas = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    for (let y = 0; y < DISPLAY_HEIGHT; y += 1) {
+      for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+        const index = y * DISPLAY_WIDTH + x;
+        if (!cells[index]) continue;
+        const age = ages[index]!;
+        canvas.setPixel(x, y, age === 0
+          ? [186, 255, 214]
+          : age < 3
+            ? [0, 255, 120]
+            : age < 8
+              ? [0, 188, 92]
+              : [0, 118, 58]);
+      }
+    }
+    step();
+    return canvas;
+  });
+  return { frames, frameDelaysMs: delays, label: start === "digits" ? "生命游戏 · 时间" : "生命游戏" };
 }
 
 interface RainDrop { y: number; speed: number; length: number }
@@ -461,6 +710,286 @@ function renderStarfield(durationMs: number, random: Random, speed: number): Vis
   return { frames, frameDelaysMs: delays, label: "星空穿梭" };
 }
 
+const DEGREES = Math.PI / 180;
+
+export interface SolarPosition {
+  elevationDegrees: number;
+  /** -180..180, negative before local solar noon. */
+  hourAngleDegrees: number;
+}
+
+/**
+ * NOAA General Solar Position Calculations, reduced to elevation and hour
+ * angle. Fourier terms for the equation of time and declination give roughly
+ * ±0.5° accuracy; atmospheric refraction near the horizon is not corrected,
+ * which is well inside what a 52x16 colour ramp can express.
+ */
+export function solarPosition(
+  timestampMs: number,
+  latitude: number,
+  longitude: number,
+): SolarPosition {
+  const date = new Date(timestampMs);
+  const dayOfYear = Math.floor(
+    (Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+      - Date.UTC(date.getUTCFullYear(), 0, 1)) / 86_400_000,
+  ) + 1;
+  const minutesUtc = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60;
+  const gamma = 2 * Math.PI / 365 * (dayOfYear - 1 + (minutesUtc / 60 - 12) / 24);
+  const equationOfTime = 229.18 * (
+    0.000075
+    + 0.001868 * Math.cos(gamma)
+    - 0.032077 * Math.sin(gamma)
+    - 0.014615 * Math.cos(2 * gamma)
+    - 0.040849 * Math.sin(2 * gamma)
+  );
+  const declination = 0.006918
+    - 0.399912 * Math.cos(gamma)
+    + 0.070257 * Math.sin(gamma)
+    - 0.006758 * Math.cos(2 * gamma)
+    + 0.000907 * Math.sin(2 * gamma)
+    - 0.002697 * Math.cos(3 * gamma)
+    + 0.00148 * Math.sin(3 * gamma);
+  const trueSolarMinutes = minutesUtc + equationOfTime + 4 * longitude;
+  const rawHourAngle = trueSolarMinutes / 4 - 180;
+  const cosZenith = Math.sin(latitude * DEGREES) * Math.sin(declination)
+    + Math.cos(latitude * DEGREES) * Math.cos(declination) * Math.cos(rawHourAngle * DEGREES);
+  return {
+    elevationDegrees: 90 - Math.acos(Math.max(-1, Math.min(1, cosZenith))) / DEGREES,
+    hourAngleDegrees: ((rawHourAngle + 180) % 360 + 360) % 360 - 180,
+  };
+}
+
+// Warm white: full daylight on an LED panel should feel like sunlight, not office grey.
+const DAYLIGHT: Rgb = [255, 244, 224];
+const DAWN: Rgb = [255, 122, 28];
+const DUSK: Rgb = [214, 46, 62];
+
+function skyColor(position: SolarPosition): Rgb {
+  const horizon = position.hourAngleDegrees < 0 ? DAWN : DUSK;
+  const stops: Array<[number, Rgb]> = [
+    // Astronomical night maps to true black so the LEDs switch off entirely
+    // instead of glowing as a faint grey-blue panel.
+    [-90, [0, 0, 0]],
+    [-18, [0, 0, 0]],
+    [-12, [9, 13, 46]],
+    [-6, [48, 30, 94]],
+    [0, horizon],
+    [8, mixColor(horizon, DAYLIGHT, 0.55)],
+    [24, DAYLIGHT],
+    [90, DAYLIGHT],
+  ];
+  const elevation = Math.max(-90, Math.min(90, position.elevationDegrees));
+  for (let index = 0; index < stops.length - 1; index += 1) {
+    const [low, lowColor] = stops[index]!;
+    const [high, highColor] = stops[index + 1]!;
+    if (elevation >= low && elevation <= high) {
+      return mixColor(lowColor, highColor, high === low ? 0 : (elevation - low) / (high - low));
+    }
+  }
+  return DAYLIGHT;
+}
+
+// Deep night maps the sky ramp to pure black; the digits still have to read,
+// so they bottom out at a faint night-reading blue instead of vanishing.
+const NIGHT_DIGIT_FLOOR: Rgb = [22, 30, 72];
+
+function renderSunColor(
+  durationMs: number,
+  nowMs: number,
+  latitude: number,
+  longitude: number,
+): VisualAnimation {
+  const delays = animationPlan(durationMs, 1_000, 90);
+  let elapsed = 0;
+  const frames = delays.map((delay) => {
+    const timestamp = nowMs + elapsed;
+    // Black panel, colour only on the ink: the sky tint lives in the digits.
+    const canvas = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    const ramp = skyColor(solarPosition(timestamp, latitude, longitude));
+    const luminance = ramp[0] * 0.3 + ramp[1] * 0.59 + ramp[2] * 0.11;
+    drawBigClockText(canvas, timeLabel(timestamp), 2, luminance < 18 ? NIGHT_DIGIT_FLOOR : ramp);
+    // Colour-temperature axis: column x is the moment (x/52)*24h of the local
+    // day, so the row fades night-day-night on its own; a white dot marks now.
+    const date = new Date(timestamp);
+    const midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+    for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+      const columnMs = midnight + x / DISPLAY_WIDTH * 86_400_000;
+      canvas.setPixel(x, 13, skyColor(solarPosition(columnMs, latitude, longitude)));
+    }
+    const dayFraction = Math.max(0, Math.min(1, (timestamp - midnight) / 86_400_000));
+    canvas.setPixel(
+      Math.min(DISPLAY_WIDTH - 1, Math.floor(dayFraction * DISPLAY_WIDTH)),
+      13,
+      [255, 255, 255],
+    );
+    elapsed += delay;
+    return canvas;
+  });
+  return { frames, frameDelaysMs: delays, label: "日出日落" };
+}
+
+interface Particle { x: number; y: number; vx: number; vy: number; seed: number }
+
+function weatherParticles(
+  condition: WeatherCondition,
+  precipitationMm: number,
+  random: Random,
+  speed: number,
+): Particle[] {
+  const count = condition === "snow"
+    ? 20 + Math.round(Math.min(1, precipitationMm / 4) * 16)
+    : Math.round(Math.max(14, Math.min(54, 14 + precipitationMm * 8)));
+  return Array.from({ length: count }, () => ({
+    x: random() * DISPLAY_WIDTH,
+    y: random() * DISPLAY_HEIGHT,
+    vx: condition === "snow" ? 0 : 0.28 * speed,
+    vy: (condition === "snow" ? 0.22 + random() * 0.22 : 1.1 + random() * 1.1) * speed,
+    seed: random() * Math.PI * 2,
+  }));
+}
+
+function temperatureLeftX(temperatureC: number): number {
+  return DISPLAY_WIDTH - measurePixelText(`${Math.round(temperatureC)}C`, 1, 1) - 1;
+}
+
+function drawTemperature(canvas: PixelCanvas, temperatureC: number): void {
+  const text = `${Math.round(temperatureC)}C`;
+  const x = temperatureLeftX(temperatureC);
+  dimRegion(canvas, x - 1, 0, measurePixelText(text, 1, 1) + 2, 7, 0.25);
+  drawPixelText(canvas, text, x, 1, [214, 224, 240], 1, 1);
+}
+
+// Same blue-grey family as the temperature ink, a step dimmer so the place
+// name reads as a caption rather than competing with the data.
+const PLACE_COLOR: Rgb = [154, 168, 187];
+
+/**
+ * Uppercase ASCII form of the geocoded place, trimmed until it fits in
+ * `limitWidth` pixels of 3x5 type. Diacritics fold to their base letters so
+ * "São Paulo" stays readable instead of dissolving into "?" glyphs.
+ */
+function fitPlaceText(place: string, limitWidth: number): string {
+  const folded = place.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  let text = sanitizePixelText(folded, 16).trim();
+  // A name with no drawable letters at all (e.g. un-geocoded CJK input) would
+  // render as a row of "?"; better to show nothing than noise.
+  if (!/[^?\s]/.test(text)) return "";
+  if (measurePixelText(text, 1, 1) <= limitWidth) return text;
+  while (text.length > 0 && measurePixelText(text, 1, 1) > limitWidth) {
+    text = text.slice(0, -1);
+  }
+  // A cut that lands on a separator would dangle ("SHANGHAI," …); drop it.
+  return text.replace(/[ ,.]+$/, "");
+}
+
+function renderWeather(
+  durationMs: number,
+  random: Random,
+  speed: number,
+  weather: WeatherVisualInput | undefined,
+  notice: string | undefined,
+  place: string,
+): VisualAnimation {
+  if (!weather) {
+    return {
+      frames: [drawCjkNotice(notice ?? "未配置", [255, 176, 32])],
+      frameDelaysMs: [durationMs],
+      label: `天气 · ${notice ?? "未配置"}`,
+    };
+  }
+  // Static per render: the caption must stop two switched-off pixels short of
+  // the temperature block so the two top-row texts never collide.
+  const placeText = place ? fitPlaceText(place, temperatureLeftX(weather.temperatureC) - 2) : "";
+  const delays = animationPlan(durationMs, 90 / speed);
+  const condition = weather.condition;
+  const particles = condition === "rain" || condition === "snow" || condition === "thunder"
+    ? weatherParticles(condition, weather.precipitationMm, random, speed)
+    : [];
+  const clouds = Array.from({ length: 3 }, (_, index) => ({
+    x: random() * DISPLAY_WIDTH,
+    y: 2 + index * 4,
+    width: 12 + Math.floor(random() * 8),
+    drift: (0.12 + index * 0.06) * speed,
+  }));
+  const flashFrames = new Set<number>();
+  if (condition === "thunder") {
+    for (let index = 6; index < delays.length; index += 24 + Math.floor(random() * 10)) {
+      flashFrames.add(index);
+      flashFrames.add(index + 1);
+    }
+  }
+  const frames = delays.map((_, index) => {
+    const canvas = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    if (condition === "clear") {
+      const pulse = 0.72 + 0.28 * Math.sin(index * 0.35);
+      const centre: [number, number] = [15, 8];
+      for (let y = 0; y < DISPLAY_HEIGHT; y += 1) {
+        for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+          const distance = Math.hypot(x - centre[0], y - centre[1]);
+          if (distance <= 3.2) canvas.setPixel(x, y, [255, 226, 96]);
+          else if (distance <= 5.4) canvas.setPixel(x, y, scaleColor([255, 176, 32], pulse * (1 - (distance - 3.2) / 2.2)));
+        }
+      }
+      for (let ray = 0; ray < 8; ray += 1) {
+        const angle = ray * Math.PI / 4 + index * 0.06;
+        const reach = 6.5 + Math.sin(index * 0.3 + ray) * 1.2;
+        canvas.setPixel(
+          Math.round(centre[0] + Math.cos(angle) * reach),
+          Math.round(centre[1] + Math.sin(angle) * reach),
+          scaleColor([255, 208, 64], pulse),
+        );
+      }
+      // Warm motes drifting off the halo keep the empty right half alive.
+      for (let mote = 0; mote < 9; mote += 1) {
+        const x = 22 + (mote * 7 + index * (0.4 + mote % 3 * 0.2) * speed) % 30;
+        const y = 3 + (mote * 5 + Math.sin(index * 0.12 + mote) * 2) % 11;
+        canvas.setPixel(Math.round(x), Math.round(y), scaleColor([255, 164, 48], 0.3 + 0.25 * Math.sin(index * 0.2 + mote)));
+      }
+    } else if (condition === "cloud" || condition === "fog") {
+      const shade = condition === "fog" ? 96 : Math.round(70 + weather.cloudCoverPercent * 1.1);
+      for (const cloud of clouds) {
+        const offset = (cloud.x + index * cloud.drift) % (DISPLAY_WIDTH + cloud.width);
+        for (let dx = 0; dx < cloud.width; dx += 1) {
+          const x = Math.round(offset - cloud.width + dx);
+          const thickness = condition === "fog" ? 1 : 1 + (dx > 2 && dx < cloud.width - 3 ? 1 : 0);
+          for (let dy = 0; dy < thickness; dy += 1) {
+            const tint = Math.round(shade * (0.65 + 0.35 * Math.sin((dx + index) * 0.4)));
+            canvas.setPixel(x, cloud.y + dy, [tint, tint, Math.min(255, tint + 24)]);
+          }
+        }
+      }
+    }
+    if (flashFrames.has(index)) {
+      for (let y = 0; y < DISPLAY_HEIGHT; y += 1) {
+        for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+          canvas.setPixel(x, y, mixColor(canvas.getPixel(x, y), [188, 200, 255], 0.8));
+        }
+      }
+    }
+    for (const particle of particles) {
+      particle.x += particle.vx + (condition === "snow" ? Math.sin(particle.seed + index * 0.18) * 0.4 : 0);
+      particle.y += particle.vy;
+      if (particle.y >= DISPLAY_HEIGHT) {
+        particle.y -= DISPLAY_HEIGHT + random() * 4;
+        particle.x = random() * DISPLAY_WIDTH;
+      }
+      const x = Math.round(particle.x) % DISPLAY_WIDTH;
+      const y = Math.round(particle.y);
+      if (condition === "snow") {
+        canvas.setPixel(x, y, [236, 244, 255]);
+      } else {
+        canvas.setPixel(x, y, [96, 176, 255]);
+        canvas.setPixel(x, y - 1, [36, 96, 190]);
+      }
+    }
+    drawTemperature(canvas, weather.temperatureC);
+    if (placeText) drawPixelText(canvas, placeText, 0, 0, PLACE_COLOR, 1, 1);
+    return canvas;
+  });
+  return { frames, frameDelaysMs: delays, label: `天气 · ${condition}` };
+}
+
 export function renderVisualEffect(
   effectId: VisualEffectId,
   durationMs: number,
@@ -475,10 +1004,29 @@ export function renderVisualEffect(
   if (effectId === "ant") return renderAnt(durationMs, random, speed);
   if (effectId === "aquarium") return renderAquarium(durationMs, random, speed);
   if (effectId === "fire") return renderFire(durationMs, random, speed);
+  if (effectId === "fireworks") {
+    return renderFireworks(durationMs, random, speed, options.fireworkDensity ?? 2);
+  }
   if (effectId === "flipclock") return renderFlipClock(durationMs, nowMs);
+  if (effectId === "life") {
+    return renderLife(durationMs, nowMs, random, speed, options.lifeStart ?? "digits");
+  }
   if (effectId === "matrixclock") return renderMatrixClock(durationMs, nowMs, random, speed);
   if (effectId === "maze") return renderMaze(durationMs, random, speed);
   if (effectId === "pet") return renderPet(durationMs, random, speed, options.petAction);
   if (effectId === "sand") return renderSand(durationMs, random, speed);
+  if (effectId === "suncolor") {
+    return renderSunColor(durationMs, nowMs, options.latitude ?? 0, options.longitude ?? 0);
+  }
+  if (effectId === "weather") {
+    return renderWeather(
+      durationMs,
+      random,
+      speed,
+      options.weather,
+      options.weatherNotice,
+      options.weatherPlace ?? "",
+    );
+  }
   return renderStarfield(durationMs, random, speed);
 }

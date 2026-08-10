@@ -32,6 +32,7 @@ import {
   type ImportedPixelAsset,
 } from "@/components/studio/pixel-asset-library";
 import { MusicPlayer } from "@/components/music/music-player";
+import { GameShell } from "@/components/game/game-shell";
 import { StudioHeader } from "@/components/studio/studio-header";
 import { WorkspaceEditor } from "@/components/studio/workspace-editor";
 
@@ -148,6 +149,7 @@ export function App() {
   const [category, setCategory] = useState<ContentCategory>("market");
   const [view, setView] = useState<StudioView>("console");
   const [musicFirmwareOnline, setMusicFirmwareOnline] = useState(false);
+  const [arcadeOnline, setArcadeOnline] = useState(false);
   const [mobileConsolePane, setMobileConsolePane] = useState<MobileConsolePane>("compose");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -714,8 +716,13 @@ export function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // 两种侧载固件（音乐/游戏）归一成一个「固件直连」状态：任一在线时，官方
+  // 固件的推送与设置通道都不存在，内容/画板/素材库视图一律锁定。
+  const firmwareOnline = musicFirmwareOnline || arcadeOnline;
+  const firmwareKind = musicFirmwareOnline ? "music" as const : arcadeOnline ? "arcade" as const : null;
+
   const changeView = (nextView: StudioView) => {
-    if (musicFirmwareOnline && nextView !== "music") return;
+    if (firmwareOnline && nextView !== "music" && nextView !== "game") return;
     if (nextView === "canvas" && workspace && selectedItem?.contentId !== "creative:canvas") {
       for (const channel of workspace.channels) {
         const item = channel.items.find((entry) => entry.contentId === "creative:canvas");
@@ -807,6 +814,12 @@ export function App() {
         title: "音乐歌词播放器",
         description: "左侧选歌，右侧同步试听像素歌词；设备固件只在需要时打开。",
       }
+    : view === "game"
+    ? {
+        kicker: "TC002 PIXEL ARCADE",
+        title: "像素游戏厅",
+        description: "在浏览器里玩 52 × 16 像素小游戏，实时画面同步上屏，成绩进排行榜。",
+      }
     : view === "canvas"
     ? {
         kicker: "TC002 PIXEL STUDIO",
@@ -827,6 +840,8 @@ export function App() {
 
   const pageClassName = view === "music"
     ? "studio-page is-music-page"
+    : view === "game"
+    ? "studio-page is-game-page"
     : view === "canvas"
     ? "studio-page is-canvas-page"
     : view === "library"
@@ -835,6 +850,8 @@ export function App() {
 
   const layoutClassName = view === "music"
     ? "studio-layout is-music"
+    : view === "game"
+    ? "studio-layout is-game"
     : view === "canvas"
     ? "studio-layout is-canvas"
     : view === "library"
@@ -843,7 +860,13 @@ export function App() {
 
   return (
     <div className={pageClassName}>
-      <StudioHeader view={view} onViewChange={changeView} runtime={runtime} musicLocked={musicFirmwareOnline} />
+      <StudioHeader
+        view={view}
+        onViewChange={changeView}
+        runtime={runtime}
+        firmwareLocked={firmwareOnline}
+        firmwareKind={firmwareKind}
+      />
       <div className="page-heading">
         <div>
           <span>{pageCopy.kicker}</span>
@@ -863,8 +886,19 @@ export function App() {
         </section>
       )}
 
+      {view === "game" && (
+        <section className="game-orientation-gate" aria-labelledby="game-orientation-title">
+          <span className="game-orientation-gate__icon" aria-hidden="true"><RotateCw /></span>
+          <div>
+            <span>52 × 16 PIXEL ARCADE</span>
+            <h2 id="game-orientation-title">请将手机横过来</h2>
+            <p>横屏能保留完整游戏画面和触控范围；拖动屏幕或使用键盘控制，排行榜在舞台下方展开。</p>
+          </div>
+        </section>
+      )}
+
       <div className={layoutClassName}>
-        {view !== "music" && (
+        {view !== "music" && view !== "game" && (
           <ChannelSidebar
             channels={workspace.channels}
             selectedChannelId={selectedChannel.id}
@@ -978,6 +1012,12 @@ export function App() {
             )}
             onAdd={addImportedPixelAsset}
             onStandalone={createStandalonePixelAsset}
+          />
+        ) : view === "game" ? (
+          <GameShell
+            firmwareOnline={firmwareOnline}
+            firmwareKind={firmwareKind}
+            onArcadeOnlineChange={setArcadeOnline}
           />
         ) : (
           <MusicPlayer onFirmwareOnlineChange={setMusicFirmwareOnline} />

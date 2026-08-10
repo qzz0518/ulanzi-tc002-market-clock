@@ -63,7 +63,8 @@
 .music-section-heading > span,
 .music-stage__heading > span,
 .music-lyrics-panel > header span,
-.music-firmware-dialog__title span {
+.music-firmware-dialog__title span,
+.arcade-firmware-dialog__title span {
   color: var(--music-ink-soft);
   font-family: var(--mono);
   font-size: 0.61rem;
@@ -1055,6 +1056,14 @@
   margin-left: 0;
 }
 
+.music-theme-panel__spectrum-note {
+  margin: -0.3rem 0 0;
+  color: var(--music-ink-soft);
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+}
+
 .music-timeline__loading {
   color: var(--music-acid);
   font-size: 0.66rem;
@@ -1480,8 +1489,11 @@
   color: oklch(0.31 0.07 73);
 }
 
-/* The Cladd dialog surface is restyled as an off-canvas firmware drawer. */
-.music-firmware-dialog {
+/* The Cladd dialog surface is restyled as an off-canvas firmware drawer.
+   两种固件共用同一套纸面皮肤：暗色变体曾把亮色前景铺在未染色的浅背景上
+   (白字白底),在补齐全部背景层之前不再提供。 */
+.music-firmware-dialog,
+.arcade-firmware-dialog {
   --music-ink: oklch(0.19 0.018 128);
   --music-ink-soft: oklch(0.31 0.018 128);
   --music-paper: oklch(0.972 0.016 102);
@@ -1489,6 +1501,10 @@
   --music-line: oklch(0.78 0.016 112);
   --music-acid: oklch(0.79 0.19 126);
   --music-signal: oklch(0.56 0.17 142);
+}
+
+.music-firmware-dialog,
+.arcade-firmware-dialog {
   --tw-scale-x: 1 !important;
   --tw-scale-y: 1 !important;
   --tw-scale-z: 1 !important;
@@ -1514,24 +1530,28 @@
   font-family: "Avenir Next", "PingFang SC", "Noto Sans CJK SC", sans-serif;
 }
 
-.music-firmware-dialog[data-open] {
+.music-firmware-dialog[data-open],
+.arcade-firmware-dialog[data-open] {
   opacity: 1 !important;
   transform: translateX(0) !important;
 }
 
-.music-firmware-dialog__content {
+.music-firmware-dialog__content,
+.arcade-firmware-dialog__content {
   height: 100%;
   gap: 0 !important;
   padding: 0 !important;
   overflow: hidden;
 }
 
-.music-firmware-dialog__content > [data-part="title"] {
+.music-firmware-dialog__content > [data-part="title"],
+.arcade-firmware-dialog__content > [data-part="title"] {
   padding: max(1rem, env(safe-area-inset-top)) 1rem 0.9rem;
   border-bottom: 1px solid var(--music-line);
 }
 
-.music-firmware-dialog__title {
+.music-firmware-dialog__title,
+.arcade-firmware-dialog__title {
   display: flex;
   width: 100%;
   align-items: center;
@@ -1539,17 +1559,22 @@
   gap: 1rem;
 }
 
-.music-firmware-dialog__title > div {
+.music-firmware-dialog__title > div,
+.arcade-firmware-dialog__title > div {
   display: grid;
   gap: 0.12rem;
 }
 
-.music-firmware-dialog__title strong {
+.music-firmware-dialog__title strong,
+.arcade-firmware-dialog__title strong {
   color: var(--music-ink);
   font-size: 0.92rem;
   font-weight: 680;
 }
 
+/* 固件抽屉的结构段两页共用，主前缀 .fw-*；旧的 .music-* 名字保留为别名，
+   防止历史引用漏改。 */
+.fw-deploy,
 .music-deploy {
   height: 100%;
   padding: 1.25rem 1.25rem calc(2rem + env(safe-area-inset-bottom));
@@ -1559,15 +1584,18 @@
   scrollbar-width: thin;
 }
 
+.fw-deploy .music-section-heading,
 .music-deploy .music-section-heading {
   padding-bottom: 1rem;
   border-bottom: 1px solid var(--music-line);
 }
 
+.fw-deploy .music-section-heading h2,
 .music-deploy .music-section-heading h2 {
   font-size: 1.7rem;
 }
 
+.fw-deploy-steps,
 .music-deploy-steps {
   display: grid;
   margin: 1rem 0 0;
@@ -1575,6 +1603,7 @@
   list-style: none;
 }
 
+.fw-deploy-steps li,
 .music-deploy-steps li {
   display: grid;
   min-height: 4.35rem;
@@ -1585,6 +1614,7 @@
   color: oklch(0.5 0.018 125);
 }
 
+.fw-deploy-steps li > span,
 .music-deploy-steps li > span {
   display: grid;
   width: 1.75rem;
@@ -1596,43 +1626,51 @@
   font-size: 0.58rem;
 }
 
+.fw-deploy-steps li > div,
 .music-deploy-steps li > div {
   display: grid;
   min-width: 0;
   gap: 0.18rem;
 }
 
+.fw-deploy-steps strong,
 .music-deploy-steps strong {
   color: inherit;
   font-size: 0.73rem;
 }
 
+.fw-deploy-steps small,
 .music-deploy-steps small {
   color: inherit;
   font-size: 0.59rem;
   line-height: 1.4;
 }
 
+.fw-deploy-steps li.is-current,
 .music-deploy-steps li.is-current {
   color: var(--music-ink);
 }
 
+.fw-deploy-steps li.is-current > span,
 .music-deploy-steps li.is-current > span {
   border-color: var(--music-ink);
   background: var(--music-ink);
   color: var(--music-paper);
 }
 
+.fw-deploy-steps li.is-done,
 .music-deploy-steps li.is-done {
   color: var(--music-signal);
 }
 
+.fw-deploy-steps li.is-done > span,
 .music-deploy-steps li.is-done > span {
   border-color: var(--music-signal);
   background: var(--music-signal);
   color: var(--music-paper);
 }
 
+.fw-device-facts,
 .music-device-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1642,6 +1680,7 @@
   overflow: hidden;
 }
 
+.fw-device-facts div,
 .music-device-facts div {
   display: grid;
   min-height: 3.6rem;
@@ -1652,19 +1691,23 @@
   border-bottom: 1px solid var(--music-line);
 }
 
+.fw-device-facts div:nth-child(2n),
 .music-device-facts div:nth-child(2n) {
   border-right: 0;
 }
 
+.fw-device-facts div:nth-last-child(-n + 2),
 .music-device-facts div:nth-last-child(-n + 2) {
   border-bottom: 0;
 }
 
+.fw-device-facts dt,
 .music-device-facts dt {
   color: var(--music-ink-soft);
   font-size: 0.57rem;
 }
 
+.fw-device-facts dd,
 .music-device-facts dd {
   margin: 0;
   overflow: hidden;
@@ -1674,6 +1717,7 @@
   white-space: nowrap;
 }
 
+.fw-recovery-acknowledgement,
 .music-recovery-acknowledgement {
   display: grid;
   grid-template-columns: 1.35rem minmax(0, 1fr);
@@ -1687,16 +1731,19 @@
   cursor: pointer;
 }
 
+.fw-recovery-checkbox,
 .music-recovery-checkbox {
   margin-top: 0.04rem;
 }
 
+.fw-recovery-acknowledgement > span,
 .music-recovery-acknowledgement > span {
   color: var(--music-ink-soft);
   font-size: 0.62rem;
   line-height: 1.48;
 }
 
+.fw-recovery-acknowledgement strong,
 .music-recovery-acknowledgement strong {
   display: block;
   margin-bottom: 0.12rem;
@@ -1704,6 +1751,7 @@
   font-size: 0.7rem;
 }
 
+.fw-deploy-actions,
 .music-deploy-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1711,10 +1759,19 @@
   margin-top: 0.75rem;
 }
 
+.fw-deploy-actions button,
 .music-deploy-actions button {
   min-width: 0;
 }
 
+/* Inside the firmware drawer the alert sits right below the action row and
+   right above the reconnect card — give it breathing room on both sides. */
+.music-firmware-dialog .music-inline-error,
+.arcade-firmware-dialog .music-inline-error {
+  margin: 0.75rem 0;
+}
+
+.fw-recovery-guide,
 .music-recovery-guide {
   display: grid;
   gap: 0.55rem;
@@ -1725,6 +1782,7 @@
   color: var(--music-paper);
 }
 
+.fw-recovery-guide > span,
 .music-recovery-guide > span {
   display: inline-flex;
   align-items: center;
@@ -1735,16 +1793,19 @@
   letter-spacing: 0.07em;
 }
 
+.fw-recovery-guide > span svg,
 .music-recovery-guide > span svg {
   width: 0.78rem;
   height: 0.78rem;
 }
 
+.fw-recovery-guide h3,
 .music-recovery-guide h3 {
   margin: 0;
   font-size: 0.86rem;
 }
 
+.fw-recovery-guide ol,
 .music-recovery-guide ol {
   display: grid;
   gap: 0.4rem;
@@ -1865,11 +1926,13 @@
     display: none;
   }
 
+  .fw-deploy-actions,
   .music-deploy-actions {
     grid-template-columns: 1fr;
   }
 
-  .music-firmware-dialog {
+  .music-firmware-dialog,
+  .arcade-firmware-dialog {
     right: 0 !important;
     left: 0 !important;
     width: auto !important;
@@ -1893,7 +1956,9 @@
   .music-studio *::before,
   .music-studio *::after,
   .music-firmware-dialog,
-  .music-firmware-dialog * {
+  .music-firmware-dialog *,
+  .arcade-firmware-dialog,
+  .arcade-firmware-dialog * {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

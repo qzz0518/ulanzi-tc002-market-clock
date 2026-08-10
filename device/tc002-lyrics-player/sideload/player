@@ -17,4 +17,8 @@ mv "$BUNDLE/libzkgui.so" /tmp/libzkgui.so
 mv "$BUNDLE/ui" /tmp/ui
 mv "$BUNDLE/EasyUI.cfg" /tmp/EasyUI.cfg
 
+# Session identity: both sideloadable apps share the /tmp load path, so the
+# installers tell sessions apart by this file (ADR 0004).
+echo tc002-lyrics-player > /tmp/tc002-sideload.id
+
 setprop ctl.start zkswe

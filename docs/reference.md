@@ -30,7 +30,7 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 | `DISPLAY_DURATION_SECONDS` | `90` | Custom App 在设备上的最短有效时间 |
 | `APP_NAME` | `btc` | 全新安装或旧配置首次迁移时的默认频道名 |
 | `ADB_BIN` | 安装时自动检测 | `adb` 的绝对路径；LaunchAgent 不继承终端 PATH |
-| `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据） |
+| `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据）；仅频道推送与设备读写经过它，live / notify 通道为压延迟走 Bun 原生 fetch 直连，不经过该代理 |
 
 ## 控制台行为
 
@@ -72,6 +72,13 @@ PWA 安装需要可信 HTTPS，纯局域网 HTTP 下响应式控制台不受影�
 可靠 24H 开盘字段，不伪造涨跌）；USD/CNY 为 Frankfurter/ECB 日参考汇率；四只美股用 Yahoo
 Chart（1D 前收盘变化）。搜索添加的运行时资产每类固定单一来源（Coinbase / Yahoo /
 Frankfurter / Gold API，无备用路由），报价失败即降级显示。
+
+## 天气与日出日落
+
+「天气粒子」与「日出日落色温钟」按地名搜索定位：在内容设置里输入地名（英文或拼音），
+服务端经 Open-Meteo Geocoding（免 key）返回候选，选中后自动填入经纬度，无需手填坐标。
+天气屏左上角用 5px ASCII 字显示所选地点的英文名（放不下按像素宽度截断）；天气实况来自
+Open-Meteo Forecast，约每 10 分钟一档，地名搜索结果同样在服务端缓存 10 分钟。
 
 ## 素材库
 
@@ -132,6 +139,12 @@ Spotify 没有公开歌词接口，歌词来自 [LRCLIB](https://lrclib.net)（�
 网页不在运行期光栅化网页字体，而是直接读固件那套离线生成的 12×12 中日文 / 6×12
 半宽 ASCII 点阵表，所以预览、推给官方固件的帧、原生固件三者逐像素一致。
 
+网易云曲目在浏览器中会后台读取同源音频，离线解码后用 1024 点 Hann 窗 FFT 按 80ms hop
+生成 17 段（60Hz–14kHz）频谱时间线；预览与“设备同屏”用同一个播放位置查表，分析结果在
+内存中按最近使用缓存 3 首。解码或分析失败会静默回落到原有伪频谱。Spotify 音频不经过本机，
+音乐固件直连时网页也拿不到设备 PCM，因此这两种来源继续显示确定性模拟律动，并在主题面板标明。
+下文所述 8fps 量化专指这条伪频谱路径；网易云真频谱按 80ms 槽位更新。
+
 两条上屏路径的细节：
 
 - **设备同屏（官方固件，不刷机）**：把渲染好的歌词帧（≤400 帧、33–50fps）推到官方固件的
@@ -164,6 +177,23 @@ Spotify 没有公开歌词接口，歌词来自 [LRCLIB](https://lrclib.net)（�
 HTTP 接口与 Wi-Fi ADB 双重确认真机、用户勾选已知恢复方式。固件源码、协议、构建与部署
 详见 [device/tc002-lyrics-player](../device/tc002-lyrics-player/README.md)。
 
+### 游戏固件（tc002-arcade）
+
+第二个侧载 App（[ADR 0004](adr/0004-arcade-firmware.md)）：开机动画、卡带式游戏菜单、
+设备信息页与七款旋钮+按键小游戏。前四款（打砖块 / Flappy / 贪吃蛇 / Pong）物理参数直译自
+网页版游戏引擎；后三款是固件专属、网页不做引擎的原生玩法：**极速车道**（racer）旋钮左右
+变道、躲开迎面而来的车流，**太空射击**（shooter）旋钮平移飞船、按键开火清掉下压的敌群，
+**横版方块**（tetris）在 52×16 的横屏里把方块从右侧推入、消掉填满的竖列。七款都带低延迟
+游戏音效；固件专属三款不提供网页试玩。服务端侧载栈不复制而是参数化：同一个安装器
+类加一份 profile（appId、远端目录、确认口令、清理列表），打包走 `bun run arcade-release`
+（清单 schema v3 不变），构建复用音乐固件的 `flythings-build/` Docker 工具链。两个固件都
+争夺 `/tmp/EasyUI.cfg` 与 zkswe，因此天然互斥；入口脚本写 `/tmp/tc002-sideload.id` 声明
+会话身份，两边的存活检查各认各的 id（旧音乐包没有 id 文件，视为音乐自己的会话，向后兼容）。
+在线检测不走音乐固件的 2 秒状态轮询，而是固件每 5 秒 `POST /api/arcade/heartbeat`（当前
+游戏/阶段/分数），网页游戏厅每 10 秒读 `GET /api/arcade/status`；任一固件直连时，工作台
+同样锁定内容/画板/素材库与常规设置，游戏页顶栏的「游戏固件」按钮打开与音乐页同构的侧载
+面板（暗色主题），在线时显示当前游戏与分数。侧载、恢复与断电自愈流程与音乐固件完全一致。
+
 ## 架构与扩展
 
 内容渲染器只产生 52×16 帧和延时，不允许写设备或自建后台循环；统一控制器负责行情缓存、
@@ -193,6 +223,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/market/search` | 按关键词与类型搜索可添加的市场资产 |
 | `GET` / `POST` | `/api/market/instruments` | 列出已添加资产；按候选引用注册新资产 |
 | `GET` | `/api/market/icons/:iconRef.png` | 运行时资产的 16×16 像素图标（不可变缓存） |
+| `GET` | `/api/weather/geocode` | 按地名搜索定位候选（`?q=` 1–64 字符；Open-Meteo 免 key，服务端缓存 10 分钟） |
 | `GET` | `/api/presets`、`/api/icons/:id.png` | 兼容旧客户端的市场预设与内置资产图标 |
 | `GET` / `PUT` | `/api/settings` | 兼容旧版单市场轮播设置 |
 | `POST` | `/api/preview` | 兼容旧版：直接返回渲染的 GIF/PNG 字节 |
@@ -212,7 +243,15 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/music/search`、`/api/music/playlists`、`/api/music/playlists/:id/tracks` | 按当前音源搜索歌曲、读取歌单及曲目 |
 | `GET` | `/api/music/tracks/:id`、`/api/music/tracks/:id/stream` | 歌曲信息与逐行歌词；同源音频代理（支持 Range，仅网易云） |
 | `GET` / `POST` | `/api/music/device-app/*` | 校验固件包、检测真机、侧载固件与恢复官方固件（内存盘会话） |
+| `GET` / `POST` | `/api/arcade/device-app/*` | 游戏固件的同一套侧载生命周期（与音乐共用一个参数化安装器） |
+| `POST` | `/api/arcade/heartbeat` | 游戏固件 5 秒心跳（免同源；`{game, phase, score, uptimeMs}` 校验后记内存） |
+| `GET` | `/api/arcade/status` | 游戏固件在线快照 `{online, ageMs, game, phase, score}`（心跳 age<12s 或侧载会话活跃即在线） |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
+| `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |
+| `GET` | `/api/game/socket` | WebSocket 升级：`?room=<4位码>&role=host\|pad`，双人手柄与涂鸦墙的纯中继通道 |
+| `POST` | `/api/library/video/import` | 上传视频转 52×16 像素素材（multipart，专属 100MB 上限；需本机 ffmpeg，缺失返回 501） |
+| `GET` | `/pad`、`/draw` | 自包含伴生页：手机游戏手柄触控条、涂鸦墙访客画布（扫码落地页，内联零依赖） |
+| `POST` / `DELETE` | `/api/notify` | 外部 Webhook 推送或立即清除一条通知（可用 `NOTIFY_TOKEN` 鉴权） |
 | `POST` | `/api/music/device/select`、`/api/music/device/control` | 网页下发选歌与控制补丁（播放/主题/配色/主色/seek） |
 | `GET` | `/api/music/device/state`、`/api/music/device/current` | 音乐固件轮询的纯文本控制状态；兼容的轻量当前曲目查询 |
 | `POST` | `/api/music/device/report`、`/api/music/device/heartbeat` | 固件上报按键动作与播放头心跳 |
@@ -221,3 +260,52 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 写接口仅接受 JSON 并执行同源检查（设备上报的 `report` / `heartbeat` 除外，它们的调用方是
 时钟固件）；请求体上限 256 KiB。工作区最多 24 个频道、每频道 48 项、
 每频道最多渲染 360 帧；App 名唯一且限 1–32 个 ASCII 字母、数字、下划线或连字符。
+
+`/api/live/frames` 与 `/api/music/mirror` 例外使用 2 MiB 正文上限，并共用独立于频道 FIFO 的
+串行 live 写队列；live 请求限 1–400 个 52×16 RGB 帧，页面端负责只保留最新的待推帧。
+`/api/library/video/import` 是另一处例外（multipart 100MB），转码由本机 ffmpeg 完成、120 秒超时。
+live 与 notify 的设备写为压延迟使用 Bun 原生 fetch 直连时钟（单批链路 <50ms），
+**不经过 `CLOCK_HTTP_PROXY`**；仅频道推送保留 curl 与代理路径。
+
+## Webhook 通知
+
+`POST /api/notify` 免同源检查，供 curl、iOS 快捷指令、Home Assistant 或 CI 等外部调用；
+请求仍须使用 JSON，正文上限 256 KiB，且每 10 秒最多接受 6 条通知。建议在服务环境中设置
+`NOTIFY_TOKEN`；设置后须传 `Authorization: Bearer <token>`，也可用 `?token=` 查询参数适配
+不便设置请求头的快捷指令。令牌不要写入公开脚本或日志。
+
+```bash
+curl --request POST 'http://你的服务地址:43820/api/notify' \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer $NOTIFY_TOKEN" \
+  --data '{"message":"外卖到了","color":"#00ff66","holdSeconds":45}'
+
+curl --request DELETE 'http://你的服务地址:43820/api/notify' \
+  --header "Authorization: Bearer $NOTIFY_TOKEN"
+```
+
+通知字段：`message` 必填（1–96 字符）；`color` 默认 `#00ff66`；`background` 默认
+`#000000`；`fontScale` 可选 `1`（5px ASCII）或 `2`（12px CJK，默认）；`speed` 为
+4–40 px/s；`holdSeconds` 为 5–300 秒，默认 45 秒。超宽消息循环滚动，最多生成 120 帧；
+到期后服务会删除 `notify` App，新通知会替换旧的自动清理计时器。
+
+iOS 快捷指令可依次添加“文本”（填写 JSON）、“获取 URL 内容”，URL 指向
+`http://你的服务地址:43820/api/notify`，方法选 `POST`，请求正文选 JSON；若启用令牌，在标头中
+加入 `Authorization` = `Bearer 你的令牌`。把消息做成快捷指令输入变量即可从分享菜单复用。
+
+Home Assistant 可加入：
+
+```yaml
+rest_command:
+  ulanzi_notify:
+    url: "http://你的服务地址:43820/api/notify"
+    method: POST
+    headers:
+      authorization: "Bearer {{ token }}"
+      content-type: "application/json"
+    payload: >-
+      {"message": {{ message | tojson }}, "holdSeconds": {{ hold_seconds | default(45) }}}
+```
+
+自动化动作调用 `rest_command.ulanzi_notify`，传入 `message`、`hold_seconds` 和保存在 Home
+Assistant Secret 中的 `token`；未设置 `NOTIFY_TOKEN` 时可删去 `authorization` 标头。

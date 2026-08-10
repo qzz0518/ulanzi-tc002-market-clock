@@ -8,6 +8,7 @@ import {
   pixelTextWidth,
   type MusicSkin,
 } from "@/components/music/pixel-lyrics-preview";
+import type { SpectrumLookup } from "@/lib/spectrum-timeline";
 
 export interface MirrorFrame {
   delayMs: number;
@@ -68,6 +69,8 @@ export function renderMirrorFrames(input: {
   skin: MusicSkin;
   trackProgress: number;
   playing: boolean;
+  startTimeMs?: number;
+  spectrum?: SpectrumLookup;
 }): MirrorFrame[] {
   const canvas = document.createElement("canvas");
   canvas.width = SCREEN_WIDTH;
@@ -96,7 +99,8 @@ export function renderMirrorFrames(input: {
       trackProgress: input.trackProgress,
       playing: input.playing,
       scrollOffsetPx,
-      timeMs: index * delayMs,
+      timeMs: (input.startTimeMs ?? 0) + index * delayMs,
+      spectrum: input.spectrum,
       reducedMotion: false,
     });
     frames.push({ delayMs, pixels: frameToBase64Rgb(context) });
@@ -104,7 +108,7 @@ export function renderMirrorFrames(input: {
   return frames;
 }
 
-function frameToBase64Rgb(context: CanvasRenderingContext2D): string {
+export function frameToBase64Rgb(context: CanvasRenderingContext2D): string {
   const rgba = context.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT).data;
   const pixelCount = SCREEN_WIDTH * SCREEN_HEIGHT;
   let binary = "";

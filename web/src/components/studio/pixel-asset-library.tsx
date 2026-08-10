@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   AppWindow,
   ChevronLeft,
@@ -9,6 +9,7 @@ import {
   Link2,
   Plus,
   Search,
+  Upload,
 } from "lucide-react";
 import { Button, Input, Select } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
@@ -74,6 +75,40 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "导入失败";
 }
 
+const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
+const VIDEO_FITS = [
+  { value: "cover", label: "铺满裁剪" },
+  { value: "contain", label: "完整留边" },
+] as const;
+
+// fetch() cannot report upload progress, so the video upload goes through
+// XMLHttpRequest; the server answers with the same asset shape as the
+// Ulanzi import endpoint.
+function uploadVideo(
+  file: File,
+  fit: string,
+  onProgress: (percent: number) => void,
+): Promise<ImportedPixelAsset> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/library/video/import");
+    xhr.responseType = "json";
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onload = () => {
+      const body = xhr.response as { asset?: ImportedPixelAsset; error?: string } | null;
+      if (xhr.status >= 200 && xhr.status < 300 && body?.asset) resolve(body.asset);
+      else reject(new Error(body?.error ?? `HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error("网络错误，上传中断"));
+    const form = new FormData();
+    form.append("file", file);
+    form.append("fit", fit);
+    xhr.send(form);
+  });
+}
+
 export function PixelAssetLibrary({
   addedOfficialIds,
   targetChannelName,
@@ -91,6 +126,10 @@ export function PixelAssetLibrary({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoFit, setVideoFit] = useState<"cover" | "contain">("cover");
+  const [videoProgress, setVideoProgress] = useState<number | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
   const added = new Set(addedOfficialIds);
 
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -150,6 +189,33 @@ export function PixelAssetLibrary({
     }
   };
 
+  const importVideo = async (mode: "channel" | "standalone") => {
+    if (!videoFile) return;
+    if (videoFile.size > VIDEO_MAX_BYTES) {
+      toast.error("视频超出 100MB 上限", { description: "请压缩或剪短后再导入" });
+      return;
+    }
+    setImporting(`video:${mode}`);
+    setVideoProgress(0);
+    try {
+      const asset = await uploadVideo(videoFile, videoFit, setVideoProgress);
+      if (mode === "channel") onAdd(asset);
+      else onStandalone(asset);
+      setVideoFile(null);
+      if (videoInputRef.current) videoInputRef.current.value = "";
+    } catch (error) {
+      toast.error("视频导入失败", { description: errorMessage(error) });
+    } finally {
+      setImporting(null);
+      setVideoProgress(null);
+    }
+  };
+
+  // "converting" once the upload itself is done but the server is still busy.
+  const videoBusyLabel = videoProgress === null
+    ? null
+    : videoProgress < 100 ? `上传 ${videoProgress}%` : "转码中…";
+
   const pageCount = Math.max(1, Math.ceil((result?.count ?? 0) / (result?.limit ?? 12)));
 
   return (
@@ -186,6 +252,52 @@ export function PixelAssetLibrary({
             color="brand"
             disabled={!source.trim() || importing !== null}
           ><Link2 />{importing === `${source.trim()}:channel` ? "导入中" : "加入所选频道"}</Button>
+        </form>
+
+        {/* Layout is inline until the integration pass moves it into globals.css
+            (owned by another workstream in this round). */}
+        <form
+          className="pixel-library-video"
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.35rem" }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void importVideo("channel");
+          }}
+        >
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept="video/*,.mp4,.mov,.webm,.mkv,.avi"
+            hidden
+            onChange={(event) => setVideoFile(event.target.files?.[0] ?? null)}
+          />
+          <Button
+            type="button"
+            disabled={importing !== null}
+            onClick={() => videoInputRef.current?.click()}
+          ><Upload />导入视频</Button>
+          <Select
+            aria-label="视频画面适配方式"
+            value={videoFit}
+            options={VIDEO_FITS.map((entry) => entry.value)}
+            renderOption={({ value }) => VIDEO_FITS.find((entry) => entry.value === value)?.label ?? value}
+            onChange={(value) => setVideoFit(value as "cover" | "contain")}
+          >{VIDEO_FITS.find((entry) => entry.value === videoFit)?.label}</Select>
+          <Button
+            type="submit"
+            color="brand"
+            disabled={!videoFile || importing !== null}
+          ><Plus />{importing === "video:channel" && videoBusyLabel ? videoBusyLabel : "加入所选频道"}</Button>
+          <Button
+            type="button"
+            disabled={!videoFile || importing !== null}
+            onClick={() => void importVideo("standalone")}
+          ><AppWindow />{importing === "video:standalone" && videoBusyLabel ? videoBusyLabel : "独立 App"}</Button>
+          <span style={{ flexBasis: "100%", fontSize: "0.68rem", opacity: 0.75 }}>
+            {videoFile
+              ? `${videoFile.name} · ${(videoFile.size / (1024 * 1024)).toFixed(1)} MB`
+              : "选择本地视频（≤100MB），服务器转成 52×16 像素动画后进素材库"}
+          </span>
         </form>
 
         <div className="pixel-library-discovery">
