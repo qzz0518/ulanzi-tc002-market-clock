@@ -173,6 +173,42 @@ export function placeSelectionPatches(place: GeocodePlace): Array<[string, JsonV
   ];
 }
 
+// The notice-board channel shows static text; the webhook is its instant
+// sibling — one POST from any LAN device puts a message on the clock right
+// away and it cleans itself up. Surface that here, where people configure
+// notices, instead of hiding it in the reference docs.
+function NoticeWebhookHint() {
+  const toast = useAppToast();
+  const origin = typeof window === "undefined" ? "http://<服务地址>:43820" : window.location.origin;
+  const command = `curl -X POST ${origin}/api/notify -H 'Content-Type: application/json' -d '{"message":"你好像素","holdSeconds":45}'`;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      toast.success("已复制 curl 示例");
+    } catch {
+      toast.error("复制失败，请手动选择文本");
+    }
+  };
+  return (
+    <div className="notice-webhook mt-2 flex flex-col gap-1.5 rounded-lg border border-cladd-outline bg-cladd-surface-cut p-3">
+      <span className="text-sm font-medium">Webhook 即时通知</span>
+      <span className="text-sm text-cladd-fg-soft">
+        与上面的频道内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的地址
+        POST 一条消息即可立刻上屏，显示 holdSeconds 秒后自动消失，支持中文。
+      </span>
+      <code className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs">
+        {command}
+      </code>
+      <div className="flex items-center gap-2">
+        <Button type="button" size="sm" onClick={() => void copy()}>复制示例</Button>
+        <span className="text-xs text-cladd-fg-softer">
+          可选 NOTIFY_TOKEN 鉴权与全部字段见技术参考「Webhook 通知」。
+        </span>
+      </div>
+    </div>
+  );
+}
+
 interface PlaceSearchFieldProps {
   controlId: string;
   label: string;
@@ -413,6 +449,7 @@ function OptionEditor({
           )}
         </div>
       )}
+      {item.contentId === "tools:notice" && <NoticeWebhookHint />}
       {item.contentId === "creative:pixel-asset" && (
         <div className="pixel-asset-metadata">
           <span>作者：{typeof item.options.author === "string" ? item.options.author : "未署名"}</span>
