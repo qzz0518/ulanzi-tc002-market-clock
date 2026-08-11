@@ -2565,9 +2565,14 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    check(w.starts == 1, "begin starts the supplicant — init will not");
-    check(policy.state() == WifiPolicy::kStartingWpa, "begin waits for the daemon");
-    policy.tick(10);
+    // begin() no longer commits: it waits out the grace period first, because
+    // on a flashed install the framework is still associating at this instant.
+    check(w.starts == 0, "begin issues nothing while it waits to adopt");
+    check(policy.state() == WifiPolicy::kAdopting, "it starts by waiting");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    check(w.starts == 1, "only then does it start the supplicant — init will not");
+    check(policy.state() == WifiPolicy::kStartingWpa, "and waits for the daemon");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     check(policy.state() == WifiPolicy::kConnecting, "a running daemon moves us to connecting");
     check(w.connects == 1 && w.lastSsid == "home", "the stored network is used");
     w.assoc = true;
@@ -2585,7 +2590,10 @@ void checkWifiPolicy() {
     FakeWifi w;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
+    check(policy.state() == WifiPolicy::kAdopting, "even with no credentials it waits first");
+    check(w.mutations() == 0, "and touches nothing while waiting");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);   // grace expires -> kStartingWpa
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);   // daemon up -> no credentials -> scan
     // Scan BEFORE the hotspot: raising it stops wpa_supplicant, and a stopped
     // supplicant cannot scan. Getting this order wrong yields a provisioning
     // page with an empty network list and no way to discover why.
@@ -2593,7 +2601,7 @@ void checkWifiPolicy() {
     check(w.scans == 1, "the sweep is started");
     check(!w.apUp, "and the hotspot is NOT up yet — it would kill the scan");
     w.visible.push_back("neighbour");
-    policy.tick(20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
     check(policy.state() == WifiPolicy::kProvisioning, "a finished sweep raises the hotspot");
     check(w.apUp && w.apStarts == 1, "the hotspot is raised");
     check(policy.scanned().size() == 1, "and the page has a list to offer");
@@ -2607,11 +2615,12 @@ void checkWifiPolicy() {
     w.autoScan = false;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     check(policy.state() == WifiPolicy::kScanning, "still scanning");
-    policy.tick(10 + WifiPolicy::kScanTimeoutMs - 100);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10 + WifiPolicy::kScanTimeoutMs - 100);
     check(policy.state() == WifiPolicy::kScanning, "it waits for the whole budget");
-    policy.tick(20 + WifiPolicy::kScanTimeoutMs);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20 + WifiPolicy::kScanTimeoutMs);
     check(policy.state() == WifiPolicy::kProvisioning,
           "a scan that never finishes still ends with a way in");
     check(policy.scanned().empty(), "with an honestly empty list");
@@ -2645,7 +2654,14 @@ void checkWifiPolicy() {
     WifiPolicy policy(&w);
     policy.begin(0);
     check(!policy.adopted(), "a supplicant with no address is not a link to adopt");
-    check(policy.state() == WifiPolicy::kStartingWpa, "so the normal bring-up runs");
+    check(policy.state() == WifiPolicy::kAdopting, "but it still waits before acting");
+    // ...and adopts for free if the address turns up during the grace period,
+    // which is exactly what a flashed boot looks like.
+    w.address = true;
+    policy.tick(200);
+    check(policy.adopted() && policy.state() == WifiPolicy::kOnline,
+          "an address arriving during the grace period is adopted, not raced");
+    check(w.mutations() == 0, "with no commands issued at all");
   }
 
   // hostapd dying while provisioning is a brick — no home network, no hotspot,
@@ -2654,12 +2670,13 @@ void checkWifiPolicy() {
     FakeWifi w;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
-    policy.tick(20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
     check(policy.state() == WifiPolicy::kProvisioning, "provisioning");
     const int before = w.apStarts;
     w.apDies = true;
-    policy.tick(100);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 100);
     check(w.apStarts == before + 1, "a dead hotspot is revived");
     check(policy.softApRestarts() == 1, "and the fact is counted, not hidden");
   }
@@ -2670,21 +2687,22 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     check(policy.state() == WifiPolicy::kConnecting, "it tries the stored network first");
-    policy.tick(WifiPolicy::kConnectTimeoutMs);
+    policy.tick(WifiPolicy::kAdoptGraceMs + WifiPolicy::kConnectTimeoutMs);
     check(policy.state() == WifiPolicy::kConnecting, "it does not give up early");
-    policy.tick(20 + WifiPolicy::kConnectTimeoutMs);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20 + WifiPolicy::kConnectTimeoutMs);
     check(policy.state() == WifiPolicy::kScanning,
           "a moved router sweeps for alternatives rather than waiting forever");
     check(!w.apUp, "and does it before the hotspot, which would stop the supplicant");
-    policy.tick(30 + WifiPolicy::kConnectTimeoutMs);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs);
     check(policy.state() == WifiPolicy::kProvisioning, "then falls back to provisioning");
     check(w.apUp, "the hotspot comes up so the user has a way in");
 
     // ...and keeps retrying in the background, because the usual cause is a
     // router that is merely slow to come back.
-    const int t0 = 30 + WifiPolicy::kConnectTimeoutMs;
+    const int t0 = WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs;
     const int connectsBefore = w.connects;
     policy.tick(t0 + 1000);
     check(w.connects == connectsBefore, "it does not spam the radio");
@@ -2702,11 +2720,12 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
-    policy.tick(20 + WifiPolicy::kConnectTimeoutMs);  // -> scanning
-    policy.tick(30 + WifiPolicy::kConnectTimeoutMs);  // -> provisioning
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);                                  // grace -> starting
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);                                  // -> connecting
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs);  // -> scanning
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40 + WifiPolicy::kConnectTimeoutMs);  // -> provisioning
     check(w.apUp, "hotspot up");
-    const int t0 = 30 + WifiPolicy::kConnectTimeoutMs;
+    const int t0 = WifiPolicy::kAdoptGraceMs + 40 + WifiPolicy::kConnectTimeoutMs;
     policy.tick(t0 + WifiPolicy::kBackgroundRetryMs + 10);  // assoc still false
     check(w.apUp, "a failed retry leaves the hotspot standing");
     check(policy.state() == WifiPolicy::kProvisioning, "and stays in provisioning");
@@ -2717,10 +2736,11 @@ void checkWifiPolicy() {
     FakeWifi w;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);   // -> scanning
-    policy.tick(20);   // -> provisioning
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);   // grace -> starting
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);   // -> scanning
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);   // -> provisioning
     check(policy.isProvisioning(), "starts in provisioning");
-    policy.applyCredentials("newnet", "secret", 100);
+    policy.applyCredentials("newnet", "secret", WifiPolicy::kAdoptGraceMs + 100);
     check(policy.state() == WifiPolicy::kConnecting, "submitted credentials are tried at once");
     check(w.lastSsid == "newnet", "the submitted network is the one attempted");
     check(!w.apUp, "the hotspot drops as soon as the user has submitted");
@@ -2732,11 +2752,12 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     w.assoc = true;
-    policy.tick(20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
     w.address = true;
-    policy.tick(30);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40);
     check(policy.isOnline(), "online");
     const int startsBefore = w.starts;
     w.running = false;  // the daemon dies
@@ -2753,7 +2774,8 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(WifiPolicy::kSupplicantStartMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);  // grace expires; the first start is issued here
+    policy.tick(WifiPolicy::kAdoptGraceMs + WifiPolicy::kSupplicantStartMs + 20);
     check(w.starts >= 2, "a supplicant that will not start is retried");
     check(policy.state() == WifiPolicy::kStartingWpa, "and we keep waiting for it");
   }
@@ -2764,11 +2786,12 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     w.assoc = true;
-    policy.tick(20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
     w.address = true;
-    policy.tick(30);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40);
     const int connectsBefore = w.connects;
     w.address = false;
     policy.tick(40);
@@ -2781,11 +2804,12 @@ void checkWifiPolicy() {
     w.stored = true;
     WifiPolicy policy(&w);
     policy.begin(0);
-    policy.tick(10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     w.assoc = true;
-    policy.tick(20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
     check(w.dhcpCalls == 1, "one lease request so far");
-    policy.tick(20 + WifiPolicy::kDhcpTimeoutMs + 1);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kDhcpTimeoutMs + 1);
     check(w.dhcpCalls == 2, "a silent DHCP server is asked again");
   }
 }

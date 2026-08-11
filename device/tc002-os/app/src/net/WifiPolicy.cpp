@@ -41,8 +41,10 @@ void WifiPolicy::begin(int nowMs) {
     return;
   }
 
-  mActuator->startSupplicant();
-  enter(kStartingWpa, nowMs);
+  // Not adoptable YET is not the same as not adoptable. On a flashed install the
+  // framework has already asked for the network but is still associating when
+  // this runs, so wait before touching anything — see kAdoptGraceMs.
+  enter(kAdopting, nowMs);
 }
 
 void WifiPolicy::applyCredentials(const std::string& ssid, const std::string& psk,
@@ -98,6 +100,17 @@ void WifiPolicy::tick(int nowMs) {
 
   switch (mState) {
     case kIdle:
+      break;
+
+    case kAdopting:
+      if (mActuator->supplicantRunning() && mActuator->hasAddress()) {
+        mAdopted = true;
+        enter(kOnline, nowMs);
+      } else if (inState >= kAdoptGraceMs) {
+        // Nobody else is going to bring this up. Now it is ours.
+        mActuator->startSupplicant();
+        enter(kStartingWpa, nowMs);
+      }
       break;
 
     case kStartingWpa:

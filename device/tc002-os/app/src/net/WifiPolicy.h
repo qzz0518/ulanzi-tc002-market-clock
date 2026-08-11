@@ -29,6 +29,7 @@ class WifiPolicy {
  public:
   enum State {
     kIdle,          // nothing attempted yet
+    kAdopting,      // waiting to see whether a link appears without our help
     kStartingWpa,   // ctl.start issued, waiting for init.svc.wpa_supplicant
     kConnecting,    // associating with stored or supplied credentials
     kObtainingIp,   // associated; asking for a DHCP lease
@@ -101,6 +102,19 @@ class WifiPolicy {
   // budget is generous because the alternative is a provisioning page with an
   // empty network list, which sends the user straight to typing an SSID by hand.
   static const int kScanTimeoutMs = 5000;
+  /**
+   * How long to wait for a link to appear before doing anything about it.
+   *
+   * Measured on a flashed install, where it matters: /bin/zkgui calls
+   * NetManager::start() before it loads the app at all, but that call is
+   * asynchronous — association and DHCP are still in flight when the app's
+   * first tick runs. Deciding "no link, take over" at that instant produced
+   * five supplicant restarts on a device that was about to be online anyway.
+   *
+   * Sideloaded the link is already up and this state is left on the first tick,
+   * so the grace period costs nothing there.
+   */
+  static const int kAdoptGraceMs = 15000;
 
   explicit WifiPolicy(Actuator* actuator);
 
