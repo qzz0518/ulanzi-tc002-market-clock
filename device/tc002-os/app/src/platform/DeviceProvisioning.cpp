@@ -3,13 +3,13 @@
 #include <sys/stat.h>
 
 #include "base/log.h"
+#include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
 
 namespace tcos {
 
 namespace {
 
-const char* kGuardPath = "/tmp/zos-allow-link";
 
 }  // namespace
 
@@ -19,10 +19,7 @@ DeviceProvisioning::DeviceProvisioning() : mHasPending(false), mRefusedForGuard(
 
 DeviceProvisioning::~DeviceProvisioning() { ::pthread_mutex_destroy(&mLock); }
 
-bool DeviceProvisioning::linkChangesAllowed() {
-  struct stat info;
-  return ::stat(kGuardPath, &info) == 0;
-}
+bool DeviceProvisioning::linkChangesAllowed() { return install::linkChangesAllowed(); }
 
 std::vector<std::string> DeviceProvisioning::scanResults() {
   std::vector<std::string> ssids;
@@ -68,8 +65,8 @@ bool DeviceProvisioning::submit(const std::string& ssid, const std::string& psk,
     mRefusedForGuard = true;
     mHasPending = false;
     ::pthread_mutex_unlock(&mLock);
-    LOGE_TRACE("provisioning: refused, %s absent", kGuardPath);
-    *reason = "link-locked";
+    LOGE_TRACE("provisioning: refused; sideloaded and /tmp/zos-allow-link absent");
+    *reason = install::refusalReason();
     return false;
   }
   mRefusedForGuard = false;

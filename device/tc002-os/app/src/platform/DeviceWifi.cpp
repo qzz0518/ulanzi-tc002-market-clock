@@ -11,6 +11,7 @@
 #include <net/NetUtils.h>
 
 #include "base/log.h"
+#include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
 
 namespace tcos {
@@ -19,7 +20,6 @@ const char* DeviceWifi::kSoftApAddress = "192.168.100.1";
 
 namespace {
 
-const char* kGuardPath = "/tmp/zos-allow-link";
 const char* kWpaConf = "/data/misc/wifi/wpa_supplicant.conf";
 
 // Reads the first `ssid=` / `psk=` pair out of a wpa_supplicant.conf.
@@ -100,8 +100,12 @@ DeviceWifi::DeviceWifi() : mEverRefused(false), mDhcpInFlight(false), mSoftApWan
 DeviceWifi::~DeviceWifi() { ::pthread_mutex_destroy(&mLock); }
 
 bool DeviceWifi::linkChangesAllowed() {
-  struct stat info;
-  return ::stat(kGuardPath, &info) == 0;
+  // One rule, in one place: see platform/InstallMode.h. The short version is
+  // that the guard protects a link we did not create — which is only true while
+  // sideloaded. A flashed ZOS owns the radio and must be allowed to start it,
+  // because /etc/init.rc leaves wpa_supplicant `disabled` + `oneshot` and there
+  // is no stock app left to bring it up.
+  return install::linkChangesAllowed();
 }
 
 // --- read-only half: always live --------------------------------------------
@@ -164,7 +168,7 @@ bool DeviceWifi::scanResults(std::vector<std::string>* out) {
 void DeviceWifi::startSupplicant() {
   if (!linkChangesAllowed()) {
     mEverRefused = true;
-    LOGE_TRACE("wifi: startSupplicant refused, %s absent", kGuardPath);
+    LOGE_TRACE("wifi: startSupplicant refused; sideloaded and /tmp/zos-allow-link absent");
     return;
   }
   // ctl.start on an already-running service is a no-op in init; ctl.restart is
@@ -185,7 +189,7 @@ void DeviceWifi::startScan() {
 bool DeviceWifi::connect(const std::string& ssid, const std::string& psk) {
   if (!linkChangesAllowed()) {
     mEverRefused = true;
-    LOGE_TRACE("wifi: connect refused, %s absent", kGuardPath);
+    LOGE_TRACE("wifi: connect refused; sideloaded and /tmp/zos-allow-link absent");
     return false;
   }
   if (!mCtrl.isOpen() && !mCtrl.open("wlan0")) return false;
@@ -233,7 +237,7 @@ void* DeviceWifi::dhcpMain(void* self) {
 bool DeviceWifi::requestDhcp() {
   if (!linkChangesAllowed()) {
     mEverRefused = true;
-    LOGE_TRACE("wifi: requestDhcp refused, %s absent", kGuardPath);
+    LOGE_TRACE("wifi: requestDhcp refused; sideloaded and /tmp/zos-allow-link absent");
     return false;
   }
   ::pthread_mutex_lock(&mLock);
@@ -262,7 +266,7 @@ void DeviceWifi::startSoftAp() {
   mSoftApWanted = true;
   if (!linkChangesAllowed()) {
     mEverRefused = true;
-    LOGE_TRACE("wifi: startSoftAp refused, %s absent", kGuardPath);
+    LOGE_TRACE("wifi: startSoftAp refused; sideloaded and /tmp/zos-allow-link absent");
     return;
   }
   // NOT IMPLEMENTED YET, and failing loudly is the honest state.

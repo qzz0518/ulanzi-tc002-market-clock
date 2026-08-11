@@ -26,6 +26,7 @@
 #include "net/SetupPortal.h"
 #include "net/StateDoc.h"
 #include "net/WpaCtrl.h"
+#include "platform/InstallMode.h"
 #include "net/WifiPolicy.h"
 #include "games/breakout.h"
 #include "games/flappy.h"
@@ -2466,6 +2467,23 @@ void checkMusicScreen() {
   check(differs, "a lyric displaces the title rather than being dropped");
 }
 
+void checkInstallMode() {
+  using tcos::install::decide;
+
+  // Sideloaded: the link belongs to the firmware we are standing on top of, and
+  // adb reaches this device over it. Refusing is the whole safety story.
+  check(!decide(true, false), "sideloaded without the guard refuses");
+  check(decide(true, true), "sideloaded with the guard armed acts");
+
+  // Flashed: /etc/init.rc leaves wpa_supplicant `disabled` + `oneshot`, so the
+  // application has always been what starts it — and there is no stock app left
+  // to do it. Refusing here would not be caution, it would be a device that can
+  // never reach a network, with no file anyone could create to fix it because
+  // /tmp is empty on a cold boot.
+  check(decide(false, false), "flashed acts without any guard file");
+  check(decide(false, true), "and a stray guard file changes nothing when flashed");
+}
+
 void checkWpaCtrl() {
   using tcos::WpaCtrl;
 
@@ -2814,6 +2832,8 @@ int main() {
   std::printf("  navigation flow ok\n");
   checkLevelOverlay();
   std::printf("  level overlay ok\n");
+  checkInstallMode();
+  std::printf("  install mode ok\n");
   checkWpaCtrl();
   std::printf("  wpa ctrl ok\n");
   checkWifiPolicy();

@@ -3,7 +3,7 @@
   "appId": "tc002-os",
   "version": "0.2.0",
   "entry": "os",
-  "bundleId": "b2862f861e7f806447a445e37ba8d8226a95161be3bfae0d87473933e3e1918b",
+  "bundleId": "782a574a7a0ca5001a9d002418296d4f067273335632fb36eae954969377de7d",
   "files": [
     {
       "path": "EasyUI.cfg",
@@ -13,7 +13,7 @@
     {
       "path": "libzkgui.so",
       "bytes": 1054424,
-      "sha256": "afb221d88fb88d0dfe2a0abe45c70a03ad5dcc6e494c092babeb1ec404aad8bf"
+      "sha256": "cc07a046b8fa733e1d7fd2c56cb4d4fdead944fca529f1e3583bc505f0d9317b"
     },
     {
       "path": "os",

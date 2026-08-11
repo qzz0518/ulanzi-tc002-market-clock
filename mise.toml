@@ -66,6 +66,7 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/app/src/ui/*.cpp \
   device/tc002-os/app/src/visual/*.cpp \
   device/tc002-os/app/src/net/*.cpp \
+  device/tc002-os/app/src/platform/InstallMode.cpp \
   device/tc002-arcade/app/src/games/*.cpp \
   -o .runtime/os-selfcheck && .runtime/os-selfcheck
 """
@@ -87,3 +88,15 @@ docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
   -w /work/tc002-lyrics-player/flythings-build flythings-build \
   sh ../../tc002-os/hostcheck/link-audit.sh libzkgui-os.so libzkgui-arcade.so device-dump/maps-baseline.txt
 """
+
+# Permanent install. Unlike os-release (which stages a /tmp sideload bundle that
+# a power cycle undoes), this writes a ZKSWE container for mtd3 `res` — the
+# partition the stock app is served from, with no A/B pair and no recovery slot
+# behind it. The packer therefore rebuilds the stock /mnt/storage/update.img from
+# its own payload first and refuses to emit anything unless the result is
+# byte-identical; that round trip is the whole safety argument, so it is inside
+# the task rather than a separate step someone can skip. Nothing here touches the
+# device: flashing stays a deliberate human action.
+[tasks.os-image]
+description = "Verify the ZKSWE container spec, then pack tc002-os into a flashable update.img"
+run = "bun run device/tc002-os/release/pack-image.ts"

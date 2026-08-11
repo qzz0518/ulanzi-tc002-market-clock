@@ -299,8 +299,16 @@ void handleHold(int code, int nowMs) {
 // which also means changing it is a redeploy rather than a rebuild. A missing
 // file is not an error — the firmware runs standalone, it just has no channels.
 std::string readHostAddress() {
-	static const char* kPaths[2] = { "/tmp/zos-host", "/tmp/tc002-os/host" };
-	for (int i = 0; i < 2; ++i) {
+	// tmpfs first, because a sideload's address is the one being tested and
+	// should win; then the persistent copies, which are the only ones a FLASHED
+	// install can have — /tmp is empty on a cold boot, so a flashed ZOS that
+	// only looked there would come up with no console link at all and no way to
+	// be given one. /data is writable and survives; /res ships inside the image
+	// itself, so an address can be baked in at pack time.
+	static const char* kPaths[4] = {
+		"/tmp/zos-host", "/tmp/tc002-os/host", "/data/zos-host", "/res/etc/zos-host",
+	};
+	for (int i = 0; i < 4; ++i) {
 		FILE* f = fopen(kPaths[i], "r");
 		if (f == NULL) continue;
 		char line[128];
