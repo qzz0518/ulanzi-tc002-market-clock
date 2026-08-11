@@ -52,6 +52,23 @@ class Screen {
     return false;
   }
 
+  /**
+   * True when this screen wants the side buttons as raw held keys rather than
+   * as the shell's volume and brightness controls.
+   *
+   * A game needs to know how long a direction is held; the launcher needs a
+   * completed press. One vocabulary cannot serve both, so a screen says which
+   * it speaks instead of the input layer guessing from context.
+   */
+  virtual bool wantsRawButtons() const { return false; }
+
+  /** Raw side-button edge, only delivered when wantsRawButtons() is true. */
+  virtual void onRawButton(Input which, bool down, int nowMs) {
+    (void)which;
+    (void)down;
+    (void)nowMs;
+  }
+
   // Screens that animate ask to be re-rendered; static ones can idle the loop.
   virtual bool isAnimating(int nowMs) const {
     (void)nowMs;

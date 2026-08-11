@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Circle, Gamepad2, Images, LayoutGrid, Music2, Palette, Settings2 } from "lucide-react";
+import { Circle, Gamepad2, Images, LayoutGrid, MonitorCog, Music2, Palette, Settings2 } from "lucide-react";
 import { Button, Tab, Tabs, TabsList, Tooltip } from "@cladd-ui/react";
 import type { FirmwareKind, RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
@@ -47,11 +47,14 @@ export function StudioHeader({
 
       <Tabs value={view} onValueChange={(value) => onViewChange(value as StudioView)}>
         <TabsList aria-label="主视图" className="main-tabs">
-          <Tab value="console" disabled={firmwareLocked}><LayoutGrid />内容</Tab>
-          <Tab value="canvas" disabled={firmwareLocked}><Palette />画板</Tab>
-          <Tab value="library" disabled={firmwareLocked}><Images />素材库</Tab>
-          <Tab value="music"><Music2 />音乐</Tab>
-          <Tab value="game"><Gamepad2 />游戏</Tab>
+          <Tab contentClassName="main-tab__content" value="console" disabled={firmwareLocked}><LayoutGrid />内容</Tab>
+          <Tab contentClassName="main-tab__content" value="canvas" disabled={firmwareLocked}><Palette />画板</Tab>
+          <Tab contentClassName="main-tab__content" value="library" disabled={firmwareLocked}><Images />素材库</Tab>
+          <Tab contentClassName="main-tab__content" value="music"><Music2 />音乐</Tab>
+          <Tab contentClassName="main-tab__content" value="game"><Gamepad2 />游戏</Tab>
+          {/* 系统固件页不随侧载固件锁定：它自己会如实显示「设备离线」，
+              而且接管指令保存在服务端，固件上线后第一次拉取即生效。 */}
+          <Tab contentClassName="main-tab__content" value="zos"><MonitorCog />系统</Tab>
         </TabsList>
       </Tabs>
 

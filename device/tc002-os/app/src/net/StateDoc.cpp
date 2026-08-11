@@ -33,7 +33,9 @@ bool kindFromName(const std::string& name, StateDoc::Kind* out) {
 
 }  // namespace
 
-StateDoc::StateDoc() : mSeq(-1), mPinned(false), mMirror(false) {}
+StateDoc::StateDoc()
+    : mSeq(-1), mPinned(false), mMirror(false), mHasNowPlaying(false),
+      mPlaying(false), mPositionMs(0), mDurationMs(0) {}
 
 bool StateDoc::parse(const std::string& body) {
   mSeq = -1;
@@ -41,6 +43,13 @@ bool StateDoc::parse(const std::string& body) {
   mMirror = false;
   mFocus.clear();
   mItems.clear();
+  mHasNowPlaying = false;
+  mPlaying = false;
+  mPositionMs = 0;
+  mDurationMs = 0;
+  mTrack.clear();
+  mArtist.clear();
+  mLyric.clear();
 
   size_t start = 0;
   while (start <= body.size()) {
@@ -65,6 +74,20 @@ bool StateDoc::parse(const std::string& body) {
       mMirror = (fields[1] == "1");
     } else if (fields[0] == "focus") {
       mFocus = fields[1];
+    } else if (fields[0] == "np") {
+      mHasNowPlaying = (fields[1] == "1");
+    } else if (fields[0] == "track") {
+      mTrack = fields[1];
+    } else if (fields[0] == "artist") {
+      mArtist = fields[1];
+    } else if (fields[0] == "playing") {
+      mPlaying = (fields[1] == "1");
+    } else if (fields[0] == "pos") {
+      mPositionMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "dur") {
+      mDurationMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "lyric") {
+      mLyric = fields[1];
     } else if (fields[0] == "item" && n == 4) {
       Item item;
       // An unknown kind is skipped rather than guessed: rendering a settings

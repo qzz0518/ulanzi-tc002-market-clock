@@ -14,18 +14,14 @@ namespace tcos {
  * the arcade's own 668-line self-check already asserts every one. Porting them
  * would fork that guarantee for nothing.
  *
- * The adapter's whole job is the input contract. While a game is Playing the
- * engine owns the buttons, so the Shell's global "hold to go up" must not fire
- * mid-game — a long press is part of several games' vocabulary. Exit is
- * therefore a deliberately longer hold, and it is only offered while the game is
- * NOT playing, or the player would leave every time they held a direction.
+ * The adapter's whole job is the input contract. The side buttons reach the
+ * engine raw, because engines integrate how long a direction is held; the knob
+ * and confirm button arrive as completed gestures, because that is what the
+ * engines act on. A hold always leaves — no engine reads one, and a game you can
+ * enter but not leave is worse than any gesture conflict.
  */
 class GameScreen : public Screen {
  public:
-  // Longer than the Shell's 600 ms, so an in-game hold cannot be mistaken for
-  // "leave". Matches the arcade firmware's own exit gesture.
-  static const int kExitHoldMs = 1200;
-
   GameScreen();
 
   void setEngine(GameEngine* engine);
@@ -36,6 +32,10 @@ class GameScreen : public Screen {
   void render(Surface& out, int nowMs);
   bool onInput(Input input, int nowMs);
   bool isAnimating(int nowMs) const;
+
+  // Games integrate held directions, so they take the raw edges.
+  bool wantsRawButtons() const { return true; }
+  void onRawButton(Input which, bool down, int nowMs);
 
   /** True once the player has asked to leave; reading it clears the request. */
   bool takeExitRequest();

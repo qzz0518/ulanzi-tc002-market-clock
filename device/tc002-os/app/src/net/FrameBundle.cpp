@@ -1,5 +1,7 @@
 #include "net/FrameBundle.h"
 
+#include <algorithm>
+
 #include "ui/Screen.h"
 
 namespace tcos {
@@ -88,6 +90,14 @@ int FrameBundle::indexAt(int elapsedMs) const {
     t -= mDelays[i];
   }
   return static_cast<int>(mDelays.size()) - 1;
+}
+
+void FrameBundle::swap(FrameBundle& other) {
+  mDelays.swap(other.mDelays);
+  mPixels.swap(other.mPixels);
+  std::swap(mWidth, other.mWidth);
+  std::swap(mHeight, other.mHeight);
+  std::swap(mTotalMs, other.mTotalMs);
 }
 
 }  // namespace tcos

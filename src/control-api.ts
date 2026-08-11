@@ -1745,17 +1745,36 @@ export function createControlHandler(
         // Asking for the frame IS the subscription: a console that stops polling
         // stops the stream ten seconds later with no explicit teardown to leak.
         options.osLink.requestMirror();
-        return jsonResponse({ frame: options.osLink.getMirrorFrame() });
+        const frame = options.osLink.getMirrorFrame();
+        // ageMs is computed HERE, against the same clock that stamped the frame.
+        // Without it the console has to subtract a service timestamp from its own
+        // wall clock, so a browser ten seconds out of step decides a live stream
+        // is stale — or worse, shows a two-minute-old frame as current. A first
+        // poll after a gap really does return a frame that old.
+        return jsonResponse({
+          frame: frame === null ? null : { ...frame, ageMs: Date.now() - frame.receivedAt },
+          // Whether the device has been told to stream. Without this the console
+          // cannot tell "the device has not started yet" from "the device is not
+          // streaming at all", and its only feedback is frames eventually arriving.
+          wanted: options.osLink.mirrorWanted(),
+        });
       }
 
       if (request.method === "GET" && url.pathname === "/api/os/state") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        const telemetry = options.osLink.getTelemetry();
         return jsonResponse({
           seq: options.osLink.currentSeq(),
           menu: options.osLink.getMenu(),
           display: options.osLink.getDisplay(),
-          telemetry: options.osLink.getTelemetry(),
+          // Same reason as the mirror's ageMs: the console must not have to
+          // compare a service timestamp against its own clock to decide how old
+          // this is.
+          telemetry: telemetry === null
+            ? null
+            : { ...telemetry, ageMs: Date.now() - telemetry.receivedAt },
           live: options.osLink.isDeviceLive(),
+          mirrorWanted: options.osLink.mirrorWanted(),
         });
       }
 
@@ -1768,6 +1787,15 @@ export function createControlHandler(
         }
         if (input.pinned !== undefined && typeof input.pinned !== "boolean") {
           throw new SettingsValidationError("pinned must be a boolean");
+        }
+        // A focus with no pinned flag used to coerce to pinned:false — the
+        // request succeeded, the response looked plausible, and nothing happened
+        // on the device. Naming a channel is only meaningful together with a
+        // decision about who is driving, so ask for both rather than guessing.
+        if (typeof input.focus === "string" && input.pinned === undefined) {
+          throw new SettingsValidationError(
+            "pinned is required when focus names a channel",
+          );
         }
         options.osLink.setDisplay({
           focus: typeof input.focus === "string" ? input.focus : null,

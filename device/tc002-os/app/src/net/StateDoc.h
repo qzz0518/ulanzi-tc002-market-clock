@@ -19,6 +19,13 @@ namespace tcos {
  *   item\tchannel\tbtc\t市场轮播
  *   item\tmusic\tmusic\t音乐
  *   item\tsettings\tsettings\t设置
+ *   np\t1
+ *   track\tHer Majesty
+ *   artist\tThe Beatles
+ *   playing\t1
+ *   pos\t18400
+ *   dur\t23000
+ *   lyric\tHer Majesty's a pretty nice girl
  *
  * Parsing is total: any line it does not recognise is skipped rather than
  * failing the document. A firmware that refuses to parse a response it half
@@ -50,12 +57,39 @@ class StateDoc {
   /** Index of `focus` in items(), or -1. */
   int focusIndex() const;
 
+  /**
+   * Now playing, resolved to text by the service.
+   *
+   * `hasNowPlaying()` is false when nothing is playing OR when no music
+   * provider is connected; the music screen shows the same "nothing here yet"
+   * state for both, because from the panel they are the same situation.
+   *
+   * `positionMs` is true as of the moment the document was served. The screen
+   * advances it locally — the service deliberately does not bump the sequence
+   * for a moving playhead, so a poll-rate-limited progress bar is not an
+   * option and would not be smooth anyway.
+   */
+  bool hasNowPlaying() const { return mHasNowPlaying; }
+  const std::string& track() const { return mTrack; }
+  const std::string& artist() const { return mArtist; }
+  const std::string& lyric() const { return mLyric; }
+  bool playing() const { return mPlaying; }
+  int positionMs() const { return mPositionMs; }
+  int durationMs() const { return mDurationMs; }
+
  private:
   int mSeq;
   bool mPinned;
   bool mMirror;
   std::string mFocus;
   std::vector<Item> mItems;
+  bool mHasNowPlaying;
+  bool mPlaying;
+  int mPositionMs;
+  int mDurationMs;
+  std::string mTrack;
+  std::string mArtist;
+  std::string mLyric;
 };
 
 }  // namespace tcos

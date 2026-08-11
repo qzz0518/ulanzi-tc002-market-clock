@@ -6,30 +6,15 @@ namespace tcos {
 
 namespace {
 
-// Copies `src` into `dst` shifted by dx, dropping whatever falls off the edge.
-// Used for both halves of a slide; `scale` dims the departing screen so the two
-// layers stay distinguishable on a panel with no depth cues.
-void blitShifted(Surface& dst, const Surface& src, int dx, float scale) {
-  const int w = dst.getWidth();
-  const int h = dst.getHeight();
-  for (int y = 0; y < h; ++y) {
-    for (int x = 0; x < w; ++x) {
-      const int sx = x - dx;
-      if (sx < 0 || sx >= src.getWidth()) continue;
-      Color c = src.getPixel(sx, y);
-      if (c.r == 0 && c.g == 0 && c.b == 0) continue;
-      if (scale < 1.0f) {
-        c.r = static_cast<unsigned char>(c.r * scale);
-        c.g = static_cast<unsigned char>(c.g * scale);
-        c.b = static_cast<unsigned char>(c.b * scale);
-      }
-      dst.setPixel(x, y, c);
-    }
+transition::Style toStyle(Shell::Entry entry) {
+  switch (entry) {
+    case Shell::kEntryCrt: return transition::kCrt;
+    case Shell::kEntryEqualiser: return transition::kEqualiser;
+    case Shell::kEntryCartridge: return transition::kCartridge;
+    case Shell::kEntryDrop: return transition::kDrop;
+    case Shell::kEntryDive:
+    default: return transition::kDive;
   }
-}
-
-void blitFaded(Surface& dst, const Surface& src, float scale) {
-  blitShifted(dst, src, 0, scale);
 }
 
 }  // namespace
@@ -37,18 +22,68 @@ void blitFaded(Surface& dst, const Surface& src, float scale) {
 Shell::Shell(int width, int height)
     : mOutgoing(width, height),
       mIncoming(width, height),
-      mTransition(kCut),
+      mEntryCount(0),
+      mMotion(kIdle),
+      mMotionStyle(transition::kDive),
+      mMotionMs(transition::durationMs(transition::kDive)),
       mTransitionStartMs(0),
-      mHasOutgoing(false) {}
+      mHasOutgoing(false) {
+  for (int i = 0; i < kMaxEntryStyles; ++i) {
+    mEntryScreens[i] = 0;
+    mEntryKinds[i] = kEntryDive;
+  }
+}
+
+int Shell::entryMs(Entry entry) {
+  return transition::durationMs(toStyle(entry));
+}
+
+void Shell::setEntryStyle(Screen* screen, Entry entry) {
+  if (screen == 0) return;
+  for (int i = 0; i < mEntryCount; ++i) {
+    if (mEntryScreens[i] == screen) {
+      mEntryKinds[i] = entry;
+      return;
+    }
+  }
+  // Silently ignoring an overflow is the right failure here: a missing entry
+  // style costs one destination its flavour, whereas asserting would take down
+  // a firmware that has no console to report to.
+  if (mEntryCount >= kMaxEntryStyles) return;
+  mEntryScreens[mEntryCount] = screen;
+  mEntryKinds[mEntryCount] = entry;
+  ++mEntryCount;
+}
+
+transition::Style Shell::styleFor(Screen* screen) const {
+  for (int i = 0; i < mEntryCount; ++i) {
+    if (mEntryScreens[i] == screen) return toStyle(mEntryKinds[i]);
+  }
+  return transition::kDive;
+}
 
 void Shell::reset(Screen* root, int nowMs) {
+  // Replacing something already on the panel cross-fades. A reset is neither a
+  // descent nor an ascent, so either direction's motion would be a lie about
+  // where the user is; the one caller is boot handing over to the launcher,
+  // which osLogic has always described as a cross-fade and never got.
+  const bool hadScreen = (top() != 0);
+  if (hadScreen) {
+    beginTransition(transition::kFade, kDescend, nowMs);
+  } else {
+    mHasOutgoing = false;
+    mMotion = kIdle;
+  }
+
   mStack.clear();
+  mStackStyles.clear();
   if (root != 0) {
     mStack.push_back(root);
+    mStackStyles.push_back(transition::kDive);
     root->onEnter(nowMs);
   }
-  mHasOutgoing = false;
-  mTransition = kCut;
+  // The entry table deliberately survives: it describes the screens, not the
+  // stack, so the handoff must not throw away what osLogic registered at start.
 }
 
 Screen* Shell::top() const {
@@ -56,10 +91,10 @@ Screen* Shell::top() const {
   return mStack[mStack.size() - 1];
 }
 
-void Shell::beginTransition(Transition kind, int nowMs) {
+void Shell::beginTransition(transition::Style style, Motion motion, int nowMs) {
   // Snapshot what is on screen right now. Rendering the outgoing screen once
-  // and reusing the pixels for the whole slide keeps a transition at the cost
-  // of one extra blit per frame rather than two full screen renders.
+  // and reusing the pixels for the whole transition keeps it at the cost of one
+  // extra composite per frame rather than two full screen renders.
   Screen* current = top();
   if (current != 0) {
     mOutgoing.clear();
@@ -68,16 +103,20 @@ void Shell::beginTransition(Transition kind, int nowMs) {
   } else {
     mHasOutgoing = false;
   }
-  mTransition = kind;
+  mMotion = motion;
+  mMotionStyle = style;
+  mMotionMs = transition::durationMs(style);
   mTransitionStartMs = nowMs;
 }
 
 void Shell::push(Screen* screen, int nowMs) {
   if (screen == 0) return;
-  beginTransition(kPushForward, nowMs);
+  const transition::Style style = styleFor(screen);
+  beginTransition(style, kDescend, nowMs);
   Screen* leaving = top();
   if (leaving != 0) leaving->onExit();
   mStack.push_back(screen);
+  mStackStyles.push_back(style);
   screen->onEnter(nowMs);
 }
 
@@ -85,10 +124,15 @@ void Shell::pop(int nowMs) {
   // The root is never popped: there is nowhere above it, and an empty stack
   // would render a black panel with no way back.
   if (mStack.size() <= 1) return;
-  beginTransition(kPopBack, nowMs);
+  // Leaving replays the motion this level was entered with, so a destination has
+  // one description of how it opens and closes rather than two.
+  transition::Style style = transition::kDive;
+  if (mStackStyles.size() == mStack.size()) style = mStackStyles[mStackStyles.size() - 1];
+  beginTransition(style, kAscend, nowMs);
   Screen* leaving = top();
   if (leaving != 0) leaving->onExit();
   mStack.pop_back();
+  if (!mStackStyles.empty()) mStackStyles.pop_back();
   Screen* revealed = top();
   if (revealed != 0) revealed->onEnter(nowMs);
 }
@@ -101,9 +145,19 @@ void Shell::onInput(Input input, int nowMs) {
   if (input == kInputHold) pop(nowMs);
 }
 
+bool Shell::topWantsRawButtons() const {
+  Screen* current = top();
+  return current != 0 && current->wantsRawButtons();
+}
+
+void Shell::deliverRawButton(Input which, bool down, int nowMs) {
+  Screen* current = top();
+  if (current != 0) current->onRawButton(which, down, nowMs);
+}
+
 bool Shell::isAnimating(int nowMs) const {
   if (mOverlay.visible(nowMs)) return true;
-  if (mTransition != kCut && (nowMs - mTransitionStartMs) < kTransitionMs) return true;
+  if (mMotion != kIdle && (nowMs - mTransitionStartMs) < mMotionMs) return true;
   Screen* current = top();
   return current != 0 && current->isAnimating(nowMs);
 }
@@ -114,33 +168,26 @@ void Shell::render(Surface& out, int nowMs) {
   if (current == 0) return;
 
   const int elapsed = nowMs - mTransitionStartMs;
-  if (mTransition == kCut || elapsed >= kTransitionMs || !mHasOutgoing) {
+  if (mMotion == kIdle || elapsed >= mMotionMs || !mHasOutgoing) {
     current->render(out, nowMs);
     mOverlay.render(out, nowMs);
     return;
   }
 
-  const float t = ease::inOutCubic(ease::progress(nowMs, mTransitionStartMs, kTransitionMs));
-  const int w = out.getWidth();
-
   mIncoming.clear();
   current->render(mIncoming, nowMs);
 
-  if (mTransition == kFadeIn) {
-    blitFaded(out, mOutgoing, 1.0f - t);
-    blitFaded(out, mIncoming, t);
-    mOverlay.render(out, nowMs);
-    return;
+  const float t = ease::progress(nowMs, mTransitionStartMs, mMotionMs);
+  if (mMotion == kAscend) {
+    // Ascending is the descent run backwards: the two rasters keep the roles
+    // they had on the way in (the screen being revealed is still `from`, the one
+    // being left is still `to`) and time is inverted. One operator per style
+    // then serves both directions, so push and pop cannot disagree.
+    transition::compose(out, mIncoming, mOutgoing, mMotionStyle, 1.0f - t);
+  } else {
+    transition::compose(out, mOutgoing, mIncoming, mMotionStyle, t);
   }
-
-  // Descending pushes the new screen in from the right; ascending brings the
-  // previous one back from the left. The departing layer also dims, so the two
-  // read as ordered rather than as one smeared image.
-  const int direction = (mTransition == kPushForward) ? 1 : -1;
-  const int travel = static_cast<int>(t * w + 0.5f);
-  blitShifted(out, mOutgoing, -direction * travel, 1.0f - 0.6f * t);
-  blitShifted(out, mIncoming, direction * (w - travel), 1.0f);
-  // Composited last, and over the transition too: a volume press mid-slide must
+  // Composited last, and over the transition too: a volume press mid-move must
   // still show its bar rather than being swallowed by the animation.
   mOverlay.render(out, nowMs);
 }

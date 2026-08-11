@@ -33,6 +33,7 @@ import {
 } from "@/components/studio/pixel-asset-library";
 import { MusicPlayer } from "@/components/music/music-player";
 import { GameShell } from "@/components/game/game-shell";
+import { ZosPanel } from "@/components/zos/zos-panel";
 import { StudioHeader } from "@/components/studio/studio-header";
 import { WorkspaceEditor } from "@/components/studio/workspace-editor";
 
@@ -722,7 +723,9 @@ export function App() {
   const firmwareKind = musicFirmwareOnline ? "music" as const : arcadeOnline ? "arcade" as const : null;
 
   const changeView = (nextView: StudioView) => {
-    if (firmwareOnline && nextView !== "music" && nextView !== "game") return;
+    // 系统固件页与音乐/游戏页一样不受侧载锁定影响：它读的是 tc002-os 自己的
+    // 拉取链路，官方固件通道在不在都不影响它如实显示设备状态。
+    if (firmwareOnline && nextView !== "music" && nextView !== "game" && nextView !== "zos") return;
     if (nextView === "canvas" && workspace && selectedItem?.contentId !== "creative:canvas") {
       for (const channel of workspace.channels) {
         const item = channel.items.find((entry) => entry.contentId === "creative:canvas");
@@ -808,7 +811,13 @@ export function App() {
     );
   }
 
-  const pageCopy = view === "music"
+  const pageCopy = view === "zos"
+    ? {
+        kicker: "TC002 ZOS CONSOLE",
+        title: "系统固件控制台",
+        description: "接管时钟正在显示的频道，并同步镜像固件真正送上面板的每一帧。",
+      }
+    : view === "music"
     ? {
         kicker: "TC002 PIXEL RADIO",
         title: "音乐歌词播放器",
@@ -838,7 +847,9 @@ export function App() {
           description: "把内容组合成轮播，或作为独立 App 交给时钟旋钮切换。",
         };
 
-  const pageClassName = view === "music"
+  const pageClassName = view === "zos"
+    ? "studio-page is-zos-page"
+    : view === "music"
     ? "studio-page is-music-page"
     : view === "game"
     ? "studio-page is-game-page"
@@ -848,7 +859,9 @@ export function App() {
       ? "studio-page is-library-page"
       : "studio-page";
 
-  const layoutClassName = view === "music"
+  const layoutClassName = view === "zos"
+    ? "studio-layout is-zos"
+    : view === "music"
     ? "studio-layout is-music"
     : view === "game"
     ? "studio-layout is-game"
@@ -898,7 +911,7 @@ export function App() {
       )}
 
       <div className={layoutClassName}>
-        {view !== "music" && view !== "game" && (
+        {view !== "music" && view !== "game" && view !== "zos" && (
           <ChannelSidebar
             channels={workspace.channels}
             selectedChannelId={selectedChannel.id}
@@ -1019,6 +1032,8 @@ export function App() {
             firmwareKind={firmwareKind}
             onArcadeOnlineChange={setArcadeOnline}
           />
+        ) : view === "zos" ? (
+          <ZosPanel />
         ) : (
           <MusicPlayer onFirmwareOnlineChange={setMusicFirmwareOnline} />
         )}

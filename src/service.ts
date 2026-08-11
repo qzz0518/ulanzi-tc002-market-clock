@@ -13,6 +13,7 @@ import { OsLinkHub, type OsMenuEntry } from "./os-link.ts";
 import { createControlHandler, resetDeviceMusicSelection } from "./control-api.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
+import type { MusicLyricLine } from "./music/core.ts";
 import { LrclibLyricsClient } from "./music/lyrics.ts";
 import { SpotifyAppStore, SpotifyMusicService, SpotifySessionStore } from "./music/spotify.ts";
 import { createGameSocketHub } from "./game-socket.ts";
@@ -255,6 +256,80 @@ function publishOsMenu(): void {
   osLink.setMenu(entries);
 }
 publishOsMenu();
+
+// --- now playing, for the tc002-os music screen ------------------------------
+// The device-facing music endpoints carry a track *id*; a 52x16 panel needs a
+// title. Only the service holds the credentials that turn one into the other,
+// so the lookup lives here and the firmware reads plain text.
+let osNowTrackId: string | null = null;
+let osNowLyrics: MusicLyricLine[] = [];
+let osNowTitle = "";
+let osNowArtist = "";
+
+function lyricAt(lines: readonly MusicLyricLine[], positionMs: number): string {
+  // Linear rather than a binary search on purpose: a song is a few hundred
+  // lines and this runs twice a second.
+  let current = "";
+  for (const line of lines) {
+    if (line.startMs > positionMs) break;
+    current = line.text;
+  }
+  return current;
+}
+
+async function publishOsNowPlaying(): Promise<void> {
+  const provider = music.activeProvider();
+  if (!provider.remote || !provider.status().loggedIn) {
+    osLink.setNowPlaying(null);
+    return;
+  }
+  let snapshot;
+  try {
+    snapshot = await provider.remote.snapshot();
+  } catch {
+    // Keep the last good reading rather than blanking the panel: a transient
+    // Connect error is not the same as nothing playing, and this is exactly the
+    // "never fabricate, but never lie by omission either" case the market
+    // renderers already settle the same way.
+    return;
+  }
+  if (!snapshot.trackId) {
+    osLink.setNowPlaying(null);
+    return;
+  }
+  if (snapshot.trackId !== osNowTrackId) {
+    osNowTrackId = snapshot.trackId;
+    osNowLyrics = [];
+    osNowTitle = "";
+    osNowArtist = "";
+    try {
+      const detail = await provider.trackDetail(snapshot.trackId);
+      osNowTitle = detail.track.title;
+      osNowArtist = detail.track.artists.join(" / ");
+      osNowLyrics = detail.lyrics;
+    } catch {
+      // A title we cannot resolve still leaves a usable transport view.
+    }
+  }
+  osLink.setNowPlaying({
+    track: osNowTitle,
+    artist: osNowArtist,
+    playing: snapshot.playing,
+    positionMs: snapshot.positionMs,
+    durationMs: snapshot.durationMs,
+    lyric: lyricAt(osNowLyrics, snapshot.positionMs),
+  });
+}
+
+// Gated on the device actually being attached: this reaches out to Spotify, and
+// polling a third-party API forever because the service happens to be running
+// would be rude to it and pointless to us. The firmware reports every 10 s from
+// boot, so the gate opens on its own.
+const osNowTimer = setInterval(() => {
+  if (!osLink.isDeviceLive()) return;
+  void publishOsNowPlaying().catch(() => {});
+}, 2_000);
+osNowTimer.unref?.();
 
 const controlHandler = createControlHandler(controller, {
   onSettingsChanged: () => {

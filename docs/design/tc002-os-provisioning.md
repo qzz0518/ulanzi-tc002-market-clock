@@ -4,6 +4,24 @@
 所以本固件必须自带一条完整的配网路径，而且必须是**开机前置**的：没有网络时，
 它是第一屏，不是设置菜单深处的一项。
 
+> **实现现状（2026-08-12）。** 本文是设计，不是已交付行为的描述，两者目前有差距：
+>
+> - **已实现**：`SetupPortal` 的四条路由（页面 / `/scan` / `/status` / `POST /connect`）
+>   和 `PortalService` 的独立线程。但它服务在**设备正常地址的 8080 端口**上，而不是只在
+>   热点起来时——这样页面、网络列表和提交往返都能从同网段的笔记本上跑一遍，全程不碰无线。
+>   这一点比别处更重要：adb 就骑在同一条链路上，弄错一次的代价是物理断电。
+>   `/scan` 的数据来自 `WpaCtrl` 读 `SCAN_RESULTS`（上一次扫描的缓存），不是
+>   `WifiManager::startScan()`——理由见 [ADR 0006](../adr/0006-no-flythings-network-managers.md)。
+> - **已实现但默认失效**：所有会改变链路的调用锁在守卫文件 `/tmp/zos-allow-link` 后面——
+>   执行器（`platform/DeviceWifi.h`）的可变一半，以及配网页的提交
+>   （`platform/DeviceProvisioning.h`），文件不存在就拒绝并回报 `link-locked`。
+>   安装器不创建它，所以正常安装下这段路径物理上不做事。
+> - **未实现**：热点（SoftAP）。下文的四屏翻页序列、`TC002-OS-<MAC 后四位>`、
+>   `192.168.100.1` 全部尚未落地；`startSoftAp()` / `stopSoftAp()` 目前只写一行日志就返回。
+>   **一台没有存储凭据的设备现在还不能由 ZOS 自己配网。**
+> - **偏离**：下文引用 `WifiManager` / `SoftApManager` 的地方已被 ADR 0006 否决——那两个类
+>   掌管无线电源路径，链接它们本身就是本设计要避免的那种不可恢复故障。
+
 ## 官方基线（2026-08-11 查证）
 
 来源：<https://docs.ulanzistudio.com/tc002/software/web-setup.html>

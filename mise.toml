@@ -65,11 +65,7 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/app/src/core/*.cpp \
   device/tc002-os/app/src/ui/*.cpp \
   device/tc002-os/app/src/visual/*.cpp \
-  device/tc002-os/app/src/net/WifiPolicy.cpp \
-  device/tc002-os/app/src/net/StateDoc.cpp \
-  device/tc002-os/app/src/net/FrameBundle.cpp \
-  device/tc002-os/app/src/net/HttpServer.cpp \
-  device/tc002-os/app/src/net/SetupPortal.cpp \
+  device/tc002-os/app/src/net/*.cpp \
   device/tc002-arcade/app/src/games/*.cpp \
   -o .runtime/os-selfcheck && .runtime/os-selfcheck
 """
@@ -80,7 +76,8 @@ run = """
 docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
   -w /work/tc002-lyrics-player/flythings-build flythings-build \
   make APP=../../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os \
-    EXTRA_SRC_DIRS=../../tc002-arcade/app/src/games EXTRA_INC=../../tc002-arcade/app/src
+    EXTRA_SRC_DIRS=../../tc002-arcade/app/src/games EXTRA_INC=../../tc002-arcade/app/src \
+    EXTRA_PKGS=zknet EXTRA_LIBS=-lzknet
 """
 
 [tasks.os-linkaudit]

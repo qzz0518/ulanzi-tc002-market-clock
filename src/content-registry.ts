@@ -239,6 +239,7 @@ const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description
   fire: { title: "火焰", description: "经典 demoscene 热量扩散火焰。" },
   fireworks: { title: "烟花", description: "升空尾迹、随机色相爆散与重力衰减。" },
   flipclock: { title: "翻页钟", description: "深色卡片、闪烁冒号与翻页扫光。" },
+  flux: { title: "流光时钟", description: "时分秒由闪烁星尘组成，秒位逐秒流变；数字会炸散成星雨再重新汇聚。" },
   life: { title: "生命游戏", description: "环面边界的康威生命游戏，可用当前时间播种。" },
   matrixclock: { title: "数字雨时钟", description: "Matrix 代码雨上叠加当前时间。" },
   maze: { title: "走迷宫", description: "随机生成迷宫并演示最短路径。" },
@@ -277,9 +278,9 @@ const LOCATION_OPTIONS: readonly ContentOptionField[] = [
   { key: "longitude", label: "经度", type: "hidden", default: "121.4737" },
 ];
 
-// The flip clock, matrix clock and sun-colour clock all re-render on the wall
-// clock rather than on an animation seed, so they refresh on the same cadence.
-const TIME_DRIVEN_VISUALS: readonly VisualEffectId[] = ["flipclock", "matrixclock", "suncolor"];
+// The flip clock, flux clock, matrix clock and sun-colour clock all re-render
+// on the wall clock rather than on an animation seed, so they share a cadence.
+const TIME_DRIVEN_VISUALS: readonly VisualEffectId[] = ["flipclock", "flux", "matrixclock", "suncolor"];
 
 function visualOptionFields(effectId: VisualEffectId): ContentOptionField[] {
   if (effectId === "flipclock" || effectId === "matrixclock") return [];
@@ -310,6 +311,34 @@ function visualOptionFields(effectId: VisualEffectId): ContentOptionField[] {
         { value: "digits", label: "当前时间" },
         { value: "soup", label: "随机汤" },
       ],
+    });
+  }
+  if (effectId === "flux") {
+    fields.push({
+      key: "fluxPalette",
+      label: "配色",
+      type: "select",
+      default: "cycle",
+      help: "幻彩轮换每分钟换一套配色，换分爆炸时正好同步切换。",
+      choices: [
+        { value: "cycle", label: "幻彩轮换" },
+        { value: "cyan", label: "星尘蓝" },
+        { value: "violet", label: "霓虹紫" },
+        { value: "ember", label: "熔岩橙" },
+        { value: "mint", label: "极光绿" },
+      ],
+    });
+    fields.push({
+      key: "fluxBurst",
+      label: "爆炸节奏",
+      type: "select",
+      default: "always",
+      choices: [
+        { value: "always", label: "每次循环" },
+        { value: "minute", label: "仅换分时" },
+        { value: "never", label: "纯闪烁" },
+      ],
+      help: "循环时长即条目时长，可在上方调整。",
     });
   }
   if (effectId === "fireworks") {
@@ -346,6 +375,13 @@ function visualDefinition(effectId: VisualEffectId): ContentDefinition {
           ? item.options.petAction as "idle" | "walk" | "run" | "attack" | "random"
           : undefined,
         lifeStart: item.options.lifeStart === "soup" ? "soup" : "digits",
+        fluxPalette: item.options.fluxPalette === "cyan" || item.options.fluxPalette === "violet"
+            || item.options.fluxPalette === "ember" || item.options.fluxPalette === "mint"
+          ? item.options.fluxPalette
+          : "cycle",
+        fluxBurst: item.options.fluxBurst === "minute" || item.options.fluxBurst === "never"
+          ? item.options.fluxBurst
+          : "always",
         fireworkDensity: valueNumber(item.options.density, 2, 1, 3),
         latitude: valueNumber(item.options.latitude, 0, -90, 90),
         longitude: valueNumber(item.options.longitude, 0, -180, 180),

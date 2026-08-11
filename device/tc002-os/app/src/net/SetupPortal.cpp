@@ -148,7 +148,16 @@ HttpServer::Response SetupPortal::connect(const std::string& body) {
   }
   // An open network is legitimate, so an empty password is accepted; only a
   // missing SSID is an error.
-  if (mBackend != 0) mBackend->submit(ssid, psk);
+  std::string reason;
+  const bool accepted = mBackend == 0 ? false : mBackend->submit(ssid, psk, &reason);
+  if (!accepted) {
+    // 409 rather than 200-with-an-error-field: the phone's fetch() sees the
+    // failure without having to parse the body, and a refusal is a state
+    // conflict, not a malformed request.
+    r.status = 409;
+    r.body = "{\"ok\":false,\"reason\":\"" + jsonEscape(reason) + "\"}";
+    return r;
+  }
   r.body = "{\"ok\":true}";
   return r;
 }

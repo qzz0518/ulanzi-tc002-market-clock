@@ -214,6 +214,248 @@ manifest, the official HTTP API and Wi-Fi ADB to both identify the device, and a
 restore acknowledgement. Firmware sources, the protocol, build, and deployment live in
 [device/tc002-lyrics-player](../device/tc002-lyrics-player/README.md).
 
+## ZOS system firmware (tc002-os)
+
+The first two firmwares are temporary lodgers beside the official app; **ZOS**
+(`device/tc002-os/`) is a replacement. It takes the official app's place and *is* the
+device's system, which means it inherits all of that app's duties — the menu, the network,
+the setup page. All three firmwares claim the same `/tmp` load path and the same
+`/tmp/tc002-sideload.id` session identity, so they are mutually exclusive by construction
+([ADR 0004](adr/0004-arcade-firmware.md)).
+
+There is exactly one architectural rule: **a Screen only draws into a Surface and never
+touches SPI; `platform/Presenter` is the only writer of the LED bus in the whole project.**
+Time arrives as the `nowMs` parameter, so a Screen must be a pure function of
+`(state, nowMs)`. The LED bus is write-only and `/dev/fb0` is unrelated to the matrix — a
+frame cannot be read back on hardware — so UI regressions can only be caught on the Mac:
+`mise run os-hostcheck` compiles `ui/`, `core/` and `net/` with clang++ and asserts exact
+pixels. The same rule gives the console mirror exactly one tee point, immediately after
+`Shell::render`.
+
+### Menu and controls
+
+Boot is a 2460 ms ZOS wordmark animation (a spark gathers, a shockwave develops the mark out
+of embers, three pens trace the letters, a flash and hold, then a CRT-style collapse) —
+entirely procedural, carrying no glyph data, so it runs before the font tables exist. It
+cross-fades into the root menu.
+
+The root menu is a **fixed four**: Music / Games / Channels / Settings. A list is a lie on
+52×16 — four 12 px CJK cells fill the width, so anything showing a selected row plus its
+neighbours ends up with three unreadable rows — so a page shows exactly one entry,
+full-bleed, and a knob detent slides the next one in, with a one-pixel rail on the bottom row
+carrying the ring's size and position. Channels are not on this ring: they are content, not
+destinations, and ten of them would push the other three off a ring that shows one item at a
+time. They live one level down, the same way the seven games do.
+
+| Input | Behaviour |
+| --- | --- |
+| Knob left / right | Move along the current ring; on Music it is previous / next, in a game it reaches the engine |
+| Knob or middle button, short press | Enter / confirm; pause-resume on a channel page, play-pause on Music |
+| Any button held (600 ms) | Back, one level, everywhere; a game can be left in any phase |
+| Side button, short press | Volume ±1 (0–6 notches, the device's own scale, the one the official firmware also exposes) |
+| Side button, long press | Brightness ±1 (10 steps; the hardware takes 0–100, but below ~10 the panel is effectively off and single percents are invisible) |
+
+Both adjustments raise a HUD — a 12×12 icon plus a segmented bar — because both are blind
+otherwise: the speaker may be muted and a brightness step on an already-dim panel is easy to
+miss. It is an **overlay, not a screen**: changing the volume must not take the user out of
+what they were looking at, and pushing a screen for it would make "back" ambiguous. While the
+bar is up, further short presses keep adjusting brightness rather than snapping back to
+volume mid-adjustment.
+
+Each destination announces itself with its own motion, lifted from the boot screens of the
+two firmwares ZOS replaces: channels as a CRT power-on (320 ms), music as a spectrum rise
+(300 ms), games as a cartridge shine-sweep (280 ms), settings as a drop-and-bounce (260 ms).
+Every one is a pure compositing operator over two finished rasters, and leaving is the same
+function evaluated backwards — so an entry can never look right going in and wrong coming out.
+
+- **Channels**: the console's enabled channels, one per page, and **each page is its
+  channel** — no icon, no label. The picture is content the service already composed;
+  drawing a badge and a name in front of it would describe what the user is looking at. The
+  name appears only while the frames are still downloading. Only the settled channel is
+  fetched — prefetching neighbours would mean several bundles of a few hundred KB resident
+  to show one, on a radio that is also carrying the long poll.
+- **Games**: seven of them, with the engines compiled in unchanged from
+  `device/tc002-arcade` rather than ported — they are hardware-verified and already covered
+  by the arcade's own self-check, and a port would fork that guarantee. One card each, with
+  a per-game 12×12 animated icon (drawn in that engine's palette, not stored as a bitmap)
+  and per-game sound. The sounds are **synthesised, not sampled**: square, triangle and noise
+  waveforms with a frequency sweep and a decay envelope written straight into
+  `base::AudioPlayer`. The arcade's .wav clips go through MediaPlayer, which drags in ffmpeg
+  — measured at ~1.1 MB of .text plus 856 KB of .bss — an absurd price for a handful of beeps.
+- **Music**: what the console is playing (title, artist, current lyric line, playhead). The
+  device has no audio of its own, so a key press becomes a Connect command executed by the
+  service; the playhead is advanced locally from the timestamp the service sent, which is
+  what keeps it smooth at 25 fps over a link that updates a few times a minute. The side
+  buttons are deliberately **not** taken over — volume is the one control a user reaches for
+  while music is playing.
+- **Settings**: network, IP, console address, volume, brightness, MAC, the setup-page
+  address, uptime, version. The panel holds exactly one text row (both glyph tables are 12 px
+  tall and the panel is 16), so label and value share that row **in time**: landing on an item
+  shows the label, and after a 1100 ms dwell the label slides up and out while the value
+  slides in; turning the knob rewinds to the label.
+
+### The console link (the device pulls)
+
+Replacing the official app deletes its `POST /api/custom` receiver, which is how every
+host→device write in this project used to work. The direction is therefore inverted: **the
+device pulls**. That is not only a workaround — it removes the service's need to know the
+device's address at all, which is the same class of problem that broke the notify webhook (a
+launchd process on macOS has no local-network permission and cannot open a LAN socket).
+
+The wire format is line-oriented `KEY\tVALUE` plain text rather than JSON: the firmware parses
+it with a split loop, and a JSON dependency for a dozen fields is not worth it on a device
+with ~1 MB free. Parsing is **total** — an unrecognised line is skipped rather than failing
+the document, because a firmware that refuses a response it half understands would be bricked
+by one forward-compatible field added service-side.
+
+```
+seq	7
+pinned	1
+mirror	1
+focus	btc
+np	1
+track	Her Majesty
+artist	The Beatles
+playing	1
+pos	18400
+dur	23000
+lyric	Her Majesty's a pretty nice girl
+menu	3
+item	channel	btc	市场轮播
+item	music	music	音乐
+item	settings	settings	设置
+```
+
+`GET /api/os/pull?seq=` is a long poll: a caller that is behind is answered immediately,
+otherwise the request parks until something changes or 8 s elapse — and **the timeout still
+answers with the full document rather than a 204**, so the firmware's parser has exactly one
+shape to handle. 8 s sits comfortably inside any home router's NAT idle timeout while letting
+a device that missed a wake-up self-heal quickly. The device reads with a 13 s budget (it has
+to clear the 8 s hold plus a round trip), backs off 1 s → 2 s → … → 10 s on failure, and only
+reports offline after three consecutive misses — a single failed poll is the normal shape of
+a router hiccup, and flashing "offline" for it would train the user to ignore the indicator.
+The `seq` survives the backoff, so a service that merely restarted its socket is resumed
+rather than replayed.
+
+Only things that change the panel bump `seq`: the menu, the pin, the mirror flag, and the
+now-playing **text**. The playhead deliberately does not — it moves a thousand times a second
+and every bump releases every parked poll, so the document carries a position plus the moment
+it was true and the firmware advances it locally. Telemetry flows device→console and never
+bumps either. The document also advances the playhead to the instant it is served, or one
+that parked for eight seconds would hand over a playhead eight seconds stale on arrival.
+
+The **frame bundle** (`GET /api/os/frames?app=`) is raw RGB rather than GIF: the official
+firmware decodes a GIF, ours does not, and adding a GIF decoder to re-encode pixels we already
+have as pixels would be pure loss. The header is a fixed 8 bytes:
+
+```
+offset  size  field
+0       4     magic "TCF1"
+4       2     frame count, little endian
+6       1     width
+7       1     height
+8       ...   per frame: u16 LE delayMs, then width*height*3 bytes RGB
+```
+
+Little endian because the device is little-endian ARM; the two u8 dimensions keep the header
+at 8 bytes and are validated by the firmware against its own panel rather than trusted. Frame
+delays are clamped to 20–60000 ms (0 ms would spin the device's play loop, a minute is a stuck
+panel).
+
+The **mirror** is a real capture, not a re-render: the LED bus is write-only and `/dev/fb0` is
+unrelated to the matrix, so the only way to know what the panel shows is for the compositor to
+tee it on the way out. A TypeScript re-implementation of the firmware's UI would be free to
+drift from the C++ without any test noticing — this repository already has that cautionary
+tale in seven C++ game engines beside four TypeScript ones. The device ships frames at 10 fps
+(the panel runs at 25, but the console preview is a monitor, not a video feed, and each frame
+is a separate HTTP exchange) and **only while someone is watching**: each console
+`GET /api/os/mirror` both reads the frame and renews the subscription, so a console that stops
+polling stops the stream ten seconds later with no explicit teardown to leak.
+
+**Now playing** is resolved to text service-side. The device-facing music endpoint carries a
+track *id*, which is useless on a 52×16 panel — the title only exists after the provider's
+trackDetail call, which needs credentials the firmware does not have — and resolving it here
+is also what lets the same lookup feed the lyric line. That poll is gated on the device
+actually being attached (the firmware reports every 10 s, so the gate opens on its own),
+because otherwise it would hammer a third-party API for a device nobody connected.
+
+### Sideloading and the `host` file
+
+Sideloading uses the same parameterized installer as the music and arcade firmwares
+(`/api/os/device-app/*`, confirmation phrase `START_TC002_OS_SESSION`): per-file SHA-256
+against the release manifest, the device identified through both its official HTTP API and
+Wi-Fi ADB, and an explicit restore acknowledgement. Everything lives in tmpfs and flash is
+never touched. **A power cycle restores the official firmware**: `/tmp` is wiped, the
+framework falls back to `/res/etc/EasyUI.cfg`, and the official app returns with its own Wi-Fi
+setup page. That is the universal rescue for anything this firmware gets wrong. The console
+has no ZOS sideload panel yet (music and arcade each have one), so these four routes are
+called directly for now.
+
+ZOS adds one step the other two do not have: **the bundle must carry a `host` file with the
+console's address.** Nothing on this LAN announces the service — it is a Bun process on
+someone's laptop, not a router service with a name — so the device has to be told. The entry
+script moves `host` to `/tmp/zos-host`, and the firmware reads it at startup (it also accepts
+`/tmp/tc002-os/host`, where the push leaves it). All three shapes a human would write are
+accepted:
+
+```
+http://192.168.8.185:43820     # complete
+192.168.8.185:43820            # http:// added
+192.168.8.185                  # http:// and :43820 added
+```
+
+A missing file is not an error — the firmware runs standalone, it just has no channels and no
+mirror. The entry script's move is guarded for that reason: `set -e` would otherwise turn "no
+console configured" into a failed launch and a blank panel.
+
+### Wi-Fi and provisioning: how far it goes
+
+**Working today:** the firmware runs its own HTTP server and serves the provisioning page on
+the device's **normal address, port 8080** — `GET /` for the page, `GET /scan` for the network
+list, `GET /status` for state, `POST /connect` for the submission. The page is entirely
+self-contained: no CDN, no web font, no external stylesheet, because a phone attached to a
+hotspot has no internet and any of those turn the setup screen into a spinner with no
+explanation. The network list comes from wpa_supplicant's `SCAN_RESULTS` over its control
+socket (the last sweep's cache — reading it does not start a sweep), sorted by signal and
+de-duplicated, so the user only types a password: one wrong character in a hand-typed SSID
+looks exactly like a wrong password, and the user cannot tell which they got wrong. The
+settings screen shows this address.
+
+Port 8080 rather than 80 because binding a privileged port would require still being root at
+that point, and nothing needs the well-known port while the device has a normal address. The
+server runs on its own thread — `serveOnce` blocks until a connection arrives or its timeout
+expires, which is exactly wrong for a 25 fps UI tick.
+
+**Deliberately inert:** the half that actually changes the link sits behind the guard file
+`/tmp/zos-allow-link`. The device-side actuator (`platform/DeviceWifi.h`) is split down that
+line: the read-only half (is it running, are there stored credentials, are we associated, do we
+have an address, scan results) is always live because none of it can change what the radio is
+doing; the mutating half (start the supplicant, connect, request DHCP, start/stop the hotspot,
+start a scan) re-reads the guard file and refuses without it. So does the page's submit — and
+it reports `link-locked` **at the moment of refusal** rather than pretending to work and letting
+the status flip to "failed" a poll later. A page that accepts credentials and silently does
+nothing is worse than one that reports the refusal: the user would sit waiting for a
+reconnection that was never going to happen. The sideload installer does not create the file,
+so on a normal install the code is compiled in, reachable from the UI, and physically incapable
+of acting. It lives in tmpfs on purpose: `adb shell touch /tmp/zos-allow-link` arms an
+experiment and a power cycle disarms it with no way to forget.
+
+**Not implemented:** the hotspot (SoftAP). `WifiPolicy` has the states and the actuator has the
+entry points, but `startSoftAp()` / `stopSoftAp()` currently log a line and return. The recipe
+is known (stop wpa_supplicant, write hostapd.conf, run hostapd, hand out addresses), but every
+step of it touches the link adb rides on — and the SDK's `SoftApManager` is exactly what
+[ADR 0006](adr/0006-no-flythings-network-managers.md) forbids linking. **A device with no stored
+credentials therefore cannot currently be provisioned by ZOS itself**, and the four-screen
+hotspot flow in `docs/design/tc002-os-provisioning.md` remains a design rather than an
+implementation.
+
+That boundary is worth reading in full: those managers own the radio's power path and call
+rmmod/insmod against module directories that **do not exist** on this unit. One trip through
+that branch and `wlan0` is gone — and adb rides that link, so recovery is a physical power
+cycle. ZOS therefore links libzknet for exactly one function
+(`NetUtils::dhcpRequestIp`), does everything else over wpa_supplicant's control socket, and
+enforces it at the binary level with `device/tc002-os/hostcheck/link-audit.sh`.
+
 ## Architecture and extension
 
 Content renderers only produce 52×16 frames and delays — they cannot write to the device or
@@ -272,9 +514,20 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll |
 | `POST` | `/api/music/device/report`, `/api/music/device/heartbeat` | Firmware key-action reports and playhead heartbeats |
 | `GET` | `/api/music/device/now`, `/api/music/device/audio` | Firmware-side lyric fetch and audio download |
+| `GET` / `POST` | `/api/os/device-app/*` | The same sideload lifecycle for ZOS (confirmation phrase `START_TC002_OS_SESSION`) |
+| `GET` | `/api/os/pull` | ZOS long-polls the state document (`?seq=`, parks up to 8 s; line-oriented `KEY\tVALUE` plain text, cross-origin) |
+| `GET` | `/api/os/frames` | ZOS fetches one channel's rendered frames by `?app=` (`TCF1` raw-RGB binary, cross-origin) |
+| `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts}` (strings truncated at 64 chars, cross-origin, never bumps seq) |
+| `POST` | `/api/os/mirror` | ZOS uploads a captured panel frame (body is 2496 raw RGB bytes, cross-origin); the reply `{wanted}` tells the device whether to keep streaming |
+| `GET` | `/api/os/mirror` | Console reads the latest frame — **asking is the subscription**: stop polling and the device stops streaming 10 s later |
+| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live}` (live means a report arrived within 15 s) |
+| `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing
-`report` / `heartbeat` endpoints, whose caller is the clock itself); the request-body limit is
-256 KiB.
+`report` / `heartbeat` endpoints and ZOS's `/api/os/pull`, `/api/os/frames`, `/api/os/report`
+and `POST /api/os/mirror`, whose caller is the clock rather than a browser and has no Origin
+to send; `POST /api/os/mirror`'s body is raw RGB rather than JSON, because a base64 JSON
+envelope would cost a third more bytes per frame for nothing the firmware can use); the
+request-body limit is 256 KiB.
 Limits: 24 channels, 48 items per channel, 360 rendered frames per channel; app names are
 unique and restricted to 1–32 ASCII letters, digits, underscores, or hyphens.

@@ -81,12 +81,47 @@ else
   echo "  no undefined media symbols"
 fi
 
+# Forbidden network symbols. This is a SAFETY gate, not a hygiene one.
+#
+# libzknet.so exports both halves of the FlyThings network stack: the harmless
+# NetUtils statics, and the NetManager/WifiManager/SoftApManager singletons that
+# own the radio's power path. Those managers reload the WiFi driver through
+# insmod/rmmod against module directories baked into the library — and on this
+# unit those directories DO NOT EXIST (/late/lib/modules and /config/lib/modules
+# are absent; the real modules live in /lib/modules/4.9.84). One trip through
+# the rmmod branch unloads aic8800_fdrv with no path back: wlan0 disappears,
+# and adb, which rides that link, dies with it. Recovery is a physical power
+# cycle, and the failure is unobservable while it happens.
+#
+# tc002-os therefore links libzknet for NetUtils::dhcpRequestIp ONLY. This is
+# what stops a later `#include <net/NetManager.h>` from quietly re-opening that
+# door: the manager classes are C++, so touching one leaves its mangled name in
+# the undefined symbols, and the build fails here instead of on the bench.
+forbidden="$("$READELF" -W --dyn-syms "$SO" \
+  | awk '$7 == "UND" { print $8 }' \
+  | grep -E '(NetManager|WifiManager|SoftApManager|LTE4GManager|EthernetManager|WifiCtrl)' \
+  | sort -u || true)"
+if [ -n "$forbidden" ]; then
+  echo "  FAIL references the FlyThings network managers, which own the radio power path" >&2
+  printf '%s\n' "$forbidden" | head -10 | sed 's/^/    /' >&2
+  echo "    only NetUtils (pure statics) may be used from libzknet — see the comment above" >&2
+  fail=1
+else
+  echo "  no references to the radio-power-path managers"
+fi
+
 # Size is a budget, not a curiosity: the bundle is pushed into tmpfs (RAM) on a
 # 36 MB box, and an unstripped .so has OOM-rebooted this device before.
 size_bytes="$(wc -c < "$SO" | tr -d ' ')"
 echo "  size: $size_bytes bytes"
-if [ "$size_bytes" -gt 614400 ]; then
-  echo "  FAIL over the 600 KB budget for tc002-os" >&2
+# 1.2 MB. The original 600 KB was a design target, not a hardware limit: the
+# arcade firmware runs on this unit at 1,766,760 bytes and the lyrics player at
+# 1,840,452. Sound costs ~438 KB (base::AudioPlayer pulls the resampler, the
+# mixer and the MI_AO glue) and is worth it. The cap still catches the failure
+# that matters — accidentally linking the full ffmpeg decode path, measured at
+# roughly 1.9 MB — while leaving real headroom below the two shipping firmwares.
+if [ "$size_bytes" -gt 1258291 ]; then
+  echo "  FAIL over the 1.2 MB budget for tc002-os" >&2
   fail=1
 fi
 

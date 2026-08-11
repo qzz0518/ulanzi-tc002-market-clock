@@ -18,7 +18,7 @@ multiple items in one channel are composed into an ordered carousel.
 | --- | --- |
 | Market | 10 built-in assets (BTC, gold, AAPL, …); search-and-add any crypto, stock / ETF, FX pair, or precious metal — no API keys |
 | Tools | Notice board (with a key-free webhook: one POST from curl / iOS Shortcuts / Home Assistant puts a message on the clock), interval timer column, pomodoro, countdown days |
-| Visual | Langton's ant, aquarium, fire, flip clock, Matrix clock, maze, pixel pet, falling sand, starfield, Game of Life, fireworks, weather particles, sunrise/sunset color clock (weather visuals locate by place-name search — no raw coordinates) |
+| Visual | Langton's ant, aquarium, fire, flip clock, flux clock, Matrix clock, maze, pixel pet, falling sand, starfield, Game of Life, fireworks, weather particles, sunrise/sunset color clock (weather visuals locate by place-name search — no raw coordinates) |
 | Creative | 52×16 canvas (pen, pixel text, image pixelization, optional live streaming to the clock plus QR-code collaborative doodling); Library imports of Ulanzi community assets (PNG / GIF) or local videos (ffmpeg to 52×16 pixel animation) |
 
 The top-right settings dialog reads and writes the clock's brightness, volume, timezone, and
@@ -63,18 +63,56 @@ Two paths put lyrics on the clock:
 
 ## Game arcade and arcade firmware
 
-The "Games" tab is a pixel arcade: **time breakout, flappy bird, snake, and two-player
-Pong** run right in the browser (touch / mouse / keyboard), and flipping "Screen" on
-mirrors the picture to the clock at ~25fps in real time — no flashing, the clock is
-simply a second screen. Two-player Pong turns a phone into the second paddle via a
-QR code.
+The "Games" tab is a pixel arcade: **time breakout, flappy bird, snake, two-player Pong,
+lane racer, space shooter, and Tetris** — all seven run right in the browser (touch /
+mouse / keyboard), and flipping "Screen" on mirrors the picture to the clock at ~25fps in
+real time — no flashing, the clock is simply a second screen. Two-player Pong turns a
+phone into the second paddle via a QR code. The last three were written for the firmware's
+knob first and ported back here; the two simulations are byte-identical.
 
 To play on the clock itself with its knob and buttons, sideload the bundled
 **arcade firmware**: a boot animation, a cartridge-style game menu, a device info
-page (battery / USB / versions / IP, knob-adjustable volume), and **seven games**
-(the four above plus lane racer, space shooter, and a sideways Tetris) with 8-bit
-sound effects. Sideloading works exactly like the music firmware: memory-only,
+page (battery / USB / versions / IP, knob-adjustable volume), and the same seven games
+with 8-bit sound effects. Sideloading works exactly like the music firmware: memory-only,
 a power cycle or one click restores the official firmware, flash is never written.
+
+## ZOS system firmware
+
+The first two firmwares are things you sideload for a while; **ZOS** (`device/tc002-os/`)
+replaces the whole thing: it takes the official app's place and *is* the device's system.
+Boot is a 2.5-second ZOS wordmark animation, then a knob-driven root menu —
+**Music / Games / Channels / Settings** — one item per page, full-bleed (a list does not
+fit on 52×16: four 12px CJK cells fill the width). The knob pages, a press descends, a
+hold goes back, at every level. Each destination arrives with its own motion (channels
+like a CRT waking up, music as an equaliser rising, a game as a cartridge seated, settings
+as a drawer dropping); leaving replays that same motion backwards. The side buttons are
+volume on a short press and brightness on a long one, both raising a bar that expires on
+its own.
+
+- **Channels** holds the console's channels, one per page, and each page **is** its
+  channel — no icon, no label; the name appears only while frames are still downloading.
+  A press pauses and resumes.
+- **Games** holds the same seven engines the arcade firmware runs, one card each, with a
+  per-game 12×12 animated icon and per-game synthesised sound (square / triangle / noise
+  sweeps — no .wav files, and therefore no ffmpeg).
+- **Music** shows what the console is playing (title, artist, current lyric line, playhead);
+  the knob is previous/next and a press toggles play.
+- **Settings** lists network, IP, console address, volume, brightness, MAC, the setup-page
+  address, and uptime.
+
+**The direction is inverted: the device pulls.** Replacing the official app deletes its
+`POST /api/custom` receiver, so ZOS long-polls the console for its menu, its channel frames
+and the now-playing text, and the console never opens a connection to the device. The
+device also ships each composed frame back at 10fps, which is how the console can show what
+the panel is really displaying.
+
+Sideloading follows the same path as the other two firmwares: memory only, a power cycle
+restores the official firmware, flash is never written. ZOS adds one step — a `host` file in
+the bundle carries the console's address, which is how the device finds the service; without
+it the firmware still runs, it just has no channels and no mirror. Its own setup page already
+lists scanned networks and accepts a submission, but **the half that actually changes the
+link is locked off by default** (see the
+[technical reference](docs/reference.en.md#zos-system-firmware-tc002-os)).
 
 ## Quick start
 
@@ -97,6 +135,7 @@ bash scripts/install-docker.sh --host TC002_IP   # Docker Compose
 - [Technical reference](docs/reference.en.md): environment variables, market data sources, Library and Music details, architecture, and the local API
 - [Music firmware](device/tc002-lyrics-player/README.md): firmware sources, protocol, build, and sideload safety
 - [Arcade firmware](device/tc002-arcade/README.md): the seven games' controls, build, and packaging
+- [ZOS system firmware](device/tc002-os/README.md): the architectural rule, build and link audit, sideload and recovery
 - [ADRs](docs/adr/): key architecture decisions
 
 ## License

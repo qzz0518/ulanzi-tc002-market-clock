@@ -28,8 +28,18 @@ class SetupPortal : public HttpServer::Handler {
     virtual ~Backend() {}
     /** SSIDs currently visible, strongest first. May be empty while scanning. */
     virtual std::vector<std::string> scanResults() = 0;
-    /** Hand credentials to the WiFi policy. */
-    virtual void submit(const std::string& ssid, const std::string& psk) = 0;
+    /**
+     * Hand credentials to the WiFi policy. Returns false when the device
+     * refused to act on them.
+     *
+     * The return value is not decoration. A submit that is silently dropped
+     * leaves the page saying "submitted" while the device does nothing, and the
+     * user waits for a reconnection that was never going to happen — the exact
+     * failure this page exists to prevent. `reason` carries a short
+     * machine-readable code the page shows verbatim.
+     */
+    virtual bool submit(const std::string& ssid, const std::string& psk,
+                        std::string* reason) = 0;
     /** One of: "provisioning", "connecting", "online", "failed". */
     virtual std::string status() = 0;
     /** The address the device got, once online. */

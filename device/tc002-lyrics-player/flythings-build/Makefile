@@ -27,7 +27,24 @@ SHARED    ?= ../..
 # own headers still win (tc002-os provides utils/Surface.h as a bridge).
 EXTRA_SRC_DIRS ?=
 EXTRA_INC ?=
-INCLUDES := -I$(APP)/src $(foreach d,$(EXTRA_INC),-I$(d)) -I$(SHARED) $(foreach d,$(DEP_INC),-I$(PKG)/$(d)/include) -I$(BOOST_INC)
+# Extra dependency packages, opt-in per app. tc002-os adds `zknet` for exactly
+# one function — NetUtils::dhcpRequestIp — because this device ships no DHCP
+# client binary at all and that symbol is the same libnetutils code the stock
+# firmware has used on this chip for years. It is NOT in DEP_INC because the
+# other two firmwares have no business carrying a DT_NEEDED on libzknet.so.
+#
+# Only include/net/NetUtils.h is vendored from that package on purpose: it is
+# pure statics with zero includes. NetManager.h/WifiManager.h/SoftApManager.h
+# are deliberately absent, because those managers own the radio power path and
+# call rmmod against module directories that DO NOT EXIST on this unit
+# (/late/lib/modules, /config/lib/modules; the real ones are /lib/modules/4.9.84).
+# One trip through that branch unloads aic8800_fdrv with no way back: wlan0
+# vanishes, and adb — which rides that link — dies with it. hostcheck/link-audit.sh
+# enforces their absence in the built .so.
+EXTRA_PKGS ?=
+EXTRA_LIBS ?=
+ALL_PKGS := $(DEP_INC) $(EXTRA_PKGS)
+INCLUDES := -I$(APP)/src $(foreach d,$(EXTRA_INC),-I$(d)) -I$(SHARED) $(foreach d,$(ALL_PKGS),-I$(PKG)/$(d)/include) -I$(BOOST_INC)
 
 # Compile flags copied from .cproject (optimization "most" → -O3, C++11, -fPIC).
 # Two globals the IDE injects (Manifest platform="Z21"), not in .cproject:
@@ -47,13 +64,13 @@ LDFLAGS := -shared -Wl,-z,now -Wl,-z,relro -Wl,--warn-common \
            -Wl,-z,combreloc -Wl,--warn-once
 # device-audio/lib holds MI/media .so pulled from the device (libmi_ao etc.),
 # resolving audio-utility's MI_AO_* symbols at load time.
-LIBDIRS := $(foreach d,$(DEP_INC),-L$(PKG)/$(d)/lib) -L$(PKG)/device-audio/lib
+LIBDIRS := $(foreach d,$(ALL_PKGS),-L$(PKG)/$(d)/lib) -L$(PKG)/device-audio/lib
 # Wrap in a group: the static libs cross-reference each other, so the linker
 # must scan them repeatedly (order-independent symbol resolution).
 LIBS    := -Wl,--start-group -leasyui -lzkhardware -llog -lbase-utility -ltransfer-protocols \
            -laudio-utility -lbase-json \
            -lavformat -lavcodec -lavfilter -lavdevice -lswscale -lswresample -lavutil -lz \
-           -lmi_ao -lmi_sys -lmi_common -lzkmedia -Wl,--end-group
+           -lmi_ao -lmi_sys -lmi_common -lzkmedia $(EXTRA_LIBS) -Wl,--end-group
 
 # FlyThings convention: logic/*.cc are not translation units — the IDE-generated
 # activity/*.cpp #includes them. Compile only .cpp/.c and exclude logic/.
@@ -76,6 +93,18 @@ vpath %.cpp $(EXTRA_SRC_DIRS)
 # activity object stale (its own mtime is unchanged) and the change never lands.
 LOGIC := $(shell find $(APP)/src/logic -name '*.cc' 2>/dev/null)
 
+# Relink when the source LIST changes, not merely when some source is newer.
+#
+# Deleting a file otherwise ships forever: the .so is still newer than every
+# remaining prerequisite, so make does nothing and the removed translation unit
+# stays linked in. That is invisible — the build says nothing, the size barely
+# moves — and it is the same class of failure as deploying a build that had
+# actually errored. The stamp is rewritten only when the sorted list differs, so
+# it does not force a relink on every invocation.
+SRCLIST := $(BUILD_DIR)/.srclist
+$(shell mkdir -p $(BUILD_DIR) && printf '%s\n' $(sort $(SRCS) $(EXTRA_SRCS)) > $(SRCLIST).new && \
+        (cmp -s $(SRCLIST).new $(SRCLIST) || mv $(SRCLIST).new $(SRCLIST)) && rm -f $(SRCLIST).new)
+
 all: $(OUT)
 
 $(BUILD_DIR)/%.o: $(APP)/% $(LOGIC)
@@ -91,7 +120,7 @@ $(BUILD_DIR)/extra/%.o: %
 # 36MB box; the unstripped ~6.7MB .so spikes RAM during `adb push` and OOM-reboots
 # the device (wiping tmpfs). Stripped it is ~1.8MB. mmap still resolves the
 # framework symbols at load, so the app is unchanged.
-$(OUT): $(OBJS)
+$(OUT): $(OBJS) $(SRCLIST)
 	$(CXX) $(LDFLAGS) $(LIBDIRS) -o $@ $(OBJS) $(LIBS)
 	$(TOOLCHAIN)/bin/arm-linux-gnueabihf-strip --strip-unneeded $@
 	@echo "=== built $(OUT) ==="

@@ -16,6 +16,7 @@ export const VISUAL_EFFECT_IDS = [
   "fire",
   "fireworks",
   "flipclock",
+  "flux",
   "life",
   "matrixclock",
   "maze",
@@ -46,6 +47,8 @@ export interface VisualEffectOptions {
   speed?: number;
   petAction?: "idle" | "walk" | "run" | "attack" | "random";
   lifeStart?: "digits" | "soup";
+  fluxPalette?: "cycle" | "cyan" | "violet" | "ember" | "mint";
+  fluxBurst?: "always" | "minute" | "never";
   fireworkDensity?: number;
   weather?: WeatherVisualInput;
   /** Short CJK hint drawn instead of the particles when weather data is unavailable. */
@@ -372,6 +375,383 @@ function renderFlipClock(durationMs: number, nowMs: number): VisualAnimation {
     return canvas;
   });
   return { frames, frameDelaysMs: delays, label: "翻页钟" };
+}
+
+// 7-segment geometry for six digits on the 52px panel: 7x14 boxes with a 2px
+// stroke and 1px colons keep HH:MM:SS readable while every glyph pixel stays
+// dense enough that per-particle twinkle reads as stardust at 52x16.
+const FLUX_SEGMENT_RECTS: Readonly<Record<string, readonly [number, number, number, number]>> = {
+  a: [2, 0, 3, 2],
+  b: [5, 2, 2, 4],
+  c: [5, 8, 2, 4],
+  d: [2, 12, 3, 2],
+  e: [0, 8, 2, 4],
+  f: [0, 2, 2, 4],
+  g: [2, 6, 3, 2],
+};
+const FLUX_DIGIT_SEGMENTS = [
+  "abcdef", "bc", "abged", "abgcd", "fgbc", "afgcd", "afgecd", "abc", "abcdefg", "abcfgd",
+] as const;
+const FLUX_DIGIT_X = [1, 9, 19, 27, 37, 45] as const;
+const FLUX_COLON_X = [17, 35] as const;
+// Pixel count of "8", the densest glyph: every region keeps this many particle
+// slots so digit changes only flip slots between active and parked.
+const FLUX_DIGIT_CAPACITY = 50;
+
+function fluxGlyphTargets(char: string, originX: number): Array<readonly [number, number]> {
+  const targets: Array<readonly [number, number]> = [];
+  for (const segment of FLUX_DIGIT_SEGMENTS[Number(char)] ?? "") {
+    const [sx, sy, sw, sh] = FLUX_SEGMENT_RECTS[segment]!;
+    for (let dy = 0; dy < sh; dy += 1) {
+      for (let dx = 0; dx < sw; dx += 1) targets.push([originX + sx + dx, 1 + sy + dy]);
+    }
+  }
+  return targets;
+}
+
+function timeLabelSeconds(timestamp: number): string {
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+interface FluxPalette { core: Rgb; tip: Rgb; sparkle: Rgb }
+
+const FLUX_PALETTES: Readonly<Record<"cyan" | "violet" | "ember" | "mint", FluxPalette>> = {
+  cyan: { core: [24, 120, 255], tip: [110, 235, 255], sparkle: [225, 250, 255] },
+  violet: { core: [150, 40, 255], tip: [255, 110, 225], sparkle: [255, 225, 250] },
+  ember: { core: [255, 96, 12], tip: [255, 205, 96], sparkle: [255, 245, 215] },
+  mint: { core: [16, 200, 110], tip: [150, 255, 200], sparkle: [230, 255, 240] },
+};
+const FLUX_CYCLE = [
+  FLUX_PALETTES.cyan, FLUX_PALETTES.violet, FLUX_PALETTES.ember, FLUX_PALETTES.mint,
+] as const;
+
+interface FluxParticle {
+  targetX: number; targetY: number;
+  x: number; y: number;
+  vx: number; vy: number;
+  prevX: number; prevY: number;
+  prev2X: number; prev2Y: number;
+  glideFromX: number; glideFromY: number;
+  glideStart: number;
+  activatedAt: number;
+  deactivatedAt: number;
+  active: boolean;
+  holdX: number; holdY: number;
+  regionCenterX: number;
+  tint: number;
+  twinkleRate: number;
+  twinklePhase: number;
+  launchFrame: number;
+}
+
+function renderFlux(
+  durationMs: number,
+  nowMs: number,
+  random: Random,
+  speed: number,
+  paletteId: NonNullable<VisualEffectOptions["fluxPalette"]>,
+  burstMode: NonNullable<VisualEffectOptions["fluxBurst"]>,
+): VisualAnimation {
+  const delays = animationPlan(durationMs, 84 / speed);
+  const total = delays.length;
+  const elapsedAt: number[] = [];
+  let elapsed = 0;
+  for (const delay of delays) {
+    elapsedAt.push(elapsed);
+    elapsed += delay;
+  }
+  // Both morph windows are wall-time budgets, not frame counts: long items cap
+  // at 120 frames and stretch the delay to seconds, where a multi-frame glide
+  // would never finish (the seconds column retargets every frame) and a fixed
+  // 4-frame afterglow would smear old digits for half a minute. Past the
+  // budget the morph snaps and the vacated slot goes dark immediately.
+  const glideFrames = delays[0]! >= 450 ? 1 : Math.max(2, Math.round(450 / delays[0]!));
+  const fadeFrames = delays[0]! >= 450 ? 0 : 4;
+
+  // The burst is scheduled around the first minute flip inside the window when
+  // there is one, so the explosion doubles as the minute-change transition:
+  // old digits erupt, the glitter rain crosses the flip, new digits condense.
+  const minute0 = new Date(nowMs).getMinutes();
+  let flipFrame = -1;
+  for (let index = 1; index < total; index += 1) {
+    if (new Date(nowMs + elapsedAt[index]!).getMinutes() !== minute0) {
+      flipFrame = index;
+      break;
+    }
+  }
+  const swellLen = Math.max(2, Math.round(total * 0.033));
+  const eruptLen = Math.max(3, Math.round(total * 0.066));
+  const rainLen = Math.max(4, Math.round(total * 0.166));
+  const gatherLen = Math.max(4, Math.round(total * 0.166));
+  const tail = Math.max(2, Math.round(total * 0.08));
+  let swellStart = total;
+  if (total >= 30 && burstMode !== "never" && (burstMode === "always" || flipFrame >= 0)) {
+    const latest = total - (swellLen + eruptLen + rainLen + gatherLen) - tail;
+    if (latest >= 2) {
+      const preferred = flipFrame >= 0
+        ? flipFrame - swellLen - eruptLen - Math.round(rainLen / 2)
+        : Math.round(total * 0.32);
+      swellStart = Math.max(2, Math.min(latest, preferred));
+    }
+  }
+  const hasBurst = swellStart < total;
+  const burstStart = hasBurst ? swellStart + swellLen : total;
+  const driftStart = hasBurst ? burstStart + eruptLen : total;
+  const gatherStart = hasBurst ? driftStart + rainLen : total;
+  const settleStart = hasBurst ? gatherStart + gatherLen : total;
+
+  const paletteAt = (timestamp: number): FluxPalette => {
+    if (paletteId !== "cycle") return FLUX_PALETTES[paletteId];
+    const date = new Date(timestamp);
+    const minuteIndex = date.getHours() * 60 + date.getMinutes();
+    const current = FLUX_CYCLE[minuteIndex % FLUX_CYCLE.length]!;
+    const intoMinuteMs = date.getSeconds() * 1_000 + date.getMilliseconds();
+    if (intoMinuteMs >= 700) return current;
+    const previous = FLUX_CYCLE[(minuteIndex + FLUX_CYCLE.length - 1) % FLUX_CYCLE.length]!;
+    const blend = intoMinuteMs / 700;
+    return {
+      core: mixColor(previous.core, current.core, blend),
+      tip: mixColor(previous.tip, current.tip, blend),
+      sparkle: mixColor(previous.sparkle, current.sparkle, blend),
+    };
+  };
+
+  // Eight regions — six digit slots and two fixed colons — each with a fixed
+  // particle pool; a digit change flips slots active/parked and glides them.
+  interface FluxRegion {
+    char: string;
+    base: number;
+    capacity: number;
+    centerX: number;
+    centerY: number;
+    targets: Array<readonly [number, number]>;
+    digitIndex: number;
+  }
+  const regions: FluxRegion[] = [];
+  const particles: FluxParticle[] = [];
+  const label0 = timeLabelSeconds(nowMs);
+  const digits0 = label0.replace(/:/g, "");
+  const addRegion = (char: string, targets: Array<readonly [number, number]>, capacity: number, centerX: number, digitIndex: number) => {
+    regions.push({ char, base: particles.length, capacity, centerX, centerY: 8, targets, digitIndex });
+    for (let slot = 0; slot < capacity; slot += 1) {
+      const target = targets[slot];
+      const parked = target ?? ([centerX, 8] as const);
+      particles.push({
+        targetX: parked[0], targetY: parked[1],
+        x: parked[0], y: parked[1],
+        vx: 0, vy: 0,
+        prevX: parked[0], prevY: parked[1],
+        prev2X: parked[0], prev2Y: parked[1],
+        glideFromX: parked[0], glideFromY: parked[1],
+        glideStart: -1,
+        activatedAt: -1,
+        deactivatedAt: -1,
+        active: target !== undefined,
+        holdX: parked[0], holdY: parked[1],
+        regionCenterX: centerX,
+        tint: random() ** 1.5,
+        twinkleRate: 0.5 + random() * 1.2,
+        twinklePhase: random(),
+        launchFrame: 0,
+      });
+    }
+  };
+  for (let index = 0; index < 6; index += 1) {
+    addRegion(digits0[index]!, fluxGlyphTargets(digits0[index]!, FLUX_DIGIT_X[index]!), FLUX_DIGIT_CAPACITY, FLUX_DIGIT_X[index]! + 3, index);
+  }
+  for (const colonX of FLUX_COLON_X) {
+    const dots: Array<readonly [number, number]> = [[colonX, 4], [colonX, 5], [colonX, 10], [colonX, 11]];
+    addRegion(":", dots, dots.length, colonX, -1);
+  }
+  for (const particle of particles) particle.launchFrame = burstStart + Math.floor(random() * 3);
+  const centerX = DISPLAY_WIDTH / 2;
+  const centerY = DISPLAY_HEIGHT / 2;
+
+  let previousLabel = label0;
+  const frames = delays.map((delay, frameIndex) => {
+    const timestamp = nowMs + elapsedAt[frameIndex]!;
+    const seconds = elapsedAt[frameIndex]! / 1_000;
+    const dt = Math.min(0.12, Math.max(0.03, delay / 1_000)) * speed;
+    const inSwell = hasBurst && frameIndex >= swellStart && frameIndex < burstStart;
+    const inFlight = hasBurst && frameIndex >= burstStart && frameIndex < gatherStart;
+    const inGather = hasBurst && frameIndex >= gatherStart && frameIndex < settleStart;
+    const inShimmer = !inSwell && !inFlight && !inGather;
+    const palette = paletteAt(timestamp);
+
+    // Retarget on every wall-clock digit change; the seconds column morphs
+    // once a second while the rest of the face stays put.
+    const label = timeLabelSeconds(timestamp);
+    if (label !== previousLabel) {
+      const digits = label.replace(/:/g, "");
+      for (const region of regions) {
+        if (region.digitIndex < 0 || digits[region.digitIndex] === region.char) continue;
+        region.char = digits[region.digitIndex]!;
+        region.targets = fluxGlyphTargets(region.char, FLUX_DIGIT_X[region.digitIndex]!);
+        for (let slot = 0; slot < region.capacity; slot += 1) {
+          const particle = particles[region.base + slot]!;
+          const target = region.targets[slot];
+          if (target) {
+            if (!particle.active) {
+              particle.active = true;
+              particle.activatedAt = frameIndex;
+              particle.deactivatedAt = -1;
+            }
+            if (particle.targetX !== target[0] || particle.targetY !== target[1]) {
+              particle.glideFromX = particle.x;
+              particle.glideFromY = particle.y;
+              particle.glideStart = inShimmer ? frameIndex : -1;
+              particle.targetX = target[0];
+              particle.targetY = target[1];
+            }
+          } else if (particle.active) {
+            particle.active = false;
+            particle.deactivatedAt = inShimmer ? frameIndex : -1;
+          }
+        }
+      }
+      previousLabel = label;
+    }
+
+    const glow = new Float32Array(DISPLAY_WIDTH * DISPLAY_HEIGHT * 3);
+    const splat = (x: number, y: number, tone: Rgb, gain: number) => {
+      const baseX = Math.floor(x);
+      const baseY = Math.floor(y);
+      const fractionX = x - baseX;
+      const fractionY = y - baseY;
+      for (const [px, py, weight] of [
+        [baseX, baseY, (1 - fractionX) * (1 - fractionY)],
+        [baseX + 1, baseY, fractionX * (1 - fractionY)],
+        [baseX, baseY + 1, (1 - fractionX) * fractionY],
+        [baseX + 1, baseY + 1, fractionX * fractionY],
+      ] as const) {
+        if (px < 0 || px >= DISPLAY_WIDTH || py < 0 || py >= DISPLAY_HEIGHT || weight < 0.02) continue;
+        const offset = (py * DISPLAY_WIDTH + px) * 3;
+        glow[offset] += tone[0] * gain * weight;
+        glow[offset + 1] += tone[1] * gain * weight;
+        glow[offset + 2] += tone[2] * gain * weight;
+      }
+    };
+
+    for (const particle of particles) {
+      let brightness = 0;
+      let tone = mixColor(palette.core, palette.tip, particle.tint);
+      let trailGain = 0;
+      particle.prev2X = particle.prevX;
+      particle.prev2Y = particle.prevY;
+      particle.prevX = particle.x;
+      particle.prevY = particle.y;
+
+      if (inShimmer) {
+        if (!particle.active) {
+          // Parked slots stay dark; a just-vacated slot fades where it stood.
+          if (particle.deactivatedAt < 0 || frameIndex - particle.deactivatedAt >= fadeFrames) continue;
+          brightness = 0.5 * (1 - (frameIndex - particle.deactivatedAt) / fadeFrames);
+        } else {
+          if (particle.glideStart >= 0 && frameIndex - particle.glideStart < glideFrames) {
+            const step = (frameIndex - particle.glideStart + 1) / glideFrames;
+            const eased = step * step * (3 - 2 * step);
+            particle.x = particle.glideFromX + (particle.targetX - particle.glideFromX) * eased
+              + (random() - 0.5) * 0.8 * (1 - eased);
+            particle.y = particle.glideFromY + (particle.targetY - particle.glideFromY) * eased;
+          } else {
+            particle.glideStart = -1;
+            particle.x = particle.targetX;
+            particle.y = particle.targetY;
+          }
+          const wave = Math.sin(Math.PI * 2 * (particle.twinkleRate * seconds * speed + particle.twinklePhase));
+          brightness = 0.5 + 0.4 * (wave * 0.5 + 0.5);
+          if (particle.activatedAt >= 0) {
+            brightness *= Math.min(1, (frameIndex - particle.activatedAt + 1) / glideFrames);
+          }
+          const sparkle = Math.sin(frameIndex * 12.9898 + particle.x * 78.233 + particle.y * 37.719) * 43758.5453;
+          if (sparkle - Math.floor(sparkle) > 0.982) {
+            tone = palette.sparkle;
+            brightness = 1;
+          }
+        }
+      } else if (inSwell) {
+        // The face boils in place and flares white-hot before letting go —
+        // parked slots materialise inside the flare so the eruption reads
+        // denser than the digits it destroys.
+        const swell = (frameIndex - swellStart + 1) / swellLen;
+        particle.x = particle.targetX + (particle.targetX - particle.regionCenterX) * 0.3 * swell
+          + (random() - 0.5) * 1.4 * swell;
+        particle.y = particle.targetY + (particle.targetY - centerY) * 0.4 * swell
+          + (random() - 0.5) * swell;
+        brightness = (particle.active ? 0.9 : 0.5) + 0.4 * swell;
+        tone = mixColor(tone, palette.sparkle, 0.35 + 0.4 * swell);
+      } else if (inFlight) {
+        if (frameIndex === particle.launchFrame) {
+          particle.vx = (random() - 0.5) * 22 + (particle.x - centerX) * 0.35;
+          particle.vy = -(10 + random() * 26);
+        }
+        if (frameIndex >= particle.launchFrame) {
+          const gravity = frameIndex < driftStart ? 16 : 9;
+          const dragRate = frameIndex < driftStart ? 1.0 : 2.1;
+          particle.vy += gravity * dt;
+          const drag = Math.exp(-dragRate * dt);
+          particle.vx *= drag;
+          particle.vy *= drag;
+          particle.x += particle.vx * dt;
+          particle.y += particle.vy * dt;
+          const restitution = 0.2 + 0.2 * particle.twinklePhase;
+          if (particle.x < 0) { particle.x = 0; particle.vx = Math.abs(particle.vx) * restitution; }
+          if (particle.x > DISPLAY_WIDTH - 1) { particle.x = DISPLAY_WIDTH - 1; particle.vx = -Math.abs(particle.vx) * restitution; }
+          if (particle.y < 0) { particle.y = 0; particle.vy = Math.abs(particle.vy) * restitution; }
+          if (particle.y > DISPLAY_HEIGHT - 1) { particle.y = DISPLAY_HEIGHT - 1; particle.vy = -Math.abs(particle.vy) * restitution; }
+        }
+        brightness = 0.65 + 0.35 * Math.sin(seconds * 7 + particle.twinklePhase * Math.PI * 2);
+        if (frameIndex < particle.launchFrame + 3) tone = mixColor(tone, palette.sparkle, 0.5);
+        // Streaks only while moving fast: eruption trails, twinkling rain dots.
+        const velocity = Math.hypot(particle.vx, particle.vy);
+        trailGain = velocity > 6 ? Math.min(1, velocity / 26) : 0;
+        const sparkle = Math.sin(frameIndex * 9.171 + particle.twinklePhase * 91.7) * 43758.5453;
+        if (frameIndex >= driftStart && sparkle - Math.floor(sparkle) > 0.93) {
+          tone = palette.sparkle;
+          brightness = 1;
+        }
+      } else {
+        if (frameIndex === gatherStart) {
+          particle.holdX = particle.x;
+          particle.holdY = particle.y;
+          particle.glideStart = -1;
+        }
+        // Orbit-condense: the swarm spirals into a boiling clump that tightens
+        // onto the digits instead of flying home in straight lines.
+        const progress = (frameIndex - gatherStart + 1) / gatherLen;
+        const eased = progress * progress * (3 - 2 * progress);
+        const orbit = particle.twinklePhase * Math.PI * 2 + frameIndex * 0.5;
+        const radius = 1 - eased;
+        const swirlX = particle.targetX + Math.sin(orbit) * 2.4 * radius;
+        const swirlY = particle.targetY + Math.cos(orbit) * 1.2 * radius;
+        particle.x = particle.holdX + (swirlX - particle.holdX) * eased;
+        particle.y = particle.holdY + (swirlY - particle.holdY) * eased;
+        brightness = (0.5 + 0.5 * eased) * (particle.active ? 1 : 1 - eased);
+        if (brightness < 0.03) continue;
+      }
+
+      splat(particle.x, particle.y, tone, brightness);
+      if (trailGain > 0) {
+        splat(particle.prevX, particle.prevY, tone, brightness * 0.4 * trailGain);
+        splat(particle.prev2X, particle.prev2Y, tone, brightness * 0.16 * trailGain);
+      }
+    }
+
+    const canvas = new PixelCanvas(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    for (let y = 0; y < DISPLAY_HEIGHT; y += 1) {
+      for (let x = 0; x < DISPLAY_WIDTH; x += 1) {
+        const offset = (y * DISPLAY_WIDTH + x) * 3;
+        const red = Math.min(255, Math.round(glow[offset]!));
+        const green = Math.min(255, Math.round(glow[offset + 1]!));
+        const blue = Math.min(255, Math.round(glow[offset + 2]!));
+        if (red + green + blue > 0) canvas.setPixel(x, y, [red, green, blue]);
+      }
+    }
+    return canvas;
+  });
+  return { frames, frameDelaysMs: delays, label: "流光时钟" };
 }
 
 const LIFE_CELLS = DISPLAY_WIDTH * DISPLAY_HEIGHT;
@@ -1008,6 +1388,16 @@ export function renderVisualEffect(
     return renderFireworks(durationMs, random, speed, options.fireworkDensity ?? 2);
   }
   if (effectId === "flipclock") return renderFlipClock(durationMs, nowMs);
+  if (effectId === "flux") {
+    return renderFlux(
+      durationMs,
+      nowMs,
+      random,
+      speed,
+      options.fluxPalette ?? "cycle",
+      options.fluxBurst ?? "always",
+    );
+  }
   if (effectId === "life") {
     return renderLife(durationMs, nowMs, random, speed, options.lifeStart ?? "digits");
   }

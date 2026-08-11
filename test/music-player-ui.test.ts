@@ -340,11 +340,12 @@ describe("music player UI", () => {
     expect(css).not.toMatch(/\.music-stage__sticky\s*\{[^}]*overscroll-behavior:\s*contain;/s);
     expect(css).toContain(".music-firmware-dialog[data-open]");
     expect(css).toContain("--tw-translate-x: 0px !important");
+    // 底部主导航一列一个主视图（内容/画板/素材库/音乐/游戏/系统）。
     expect(globals).toMatch(
-      /@media \(max-width: 52rem\)[\s\S]*?\.main-tabs\s*\{[\s\S]*?grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);/,
+      /@media \(max-width: 52rem\)[\s\S]*?\.main-tabs\s*\{[\s\S]*?grid-template-columns:\s*repeat\(6, minmax\(0, 1fr\)\);/,
     );
     expect(globals).toMatch(
-      /@media \(max-width: 60rem\) and \(max-height: 34rem\)[\s\S]*?\.main-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);/,
+      /@media \(max-width: 60rem\) and \(max-height: 34rem\)[\s\S]*?\.main-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(6, minmax\(0, 1fr\)\);/,
     );
   });
 

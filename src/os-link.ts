@@ -34,6 +34,17 @@ export interface OsMirrorFrame {
   receivedAt: number;
 }
 
+export interface OsNowPlaying {
+  track: string;
+  artist: string;
+  playing: boolean;
+  /** Playhead as of `stampedAt`; the firmware extrapolates from there. */
+  positionMs: number;
+  durationMs: number;
+  /** The lyric line covering `positionMs`, or "" when there are no lyrics. */
+  lyric: string;
+}
+
 export interface OsTelemetry {
   screen: string;
   focus: string;
@@ -74,6 +85,8 @@ export class OsLinkHub {
   private telemetry: OsTelemetry | null = null;
   private mirror: OsMirrorFrame | null = null;
   private mirrorRequestedAt = 0;
+  private nowPlaying: OsNowPlaying | null = null;
+  private nowPlayingStampedAt = 0;
   private readonly waiters = new Set<Waiter>();
 
   constructor(private readonly now: () => number = () => Date.now()) {}
@@ -106,6 +119,45 @@ export class OsLinkHub {
 
   getMenu(): OsMenuEntry[] {
     return this.menu.map((entry) => ({ ...entry }));
+  }
+
+  /**
+   * What is playing, resolved to text the panel can actually show.
+   *
+   * The device-facing music endpoint carries a track *id*, which is useless on
+   * a 52x16 panel — the title only exists after the provider's trackDetail call,
+   * which needs credentials the firmware does not have. Resolving it here is
+   * also what lets the same lookup feed the lyric line.
+   *
+   * The playhead deliberately does NOT bump the sequence. It moves a thousand
+   * times a second and every bump releases every parked long poll; the firmware
+   * gets a position plus the moment it was true and advances it locally, which
+   * is both cheaper and smoother than any poll rate could be.
+   */
+  setNowPlaying(now: OsNowPlaying | null): void {
+    const next = now === null ? null : {
+      track: clampLabel(sanitizeField(now.track)),
+      artist: clampLabel(sanitizeField(now.artist)),
+      playing: now.playing,
+      positionMs: Math.max(0, Math.round(now.positionMs)),
+      durationMs: Math.max(0, Math.round(now.durationMs)),
+      lyric: clampLabel(sanitizeField(now.lyric)),
+    };
+    const before = this.nowPlaying;
+    const textChanged = (before === null) !== (next === null) ||
+      (before !== null && next !== null && (
+        before.track !== next.track ||
+        before.artist !== next.artist ||
+        before.playing !== next.playing ||
+        before.lyric !== next.lyric
+      ));
+    this.nowPlaying = next;
+    this.nowPlayingStampedAt = this.now();
+    if (textChanged) this.bump();
+  }
+
+  getNowPlaying(): OsNowPlaying | null {
+    return this.nowPlaying === null ? null : { ...this.nowPlaying };
   }
 
   report(telemetry: Omit<OsTelemetry, "receivedAt">): void {
@@ -169,6 +221,23 @@ export class OsLinkHub {
     // cheap on a LAN but not free on a device with one core and a 15 ms panel.
     lines.push(`mirror\t${this.mirrorWanted() ? 1 : 0}`);
     if (this.display.focus !== null) lines.push(`focus\t${this.display.focus}`);
+    const np = this.nowPlaying;
+    if (np !== null) {
+      lines.push(`np\t1`);
+      lines.push(`track\t${np.track}`);
+      lines.push(`artist\t${np.artist}`);
+      lines.push(`playing\t${np.playing ? 1 : 0}`);
+      // Advanced to now rather than sent as captured: a document that parked in
+      // a long poll for eight seconds would otherwise hand the firmware a
+      // playhead eight seconds stale the instant it arrived.
+      const drift = np.playing ? Math.max(0, this.now() - this.nowPlayingStampedAt) : 0;
+      const position = np.durationMs > 0
+        ? Math.min(np.durationMs, np.positionMs + drift)
+        : np.positionMs + drift;
+      lines.push(`pos\t${Math.round(position)}`);
+      lines.push(`dur\t${np.durationMs}`);
+      if (np.lyric !== "") lines.push(`lyric\t${np.lyric}`);
+    }
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {
       lines.push(`item\t${entry.kind}\t${entry.id}\t${entry.label}`);

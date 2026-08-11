@@ -37,7 +37,11 @@ export interface PixelDrawContext {
 
 export interface GameEngine {
   readonly meta: {
-    id: "breakout" | "flappy" | "snake" | "pong";
+    // The full arcade, matching device/tc002-arcade/app/src/games/ one for one.
+    // The first four were written here and ported to C++; racer, shooter and
+    // tetris went the other way, because they were built for the firmware's
+    // knob before the console had a place to put them.
+    id: "breakout" | "flappy" | "snake" | "pong" | "racer" | "shooter" | "tetris";
     title: string;
     hint: string;
     twoPlayers?: boolean;

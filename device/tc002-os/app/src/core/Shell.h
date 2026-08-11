@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "core/Surface.h"
+#include "core/Transitions.h"
 #include "ui/LevelOverlay.h"
 #include "ui/Screen.h"
 
@@ -29,14 +30,36 @@ namespace tcos {
  */
 class Shell {
  public:
-  enum Transition {
-    kCut,          // no animation
-    kPushForward,  // descending: new screen slides in from the right
-    kPopBack,      // ascending: previous screen slides back in from the left
-    kFadeIn,       // boot handoff
+  /**
+   * How a destination arrives when you descend into it.
+   *
+   * Every push used to play the same 220 ms horizontal slide, which reads as
+   * scrolling to a sibling rather than as entering somewhere — the four root
+   * destinations are four different kinds of place and were announcing
+   * themselves identically. A destination now declares its own arrival, drawn
+   * from the motifs the music and arcade firmwares already earned (see
+   * core/Transitions.h for what each one is and where it came from).
+   *
+   * Registration is by pointer and happens once at startup, because screens on
+   * this device are long-lived singletons rather than objects allocated per
+   * visit; an unregistered screen gets kEntryDive.
+   */
+  enum Entry {
+    kEntryDive = 0,   // generic descend — the default
+    kEntryCrt,        // 轮播: a display switching channels
+    kEntryEqualiser,  // 音乐: bars rising into the room
+    kEntryCartridge,  // 游戏: a shine sweep seating a cartridge
+    kEntryDrop,       // 设置: a drawer pulled down onto its stop
   };
 
+  // The handoff/fade baseline. Direction-carrying entries set their own length
+  // (transition::durationMs), so this is no longer "how long a transition is".
   static const int kTransitionMs = 220;
+
+  // Screens are registered by pointer, so the table is a fixed array and costs
+  // no allocation at all. Five destinations exist today; 8 leaves room without
+  // pretending this is a general-purpose map.
+  static const int kMaxEntryStyles = 8;
 
   Shell(int width, int height);
 
@@ -47,11 +70,24 @@ class Shell {
   void push(Screen* screen, int nowMs);
   void pop(int nowMs);
 
+  /**
+   * Declares how `screen` arrives. Survives reset(), because it describes the
+   * screen and not the current stack.
+   */
+  void setEntryStyle(Screen* screen, Entry entry);
+
+  /** How long that entry takes; the self-check and callers sample against it. */
+  static int entryMs(Entry entry);
+
   Screen* top() const;
   int depth() const { return static_cast<int>(mStack.size()); }
 
   // Routes an input to the top screen; unconsumed kInputHold pops one level.
   void onInput(Input input, int nowMs);
+
+  /** True when the top screen wants the side buttons raw (a game does). */
+  bool topWantsRawButtons() const;
+  void deliverRawButton(Input which, bool down, int nowMs);
 
   // Composes the current frame. The single producer of finished pixels in the
   // firmware, which is what gives the console mirror exactly one tee point.
@@ -70,13 +106,27 @@ class Shell {
   Shell(const Shell&);
   Shell& operator=(const Shell&);
 
-  void beginTransition(Transition kind, int nowMs);
+  // Which direction the running transition is being played in. Ascending is the
+  // descent evaluated backwards rather than a second operator, so a style can
+  // never look right going in and wrong coming out.
+  enum Motion { kIdle, kDescend, kAscend };
+
+  void beginTransition(transition::Style style, Motion motion, int nowMs);
+  transition::Style styleFor(Screen* screen) const;
 
   std::vector<Screen*> mStack;
+  // Parallel to mStack: the style each level was entered with, so leaving it
+  // replays that same motion. Grows only on navigation, never per frame.
+  std::vector<transition::Style> mStackStyles;
   Surface mOutgoing;   // snapshot of the frame we are leaving
   Surface mIncoming;   // scratch for the frame we are entering
   LevelOverlay mOverlay;
-  Transition mTransition;
+  Screen* mEntryScreens[kMaxEntryStyles];
+  Entry mEntryKinds[kMaxEntryStyles];
+  int mEntryCount;
+  Motion mMotion;
+  transition::Style mMotionStyle;
+  int mMotionMs;
   int mTransitionStartMs;
   bool mHasOutgoing;
 };

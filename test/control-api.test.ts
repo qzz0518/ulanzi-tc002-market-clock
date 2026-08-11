@@ -741,7 +741,7 @@ describe("local control API", () => {
     const handler = createControlHandler(fakeWorkspaceController(previewCalls));
     const catalog = await handler(new Request("http://127.0.0.1:43820/api/catalog"));
     const catalogBody = await catalog.json();
-    expect(catalogBody.contents).toHaveLength(30);
+    expect(catalogBody.contents).toHaveLength(31);
     expect(catalogBody.categories.map((category: { id: string }) => category.id)).toEqual([
       "market", "tools", "visual", "creative",
     ]);
@@ -1071,5 +1071,85 @@ describe("local control API", () => {
       headers: { Origin: "http://127.0.0.1:43820" },
     }));
     expect((await reset.json()).host).toEqual({ host: envHost, envHost, source: "env" });
+  });
+});
+
+describe("tc002-os console routes", () => {
+  // The console cannot compare a service timestamp against its own clock: the
+  // two are not the same clock, and a browser a few seconds out of step reports
+  // a live stream as stale — or paints a two-minute-old frame as current, which
+  // is what actually happened before these fields existed.
+  test("mirror and state carry a service-measured age", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+
+    // No frame yet, but the lease state is still reportable.
+    const empty = await handler(new Request("http://127.0.0.1/api/os/mirror"));
+    const emptyBody = await empty.json() as { frame: unknown; wanted: boolean };
+    expect(emptyBody.frame).toBeNull();
+    expect(emptyBody.wanted).toBe(true); // asking IS the subscription
+
+    osLink.putMirrorFrame(Buffer.alloc(52 * 16 * 3).toString("base64"));
+    const mirror = await handler(new Request("http://127.0.0.1/api/os/mirror"));
+    const frame = (await mirror.json() as { frame: { ageMs: number } }).frame;
+    expect(typeof frame.ageMs).toBe("number");
+    expect(frame.ageMs).toBeGreaterThanOrEqual(0);
+
+    osLink.report({
+      screen: "launcher",
+      focus: "",
+      wifi: "net",
+      ip: "192.168.8.240",
+      uptimeMs: 1_000,
+      freeKb: 16_000,
+      supplicantRestarts: 0,
+    });
+    const state = await handler(new Request("http://127.0.0.1/api/os/state"));
+    const body = await state.json() as {
+      telemetry: { ageMs: number };
+      live: boolean;
+      mirrorWanted: boolean;
+    };
+    expect(typeof body.telemetry.ageMs).toBe("number");
+    expect(body.live).toBe(true);
+    // Without this the console cannot tell "the device has not started
+    // streaming yet" from "the device is not streaming at all".
+    expect(body.mirrorWanted).toBe(true);
+  });
+
+  // Naming a channel without saying who is driving used to succeed and do
+  // nothing: the request was accepted, the response looked plausible, and the
+  // device never moved.
+  test("a pin request missing `pinned` is refused rather than coerced", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1";
+
+    const refused = await handler(new Request(`${origin}/api/os/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ focus: "btc" }),
+    }));
+    expect(refused.status).toBe(400);
+    expect(osLink.getDisplay()).toEqual({ focus: null, pinned: false });
+
+    const accepted = await handler(new Request(`${origin}/api/os/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ focus: "btc", pinned: true }),
+    }));
+    expect(accepted.status).toBe(200);
+    expect(osLink.getDisplay()).toEqual({ focus: "btc", pinned: true });
+
+    // Releasing needs no focus, so it is still a one-field call.
+    const released = await handler(new Request(`${origin}/api/os/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ focus: null, pinned: false }),
+    }));
+    expect(released.status).toBe(200);
+    expect(osLink.getDisplay()).toEqual({ focus: null, pinned: false });
   });
 });

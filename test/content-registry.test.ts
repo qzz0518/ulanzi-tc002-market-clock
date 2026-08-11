@@ -91,7 +91,7 @@ describe("built-in content registry", () => {
         };
       },
     };
-    expect(CONTENT_DEFINITIONS).toHaveLength(30);
+    expect(CONTENT_DEFINITIONS).toHaveLength(31);
     expect(new Set(getContentCatalog().map((entry) => entry.category))).toEqual(
       new Set(["market", "tools", "visual", "creative"]),
     );
@@ -104,6 +104,30 @@ describe("built-in content registry", () => {
       expect(rendered.frameDelaysMs.reduce((sum, delay) => sum + delay, 0)).toBe(1_000);
       expect(rendered.frames.every((frame) => frame.width === 52 && frame.height === 16)).toBe(true);
     }
+  });
+
+  test("routes flux palette and burst options through the registry whitelist", async () => {
+    const context = {
+      nowMs: Date.parse("2026-08-06T06:00:00Z"),
+      forceRefresh: false,
+      async getMarket(): Promise<never> { throw new Error("unused"); },
+      async getInstrumentMarket(): Promise<never> { throw new Error("unused"); },
+      async getWeather(): Promise<never> { throw new Error("unused"); },
+      async getPixelAsset(): Promise<never> { throw new Error("unused"); },
+    };
+    const definition = CONTENT_DEFINITIONS.find((entry) => entry.id === "visual:flux")!;
+    const bytes = async (options: Record<string, string>) => {
+      const item = createDefaultContentItem(definition.id);
+      item.durationMs = 4_000;
+      item.options = { ...item.options, ...options };
+      const rendered = await definition.render(context, item);
+      return rendered.frames.map((frame) => Buffer.from(frame.pixels).toString("base64")).join("|");
+    };
+    const defaults = await bytes({});
+    expect(await bytes({ fluxPalette: "ember" })).not.toBe(defaults);
+    expect(await bytes({ fluxBurst: "never" })).not.toBe(defaults);
+    // Unknown values must fall back to the defaults instead of leaking through.
+    expect(await bytes({ fluxPalette: "chartreuse", fluxBurst: "sometimes" })).toBe(defaults);
   });
 
   test("preserves the exact four upstream stock PNG byte streams", () => {

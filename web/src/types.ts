@@ -283,6 +283,6 @@ export interface ArcadeStatus {
 // 哪种侧载固件正在直连；两种固件互斥，最多一种在线。
 export type FirmwareKind = "music" | "arcade";
 
-export type StudioView = "console" | "canvas" | "library" | "music" | "game";
+export type StudioView = "console" | "canvas" | "library" | "music" | "game" | "zos";
 export type PreviewScope = "item" | "channel";
 export type BusyAction = "preview" | "push" | null;

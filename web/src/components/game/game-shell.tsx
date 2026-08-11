@@ -8,13 +8,16 @@ import {
 import {
   Bird,
   Blocks,
+  Car,
   ChevronRight,
   Gamepad2,
+  Grid2x2,
   HardDrive,
   Pause,
   Play,
   QrCode,
   Radio,
+  Rocket,
   RotateCcw,
   Swords,
   TriangleAlert,
@@ -48,6 +51,9 @@ import {
 import { createFlappyGame } from "@/lib/games/flappy";
 import { createSnakeGame } from "@/lib/games/snake";
 import { createPongGame } from "@/lib/games/pong";
+import { createRacerGame } from "@/lib/games/racer";
+import { createShooterGame } from "@/lib/games/shooter";
+import { createTetrisGame } from "@/lib/games/tetris";
 import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
 import { createLiveScreen, type LiveScreen } from "@/lib/live-screen";
 import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
@@ -73,6 +79,19 @@ const GAME_REGISTRY: GameRegistryEntry[] = [
   { id: "flappy", title: "像素小鸟", icon: Bird, create: () => createFlappyGame() },
   { id: "snake", title: "贪吃蛇", icon: Worm, create: () => createSnakeGame() },
   { id: "pong", title: "双人 Pong", icon: Swords, create: () => createPongGame() },
+  // The last three were written for the firmware's knob first and ported back
+  // here, so the console now carries the same seven games the device does. Their
+  // simulations are asserted byte-identical against the C++ (test/racer.test.ts,
+  // shooter.test.ts, tetris.test.ts) — which is what makes driving both from one
+  // input stream possible later.
+  //
+  // Each is left on its engine's default seed on purpose: a fixed seed is what
+  // lets a console session and a device session be lined up. A lockstep driver
+  // must pass the SAME seed to both sides; the device seeds from time(0), so it
+  // is the device that has to be told, not this side.
+  { id: "racer", title: "像素赛车", icon: Car, create: () => createRacerGame() },
+  { id: "shooter", title: "太空射击", icon: Rocket, create: () => createShooterGame() },
+  { id: "tetris", title: "俄罗斯方块", icon: Grid2x2, create: () => createTetrisGame() },
 ];
 
 // Pads join with a human-typeable 4-character room code; look-alike glyphs are

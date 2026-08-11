@@ -44,6 +44,14 @@ class FrameBundle {
 
   int totalDurationMs() const { return mTotalMs; }
 
+  /**
+   * Exchanges contents with `other` in constant time. A 360-frame bundle is
+   * ~900 KB on a device with ~1 MB free, so handing one from the download
+   * thread to the UI has to be a pointer swap; copying one would not merely be
+   * slow, it would not fit.
+   */
+  void swap(FrameBundle& other);
+
   // Guard rails, exposed so the host self-check asserts the real values.
   static const int kMaxFrames = 600;
   static const int kMinDelayMs = 20;

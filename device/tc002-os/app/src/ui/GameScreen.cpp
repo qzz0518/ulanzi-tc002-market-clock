@@ -52,19 +52,16 @@ bool GameScreen::onInput(Input input, int nowMs) {
   (void)nowMs;
   if (mEngine == 0) return false;
 
-  const bool playing = mEngine->hud().phase == GameHud::Playing;
-
-  // A hold only means "leave" when the game is not running. During play a long
-  // press belongs to the game — several use it — and stealing it would eject the
-  // player mid-rally.
+  // A hold always leaves, in every phase.
+  //
+  // The first version only exited when the game was NOT playing, on the theory
+  // that a long press belonged to the game. That was wrong: every engine acts on
+  // the DOWN edge of a press (`if (!event.down) break;`) or on the held state of
+  // Left/Right, and none reads a hold. Since the side buttons now reach the
+  // engine raw, the only key that can produce a hold here is the confirm button,
+  // whose in-game action is a tap. The result of getting this wrong was a game
+  // you could enter and not leave.
   if (input == kInputHold) {
-    if (playing) {
-      GameInputEvent event;
-      event.kind = GameInputEvent::Middle;
-      event.down = true;
-      mEngine->onInput(event);
-      return true;
-    }
     mExitRequested = true;
     return true;
   }
@@ -75,21 +72,27 @@ bool GameScreen::onInput(Input input, int nowMs) {
     case kInputTurnCw: event.kind = GameInputEvent::KnobCw; break;
     case kInputTurnCcw: event.kind = GameInputEvent::KnobCcw; break;
     case kInputPress: event.kind = GameInputEvent::KnobPress; break;
-    case kInputLeft: event.kind = GameInputEvent::Left; break;
-    case kInputRight: event.kind = GameInputEvent::Right; break;
-    default: return false;
+    default: return false;  // side buttons arrive through onRawButton
   }
   mEngine->onInput(event);
-
-  // Buttons report both edges to the engines; the Shell's vocabulary has only
-  // the completed gesture, so the release is synthesised immediately. Knob
-  // detents carry no release by contract.
-  if (event.kind != GameInputEvent::KnobCw && event.kind != GameInputEvent::KnobCcw) {
-    GameInputEvent release = event;
-    release.down = false;
-    mEngine->onInput(release);
-  }
+  // The engines act on the down edge of a press and ignore its release, and
+  // knob detents carry no release at all — so nothing is synthesised here.
   return true;
+}
+
+void GameScreen::onRawButton(Input which, bool down, int nowMs) {
+  (void)nowMs;
+  if (mEngine == 0) return;
+  GameInputEvent event;
+  event.down = down;
+  if (which == kInputLeft) event.kind = GameInputEvent::Left;
+  else if (which == kInputRight) event.kind = GameInputEvent::Right;
+  else return;
+  // Both edges, unsynthesised: the engines integrate how long a direction is
+  // held (mLeftHeld = event.down), so a press followed instantly by its own
+  // release moves the paddle for zero milliseconds — which is exactly what the
+  // side buttons did before.
+  mEngine->onInput(event);
 }
 
 }  // namespace tcos

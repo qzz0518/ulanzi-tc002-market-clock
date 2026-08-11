@@ -16,11 +16,19 @@
 set -e
 BUNDLE=/tmp/tc002-os
 
-rm -f /tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/tc002-sideload.id
+rm -f /tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/tc002-sideload.id /tmp/zos-host
 rm -rf /tmp/ui
 mv "$BUNDLE/libzkgui.so" /tmp/libzkgui.so
 mv "$BUNDLE/ui" /tmp/ui
 mv "$BUNDLE/EasyUI.cfg" /tmp/EasyUI.cfg
+
+# The console's address, if the installer supplied one. Guarded rather than
+# unconditional: the firmware runs standalone without it (no channels, no
+# mirror), and `set -e` would otherwise turn "no host configured" into a failed
+# launch that leaves the device on a blank panel.
+if [ -f "$BUNDLE/host" ]; then
+  mv "$BUNDLE/host" /tmp/zos-host
+fi
 
 # Session identity: all sideloadable apps share the /tmp load path, so the
 # installers tell sessions apart by this file (ADR 0004).

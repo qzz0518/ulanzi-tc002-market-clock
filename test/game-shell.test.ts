@@ -12,7 +12,9 @@ describe("game shell", () => {
     expect(html).toContain("选择游戏");
     expect(html).toContain("时间打砖块");
     expect(html).toContain("上屏");
-    expect(html).toContain("直播中");
+    // 未上屏,不是直播中:上屏默认关闭(见 game-shell.tsx 的 mirrorEnabled 初值),
+    // 先在浏览器里玩,想投到时钟再手动打开。
+    expect(html).toContain("未上屏");
     expect(html).toContain("游戏固件");
     expect(html).toContain("侧载游戏固件");
     // 舞台：52×16 LED 屏 + 像素 HUD。
@@ -100,7 +102,7 @@ describe("game shell", () => {
     expect(shellSource).toContain('dialogClassName="arcade-firmware-dialog"');
 
     // 页面接线与横屏 gate 保持；firmwareOnline 是两种固件的派生量。
-    expect(headerSource).toContain('<Tab value="game"><Gamepad2 />游戏</Tab>');
+    expect(headerSource).toContain('value="game"><Gamepad2 />游戏</Tab>');
     // Tooltip 文案按固件种类区分（弹层内容不进 SSR，只能查源码）。
     expect(headerSource).toContain("`${kindLabel}运行中，恢复官方固件后可用`");
     expect(appSource).toContain('view === "game"');

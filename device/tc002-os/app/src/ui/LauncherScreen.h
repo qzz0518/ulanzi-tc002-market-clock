@@ -32,6 +32,16 @@ class LauncherScreen : public Screen {
     kIconMusic,
     kIconGame,
     kIconSettings,
+    // Per-game sprites, one per engine. These are polychrome where the four
+    // above are single-accent badges, and that palette difference is what makes
+    // entering the games ring feel like a different room.
+    kIconGameBreakout,
+    kIconGameFlappy,
+    kIconGameSnake,
+    kIconGamePong,
+    kIconGameRacer,
+    kIconGameShooter,
+    kIconGameTetris,
   };
 
   struct Entry {
@@ -43,6 +53,17 @@ class LauncherScreen : public Screen {
   LauncherScreen();
 
   void setEntries(const std::vector<Entry>& entries, int nowMs);
+
+  /**
+   * Chrome hue for this ring. The root stays launcher green; the games ring
+   * uses the arcade blue, so the rail and arrows say which ring you are in even
+   * before a card is read.
+   */
+  void setChrome(const Color& lit, const Color& dim);
+
+  /** Rises 16 px on entry. Used by the games ring: hold means "up", so content
+   *  arriving from below completes the metaphor. */
+  void setEntryRise(bool enabled) { mEntryRise = enabled; }
   int count() const { return static_cast<int>(mEntries.size()); }
 
   void onEnter(int nowMs);
@@ -56,14 +77,20 @@ class LauncherScreen : public Screen {
   int selectedIndex() const { return mRing.index(); }
 
  private:
-  void renderCard(Surface& out, const Entry& entry, int originX, int nowMs) const;
+  void renderCard(Surface& out, const Entry& entry, int originX, int nowMs, int riseY) const;
   void renderRail(Surface& out) const;
+  void renderArrows(Surface& out, int nowMs) const;
 
   std::vector<Entry> mEntries;
   RingModel mRing;
   int mEnteredMs;
   int mActivated;
   int mPressFlashMs;  // when the confirm flash started, or -1
+  int mLastTurnMs;    // when the knob last moved, for the arrow flash
+  int mLastTurnDir;   // +1 clockwise, -1 anti-clockwise
+  Color mChromeLit;
+  Color mChromeDim;
+  bool mEntryRise;
 };
 
 }  // namespace tcos

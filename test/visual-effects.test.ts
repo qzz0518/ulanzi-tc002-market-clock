@@ -148,6 +148,97 @@ describe("fireworks", () => {
   });
 });
 
+describe("flux clock", () => {
+  const litSet = (frame: PixelCanvas): string => {
+    const cells: string[] = [];
+    for (let y = 0; y < frame.height; y += 1) {
+      for (let x = 0; x < frame.width; x += 1) {
+        const [red, green, blue] = frame.getPixel(x, y);
+        if (red + green + blue > 0) cells.push(`${x},${y}`);
+      }
+    }
+    return cells.join(";");
+  };
+
+  const bottomRowLit = (animation: VisualAnimation): boolean =>
+    animation.frames.some((frame) => {
+      for (let x = 0; x < frame.width; x += 1) {
+        const [red, green, blue] = frame.getPixel(x, DISPLAY_HEIGHT - 1);
+        if (red + green + blue > 0) return true;
+      }
+      return false;
+    });
+
+  test("holds readable digits through the shimmer and scatters them in the burst", () => {
+    const animation = renderVisualEffect("flux", 10_000, NOW);
+    expectPanelContract(animation, 10_000);
+    expect(animation.label).toBe("流光时钟");
+    // Before the first second flips, shimmer twinkles in brightness only.
+    expect(litSet(animation.frames[3]!)).toBe(litSet(animation.frames[0]!));
+    // Mid-animation the burst has scattered pixels off the digit mask.
+    const drifting = animation.frames[Math.floor(animation.frames.length * 0.5)]!;
+    expect(litSet(drifting)).not.toBe(litSet(animation.frames[0]!));
+    expect(animation.frames.every((frame) => litCount(frame) > 0)).toBe(true);
+  });
+
+  test("ticks the seconds column with a particle morph instead of a burst", () => {
+    const animation = renderVisualEffect("flux", 4_000, NOW, { fluxBurst: "never" });
+    expectPanelContract(animation, 4_000);
+    // The digit masks sit on rows 1-14, so a burst-free render never touches
+    // the bottom row — while the wall clock still advances the seconds digits.
+    expect(bottomRowLit(animation)).toBe(false);
+    expect(litSet(animation.frames[43]!)).not.toBe(litSet(animation.frames[0]!));
+    // A bursting render bounces sparks off the panel floor.
+    expect(bottomRowLit(renderVisualEffect("flux", 10_000, NOW))).toBe(true);
+  });
+
+  test("uses the burst as the minute-change transition when the clock flips mid-item", () => {
+    const start = Date.parse("2026-08-10T09:36:55Z");
+    const animation = renderVisualEffect("flux", 10_000, start);
+    expectPanelContract(animation, 10_000);
+    const last = litSet(animation.frames.at(-1)!);
+    expect(last).not.toBe(litSet(animation.frames[0]!));
+    // The settled digits equal a fresh render taken at the same wall instant.
+    const lastElapsed = animation.frameDelaysMs.slice(0, -1).reduce((sum, delay) => sum + delay, 0);
+    const next = renderVisualEffect("flux", 10_000, start + lastElapsed);
+    expect(last).toBe(litSet(next.frames[0]!));
+  });
+
+  test("keeps the seconds column crisp when long durations stretch the frame delay", () => {
+    // 600s caps at 120 frames of 5s each, so the seconds digits retarget on
+    // every frame: the morph must snap onto the glyph instead of hovering at
+    // a half-glide, and vacated slots must not leave multi-second ghosts.
+    const animation = renderVisualEffect("flux", 600_000, NOW, { fluxBurst: "never" });
+    expectPanelContract(animation, 600_000);
+    for (const frameIndex of [7, 60, 119]) {
+      const elapsed = animation.frameDelaysMs.slice(0, frameIndex).reduce((sum, delay) => sum + delay, 0);
+      const fresh = renderVisualEffect("flux", 600_000, NOW + elapsed, { fluxBurst: "never" });
+      expect(litSet(animation.frames[frameIndex]!)).toBe(litSet(fresh.frames[0]!));
+    }
+  });
+
+  test("stays deterministic and caps long items at the 120-frame budget", () => {
+    const animation = renderVisualEffect("flux", 600_000, NOW, { fluxPalette: "violet" });
+    expect(animation.frames).toHaveLength(120);
+    expectPanelContract(animation, 600_000);
+    expect(frameBytes(renderVisualEffect("flux", 600_000, NOW, { fluxPalette: "violet" })))
+      .toBe(frameBytes(animation));
+    expect(frameBytes(renderVisualEffect("flux", 600_000, NOW, { fluxPalette: "ember" })))
+      .not.toBe(frameBytes(animation));
+  });
+
+  test("short items cannot fit the burst yet still track the clock", () => {
+    const animation = renderVisualEffect("flux", 1_000, NOW);
+    expectPanelContract(animation, 1_000);
+    const first = litSet(animation.frames[0]!);
+    // 12 frames cover less than a second from :00.000: no flip, no burst.
+    expect(animation.frames.every((frame) => litSet(frame) === first)).toBe(true);
+    expect(bottomRowLit(animation)).toBe(false);
+    const other = renderVisualEffect("flux", 1_000, Date.parse("2026-08-10T09:41:30Z"));
+    expect(litSet(other.frames[0]!)).not.toBe(first);
+  });
+});
+
 describe("weather particles", () => {
   const conditions = ["clear", "cloud", "fog", "rain", "snow", "thunder"] as const;
 

@@ -2,6 +2,8 @@
 
 #include <utils/BrightnessHelper.h>
 
+#include "audio_manager.h"
+
 #include "base/log.h"
 
 namespace tcos {
@@ -16,7 +18,7 @@ int clampInt(int value, int lo, int hi) {
 
 }  // namespace
 
-DeviceControls::DeviceControls() : mVolume(3), mBrightnessStep(5), mInitialized(false) {}
+DeviceControls::DeviceControls() : mVolume(5), mBrightnessStep(5), mInitialized(false) {}
 
 DeviceControls& DeviceControls::instance() {
   static DeviceControls single;
@@ -36,14 +38,20 @@ void DeviceControls::initialize() {
     mBrightnessStep = clampInt((current * kBrightnessSteps + max / 2) / max, 1, kBrightnessSteps);
   }
   LOGD("tcos controls: brightness %d/%d -> step %d", current, max, mBrightnessStep);
+  base::AudioManager::instance().setVolume((mVolume * kMixerMax) / kVolumeMax);
+  // Paired with the setVolume above: without it a mute inherited from the
+  // previous firmware would silence a session that never touches the volume
+  // keys, and the only cure would be pressing volume-down to 0 and back.
+  base::AudioManager::instance().setMute(false);
 }
 
 int DeviceControls::nudgeVolume(int delta) {
   mVolume = clampInt(mVolume + delta, 0, kVolumeMax);
-  // Volume deliberately does NOT touch the audio stack here. Linking it pulls
-  // ffmpeg in — measured at ~1.1 MB .text plus 856 KB .bss on a device with
-  // about 1 MB free — so with AUDIO=0 the level is tracked and shown, and the
-  // sink is wired when the audio build flag is turned on.
+  // The device's own 0..6 notch scale, mapped onto the mixer's 0..100. The
+  // sound effects are synthesised rather than decoded, so this costs the
+  // resampler and mixer but not ffmpeg (see platform/Sfx.cpp).
+  base::AudioManager::instance().setVolume((mVolume * kMixerMax) / kVolumeMax);
+  base::AudioManager::instance().setMute(mVolume == 0);
   return mVolume;
 }
 
