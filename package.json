@@ -19,7 +19,8 @@
     "install-docker": "bash scripts/install-docker.sh",
     "uninstall-docker": "bash scripts/uninstall-docker.sh",
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "os-release": "bun run scripts/create-os-release.ts"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

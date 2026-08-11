@@ -131,9 +131,10 @@ describe("TC002 sideload session (both profiles)", () => {
       ]);
       expect(calls.slice(-7).map((call) => call.at(-1))).toEqual([
         `[ -f ${remoteDir}/session.pid ] && kill "$(cat ${remoteDir}/session.pid)" 2>/dev/null; setprop ctl.stop zkswe`,
-        // Start clears BOTH bundle dirs and the session id: switching between
-        // the two apps must never push on top of a full tmpfs.
-        `rm -rf /tmp/tc002-music /tmp/tc002-arcade /tmp/ui; rm -f ${extraCleanup}/tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/tc002-sideload.id`,
+        // Start clears EVERY bundle dir and the session id: switching between
+        // the three apps must never push on top of a full tmpfs. /tmp is 16 MB
+        // and the bundles are ~0.4-1.8 MB each, so a stale one is not academic.
+        `rm -rf /tmp/tc002-music /tmp/tc002-arcade /tmp/tc002-os /tmp/ui; rm -f ${extraCleanup}/tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/tc002-sideload.id`,
         `mkdir -p ${remoteDir}`,
         `${remoteDir}/`,
         `chmod +x ${remoteDir}/player`,

@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 
 export const MUSIC_SESSION_CONFIRMATION = "START_TC002_MUSIC_SESSION";
 export const ARCADE_SESSION_CONFIRMATION = "START_TC002_ARCADE_SESSION";
+export const OS_SESSION_CONFIRMATION = "START_TC002_OS_SESSION";
 
 /**
  * The sideload stack is shared by every sideloadable TC002 app (ADR 0004): the
@@ -49,12 +50,25 @@ export const ARCADE_SIDELOAD_PROFILE: SideloadProfile = {
   },
 };
 
+export const OS_SIDELOAD_PROFILE: SideloadProfile = {
+  appId: "tc002-os",
+  slug: "os",
+  confirmation: OS_SESSION_CONFIRMATION,
+  releaseDirectory: "device/tc002-os/release",
+  packagingDoc: "device/tc002-os/README.md",
+  extraCleanupPaths: [],
+  copy: {
+    running: "设备在线，系统固件正在运行",
+    started: "系统固件已在时钟内存运行；点「恢复官方固件」或断电重启即可回到原样",
+  },
+};
+
 // Both apps' entry scripts write their appId here so each installer can tell
 // whose session is live; the file lives in tmpfs like everything else.
 const SESSION_ID_FILE = "/tmp/tc002-sideload.id";
 // Every remote dir any profile may have used; the start cleanup clears them
 // all so switching apps never pushes on top of a full tmpfs.
-const ALL_REMOTE_DIRS = ["/tmp/tc002-music", "/tmp/tc002-arcade"] as const;
+const ALL_REMOTE_DIRS = ["/tmp/tc002-music", "/tmp/tc002-arcade", "/tmp/tc002-os"] as const;
 
 function remoteDir(profile: SideloadProfile): string {
   return `/tmp/tc002-${profile.slug}`;

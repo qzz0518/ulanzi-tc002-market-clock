@@ -99,6 +99,7 @@ export interface ControlApiOptions {
   music?: MusicHub;
   musicInstaller?: Tc002SideloadInstaller;
   arcadeInstaller?: Tc002SideloadInstaller;
+  osInstaller?: Tc002SideloadInstaller;
   musicMirror?: {
     push: (payload: ClockPayload) => Promise<{ status: number }>;
     clear: () => Promise<{ status: number }>;
@@ -329,7 +330,7 @@ async function readJson(
 async function deviceAppResponse(
   request: Request,
   url: URL,
-  scope: "music" | "arcade",
+  scope: "music" | "arcade" | "os",
   installer: Tc002SideloadInstaller | undefined,
 ): Promise<Response | null> {
   const base = `/api/${scope}/device-app`;
@@ -1160,7 +1161,8 @@ export function createControlHandler(
       // Sideload lifecycle for both device apps, same four routes each.
       const deviceAppRouted =
         await deviceAppResponse(request, url, "music", options.musicInstaller)
-        ?? await deviceAppResponse(request, url, "arcade", options.arcadeInstaller);
+        ?? await deviceAppResponse(request, url, "arcade", options.arcadeInstaller)
+        ?? await deviceAppResponse(request, url, "os", options.osInstaller);
       if (deviceAppRouted) return deviceAppRouted;
 
       if (request.method === "POST" && url.pathname === "/api/arcade/heartbeat") {
@@ -1208,7 +1210,8 @@ export function createControlHandler(
         assertSameOrigin(request);
         const ageMs = sArcadeLive.heartbeatAt > 0 ? Date.now() - sArcadeLive.heartbeatAt : -1;
         const online = (ageMs >= 0 && ageMs < ARCADE_ONLINE_WINDOW_MS)
-          || options.arcadeInstaller?.sessionState().active === true;
+          || options.arcadeInstaller?.sessionState().active === true
+          || options.osInstaller?.sessionState().active === true;
         return jsonResponse({
           online,
           ageMs,

@@ -24,6 +24,7 @@ import { UlanziPixelAssetClient } from "./ulanzi-pixel-assets.ts";
 import {
   ARCADE_SIDELOAD_PROFILE,
   MUSIC_SIDELOAD_PROFILE,
+  OS_SIDELOAD_PROFILE,
   MusicPlayerBundleStore,
   Tc002SideloadInstaller,
 } from "./tc002-music-installer.ts";
@@ -186,6 +187,18 @@ const arcadeInstaller = new Tc002SideloadInstaller({
   serviceOrigin: sideloadServiceOrigin,
 });
 
+const osInstaller = new Tc002SideloadInstaller({
+  get clockHost() { return config.clockHost; },
+  adbPath: process.env.ADB_BIN,
+  profile: OS_SIDELOAD_PROFILE,
+  bundleStore: new MusicPlayerBundleStore(
+    OS_SIDELOAD_PROFILE.releaseDirectory,
+    OS_SIDELOAD_PROFILE,
+  ),
+  verifyClock: verifySideloadClock,
+  serviceOrigin: sideloadServiceOrigin,
+});
+
 const NOTIFY_APP = "notify";
 let liveWriteQueue: Promise<unknown> = Promise.resolve();
 function queueLiveWrite<T>(operation: () => Promise<T>): Promise<T> {
@@ -288,6 +301,7 @@ const controlHandler = createControlHandler(controller, {
   music,
   musicInstaller,
   arcadeInstaller,
+  osInstaller,
   live: {
     push: (appName, payload) => queueLiveWrite(() => pushClockPayloadNamed(config, appName, payload, fetch)),
     clear: (appName) => queueLiveWrite(() => deleteClockApp(config, appName, fetch)),
