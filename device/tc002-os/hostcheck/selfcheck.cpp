@@ -32,6 +32,7 @@
 #include "ui/BootScreen.h"
 #include "ui/GameScreen.h"
 #include "ui/LauncherScreen.h"
+#include "ui/LevelOverlay.h"
 #include "visual/Glyphs.h"
 
 namespace {
@@ -947,6 +948,141 @@ void checkGameScreen() {
   check(!empty.onInput(tcos::kInputPress, 10), "and ignores input");
 }
 
+void checkLevelOverlay() {
+  using tcos::LevelOverlay;
+  LevelOverlay hud;
+  Surface out(52, 16);
+
+  check(!hud.visible(0), "nothing is shown until something changes");
+  out.clear();
+  hud.render(out, 0);
+  check(litPixels(out) == 0, "an idle overlay draws nothing at all");
+
+  hud.show(LevelOverlay::kVolume, 3, 6, 1000);
+  check(hud.visible(1000) && hud.kind() == LevelOverlay::kVolume, "a volume change shows the bar");
+  check(hud.value() == 3, "at the level it was given");
+
+  out.clear();
+  hud.render(out, 1000 + LevelOverlay::kEnterMs);
+  const int mid = litPixels(out);
+  check(mid > 0, "the bar renders");
+
+  // It must expire on its own: an adjustment HUD that stayed would make the
+  // panel unusable, and there is no dismiss gesture to spend on it.
+  check(hud.visible(1000 + LevelOverlay::kHoldMs), "it holds long enough to read");
+  check(!hud.visible(1000 + LevelOverlay::kHoldMs + LevelOverlay::kExitMs + 1),
+        "and then expires by itself");
+  out.clear();
+  hud.render(out, 1000 + LevelOverlay::kHoldMs + LevelOverlay::kExitMs + 1);
+  check(litPixels(out) == 0, "leaving nothing behind");
+
+  // Repeated presses extend the hold rather than restarting the entry
+  // animation, which would flicker during a fast run of presses.
+  hud.show(LevelOverlay::kVolume, 4, 6, 2000);
+  hud.show(LevelOverlay::kVolume, 5, 6, 2100);
+  check(hud.value() == 5, "the latest value wins");
+  check(hud.visible(2100 + LevelOverlay::kHoldMs), "the hold restarts from the last press");
+
+  // The two kinds are visually distinct — same geometry would make a
+  // brightness press look like a volume press.
+  Surface volumeFrame(52, 16);
+  Surface brightFrame(52, 16);
+  LevelOverlay a;
+  LevelOverlay b;
+  a.show(LevelOverlay::kVolume, 5, 6, 0);
+  b.show(LevelOverlay::kBrightness, 5, 10, 0);
+  a.render(volumeFrame, LevelOverlay::kEnterMs);
+  b.render(brightFrame, LevelOverlay::kEnterMs);
+  std::vector<uint8_t> va;
+  std::vector<uint8_t> vb;
+  volumeFrame.extractRGB(va);
+  brightFrame.extractRGB(vb);
+  check(va != vb, "volume and brightness look different");
+
+  // More filled segments at a higher level, which is the whole point.
+  LevelOverlay low;
+  LevelOverlay high;
+  low.show(LevelOverlay::kVolume, 1, 6, 0);
+  high.show(LevelOverlay::kVolume, 6, 6, 0);
+  Surface lowFrame(52, 16);
+  Surface highFrame(52, 16);
+  low.render(lowFrame, LevelOverlay::kEnterMs);
+  high.render(highFrame, LevelOverlay::kEnterMs);
+  int lowBar = 0;
+  int highBar = 0;
+  for (int x = 14; x < 52; ++x) {
+    for (int y = 0; y < 16; ++y) {
+      const Color lc = lowFrame.getPixel(x, y);
+      const Color hc = highFrame.getPixel(x, y);
+      if (lc.r + lc.g + lc.b > 200) ++lowBar;
+      if (hc.r + hc.g + hc.b > 200) ++highBar;
+    }
+  }
+  check(highBar > lowBar, "a higher level fills more of the bar");
+
+  // Zero is a real state and must not look like "off screen".
+  LevelOverlay muted;
+  muted.show(LevelOverlay::kVolume, 0, 6, 0);
+  Surface mutedFrame(52, 16);
+  muted.render(mutedFrame, LevelOverlay::kEnterMs);
+  check(litPixels(mutedFrame) > 0, "zero volume still draws — it shows a mute mark");
+
+  // Out-of-range input is clamped rather than drawn outside the bar.
+  LevelOverlay clamped;
+  clamped.show(LevelOverlay::kVolume, 99, 6, 0);
+  check(clamped.value() == 6, "a level above the max is clamped");
+  clamped.show(LevelOverlay::kVolume, -5, 6, 0);
+  check(clamped.value() == 0, "a negative level is clamped");
+
+  // THE MODE RULE. A short press adjusts whatever is on screen: once a long
+  // press has opened brightness, further short presses must keep adjusting
+  // brightness. Snapping back to volume mid-adjustment would force a hold for
+  // every single step and would silently move the wrong control.
+  LevelOverlay mode;
+  check(mode.shortPressKind(0) == LevelOverlay::kVolume,
+        "with nothing on screen, a short press means volume");
+
+  mode.show(LevelOverlay::kBrightness, 5, 10, 1000);
+  check(mode.shortPressKind(1000) == LevelOverlay::kBrightness,
+        "while the brightness bar is up, a short press means brightness");
+  check(mode.shortPressKind(1000 + LevelOverlay::kHoldMs) == LevelOverlay::kBrightness,
+        "for as long as the bar is up");
+
+  // ...and only until it expires. Once the panel is back to normal the buttons
+  // mean volume again, with no mode the user has to remember to leave.
+  const int gone = 1000 + LevelOverlay::kHoldMs + LevelOverlay::kExitMs + 1;
+  check(!mode.visible(gone), "the bar is gone by then");
+  check(mode.shortPressKind(gone) == LevelOverlay::kVolume,
+        "once it expires, a short press means volume again");
+
+  // A volume bar must NOT capture short presses into brightness.
+  mode.show(LevelOverlay::kVolume, 3, 6, 2000);
+  check(mode.shortPressKind(2000) == LevelOverlay::kVolume,
+        "a volume bar keeps short presses on volume");
+
+  // And each further short press extends the brightness mode rather than
+  // letting it lapse mid-adjustment.
+  mode.show(LevelOverlay::kBrightness, 4, 10, 3000);
+  mode.show(LevelOverlay::kBrightness, 5, 10, 3000 + LevelOverlay::kHoldMs - 10);
+  check(mode.shortPressKind(3000 + LevelOverlay::kHoldMs + 100) == LevelOverlay::kBrightness,
+        "each adjustment extends the mode");
+
+  // It composites: whatever was underneath is dimmed, not erased.
+  Surface busy(52, 16);
+  busy.fill(Color(200, 200, 200));
+  LevelOverlay over;
+  over.show(LevelOverlay::kBrightness, 5, 10, 0);
+  over.render(busy, LevelOverlay::kEnterMs);
+  bool sawDimmed = false;
+  for (int x = 0; x < 52 && !sawDimmed; ++x) {
+    for (int y = 0; y < 16; ++y) {
+      const Color c = busy.getPixel(x, y);
+      if (c.r > 0 && c.r < 200) sawDimmed = true;
+    }
+  }
+  check(sawDimmed, "the frame underneath is dimmed rather than erased");
+}
+
 void checkStateDoc() {
   using tcos::StateDoc;
 
@@ -1269,6 +1405,8 @@ int main() {
   std::printf("  setup portal ok\n");
   checkGameScreen();
   std::printf("  game screen ok\n");
+  checkLevelOverlay();
+  std::printf("  level overlay ok\n");
   checkWifiPolicy();
   std::printf("  wifi policy ok\n");
   checkBootScreen();

@@ -8,12 +8,22 @@
 
 #include <os/SystemProperties.h>
 
+#include "platform/DeviceControls.h"
 #include "platform/Presenter.h"
 #include "core/Shell.h"
 #include "core/Surface.h"
 #include "managers/KeyManager.h"
+#include "games/breakout.h"
+#include "games/flappy.h"
+#include "games/pong.h"
+#include "games/racer.h"
+#include "games/shooter.h"
+#include "games/snake.h"
+#include "games/tetris.h"
 #include "ui/BootScreen.h"
+#include "ui/GameScreen.h"
 #include "ui/LauncherScreen.h"
+#include "ui/LevelOverlay.h"
 #include "ui/Screen.h"
 
 namespace {
@@ -70,7 +80,33 @@ void keyEventCb(int keyCode, int keyStatus) {
 // Screens are long-lived singletons rather than allocated per visit: on a device
 // with ~1 MB free, churning a screen's state on every navigation buys nothing.
 tcos::BootScreen sBoot;
-tcos::LauncherScreen sLauncher;
+tcos::LauncherScreen sLauncher;      // the root ring
+tcos::LauncherScreen sGameList;      // the games ring, one level down
+tcos::GameScreen sGameScreen;
+
+// Engines are created once and kept: re-creating one on every visit would
+// churn the heap on a device with ~1 MB free, and GameScreen::onEnter already
+// rewinds whichever is mounted.
+BreakoutEngine sBreakout;
+FlappyEngine sFlappy;
+SnakeEngine sSnake;
+PongEngine sPong;
+RacerEngine sRacer;
+ShooterEngine sShooter;
+TetrisEngine sTetris;
+GameEngine* sEngines[7] = {
+	&sBreakout, &sFlappy, &sSnake, &sPong, &sRacer, &sShooter, &sTetris,
+};
+
+// Launcher ids. Channels will take 100+ once the poll thread lands, so the
+// built-ins are numbered low and the games ring uses its own range.
+enum {
+	ID_MUSIC = 1,
+	ID_GAMES = 2,
+	ID_SETTINGS = 3,
+	ID_CHANNELS = 4,
+	ID_GAME_BASE = 200,
+};
 
 tcos::Shell& shell() {
 	static tcos::Shell instance(tcos::kPanelWidth, tcos::kPanelHeight);
@@ -83,12 +119,35 @@ bool sHandedOff = false;
 // turns a long press on the middle/knob button into kInputHold. The threshold
 // lives here rather than in a screen so "hold means up" is uniform everywhere.
 const int HOLD_MS = 600;
-int sPressedCode = -1;
-uint64_t sPressedAtMs = 0;
-bool sHoldFired = false;
+// The side buttons carry two functions each, so they need their own hold
+// tracking: a short press is volume, a long press is brightness. Keeping them
+// in one table rather than three variables is what stops "which button am I
+// holding" from becoming a bug.
+struct HeldButton {
+	int code;
+	uint64_t atMs;
+	bool fired;
+};
+HeldButton sHeld = { -1, 0, false };
 
 void dispatchInput(tcos::Input input, int nowMs) {
 	shell().onInput(input, nowMs);
+}
+
+// Side buttons: short press adjusts volume, long press adjusts brightness. Both
+// raise the same HUD, because neither change is visible otherwise — the speaker
+// may be muted and a brightness step on an already-dim panel is easy to miss.
+void adjustLevel(bool brightness, int delta, int nowMs) {
+	tcos::DeviceControls& controls = tcos::DeviceControls::instance();
+	if (brightness) {
+		const int level = controls.nudgeBrightness(delta);
+		shell().overlay().show(tcos::LevelOverlay::kBrightness, level,
+		                       tcos::DeviceControls::kBrightnessSteps, nowMs);
+	} else {
+		const int level = controls.nudgeVolume(delta);
+		shell().overlay().show(tcos::LevelOverlay::kVolume, level,
+		                       tcos::DeviceControls::kVolumeMax, nowMs);
+	}
 }
 
 void handleKey(int code, int status, int nowMs) {
@@ -102,25 +161,40 @@ void handleKey(int code, int status, int nowMs) {
 		dispatchInput(tcos::kInputTurnCcw, nowMs);
 		return;
 	}
-	const bool isConfirm = (code == E_KEYCODE_KNOB_BUTTON || code == E_KEYCODE_MIDDLE_BUTTON);
-	if (!isConfirm) {
-		if (status != 0) return;
-		if (code == E_KEYCODE_LEFT_BUTTON) dispatchInput(tcos::kInputLeft, nowMs);
-		else if (code == E_KEYCODE_RIGHT_BUTTON) dispatchInput(tcos::kInputRight, nowMs);
-		return;
-	}
+
 	if (status != 0) {
-		sPressedCode = code;
-		sPressedAtMs = monoMs();
-		sHoldFired = false;
+		sHeld.code = code;
+		sHeld.atMs = monoMs();
+		sHeld.fired = false;
 		return;
 	}
-	// Release: a hold already fired on the tick that crossed the threshold, so
-	// only a short press is reported here. Without that split the user would get
-	// both a "press" and a "hold" from one gesture.
-	if (sPressedCode == code && !sHoldFired) dispatchInput(tcos::kInputPress, nowMs);
-	sPressedCode = -1;
-	sHoldFired = false;
+
+	// Release. A long press already acted on the tick that crossed the
+	// threshold, so only a short press is reported here — without that split one
+	// gesture would fire both meanings.
+	const bool wasHeld = (sHeld.code == code);
+	const bool alreadyFired = sHeld.fired;
+	sHeld.code = -1;
+	sHeld.fired = false;
+	if (!wasHeld || alreadyFired) return;
+
+	// A short press adjusts whatever the HUD is currently showing. While a
+	// brightness bar is up the user is in brightness, and making them hold the
+	// button for every step — or silently moving the volume instead — would both
+	// be wrong.
+	const bool brightness =
+		shell().overlay().shortPressKind(nowMs) == tcos::LevelOverlay::kBrightness;
+	if (code == E_KEYCODE_LEFT_BUTTON) adjustLevel(brightness, -1, nowMs);
+	else if (code == E_KEYCODE_RIGHT_BUTTON) adjustLevel(brightness, +1, nowMs);
+	else dispatchInput(tcos::kInputPress, nowMs);
+}
+
+// Fired from the tick the moment the threshold passes, not on release: waiting
+// for the release would make every long press feel like it lagged.
+void handleHold(int code, int nowMs) {
+	if (code == E_KEYCODE_LEFT_BUTTON) adjustLevel(true, -1, nowMs);
+	else if (code == E_KEYCODE_RIGHT_BUTTON) adjustLevel(true, +1, nowMs);
+	else dispatchInput(tcos::kInputHold, nowMs);
 }
 
 }  // namespace
@@ -175,8 +249,21 @@ static void onUI_show() {
 	entry.id = 4;
 	entries.push_back(entry);
 
+	// The games ring: one card per engine, titles straight from the engines so
+	// the two can never disagree about what is installed.
+	std::vector<tcos::LauncherScreen::Entry> games;
+	for (int i = 0; i < 7; ++i) {
+		tcos::LauncherScreen::Entry game;
+		game.label = sEngines[i]->title();
+		game.icon = tcos::LauncherScreen::kIconGame;
+		game.id = ID_GAME_BASE + i;
+		games.push_back(game);
+	}
+
 	const int nowMs = (int)(monoMs() - sStartMs);
 	sLauncher.setEntries(entries, nowMs);
+	sGameList.setEntries(games, nowMs);
+	tcos::DeviceControls::instance().initialize();
 	sHandedOff = false;
 	shell().reset(&sBoot, nowMs);
 	mActivityPtr->registerUserTimer(TIMER_TICK, TICK_MS);
@@ -212,11 +299,9 @@ static bool onUI_Timer(int id) {
 		handleKey(events[i].code, events[i].status, nowMs);
 	}
 
-	// A hold fires as soon as the threshold passes, not on release: waiting for
-	// the release would make "up one level" feel like it lagged the gesture.
-	if (sPressedCode >= 0 && !sHoldFired && (monoMs() - sPressedAtMs) >= (uint64_t)HOLD_MS) {
-		sHoldFired = true;
-		dispatchInput(tcos::kInputHold, nowMs);
+	if (sHeld.code >= 0 && !sHeld.fired && (monoMs() - sHeld.atMs) >= (uint64_t)HOLD_MS) {
+		sHeld.fired = true;
+		handleHold(sHeld.code, nowMs);
 	}
 
 	// Boot hands over to the launcher exactly once, on a cross-fade.
@@ -225,11 +310,22 @@ static bool onUI_Timer(int id) {
 		shell().reset(&sLauncher, nowMs);
 	}
 
+	// Route activations before rendering, so a press lands on the panel in the
+	// same frame the user made it.
+	const int rootPick = sLauncher.takeActivated();
+	if (rootPick == ID_GAMES) {
+		shell().push(&sGameList, nowMs);
+	}
+	const int gamePick = sGameList.takeActivated();
+	if (gamePick >= ID_GAME_BASE && gamePick < ID_GAME_BASE + 7) {
+		sGameScreen.setEngine(sEngines[gamePick - ID_GAME_BASE]);
+		shell().push(&sGameScreen, nowMs);
+	}
+	if (sGameScreen.takeExitRequest()) {
+		shell().pop(nowMs);
+	}
+
 	shell().render(canvas(), nowMs);
 	presenter().present(canvas());
-
-	// Milestone 4 has nowhere to descend to yet; the activation is consumed so
-	// it cannot pile up, and the press flash is the whole feedback for now.
-	sLauncher.takeActivated();
 	return true;
 }

@@ -102,6 +102,7 @@ void Shell::onInput(Input input, int nowMs) {
 }
 
 bool Shell::isAnimating(int nowMs) const {
+  if (mOverlay.visible(nowMs)) return true;
   if (mTransition != kCut && (nowMs - mTransitionStartMs) < kTransitionMs) return true;
   Screen* current = top();
   return current != 0 && current->isAnimating(nowMs);
@@ -115,6 +116,7 @@ void Shell::render(Surface& out, int nowMs) {
   const int elapsed = nowMs - mTransitionStartMs;
   if (mTransition == kCut || elapsed >= kTransitionMs || !mHasOutgoing) {
     current->render(out, nowMs);
+    mOverlay.render(out, nowMs);
     return;
   }
 
@@ -127,6 +129,7 @@ void Shell::render(Surface& out, int nowMs) {
   if (mTransition == kFadeIn) {
     blitFaded(out, mOutgoing, 1.0f - t);
     blitFaded(out, mIncoming, t);
+    mOverlay.render(out, nowMs);
     return;
   }
 
@@ -137,6 +140,9 @@ void Shell::render(Surface& out, int nowMs) {
   const int travel = static_cast<int>(t * w + 0.5f);
   blitShifted(out, mOutgoing, -direction * travel, 1.0f - 0.6f * t);
   blitShifted(out, mIncoming, direction * (w - travel), 1.0f);
+  // Composited last, and over the transition too: a volume press mid-slide must
+  // still show its bar rather than being swallowed by the animation.
+  mOverlay.render(out, nowMs);
 }
 
 }  // namespace tcos

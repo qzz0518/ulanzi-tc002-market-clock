@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "core/Surface.h"
+#include "ui/LevelOverlay.h"
 #include "ui/Screen.h"
 
 namespace tcos {
@@ -58,6 +59,13 @@ class Shell {
 
   bool isAnimating(int nowMs) const;
 
+  /**
+   * The volume/brightness HUD. It lives on the Shell rather than on a screen
+   * because it must survive navigation and must never change what "back" means:
+   * adjusting the volume is not somewhere you can be, so it cannot be a screen.
+   */
+  LevelOverlay& overlay() { return mOverlay; }
+
  private:
   Shell(const Shell&);
   Shell& operator=(const Shell&);
@@ -67,6 +75,7 @@ class Shell {
   std::vector<Screen*> mStack;
   Surface mOutgoing;   // snapshot of the frame we are leaving
   Surface mIncoming;   // scratch for the frame we are entering
+  LevelOverlay mOverlay;
   Transition mTransition;
   int mTransitionStartMs;
   bool mHasOutgoing;
