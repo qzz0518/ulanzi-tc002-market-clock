@@ -56,7 +56,11 @@ if [ "$includers" != "device/tc002-os/app/src/visual/Glyphs.cpp" ]; then
   echo "$includers" >&2
   exit 1
 fi
+# The seven game engines are compiled in unchanged from the arcade tree, so its
+# src is on the include path AFTER this firmware's own: utils/Surface.h resolves
+# to the bridge here, visual/PixelFont.h falls through to the arcade's.
 clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
+  -I 'device/tc002-arcade/app/src' \
   device/tc002-os/hostcheck/selfcheck.cpp \
   device/tc002-os/app/src/core/*.cpp \
   device/tc002-os/app/src/ui/*.cpp \
@@ -66,6 +70,7 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/app/src/net/FrameBundle.cpp \
   device/tc002-os/app/src/net/HttpServer.cpp \
   device/tc002-os/app/src/net/SetupPortal.cpp \
+  device/tc002-arcade/app/src/games/*.cpp \
   -o .runtime/os-selfcheck && .runtime/os-selfcheck
 """
 
@@ -74,7 +79,8 @@ description = "Cross-build tc002-os to an ELF32-ARM libzkgui-os.so"
 run = """
 docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
   -w /work/tc002-lyrics-player/flythings-build flythings-build \
-  make APP=../../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os
+  make APP=../../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os \
+    EXTRA_SRC_DIRS=../../tc002-arcade/app/src/games EXTRA_INC=../../tc002-arcade/app/src
 """
 
 [tasks.os-linkaudit]

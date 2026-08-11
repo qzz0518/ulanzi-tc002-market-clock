@@ -20,7 +20,14 @@ BOOST_INC ?= /opt/boost
 # "shared-visual/CjkFont.h" from any firmware. One copy in the repo is what keeps
 # the panel and the browser preview bit-for-bit identical (test/pixel-glyphs.test.ts).
 SHARED    ?= ../..
-INCLUDES := -I$(APP)/src -I$(SHARED) $(foreach d,$(DEP_INC),-I$(PKG)/$(d)/include) -I$(BOOST_INC)
+# Extra source trees and include roots an app can pull in. tc002-os compiles the
+# arcade's seven game engines unchanged rather than porting them: they are
+# hardware-verified and already covered by the arcade's own self-check, so a
+# port would fork that guarantee. EXTRA_INC comes AFTER $(APP)/src so the app's
+# own headers still win (tc002-os provides utils/Surface.h as a bridge).
+EXTRA_SRC_DIRS ?=
+EXTRA_INC ?=
+INCLUDES := -I$(APP)/src $(foreach d,$(EXTRA_INC),-I$(d)) -I$(SHARED) $(foreach d,$(DEP_INC),-I$(PKG)/$(d)/include) -I$(BOOST_INC)
 
 # Compile flags copied from .cproject (optimization "most" → -O3, C++11, -fPIC).
 # Two globals the IDE injects (Manifest platform="Z21"), not in .cproject:
@@ -51,11 +58,19 @@ LIBS    := -Wl,--start-group -leasyui -lzkhardware -llog -lbase-utility -ltransf
 # FlyThings convention: logic/*.cc are not translation units — the IDE-generated
 # activity/*.cpp #includes them. Compile only .cpp/.c and exclude logic/.
 SRCS := $(shell find $(APP)/src \( -name '*.cpp' -o -name '*.c' \) -not -path '*/logic/*')
+EXTRA_SRCS := $(if $(EXTRA_SRC_DIRS),$(shell find $(EXTRA_SRC_DIRS) -name '*.cpp'),)
 # Strip the $(APP) prefix so objects land UNDER $(BUILD_DIR). The old
 # 'build/%.o,$(SRCS)' yielded 'build/../app/...', whose build/.. escapes build/,
 # dropping .o files into the source tree where `clean` (rm -rf build) never
 # deleted them — stale objects then survived every rebuild.
-OBJS := $(patsubst $(APP)/%,$(BUILD_DIR)/%.o,$(SRCS))
+# App objects mirror the source tree under $(BUILD_DIR); extra sources live
+# outside $(APP) entirely, so they are flattened into build/extra/ by basename
+# and resolved through vpath. Flattening is safe because the engine filenames
+# are unique, and it keeps '..' out of the object paths — the same escape that
+# once dropped .o files into the source tree.
+OBJS := $(patsubst $(APP)/%,$(BUILD_DIR)/%.o,$(SRCS)) \
+        $(addprefix $(BUILD_DIR)/extra/,$(addsuffix .o,$(notdir $(EXTRA_SRCS))))
+vpath %.cpp $(EXTRA_SRC_DIRS)
 # activity/*.cpp #include logic/*.cc; make cannot see that include, so make every
 # object depend on all logic sources — otherwise editing a logic file leaves the
 # activity object stale (its own mtime is unchanged) and the change never lands.
@@ -64,6 +79,11 @@ LOGIC := $(shell find $(APP)/src/logic -name '*.cc' 2>/dev/null)
 all: $(OUT)
 
 $(BUILD_DIR)/%.o: $(APP)/% $(LOGIC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+# Sources outside $(APP), found through vpath by basename.
+$(BUILD_DIR)/extra/%.o: %
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $< -o $@
 

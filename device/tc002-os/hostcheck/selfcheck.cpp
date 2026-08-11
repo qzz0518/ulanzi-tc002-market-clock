@@ -22,7 +22,15 @@
 #include "net/SetupPortal.h"
 #include "net/StateDoc.h"
 #include "net/WifiPolicy.h"
+#include "games/breakout.h"
+#include "games/flappy.h"
+#include "games/pong.h"
+#include "games/racer.h"
+#include "games/shooter.h"
+#include "games/snake.h"
+#include "games/tetris.h"
 #include "ui/BootScreen.h"
+#include "ui/GameScreen.h"
 #include "ui/LauncherScreen.h"
 #include "visual/Glyphs.h"
 
@@ -874,6 +882,71 @@ void checkSetupPortal() {
         "and the address once there is one");
 }
 
+void checkGameScreen() {
+  using tcos::GameScreen;
+
+  BreakoutEngine engine;
+  GameScreen screen;
+  screen.setEngine(&engine);
+  check(screen.engine() == &engine, "the engine mounts");
+
+  screen.onEnter(0);
+  check(engine.hud().phase == GameHud::Ready, "entering rewinds to the attract screen");
+
+  Surface out(52, 16);
+  screen.render(out, 0);
+  check(litPixels(out) > 0, "the attract screen renders");
+
+  // While NOT playing, a hold leaves. This is the only state where it may:
+  // during play a long press belongs to the game.
+  check(screen.onInput(tcos::kInputHold, 100), "a hold is consumed while idle");
+  check(screen.takeExitRequest(), "and asks to leave");
+  check(!screen.takeExitRequest(), "reading the request clears it");
+
+  // Start playing, then confirm a hold no longer ejects the player.
+  screen.onEnter(200);
+  screen.onInput(tcos::kInputPress, 210);
+  screen.render(out, 220);
+  if (engine.hud().phase == GameHud::Playing) {
+    check(screen.onInput(tcos::kInputHold, 300), "a hold is still consumed while playing");
+    check(!screen.takeExitRequest(),
+          "but does NOT eject the player — a long press belongs to the game");
+  }
+
+  // A stalled tick must not teleport the simulation. Two renders far apart
+  // should advance by the clamp, not by the wall-clock gap.
+  screen.onEnter(0);
+  screen.render(out, 0);
+  screen.render(out, 100000);
+  check(out.getWidth() == 52, "a huge time step does not corrupt the surface");
+
+  // Every engine must mount and render without the adapter caring which it is.
+  BreakoutEngine b;
+  FlappyEngine f;
+  SnakeEngine s;
+  PongEngine p;
+  RacerEngine r;
+  ShooterEngine sh;
+  TetrisEngine t;
+  GameEngine* all[7] = {&b, &f, &s, &p, &r, &sh, &t};
+  for (int i = 0; i < 7; ++i) {
+    GameScreen host;
+    host.setEngine(all[i]);
+    host.onEnter(0);
+    Surface frame(52, 16);
+    host.render(frame, 30);
+    check(frame.getWidth() == 52 && frame.getHeight() == 16,
+          std::string("engine ") + all[i]->id() + " renders into the panel");
+  }
+
+  GameScreen empty;
+  empty.onEnter(0);
+  Surface blank(52, 16);
+  empty.render(blank, 10);
+  check(litPixels(blank) == 0, "a screen with no engine renders black rather than crashing");
+  check(!empty.onInput(tcos::kInputPress, 10), "and ignores input");
+}
+
 void checkStateDoc() {
   using tcos::StateDoc;
 
@@ -1194,6 +1267,8 @@ int main() {
   std::printf("  http server ok\n");
   checkSetupPortal();
   std::printf("  setup portal ok\n");
+  checkGameScreen();
+  std::printf("  game screen ok\n");
   checkWifiPolicy();
   std::printf("  wifi policy ok\n");
   checkBootScreen();
