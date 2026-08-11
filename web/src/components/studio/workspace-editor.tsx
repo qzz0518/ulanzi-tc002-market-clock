@@ -13,16 +13,17 @@ import {
   Search,
   Settings2,
   Trash2,
+  Webhook,
 } from "lucide-react";
 import {
   Button,
   ColorPicker,
+  Dialog,
   Input,
   List,
   ListButton,
   NumberScrubber,
   Select,
-  Surface,
   SurfaceCut,
   Switch,
   Tab,
@@ -176,10 +177,11 @@ export function placeSelectionPatches(place: GeocodePlace): Array<[string, JsonV
 
 // The notice-board channel shows static text; the webhook is its instant
 // sibling — one POST from any LAN device puts a message on the clock right
-// away and it cleans itself up. Surface that here, where people configure
-// notices, instead of hiding it in the reference docs.
+// away and it cleans itself up. A single button opens a dialog that explains
+// it; nothing extra sits in the option panel.
 function NoticeWebhookHint() {
   const toast = useAppToast();
+  const [open, setOpen] = useState(false);
   const origin = typeof window === "undefined" ? "http://<服务地址>:43820" : window.location.origin;
   const command = `curl -X POST ${origin}/api/notify -H 'Content-Type: application/json' -d '{"message":"你好像素","holdSeconds":45}'`;
   const copy = async () => {
@@ -191,33 +193,36 @@ function NoticeWebhookHint() {
     }
   };
   return (
-    <Surface
-      className="notice-webhook mt-2 w-full min-w-0"
-      variant="solid"
-      outline
-      contentClassName="flex w-full min-w-0 flex-col gap-1.5 p-3"
-    >
-      <span className="text-sm font-medium">Webhook 即时通知</span>
-      <span className="text-sm text-cladd-fg-soft">
-        与上面的频道内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的地址
-        POST 一条消息即可立刻上屏，显示 holdSeconds 秒后自动消失，支持中文。
-      </span>
-      {/* width:0 + min-width:100% keeps the one-line command out of the
-          ancestors' min-content math (it was inflating the whole card) while
-          still rendering full-width with its own horizontal scroll. */}
-      <code
-        className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs"
-        style={{ width: 0, minWidth: "100%" }}
+    <div className="timer-actions">
+      <Button type="button" size="sm" onClick={() => setOpen(true)}>
+        <Webhook />Webhook 即时通知
+      </Button>
+      <Dialog
+        open={open}
+        onOpenChange={setOpen}
+        title="Webhook 即时通知"
+        cancelButtonText="关闭"
+        confirmButtonText="复制 curl 示例"
+        onConfirm={() => void copy()}
       >
-        {command}
-      </code>
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Button type="button" size="sm" onClick={() => void copy()}>复制示例</Button>
-        <span className="text-xs text-cladd-fg-softer">
-          可选 NOTIFY_TOKEN 鉴权与全部字段见技术参考「Webhook 通知」。
-        </span>
-      </div>
-    </Surface>
+        <div className="flex min-w-0 flex-col gap-2 text-sm">
+          <p className="m-0">
+            与频道里的通知板内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的
+            地址 POST 一条消息即可立刻上屏，显示 holdSeconds 秒后自动消失，支持中文。
+          </p>
+          <code
+            className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs"
+            style={{ width: 0, minWidth: "100%" }}
+          >
+            {command}
+          </code>
+          <p className="m-0 text-xs text-cladd-fg-soft">
+            手机打开控制台时，示例地址会自动换成局域网 IP。可选 NOTIFY_TOKEN 鉴权与全部字段
+            见技术参考「Webhook 通知」。
+          </p>
+        </div>
+      </Dialog>
+    </div>
   );
 }
 
