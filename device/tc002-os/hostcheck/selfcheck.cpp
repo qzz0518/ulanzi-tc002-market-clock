@@ -18,6 +18,8 @@
 #include "core/Surface.h"
 #include "core/Text.h"
 #include "net/FrameBundle.h"
+#include "net/HttpServer.h"
+#include "net/SetupPortal.h"
 #include "net/StateDoc.h"
 #include "net/WifiPolicy.h"
 #include "ui/BootScreen.h"
@@ -673,6 +675,205 @@ void checkFrameBundle() {
   check(floored.delayMs(0) == FrameBundle::kMinDelayMs, "and is floored to the minimum");
 }
 
+class EchoHandler : public tcos::HttpServer::Handler {
+ public:
+  tcos::HttpServer::Response handle(const tcos::HttpServer::Request& request) {
+    ++calls;
+    lastMethod = request.method;
+    lastPath = request.path;
+    lastBody = request.body;
+    tcos::HttpServer::Response r;
+    if (request.path == "/missing") {
+      r.status = 404;
+      r.body = "nope";
+      return r;
+    }
+    r.contentType = "text/html; charset=utf-8";
+    r.body = "<h1>ok</h1>";
+    return r;
+  }
+  int calls = 0;
+  std::string lastMethod;
+  std::string lastPath;
+  std::string lastBody;
+};
+
+void checkHttpServer() {
+  using tcos::HttpServer;
+
+  // --- pure parsing, including what a phone browser actually sends ----------
+  HttpServer::Request req;
+  check(HttpServer::parseRequest("GET / HTTP/1.1\r\nHost: x\r\n\r\n", &req), "a GET parses");
+  check(req.method == "GET" && req.path == "/" && req.query.empty(), "method and path split");
+
+  check(HttpServer::parseRequest("GET /scan?full=1 HTTP/1.1\r\n\r\n", &req), "a query parses");
+  check(req.path == "/scan" && req.query == "full=1", "the query is split off the path");
+
+  check(HttpServer::parseRequest(
+            "POST /connect HTTP/1.1\r\nContent-Length: 9\r\n\r\nssid=home", &req),
+        "a POST body is captured");
+  check(req.body == "ssid=home", "the body survives the header boundary");
+
+  check(!HttpServer::parseRequest("", &req), "an empty request is rejected");
+  check(!HttpServer::parseRequest("GARBAGE\r\n\r\n", &req), "a request line with no spaces is rejected");
+  check(!HttpServer::parseRequest("GET nonabsolute HTTP/1.1\r\n\r\n", &req),
+        "a non-absolute target is rejected");
+
+  // --- form decoding: this is where a wrong password comes from -------------
+  check(HttpServer::urlDecode("a+b") == "a b", "plus decodes to space");
+  check(HttpServer::urlDecode("%E4%B8%AD") == "\xE4\xB8\xAD", "percent-encoded UTF-8 decodes");
+  check(HttpServer::urlDecode("p%40ss") == "p@ss", "symbols decode");
+  // A stray % is kept rather than mangled: a WPA passphrase may contain one and
+  // corrupting it produces a wrong-password loop the user cannot diagnose.
+  check(HttpServer::urlDecode("100%") == "100%", "a trailing percent is left alone");
+  check(HttpServer::urlDecode("50%zz") == "50%zz", "an invalid escape is left alone");
+
+  const std::string form = "ssid=my+net&password=p%40ss%21&other=x";
+  check(HttpServer::formValue(form, "ssid") == "my net", "ssid decodes");
+  check(HttpServer::formValue(form, "password") == "p@ss!", "password decodes");
+  check(HttpServer::formValue(form, "missing").empty(), "an absent field is empty");
+  // "password" must not be matched by a prefix search for "pass".
+  check(HttpServer::formValue("passwordx=1&password=2", "password") == "2",
+        "field matching is exact, not a prefix");
+
+  // --- and the real thing, over a real socket on this machine ---------------
+  EchoHandler handler;
+  HttpServer server;
+  const int port = server.start(0, &handler);
+  check(port > 0 && server.running(), "the server binds a free port");
+
+  if (port > 0) {
+    // Drive it with curl rather than hand-rolling a client: the point is that a
+    // real HTTP client is satisfied by these responses.
+    char command[256];
+    std::snprintf(command, sizeof(command),
+                  "curl -s -o /tmp/tcos-http.out -w '%%{http_code}' "
+                  "--max-time 3 http://127.0.0.1:%d/ > /tmp/tcos-http.code 2>/dev/null &",
+                  port);
+    std::system(command);
+    const bool served = server.serveOnce(3000);
+    check(served, "a request is accepted and served");
+    check(handler.calls == 1 && handler.lastMethod == "GET" && handler.lastPath == "/",
+          "the handler sees the request");
+
+    // Give curl a moment to finish writing its files.
+    std::system("sleep 1");
+    std::FILE* f = std::fopen("/tmp/tcos-http.code", "r");
+    char code[8] = {0};
+    if (f != 0) {
+      if (std::fgets(code, sizeof(code), f) == 0) code[0] = 0;
+      std::fclose(f);
+    }
+    check(std::string(code) == "200", "a real HTTP client gets 200");
+    check(readFixture("/tmp/tcos-http.out") == "<h1>ok</h1>", "and the body it was sent");
+
+    // A POST with a form body, which is the only request that matters.
+    std::snprintf(command, sizeof(command),
+                  "curl -s -o /dev/null --max-time 3 -d 'ssid=home&password=x' "
+                  "http://127.0.0.1:%d/connect > /dev/null 2>&1 &",
+                  port);
+    std::system(command);
+    check(server.serveOnce(3000), "a POST is served");
+    check(handler.lastMethod == "POST" && handler.lastPath == "/connect",
+          "the POST route is seen");
+    check(handler.lastBody == "ssid=home&password=x", "the whole form body arrives");
+
+    check(!server.serveOnce(50), "serveOnce times out when nobody connects");
+  }
+
+  server.stop();
+  check(!server.running(), "stop closes the listener");
+}
+
+class FakePortalBackend : public tcos::SetupPortal::Backend {
+ public:
+  std::vector<std::string> scanResults() { return networks; }
+  void submit(const std::string& s, const std::string& p) {
+    submittedSsid = s;
+    submittedPsk = p;
+    ++submits;
+  }
+  std::string status() { return state; }
+  std::string ipAddress() { return ip; }
+
+  std::vector<std::string> networks;
+  std::string state = "provisioning";
+  std::string ip;
+  std::string submittedSsid;
+  std::string submittedPsk;
+  int submits = 0;
+};
+
+void checkSetupPortal() {
+  using tcos::HttpServer;
+  using tcos::SetupPortal;
+
+  FakePortalBackend backend;
+  SetupPortal portal(&backend);
+
+  HttpServer::Request req;
+  req.method = "GET";
+  req.path = "/";
+  HttpServer::Response page = portal.handle(req);
+  check(page.status == 200, "the page serves 200");
+  check(page.contentType.find("text/html") != std::string::npos, "as HTML");
+  // The phone is joined to the device's own hotspot and has no internet, so a
+  // single external reference turns setup into an unexplained spinner.
+  check(page.body.find("http://") == std::string::npos &&
+            page.body.find("https://") == std::string::npos,
+        "the page references nothing external");
+  check(page.body.find("<script") != std::string::npos, "its script is inline");
+  check(page.body.find("<style") != std::string::npos, "its styles are inline");
+  check(page.body.find("2.4G") != std::string::npos, "it states the 2.4G-only limit");
+
+  // A captive-portal probe hits an arbitrary path; answering it with the form is
+  // what makes the phone's "sign in to network" banner open straight onto it.
+  req.path = "/hotspot-detect.html";
+  check(portal.handle(req).body == page.body, "any unknown path serves the setup page");
+
+  // Scan results are JSON, and an SSID is user-controlled data from the air.
+  req.path = "/scan";
+  check(portal.handle(req).body == "{\"networks\":[]}", "an empty scan is still valid JSON");
+  backend.networks.push_back("home");
+  backend.networks.push_back("say \"hi\"");
+  backend.networks.push_back("back\\slash");
+  const std::string scanBody = portal.handle(req).body;
+  check(scanBody.find("\\\"hi\\\"") != std::string::npos, "quotes in an SSID are escaped");
+  check(scanBody.find("back\\\\slash") != std::string::npos, "backslashes are escaped");
+  check(SetupPortal::jsonEscape("\x01") == "\\u0001",
+        "a control byte becomes an escape rather than invalid JSON");
+  check(SetupPortal::htmlEscape("<b>&\"") == "&lt;b&gt;&amp;&quot;", "html escaping covers the set");
+
+  // Submitting.
+  req.method = "POST";
+  req.path = "/connect";
+  req.body = "ssid=my+net&password=p%40ss";
+  HttpServer::Response ok = portal.handle(req);
+  check(ok.status == 200 && backend.submits == 1, "a submit reaches the backend");
+  check(backend.submittedSsid == "my net" && backend.submittedPsk == "p@ss",
+        "the form is decoded before it reaches the WiFi layer");
+
+  // An open network is legitimate; only a missing SSID is an error.
+  req.body = "ssid=open&password=";
+  check(portal.handle(req).status == 200, "an empty password is accepted");
+  req.body = "password=x";
+  check(portal.handle(req).status == 400, "a missing ssid is refused");
+  check(backend.submits == 2, "and is not handed to the WiFi layer");
+
+  req.method = "GET";
+  check(portal.handle(req).status == 400, "GET /connect is refused");
+
+  // Status drives the page's polling loop.
+  req.method = "GET";
+  req.path = "/status";
+  check(portal.handle(req).body == "{\"status\":\"provisioning\",\"ip\":\"\"}",
+        "status reports the current state");
+  backend.state = "online";
+  backend.ip = "192.168.8.240";
+  check(portal.handle(req).body == "{\"status\":\"online\",\"ip\":\"192.168.8.240\"}",
+        "and the address once there is one");
+}
+
 void checkStateDoc() {
   using tcos::StateDoc;
 
@@ -989,6 +1190,10 @@ int main() {
   std::printf("  state doc ok\n");
   checkFrameBundle();
   std::printf("  frame bundle ok\n");
+  checkHttpServer();
+  std::printf("  http server ok\n");
+  checkSetupPortal();
+  std::printf("  setup portal ok\n");
   checkWifiPolicy();
   std::printf("  wifi policy ok\n");
   checkBootScreen();
