@@ -2,8 +2,12 @@ upstream/
 toolchain/
 packages/
 *.tar.gz
+# Object directories are namespaced per app (Makefile BUILD_DIR); three
+# firmwares share this directory and must not share objects.
 build/
+build-*/
 libzkgui.so
+libzkgui-os.so
 main.js
 biz.js
 node_modules/

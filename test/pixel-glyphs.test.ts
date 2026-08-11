@@ -11,10 +11,9 @@ import {
   isFullWidth,
 } from "../web/src/lib/pixel-glyphs";
 
-const visualDir = join(
-  import.meta.dir,
-  "../device/tc002-lyrics-player/app/src/visual",
-);
+// One copy of the tables serves every firmware and the browser preview; this
+// test is what stops the two sides from drifting apart.
+const visualDir = join(import.meta.dir, "../device/shared-visual");
 
 function parseGlyphHeader(fileName: string): Map<number, number[]> {
   const source = readFileSync(join(visualDir, fileName), "utf8");

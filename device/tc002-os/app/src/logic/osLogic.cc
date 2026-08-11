@@ -8,7 +8,7 @@
 
 #include <os/SystemProperties.h>
 
-#include "core/Presenter.h"
+#include "platform/Presenter.h"
 #include "core/Surface.h"
 #include "managers/KeyManager.h"
 #include "ui/BootScreen.h"

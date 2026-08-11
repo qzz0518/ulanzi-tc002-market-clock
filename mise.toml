@@ -45,7 +45,24 @@ run = "clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-arcade/app/src' devic
 # the UI can be compiled and asserted here rather than only on hardware.
 [tasks.os-hostcheck]
 description = "Compile and run the tc002-os UI self-checks on the host"
-run = "clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' device/tc002-os/hostcheck/selfcheck.cpp device/tc002-os/app/src/core/Surface.cpp device/tc002-os/app/src/ui/*.cpp -o .runtime/os-selfcheck && .runtime/os-selfcheck"
+run = """
+# The glyph tables are `static const` arrays in headers: every extra translation
+# unit that includes them adds its own ~145 KB copy of the CJK table to a binary
+# living on a device with ~1 MB free. visual/Glyphs.cpp is the only permitted
+# includer, and this is the guard that keeps it that way.
+includers=$(grep -rl 'shared-visual/CjkFont.h\\|shared-visual/LatinFont.h' device/tc002-os/app/src | sort)
+if [ "$includers" != "device/tc002-os/app/src/visual/Glyphs.cpp" ]; then
+  echo "FAIL the glyph tables must be included by visual/Glyphs.cpp alone; found:" >&2
+  echo "$includers" >&2
+  exit 1
+fi
+clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
+  device/tc002-os/hostcheck/selfcheck.cpp \
+  device/tc002-os/app/src/core/*.cpp \
+  device/tc002-os/app/src/ui/*.cpp \
+  device/tc002-os/app/src/visual/*.cpp \
+  -o .runtime/os-selfcheck && .runtime/os-selfcheck
+"""
 
 [tasks.os-build]
 description = "Cross-build tc002-os to an ELF32-ARM libzkgui-os.so"

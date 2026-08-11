@@ -6,7 +6,7 @@
 #include "visual/Palette.h"
 #include "visual/Spectrum.h"
 #include "visual/Icons.h"
-#include "visual/LatinFont.h"
+#include "shared-visual/LatinFont.h"
 
 using namespace lyricsvisual;
 

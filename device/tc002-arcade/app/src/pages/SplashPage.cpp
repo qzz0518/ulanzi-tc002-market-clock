@@ -3,7 +3,7 @@
 #include <vector>
 #include "utils/Surface.h"
 #include "visual/Palette.h"
-#include "visual/LatinFont.h"
+#include "shared-visual/LatinFont.h"
 #include "visual/PixelFont.h"
 #include "managers/SfxManager.h"
 

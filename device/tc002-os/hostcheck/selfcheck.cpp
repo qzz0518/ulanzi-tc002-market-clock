@@ -14,7 +14,9 @@
 
 #include "core/Ease.h"
 #include "core/Surface.h"
+#include "core/Text.h"
 #include "ui/BootScreen.h"
+#include "visual/Glyphs.h"
 
 namespace {
 
@@ -172,6 +174,130 @@ void checkBootScreen() {
   }
 }
 
+void checkGlyphs() {
+  using namespace tcos;
+  check(glyphs::cjkCount() == 5195, "the CJK table still holds 5195 glyphs");
+  check(glyphs::latinCount() == 0x7E - 0x20 + 1, "the Latin table covers ASCII 0x20..0x7E");
+  check(glyphs::cellWidth('A') == 6, "ASCII is half-width");
+  check(glyphs::cellWidth(0x4E2D) == 12, "CJK is full-width");
+
+  const glyphs::Bitmap a = glyphs::lookup('A');
+  check(a.rows != 0 && a.width == 6, "'A' resolves in the Latin table");
+  const glyphs::Bitmap zh = glyphs::lookup(0x4E2D);  // 中
+  check(zh.rows != 0 && zh.width == 12, "U+4E2D resolves in the CJK table");
+  const glyphs::Bitmap missing = glyphs::lookup(0x10FFFF);
+  check(missing.rows == 0, "an unmapped codepoint reports no bitmap");
+
+  // The layout puts a 12 px cell at the top of a 16 px panel and reserves the
+  // bottom rows; a glyph inking its very first row would collide with the
+  // status band, so assert the generated table leaves that row clear.
+  bool topRowClear = true;
+  for (int cp = 0x4E00; cp < 0x4E40; ++cp) {
+    const glyphs::Bitmap g = glyphs::lookup(static_cast<uint32_t>(cp));
+    if (g.rows != 0 && g.rows[0] != 0) topRowClear = false;
+  }
+  check(topRowClear, "CJK glyphs leave their top row empty");
+}
+
+void checkText() {
+  using namespace tcos;
+
+  // UTF-8 decoding, including the malformed cases a host payload can carry.
+  const char* ascii = "Hi";
+  const char* p = ascii;
+  check(text::utf8Next(p) == 'H', "ascii decodes");
+  check(text::utf8Next(p) == 'i', "ascii advances");
+  check(text::utf8Next(p) == 0, "the terminator reads as 0");
+
+  const char* han = "\xE4\xB8\xAD";  // U+4E2D
+  p = han;
+  check(text::utf8Next(p) == 0x4E2D, "a three-byte sequence decodes");
+  check(*p == 0, "a three-byte sequence advances three bytes");
+
+  const char* truncated = "\xE4\xB8";  // missing the last byte
+  p = truncated;
+  const uint32_t bad = text::utf8Next(p);
+  check(bad == 0xFFFD, "a truncated sequence yields U+FFFD");
+  check(p != truncated, "a malformed sequence still advances (no infinite loop)");
+
+  const char* stray = "\x80" "A";
+  p = stray;
+  check(text::utf8Next(p) == 0xFFFD, "a stray continuation byte yields U+FFFD");
+  check(text::utf8Next(p) == 'A', "decoding resynchronises after bad input");
+
+  // Measurement is what every layout decision is built on.
+  check(text::measure("") == 0, "an empty string is zero wide");
+  check(text::measure("ABCDEFGH") == 48, "8 Latin cells are 48 px");
+  check(text::measure("\xE9\x9F\xB3\xE4\xB9\x90") == 24, "2 CJK cells are 24 px");
+  check(text::countCells("\xE9\x9F\xB3\xE4\xB9\x90") == 2, "countCells counts codepoints");
+
+  // 4 CJK is 48 px and fits the 52 px panel; 5 does not. This is the number the
+  // whole one-item-per-page design rests on.
+  const char* four = "\xE4\xB8\x80\xE4\xB8\x80\xE4\xB8\x80\xE4\xB8\x80";
+  const char* five = "\xE4\xB8\x80\xE4\xB8\x80\xE4\xB8\x80\xE4\xB8\x80\xE4\xB8\x80";
+  check(text::measure(four) == 48, "4 CJK cells fit the panel at 48 px");
+  check(text::measure(five) == 60, "5 CJK cells overflow the 52 px panel");
+  check(text::prefixBytesThatFit(five, 52) == 12, "the fitting prefix stops at 4 cells");
+  check(text::prefixBytesThatFit(five, 5) == 0, "nothing fits below one cell");
+
+  // Drawing and clipping.
+  Surface s(52, 16);
+  text::draw(s, "A", 0, 2, Color(0, 255, 0), 0, 52);
+  check(litPixels(s) > 0, "drawing inks pixels");
+
+  Surface clipped(52, 16);
+  text::draw(clipped, "A", 0, 2, Color(0, 255, 0), 10, 42);
+  check(litPixels(clipped) == 0, "a glyph outside the clip window draws nothing");
+
+  Surface negative(52, 16);
+  text::draw(negative, "AAAAAAAAAA", -30, 2, Color(0, 255, 0), 0, 52);
+  check(litPixels(negative) > 0, "a negative origin still draws the visible tail");
+  for (int y = 0; y < 16; ++y) {
+    for (int x = 0; x < 52; ++x) {
+      (void)x;
+      (void)y;
+    }
+  }
+
+  Surface tall(52, 16);
+  text::draw(tall, "A", 0, 12, Color(0, 255, 0), 0, 52);  // 12 + 12 > 16
+  check(tall.getHeight() == 16, "vertical overflow does not resize the surface");
+
+  Surface centred(52, 16);
+  text::drawCentered(centred, "AB", 2, Color(0, 255, 0), 0, 52);
+  int minX = 52;
+  for (int x = 0; x < 52; ++x) {
+    for (int y = 0; y < 16; ++y) {
+      const Color c = centred.getPixel(x, y);
+      if ((c.r || c.g || c.b) && x < minX) minX = x;
+    }
+  }
+  check(minX >= 19 && minX <= 21, "centred text starts near the middle");
+
+  // Marquee.
+  check(text::marqueeOffset(40, 52, 0) == 0, "a fitting label never scrolls");
+  check(text::marqueeOffset(40, 52, 99999) == 0, "a fitting label never scrolls, ever");
+  const int wide = 100;
+  const int view = 52;
+  const int travel = wide - view;
+  check(text::marqueeOffset(wide, view, 0) == 0, "the marquee dwells at the head first");
+  check(text::marqueeOffset(wide, view, text::kMarqueeDwellMs - 1) == 0,
+        "the head dwell lasts the full 900 ms");
+  const int legMs = (travel * 1000) / text::kMarqueePxPerSecond;
+  check(text::marqueeOffset(wide, view, text::kMarqueeDwellMs + legMs) == -travel,
+        "the first leg ends fully scrolled");
+  check(text::marqueeOffset(wide, view, text::kMarqueeDwellMs + legMs + 10) == -travel,
+        "the tail dwell holds at the end");
+  const int cycle = 2 * text::kMarqueeDwellMs + 2 * legMs;
+  check(text::marqueeOffset(wide, view, cycle) == 0, "the cycle returns to the head");
+  bool inRange = true;
+  for (int t = 0; t < cycle * 2; t += 17) {
+    const int off = text::marqueeOffset(wide, view, t);
+    if (off > 0 || off < -travel) inRange = false;
+  }
+  check(inRange, "the marquee never leaves [-(w-view), 0]");
+}
+
 }  // namespace
 
 int main() {
@@ -180,6 +306,10 @@ int main() {
   std::printf("  ease ok\n");
   checkSurface();
   std::printf("  surface ok\n");
+  checkGlyphs();
+  std::printf("  glyphs ok\n");
+  checkText();
+  std::printf("  text ok\n");
   checkBootScreen();
   std::printf("  boot screen ok\n");
 

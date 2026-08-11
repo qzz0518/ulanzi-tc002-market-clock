@@ -16,7 +16,11 @@ BUILD_DIR ?= build
 DEP_INC := easyui base-utility log zkhardware transfer-protocols audio-utility base-json ffmpeg z
 # BOOST_INC points at the isolated boost/ subtree provided by the Docker image.
 BOOST_INC ?= /opt/boost
-INCLUDES := -I$(APP)/src $(foreach d,$(DEP_INC),-I$(PKG)/$(d)/include) -I$(BOOST_INC)
+# SHARED is the device/ root, so the generated glyph tables can be included as
+# "shared-visual/CjkFont.h" from any firmware. One copy in the repo is what keeps
+# the panel and the browser preview bit-for-bit identical (test/pixel-glyphs.test.ts).
+SHARED    ?= ../..
+INCLUDES := -I$(APP)/src -I$(SHARED) $(foreach d,$(DEP_INC),-I$(PKG)/$(d)/include) -I$(BOOST_INC)
 
 # Compile flags copied from .cproject (optimization "most" → -O3, C++11, -fPIC).
 # Two globals the IDE injects (Manifest platform="Z21"), not in .cproject:

@@ -27,7 +27,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
-const visualDir = join(root, "device/tc002-lyrics-player/app/src/visual");
+// One copy for every firmware and for the browser preview: device/shared-visual.
+const visualDir = join(root, "device/shared-visual");
 const outputPath = join(root, "web/src/lib/pixel-glyph-data.ts");
 
 const CELL_HEIGHT = 12;

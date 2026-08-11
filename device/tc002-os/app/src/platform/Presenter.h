@@ -1,5 +1,5 @@
-#ifndef CORE_PRESENTER_H_
-#define CORE_PRESENTER_H_
+#ifndef PLATFORM_PRESENTER_H_
+#define PLATFORM_PRESENTER_H_
 
 #include <stdint.h>
 #include <vector>
@@ -50,4 +50,4 @@ class Presenter {
 
 }  // namespace tcos
 
-#endif  // CORE_PRESENTER_H_
+#endif  // PLATFORM_PRESENTER_H_
