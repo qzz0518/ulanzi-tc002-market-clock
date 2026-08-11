@@ -17,6 +17,7 @@
 #include "core/Shell.h"
 #include "core/Surface.h"
 #include "core/Text.h"
+#include "net/WifiPolicy.h"
 #include "ui/BootScreen.h"
 #include "ui/LauncherScreen.h"
 #include "visual/Glyphs.h"
@@ -587,6 +588,219 @@ void checkLauncher() {
   }
 }
 
+// A scriptable stand-in for zknet: every predicate is a field the test sets, so
+// the timeout branches can be reached in microseconds instead of by unplugging
+// a router and waiting.
+class FakeWifi : public tcos::WifiPolicy::Actuator {
+ public:
+  FakeWifi()
+      : running(false), stored(false), assoc(false), address(false),
+        connectOk(true), apUp(false), starts(0), connects(0), dhcpCalls(0),
+        apStarts(0), apStops(0) {}
+
+  void startSupplicant() {
+    ++starts;
+    running = autoStart;
+  }
+  bool supplicantRunning() { return running; }
+  bool storedCredentials(std::string* s, std::string* p) {
+    if (!stored) return false;
+    *s = storedSsid;
+    *p = "psk";
+    return true;
+  }
+  bool connect(const std::string& s, const std::string&) {
+    ++connects;
+    lastSsid = s;
+    return connectOk;
+  }
+  bool associated() { return assoc; }
+  bool requestDhcp() {
+    ++dhcpCalls;
+    return true;
+  }
+  bool hasAddress() { return address; }
+  void startSoftAp() {
+    apUp = true;
+    ++apStarts;
+  }
+  void stopSoftAp() {
+    apUp = false;
+    ++apStops;
+  }
+
+  bool autoStart = true;
+  bool running;
+  bool stored;
+  std::string storedSsid = "home";
+  bool assoc;
+  bool address;
+  bool connectOk;
+  bool apUp;
+  std::string lastSsid;
+  int starts;
+  int connects;
+  int dhcpCalls;
+  int apStarts;
+  int apStops;
+};
+
+void checkWifiPolicy() {
+  using tcos::WifiPolicy;
+
+  // Happy path: stored credentials, supplicant comes up, associate, lease, online.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    check(w.starts == 1, "begin starts the supplicant — init will not");
+    check(policy.state() == WifiPolicy::kStartingWpa, "begin waits for the daemon");
+    policy.tick(10);
+    check(policy.state() == WifiPolicy::kConnecting, "a running daemon moves us to connecting");
+    check(w.connects == 1 && w.lastSsid == "home", "the stored network is used");
+    w.assoc = true;
+    policy.tick(500);
+    check(policy.state() == WifiPolicy::kObtainingIp, "association leads to a lease request");
+    check(w.dhcpCalls == 1, "DHCP is requested explicitly — nothing else does it");
+    w.address = true;
+    policy.tick(600);
+    check(policy.state() == WifiPolicy::kOnline && policy.isOnline(), "an address means online");
+    check(w.apStarts == 0, "the hotspot never came up on the happy path");
+  }
+
+  // No credentials at all: straight to provisioning.
+  {
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    check(policy.state() == WifiPolicy::kProvisioning, "no credentials means provisioning");
+    check(w.apUp && w.apStarts == 1, "the hotspot is raised");
+    check(w.connects == 0, "nothing is attempted without credentials");
+  }
+
+  // THE case this class exists for: valid-looking credentials, network gone.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    check(policy.state() == WifiPolicy::kConnecting, "it tries the stored network first");
+    policy.tick(WifiPolicy::kConnectTimeoutMs);
+    check(policy.state() == WifiPolicy::kConnecting, "it does not give up early");
+    policy.tick(20 + WifiPolicy::kConnectTimeoutMs);
+    check(policy.state() == WifiPolicy::kProvisioning,
+          "a moved router falls back to provisioning instead of waiting forever");
+    check(w.apUp, "the hotspot comes up so the user has a way in");
+
+    // ...and keeps retrying in the background, because the usual cause is a
+    // router that is merely slow to come back.
+    const int t0 = 20 + WifiPolicy::kConnectTimeoutMs;
+    const int connectsBefore = w.connects;
+    policy.tick(t0 + 1000);
+    check(w.connects == connectsBefore, "it does not spam the radio");
+    w.assoc = true;
+    policy.tick(t0 + WifiPolicy::kBackgroundRetryMs + 10);
+    check(w.connects > connectsBefore, "it retries the stored network on a timer");
+    check(policy.state() == WifiPolicy::kObtainingIp, "a recovered router is picked up by itself");
+    check(!w.apUp && w.apStops >= 1, "the hotspot is torn down once the network is back");
+  }
+
+  // Provisioning must not tear the hotspot down on a hopeful retry that fails —
+  // that would strand a user halfway through configuring.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    policy.tick(20 + WifiPolicy::kConnectTimeoutMs);
+    check(w.apUp, "hotspot up");
+    const int t0 = 20 + WifiPolicy::kConnectTimeoutMs;
+    policy.tick(t0 + WifiPolicy::kBackgroundRetryMs + 10);  // assoc still false
+    check(w.apUp, "a failed retry leaves the hotspot standing");
+    check(policy.state() == WifiPolicy::kProvisioning, "and stays in provisioning");
+  }
+
+  // Credentials from the setup page take effect immediately.
+  {
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    check(policy.isProvisioning(), "starts in provisioning");
+    policy.applyCredentials("newnet", "secret", 100);
+    check(policy.state() == WifiPolicy::kConnecting, "submitted credentials are tried at once");
+    check(w.lastSsid == "newnet", "the submitted network is the one attempted");
+    check(!w.apUp, "the hotspot drops as soon as the user has submitted");
+  }
+
+  // Supervision: init will not respawn a oneshot service, so we must.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    w.assoc = true;
+    policy.tick(20);
+    w.address = true;
+    policy.tick(30);
+    check(policy.isOnline(), "online");
+    const int startsBefore = w.starts;
+    w.running = false;  // the daemon dies
+    policy.tick(40);
+    check(w.starts == startsBefore + 1, "a dead supplicant is revived by us");
+    check(policy.state() == WifiPolicy::kStartingWpa, "and the machine goes back to waiting");
+    check(policy.supplicantRestarts() >= 1, "the restart is counted, not hidden");
+  }
+
+  // A supplicant that refuses to start is retried rather than abandoned.
+  {
+    FakeWifi w;
+    w.autoStart = false;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kSupplicantStartMs + 10);
+    check(w.starts >= 2, "a supplicant that will not start is retried");
+    check(policy.state() == WifiPolicy::kStartingWpa, "and we keep waiting for it");
+  }
+
+  // Losing the lease re-associates instead of sitting on a dead link.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    w.assoc = true;
+    policy.tick(20);
+    w.address = true;
+    policy.tick(30);
+    const int connectsBefore = w.connects;
+    w.address = false;
+    policy.tick(40);
+    check(w.connects == connectsBefore + 1, "a lost address re-associates");
+  }
+
+  // A DHCP request that never lands is repeated.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(10);
+    w.assoc = true;
+    policy.tick(20);
+    check(w.dhcpCalls == 1, "one lease request so far");
+    policy.tick(20 + WifiPolicy::kDhcpTimeoutMs + 1);
+    check(w.dhcpCalls == 2, "a silent DHCP server is asked again");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -605,6 +819,8 @@ int main() {
   std::printf("  shell ok\n");
   checkLauncher();
   std::printf("  launcher ok\n");
+  checkWifiPolicy();
+  std::printf("  wifi policy ok\n");
   checkBootScreen();
   std::printf("  boot screen ok\n");
 
