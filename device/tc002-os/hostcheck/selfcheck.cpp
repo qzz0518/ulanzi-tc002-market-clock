@@ -521,6 +521,60 @@ void checkLauncher() {
   b.extractRGB(rb);
   check(ra != rb, "an overflowing label scrolls instead of sitting clipped");
 
+  // EVERY icon must animate, and must animate by moving something. A 12x12 cell
+  // is too small for a brightness pulse to read, and a four-step rotation looks
+  // like flicker rather than motion — this check exists because three of the
+  // four icons shipped static and only the equaliser was noticed as alive.
+  static const LauncherScreen::Icon kAllIcons[4] = {
+      LauncherScreen::kIconChannel, LauncherScreen::kIconMusic,
+      LauncherScreen::kIconGame, LauncherScreen::kIconSettings};
+  static const char* kIconNames[4] = {"channel", "music", "game", "settings"};
+  for (int i = 0; i < 4; ++i) {
+    std::vector<LauncherScreen::Entry> one;
+    LauncherScreen::Entry only;
+    only.label = "x";
+    only.icon = kAllIcons[i];
+    only.id = 0;
+    one.push_back(only);
+    LauncherScreen screen;
+    screen.setEntries(one, 0);
+    screen.onEnter(0);
+
+    // Sample a full cycle and require the icon area to take at least three
+    // distinct shapes: two would be satisfied by a blink, which is not motion.
+    std::vector<std::vector<uint8_t> > shapes;
+    for (int t = 0; t <= 2400; t += 60) {
+      Surface frame(52, 16);
+      screen.render(frame, t);
+      std::vector<uint8_t> iconArea;
+      for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 12; ++x) {
+          const Color c = frame.getPixel(x, y);
+          iconArea.push_back((c.r || c.g || c.b) ? 1 : 0);
+        }
+      }
+      bool seen = false;
+      for (size_t k = 0; k < shapes.size(); ++k) {
+        if (shapes[k] == iconArea) seen = true;
+      }
+      if (!seen) shapes.push_back(iconArea);
+    }
+    check(shapes.size() >= 3,
+          std::string("the ") + kIconNames[i] + " icon animates by moving pixels");
+
+    // And it must stay inside its 12 px cell, or it would collide with the label.
+    Surface frame(52, 16);
+    screen.render(frame, 500);
+    bool inkedBetween = false;
+    for (int y = 0; y < 16; ++y) {
+      for (int x = 12; x < 14; ++x) {
+        const Color c = frame.getPixel(x, y);
+        if (c.r || c.g || c.b) inkedBetween = true;
+      }
+    }
+    check(!inkedBetween, std::string("the ") + kIconNames[i] + " icon stays in its cell");
+  }
+
   // Nothing may be drawn outside the panel at any point of a slide.
   LauncherScreen bounds;
   bounds.setEntries(entries, 0);

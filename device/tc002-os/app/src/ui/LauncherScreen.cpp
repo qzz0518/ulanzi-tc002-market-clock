@@ -1,5 +1,7 @@
 #include "ui/LauncherScreen.h"
 
+#include <math.h>
+
 #include "core/Ease.h"
 #include "core/Text.h"
 #include "visual/Glyphs.h"
@@ -42,15 +44,23 @@ void plot(Surface& out, int x, int y, const Color& c) {
 
 // Icons are procedural: a 12x12 RGB bitmap would cost 432 bytes each, and the
 // whole point of this firmware is that it fits where the official one does not.
+//
+// All four ANIMATE, and all four animate by MOVING something. On a 12x12 cell a
+// brightness pulse is nearly invisible and a 4-step rotation reads as flicker,
+// so every icon here changes a position by at least two pixels per cycle. Cost
+// is a handful of sinf/cosf per frame over at most 144 pixels.
 void drawIcon(Surface& out, LauncherScreen::Icon icon, int x, int y,
               const Color& c, int phaseMs) {
+  const float kTwoPi = 6.2831853f;
+
   switch (icon) {
     case LauncherScreen::kIconChannel: {
-      // A 3-bar equaliser whose bars breathe out of phase.
+      // A 3-bar equaliser. sinf rather than a fract-based ramp: the ramp had a
+      // discontinuity at the wrap, which showed up as a visible snap.
       for (int bar = 0; bar < 3; ++bar) {
-        const float t = (phaseMs / 420.0f) + bar * 0.7f;
-        const float wave = 0.5f + 0.5f * ease::inOutQuad((t - (int)t));
-        const int h = 3 + static_cast<int>(wave * 6.0f);
+        const float phase = (phaseMs / 900.0f) * kTwoPi + bar * 1.9f;
+        const float wave = 0.5f + 0.5f * sinf(phase);
+        const int h = 3 + static_cast<int>(wave * 7.0f);
         for (int i = 0; i < h; ++i) {
           const int py = y + 11 - i;
           plot(out, x + 1 + bar * 4, py, c);
@@ -60,38 +70,87 @@ void drawIcon(Surface& out, LauncherScreen::Icon icon, int x, int y,
       break;
     }
     case LauncherScreen::kIconMusic: {
-      // A quaver: stem, flag, and a filled head.
-      for (int i = 0; i < 8; ++i) plot(out, x + 7, y + 1 + i, c);
-      for (int i = 0; i < 3; ++i) plot(out, x + 8 + i, y + 1 + i, c);
-      for (int dy = 0; dy < 3; ++dy)
-        for (int dx = 0; dx < 4; ++dx) plot(out, x + 3 + dx, y + 8 + dy, c);
+      // Two beamed quavers bouncing in antiphase. The beam stays put and the
+      // heads travel 3 px, which is a quarter of the cell — unmistakable motion
+      // at this size, and unmistakably musical.
+      const float phase = (phaseMs / 760.0f) * kTwoPi;
+      const int lift[2] = {
+          static_cast<int>(1.5f + 1.5f * sinf(phase)),
+          static_cast<int>(1.5f + 1.5f * sinf(phase + 3.14159f)),
+      };
+      // Beam across the top, joining both stems.
+      for (int i = 0; i < 9; ++i) plot(out, x + 2 + i, y + 1, c);
+      for (int i = 0; i < 9; ++i) plot(out, x + 2 + i, y + 2, c);
+      for (int n = 0; n < 2; ++n) {
+        const int sx = (n == 0) ? x + 2 : x + 10;
+        const int headTop = y + 7 + lift[n];
+        for (int i = y + 3; i < headTop; ++i) plot(out, sx, i, c);
+        // A 3x3 head hanging off the stem, on the inside so both fit the cell.
+        const int hx = (n == 0) ? sx : sx - 2;
+        for (int dy = 0; dy < 3; ++dy)
+          for (int dx = 0; dx < 3; ++dx) plot(out, hx + dx, headTop + dy, c);
+      }
       break;
     }
     case LauncherScreen::kIconGame: {
-      // A d-pad and two buttons.
-      for (int i = 0; i < 5; ++i) plot(out, x + 1 + i, y + 6, c);
-      for (int i = 0; i < 5; ++i) plot(out, x + 3, y + 4 + i, c);
-      plot(out, x + 8, y + 5, c);
-      plot(out, x + 9, y + 5, c);
-      plot(out, x + 9, y + 7, c);
-      plot(out, x + 10, y + 7, c);
+      // Pong. A d-pad was tried first and rejected: its only motion was a
+      // highlight landing on pixels the static cross had already lit, so the
+      // icon's silhouette never changed and it read as frozen. Here the ball
+      // travels the full cell and the paddles chase it — actual displacement,
+      // which is the only kind of animation legible at 12x12.
+      const float period = 1500.0f;
+      const float u = (phaseMs / period) - floorf(phaseMs / period);
+      // Triangle waves: the ball crosses and returns, bouncing off the top and
+      // bottom on a faster axis so the path reads as a rally rather than a slide.
+      const float triX = u < 0.5f ? (u * 2.0f) : (2.0f - u * 2.0f);
+      const float v = (phaseMs / 620.0f) - floorf(phaseMs / 620.0f);
+      const float triY = v < 0.5f ? (v * 2.0f) : (2.0f - v * 2.0f);
+      const int bx = x + 3 + static_cast<int>(triX * 6.0f + 0.5f);
+      const int by = y + 2 + static_cast<int>(triY * 8.0f + 0.5f);
+
+      // Paddles track the ball, clamped inside the cell.
+      int leftY = by - 1;
+      if (leftY < y + 1) leftY = y + 1;
+      if (leftY > y + 9) leftY = y + 9;
+      int rightY = (y + 11) - (by - y) - 1;  // mirrored, so they are not identical
+      if (rightY < y + 1) rightY = y + 1;
+      if (rightY > y + 9) rightY = y + 9;
+
+      for (int i = 0; i < 3; ++i) {
+        plot(out, x + 1, leftY + i, c);
+        plot(out, x + 10, rightY + i, c);
+      }
+      // A 2x2 ball, big enough to be seen against the paddles.
+      plot(out, bx, by, c);
+      plot(out, bx + 1, by, c);
+      plot(out, bx, by + 1, c);
+      plot(out, bx + 1, by + 1, c);
       break;
     }
     case LauncherScreen::kIconSettings: {
-      // A gear: a ring with four teeth, rotating one step per 250 ms.
-      const int cx = x + 6;
+      // A gear that actually rotates: six teeth placed by angle and advanced
+      // continuously, instead of four teeth snapping between four slots.
+      const float angle = (phaseMs / 2400.0f) * kTwoPi;
+      const int cx = x + 5;
       const int cy = y + 6;
-      for (int a = 0; a < 12; ++a) {
-        static const int ringX[12] = {0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3};
-        static const int ringY[12] = {-3, -3, -2, -1, 0, 1, 2, 3, 3, 2, 1, 0};
-        plot(out, cx + ringX[a] - 1, cy + ringY[a], c);
+      // Hub.
+      for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) plot(out, cx + dx, cy + dy, c);
+      // Body ring at radius 2.
+      for (int a = 0; a < 16; ++a) {
+        const float th = (a / 16.0f) * kTwoPi;
+        plot(out, cx + static_cast<int>(cosf(th) * 2.4f + 0.5f),
+             cy + static_cast<int>(sinf(th) * 2.4f + 0.5f), dim(c, 0.55f));
       }
-      const int step = (phaseMs / 250) % 4;
-      static const int toothX[4] = {0, 4, 0, -4};
-      static const int toothY[4] = {-4, 0, 4, 0};
-      for (int t = 0; t < 4; ++t) {
-        const int k = (t + step) % 4;
-        plot(out, cx - 1 + toothX[k], cy + toothY[k], c);
+      // Teeth at radius 4, rotating.
+      for (int t = 0; t < 6; ++t) {
+        const float th = angle + (t / 6.0f) * kTwoPi;
+        const int tx = cx + static_cast<int>(cosf(th) * 4.2f + (cosf(th) < 0 ? -0.5f : 0.5f));
+        const int ty = cy + static_cast<int>(sinf(th) * 4.2f + (sinf(th) < 0 ? -0.5f : 0.5f));
+        plot(out, tx, ty, c);
+        // Fatten each tooth towards the hub so it reads as a tooth, not a speck.
+        plot(out, cx + static_cast<int>(cosf(th) * 3.0f + (cosf(th) < 0 ? -0.5f : 0.5f)),
+             cy + static_cast<int>(sinf(th) * 3.0f + (sinf(th) < 0 ? -0.5f : 0.5f)), c);
       }
       break;
     }

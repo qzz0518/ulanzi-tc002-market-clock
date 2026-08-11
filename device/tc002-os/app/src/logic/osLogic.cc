@@ -170,7 +170,7 @@ static void onUI_show() {
 	entry.icon = tcos::LauncherScreen::kIconSettings;
 	entry.id = 3;
 	entries.push_back(entry);
-	entry.label = "\xE5\xB8\x82\xE5\x9C\xBA\xE8\xBD\xAE\xE6\x92\xAD";  // 市场轮播
+	entry.label = "\xE8\xBD\xAE\xE6\x92\xAD";              // 轮播
 	entry.icon = tcos::LauncherScreen::kIconChannel;
 	entry.id = 4;
 	entries.push_back(entry);
