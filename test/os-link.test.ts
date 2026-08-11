@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { OsLinkHub, type OsMenuEntry } from "../src/os-link.ts";
 
 const entry = (id: string, label: string, kind: OsMenuEntry["kind"] = "channel"): OsMenuEntry => ({
@@ -127,6 +129,29 @@ describe("tc002-os host link", () => {
     expect(hub.pendingWaiters()).toBe(1);
     await pending;
     expect(hub.getTelemetry()?.ip).toBe("192.168.8.240");
+  });
+
+  test("still produces the exact bytes the firmware's parser is tested against", () => {
+    // device/tc002-os/hostcheck/fixtures/state-doc.txt is parsed by the C++
+    // self-check. Without this assertion the two sides could drift: the encoder
+    // would change, the fixture would keep passing on the firmware side, and the
+    // mismatch would only appear on hardware as a menu that silently went empty.
+    const hub = new OsLinkHub();
+    hub.setMenu([
+      entry("btc", "市场轮播"),
+      entry("matrixclock", "数字雨时钟"),
+      entry("notice", "通知板"),
+      entry("music", "音乐", "music"),
+      entry("game", "游戏", "game"),
+      entry("settings", "设置", "settings"),
+    ]);
+    hub.setDisplay({ focus: "notice", pinned: true });
+
+    const fixture = readFileSync(
+      join(import.meta.dir, "../device/tc002-os/hostcheck/fixtures/state-doc.txt"),
+      "utf8",
+    );
+    expect(hub.serialize()).toBe(fixture);
   });
 
   test("liveness is judged by report age, not by ever having heard from the device", () => {

@@ -17,6 +17,7 @@
 #include "core/Shell.h"
 #include "core/Surface.h"
 #include "core/Text.h"
+#include "net/StateDoc.h"
 #include "net/WifiPolicy.h"
 #include "ui/BootScreen.h"
 #include "ui/LauncherScreen.h"
@@ -588,6 +589,86 @@ void checkLauncher() {
   }
 }
 
+void checkStateDoc() {
+  using tcos::StateDoc;
+
+  // THE fixture is bytes produced by the real TypeScript encoder
+  // (test/os-link.test.ts asserts it still matches), so this is a genuine
+  // cross-language contract test rather than two hand-written idealisations of
+  // the same format agreeing with each other.
+  std::FILE* f = std::fopen("device/tc002-os/hostcheck/fixtures/state-doc.txt", "rb");
+  check(f != 0, "the state-doc fixture is readable");
+  std::string body;
+  if (f != 0) {
+    char buffer[4096];
+    size_t n;
+    while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) body.append(buffer, n);
+    std::fclose(f);
+  }
+
+  StateDoc doc;
+  check(doc.parse(body), "the real service document parses");
+  check(doc.seq() == 3, "seq is read");
+  check(doc.pinned(), "pinned is read");
+  check(doc.focus() == "notice", "focus is read");
+  check(doc.items().size() == 6, "every item is read");
+  if (doc.items().size() == 6) {
+    // Every field of every record, not a spot check: a partial assertion here
+    // let a deliberate fixture edit pass once while the TypeScript side caught
+    // it, which is exactly the asymmetry this pair of tests exists to remove.
+    static const StateDoc::Kind kKinds[6] = {
+        StateDoc::kChannel, StateDoc::kChannel, StateDoc::kChannel,
+        StateDoc::kMusic, StateDoc::kGame, StateDoc::kSettings};
+    static const char* kIds[6] = {"btc", "matrixclock", "notice", "music", "game", "settings"};
+    static const char* kLabels[6] = {
+        "\xE5\xB8\x82\xE5\x9C\xBA\xE8\xBD\xAE\xE6\x92\xAD",              // 市场轮播
+        "\xE6\x95\xB0\xE5\xAD\x97\xE9\x9B\xA8\xE6\x97\xB6\xE9\x92\x9F",  // 数字雨时钟
+        "\xE9\x80\x9A\xE7\x9F\xA5\xE6\x9D\xBF",                          // 通知板
+        "\xE9\x9F\xB3\xE4\xB9\x90",                                      // 音乐
+        "\xE6\xB8\xB8\xE6\x88\x8F",                                      // 游戏
+        "\xE8\xAE\xBE\xE7\xBD\xAE",                                      // 设置
+    };
+    for (int i = 0; i < 6; ++i) {
+      char label[64];
+      std::snprintf(label, sizeof(label), "item %d round-trips", i);
+      check(doc.items()[i].kind == kKinds[i] && doc.items()[i].id == kIds[i] &&
+                doc.items()[i].label == kLabels[i],
+            label);
+    }
+  }
+  check(doc.focusIndex() == 2, "focus resolves to its index");
+
+  // Robustness: the firmware must never brick itself on a document it only
+  // half understands, or one forward-compatible field on the service side
+  // would take out every deployed device.
+  StateDoc future;
+  check(future.parse("seq\t9\nnewfield\twhatever\nitem\tvideo\tv1\tX\n"
+                     "item\tchannel\tok\tY\n"),
+        "an unknown field does not fail the document");
+  check(future.seq() == 9, "known fields still parse around unknown ones");
+  check(future.items().size() == 1, "an unknown item kind is skipped, not guessed");
+  check(future.items()[0].id == "ok", "the known item survives");
+
+  StateDoc empty;
+  check(!empty.parse(""), "an empty body is rejected");
+  check(!empty.parse("pinned\t1\n"), "a document with no seq is rejected");
+
+  StateDoc noTrailer;
+  check(noTrailer.parse("seq\t4\nitem\tchannel\ta\tb"), "a missing trailing newline still parses");
+  check(noTrailer.items().size() == 1, "the last record is not dropped");
+
+  StateDoc ragged;
+  check(ragged.parse("seq\t5\nitem\tchannel\tonly-three-fields\n"), "a short item line is skipped");
+  check(ragged.items().empty(), "and does not produce a half-built entry");
+
+  StateDoc noFocus;
+  noFocus.parse("seq\t6\nitem\tchannel\ta\tb\n");
+  check(noFocus.focusIndex() == -1, "no focus reports -1 rather than 0");
+  StateDoc staleFocus;
+  staleFocus.parse("seq\t7\nfocus\tgone\nitem\tchannel\ta\tb\n");
+  check(staleFocus.focusIndex() == -1, "a focus naming a removed channel reports -1");
+}
+
 // A scriptable stand-in for zknet: every predicate is a field the test sets, so
 // the timeout branches can be reached in microseconds instead of by unplugging
 // a router and waiting.
@@ -819,6 +900,8 @@ int main() {
   std::printf("  shell ok\n");
   checkLauncher();
   std::printf("  launcher ok\n");
+  checkStateDoc();
+  std::printf("  state doc ok\n");
   checkWifiPolicy();
   std::printf("  wifi policy ok\n");
   checkBootScreen();
