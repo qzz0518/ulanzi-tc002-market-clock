@@ -22,6 +22,7 @@ import {
   ListButton,
   NumberScrubber,
   Select,
+  Surface,
   SurfaceCut,
   Switch,
   Tab,
@@ -190,22 +191,33 @@ function NoticeWebhookHint() {
     }
   };
   return (
-    <div className="notice-webhook mt-2 flex flex-col gap-1.5 rounded-lg border border-cladd-outline bg-cladd-surface-cut p-3">
+    <Surface
+      className="notice-webhook mt-2 w-full min-w-0"
+      variant="solid"
+      outline
+      contentClassName="flex w-full min-w-0 flex-col gap-1.5 p-3"
+    >
       <span className="text-sm font-medium">Webhook 即时通知</span>
       <span className="text-sm text-cladd-fg-soft">
         与上面的频道内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的地址
         POST 一条消息即可立刻上屏，显示 holdSeconds 秒后自动消失，支持中文。
       </span>
-      <code className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs">
+      {/* width:0 + min-width:100% keeps the one-line command out of the
+          ancestors' min-content math (it was inflating the whole card) while
+          still rendering full-width with its own horizontal scroll. */}
+      <code
+        className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs"
+        style={{ width: 0, minWidth: "100%" }}
+      >
         {command}
       </code>
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Button type="button" size="sm" onClick={() => void copy()}>复制示例</Button>
         <span className="text-xs text-cladd-fg-softer">
           可选 NOTIFY_TOKEN 鉴权与全部字段见技术参考「Webhook 通知」。
         </span>
       </div>
-    </div>
+    </Surface>
   );
 }
 
