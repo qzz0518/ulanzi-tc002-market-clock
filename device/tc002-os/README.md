@@ -205,6 +205,38 @@ adb shell setprop ctl.restart zkswe
 
 因此一次失败的刷写最坏是「面板不亮但 adb 还在」，可以再刷一次。
 
+### 触发前后能观测什么
+
+这台机器不能开 logcat（会卡死 adbd），所以观测点只有这三个，都在 `libzkupgrade.so`
+的字符串里，用真机 pull 下来的库核对过（注意别用 `adb shell cat` 导二进制，会损坏）：
+
+| 观测点 | 含义 |
+|---|---|
+| `getprop sys.zkupgrade.state` | 升级状态；本机当前为空 |
+| `/data/.zkupgraderec` | 升级记录，持久分区；本机当前**不存在** |
+| `/tmp/EasyUI.cfg` 被清空 | 升级路径会执行 `echo {} > /tmp/EasyUI.cfg`，即**触发升级会拆掉正在跑的侧载会话** |
+
+前两项为空/不存在，说明**本机从未执行过升级流程**——所以整条链是否点火尚未在硬件上
+证实，只证实了它存在。
+
+镜像搜索路径不止 `/tmp`：库里还有 `/mnt/storage/zkimg/update.img`、`/mnt/extsd`、
+`/mnt/usb1`、`/mnt/mmc`，以及 `sys.zkupgrade.force` / `.umount` / `zkrebootdelay`。
+
+### 尺寸不合会在擦除之前退出
+
+这是「先拿还原镜像试链路」之所以安全的依据，取自真机 `libzkupgrade.so` 的反汇编：
+
+```
+5b64: ldr r4,[r5,#8]          ; 镜像声明的尺寸
+5b6c: bl  Mtd::getSize()      ; 分区尺寸
+5b70: cmp r4, r0
+5b74: bls 5b9c                ; 装得下 → 继续
+5b94: bl  __android_log_print ; 装不下 → 打日志
+5b98: b   5e00                ; 退出
+5b9c: ...
+5ba8: bl  Mtd::erase(0, r4)   ; 擦除只在「装得下」这条路上
+```
+
 ### 恢复
 
 **没有 recovery 分区**（`/proc/mtd` 里 BOOT0/KERNEL/rootfs/res/config/MISC/data/UDISK，
