@@ -40,3 +40,25 @@ run = "bash scripts/uninstall-docker.sh"
 [tasks.arcade-hostcheck]
 description = "Compile and run the arcade engine self-checks on the host"
 run = "clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-arcade/app/src' device/tc002-arcade/hostcheck/selfcheck.cpp device/tc002-arcade/app/src/games/*.cpp device/tc002-arcade/app/src/utils/Surface.cpp -o .runtime/arcade-selfcheck && .runtime/arcade-selfcheck"
+
+# tc002-os. Everything below the device glue is FlyThings-free on purpose, so
+# the UI can be compiled and asserted here rather than only on hardware.
+[tasks.os-hostcheck]
+description = "Compile and run the tc002-os UI self-checks on the host"
+run = "clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' device/tc002-os/hostcheck/selfcheck.cpp device/tc002-os/app/src/core/Surface.cpp device/tc002-os/app/src/ui/*.cpp -o .runtime/os-selfcheck && .runtime/os-selfcheck"
+
+[tasks.os-build]
+description = "Cross-build tc002-os to an ELF32-ARM libzkgui-os.so"
+run = """
+docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
+  -w /work/tc002-lyrics-player/flythings-build flythings-build \
+  make APP=../../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os
+"""
+
+[tasks.os-linkaudit]
+description = "Assert tc002-os only needs libraries the real device maps, and links no ffmpeg"
+run = """
+docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
+  -w /work/tc002-lyrics-player/flythings-build flythings-build \
+  sh ../../tc002-os/hostcheck/link-audit.sh libzkgui-os.so libzkgui-arcade.so device-dump/maps-baseline.txt
+"""

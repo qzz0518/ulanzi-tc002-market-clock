@@ -7,6 +7,11 @@ CXX       := $(TOOLCHAIN)/bin/arm-linux-gnueabihf-g++
 APP       ?= ../app
 PKG       := packages
 OUT       ?= libzkgui.so
+# Object directory, per app. Three firmwares share this build dir; with a single
+# hardcoded 'build/', switching APP without `make clean` silently links the
+# previous app's objects into the new .so — it builds, it loads, and it runs the
+# wrong firmware. Namespacing the objects makes that impossible.
+BUILD_DIR ?= build
 
 DEP_INC := easyui base-utility log zkhardware transfer-protocols audio-utility base-json ffmpeg z
 # BOOST_INC points at the isolated boost/ subtree provided by the Docker image.
@@ -42,11 +47,11 @@ LIBS    := -Wl,--start-group -leasyui -lzkhardware -llog -lbase-utility -ltransf
 # FlyThings convention: logic/*.cc are not translation units — the IDE-generated
 # activity/*.cpp #includes them. Compile only .cpp/.c and exclude logic/.
 SRCS := $(shell find $(APP)/src \( -name '*.cpp' -o -name '*.c' \) -not -path '*/logic/*')
-# Strip the $(APP) prefix so objects land UNDER build/. The old
+# Strip the $(APP) prefix so objects land UNDER $(BUILD_DIR). The old
 # 'build/%.o,$(SRCS)' yielded 'build/../app/...', whose build/.. escapes build/,
 # dropping .o files into the source tree where `clean` (rm -rf build) never
 # deleted them — stale objects then survived every rebuild.
-OBJS := $(patsubst $(APP)/%,build/%.o,$(SRCS))
+OBJS := $(patsubst $(APP)/%,$(BUILD_DIR)/%.o,$(SRCS))
 # activity/*.cpp #include logic/*.cc; make cannot see that include, so make every
 # object depend on all logic sources — otherwise editing a logic file leaves the
 # activity object stale (its own mtime is unchanged) and the change never lands.
@@ -54,7 +59,7 @@ LOGIC := $(shell find $(APP)/src/logic -name '*.cc' 2>/dev/null)
 
 all: $(OUT)
 
-build/%.o: $(APP)/% $(LOGIC)
+$(BUILD_DIR)/%.o: $(APP)/% $(LOGIC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
@@ -69,6 +74,6 @@ $(OUT): $(OBJS)
 	@$(TOOLCHAIN)/bin/arm-linux-gnueabihf-readelf -h $@ | grep -E 'Class|Machine|Type'
 
 clean:
-	rm -rf build $(OUT)
+	rm -rf $(BUILD_DIR) $(OUT)
 
 .PHONY: all clean

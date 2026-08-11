@@ -1,0 +1,29 @@
+#!/bin/sh
+# TC002 tc002-os sideload entry. The web installer has already pushed the bundle
+# to /tmp/tc002-os and stopped the official UI service (zkswe). This script moves
+# the FlyThings app into the framework's /tmp load path, writes the session
+# identity file, starts the service (which then loads /tmp/EasyUI.cfg ->
+# /tmp/libzkgui.so) and exits.
+#
+# NOTE: the device busybox has no `sleep`, so nothing here may loop or wait —
+# the installer defines "session alive" as /tmp/EasyUI.cfg existing while zkswe
+# runs plus the identity file naming this app, and verifies that after launch.
+#
+# Everything lives in tmpfs. A power cycle wipes /tmp, the framework falls back
+# to /res/etc/EasyUI.cfg, and the official firmware returns with its own WiFi
+# web UI. That is the universal rescue for anything this firmware gets wrong,
+# and it is exactly the safety net 固化 would remove (ADR 0006).
+set -e
+BUNDLE=/tmp/tc002-os
+
+rm -f /tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/tc002-sideload.id
+rm -rf /tmp/ui
+mv "$BUNDLE/libzkgui.so" /tmp/libzkgui.so
+mv "$BUNDLE/ui" /tmp/ui
+mv "$BUNDLE/EasyUI.cfg" /tmp/EasyUI.cfg
+
+# Session identity: all sideloadable apps share the /tmp load path, so the
+# installers tell sessions apart by this file (ADR 0004).
+echo tc002-os > /tmp/tc002-sideload.id
+
+setprop ctl.start zkswe
