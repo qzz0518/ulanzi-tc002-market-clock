@@ -465,4 +465,30 @@ describe("TC002 music sideload session", () => {
     expect(probe.playerRunning).toBe(false);
     expect((await installer.status()).session.active).toBe(false);
   });
+
+  test("follows a clock host that changes at runtime instead of freezing the boot value", async () => {
+    // service.ts passes clockHost as a getter so PUT /api/device/host repoints ADB
+    // too (ADR 0005). Without this guard, "simplifying" it back to a plain property
+    // would silently strand sideloading on the old device.
+    const fixture = await releaseFixture(MUSIC_SIDELOAD_PROFILE.appId);
+    const calls: string[][] = [];
+    let host = "192.0.2.20";
+    const installer = new Tc002SideloadInstaller({
+      get clockHost() { return host; },
+      profile: MUSIC_SIDELOAD_PROFILE,
+      bundleStore: new MusicPlayerBundleStore(fixture.directory, MUSIC_SIDELOAD_PROFILE),
+      processRunner: fakeRunner(calls),
+      verifyClock: async () => ({ mcuVersion: "T1.0.13", appVersion: "0.2.9" }),
+      settleDelayMs: 0,
+    });
+
+    await installer.probe();
+    expect(calls.some((call) => call.join(" ").includes("192.0.2.20:5555"))).toBe(true);
+
+    host = "192.0.2.30";
+    calls.length = 0;
+    await installer.probe();
+    expect(calls.some((call) => call.join(" ").includes("192.0.2.30:5555"))).toBe(true);
+    expect(calls.some((call) => call.join(" ").includes("192.0.2.20:5555"))).toBe(false);
+  });
 });

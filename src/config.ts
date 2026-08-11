@@ -1,4 +1,7 @@
 export interface AppConfig {
+  // The only field mutated after boot: PUT /api/device/host repoints the clock in
+  // place. That is legal only because every consumer dereferences config.clockHost
+  // at call time — read ADR 0005 before capturing it into a local or a constructor.
   clockHost: string;
   clockHttpProxy?: string;
   notifyToken?: string;
@@ -87,7 +90,7 @@ export function loadHealthPort(
   );
 }
 
-function validateClockHost(value: string): string {
+export function validateClockHost(value: string): string {
   const host = value.trim();
   if (
     host.length === 0 ||

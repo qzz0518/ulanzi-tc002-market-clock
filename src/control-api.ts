@@ -7,6 +7,8 @@ import {
   validateDeviceGeneralSettings,
   type DeviceGeneralSettings,
 } from "./device-settings.ts";
+import { validateDeviceHost, type DeviceHostStatus } from "./device-host.ts";
+import type { ClockDeviceInfo } from "./clock-client.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
 import {
@@ -76,6 +78,14 @@ export interface ControlApiOptions {
   deviceGeneralSettings?: {
     read: () => Promise<DeviceGeneralSettings>;
     write: (settings: DeviceGeneralSettings) => Promise<DeviceGeneralSettings>;
+  };
+  deviceInfo?: {
+    read: () => Promise<ClockDeviceInfo>;
+  };
+  deviceHost?: {
+    read: () => DeviceHostStatus;
+    write: (host: string) => Promise<DeviceHostStatus>;
+    reset: () => Promise<DeviceHostStatus>;
   };
   pixelAssetLibrary?: {
     client: UlanziPixelAssetClient;
@@ -1598,6 +1608,55 @@ export function createControlHandler(
         assertSameOrigin(request);
         const settings = validateDeviceGeneralSettings(await readJson(request));
         return jsonResponse({ settings: await options.deviceGeneralSettings.write(settings) });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/device/info") {
+        if (!options.deviceInfo) {
+          return jsonResponse({ error: "device info is unavailable" }, 404);
+        }
+        // A ClockRequestError deliberately falls through to the outer handler's 503:
+        // "the clock did not answer" is exactly the signal the settings tab keys its
+        // address-recovery UI off, so it must not be flattened into an empty 200.
+        return jsonResponse({ info: await options.deviceInfo.read() });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/device/host") {
+        if (!options.deviceHost) {
+          return jsonResponse({ error: "device host control is unavailable" }, 404);
+        }
+        return jsonResponse({ host: options.deviceHost.read() });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/device/host") {
+        if (!options.deviceHost) {
+          return jsonResponse({ error: "device host control is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        const input = await readJson(request) as { host?: unknown };
+        const host = validateDeviceHost(input.host);
+        const status = await options.deviceHost.write(host);
+        // The user is here because the clock was unreachable, so answering "saved"
+        // alone is useless — probe the new address and report what happened. A
+        // failed probe never rejects the save: the clock may simply be powered off.
+        let probe: { ok: boolean; info?: ClockDeviceInfo; error?: string } = { ok: false };
+        if (options.deviceInfo) {
+          try {
+            probe = { ok: true, info: await options.deviceInfo.read() };
+          } catch (error) {
+            probe = { ok: false, error: error instanceof Error ? error.message : "unknown error" };
+          }
+        }
+        options.onSettingsChanged?.();
+        return jsonResponse({ host: status, probe });
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/api/device/host") {
+        if (!options.deviceHost) {
+          return jsonResponse({ error: "device host control is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        options.onSettingsChanged?.();
+        return jsonResponse({ host: await options.deviceHost.reset() });
       }
 
       if (request.method === "PUT" && url.pathname === "/api/workspace") {

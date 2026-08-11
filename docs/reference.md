@@ -22,7 +22,7 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CLOCK_HOST` | 无，必填 | TC002 的局域网 IP 或主机名，不带协议和端口 |
+| `CLOCK_HOST` | 无，必填 | TC002 的局域网 IP 或主机名，不带协议和端口。这是首次安装的种子值；控制台在「设备信息」里改过地址后，`.runtime/clock-host.json` 优先级更高 |
 | `CONTROL_HOST` | macOS 安装为 `0.0.0.0`；直接运行为 `127.0.0.1` | 控制台监听地址；手机访问需要 `0.0.0.0` |
 | `HEALTH_PORT` | `43820` | 控制台、API 和健康检查端口 |
 | `REQUEST_TIMEOUT_MS` | `5000` | 行情和设备请求超时 |
@@ -30,7 +30,7 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 | `DISPLAY_DURATION_SECONDS` | `90` | Custom App 在设备上的最短有效时间 |
 | `APP_NAME` | `btc` | 全新安装或旧配置首次迁移时的默认频道名 |
 | `ADB_BIN` | 安装时自动检测 | `adb` 的绝对路径；LaunchAgent 不继承终端 PATH |
-| `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据）；仅频道推送与设备读写经过它，live / notify 通道为压延迟走 Bun 原生 fetch 直连，不经过该代理 |
+| `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据）；**所有**设备请求都经过它，包括 live / notify |
 
 ## 控制台行为
 
@@ -41,6 +41,7 @@ PWA 安装需要可信 HTTPS，纯局域网 HTTP 下响应式控制台不受影�
 设置保存在 `.runtime/workspace.json`；旧版 `.runtime/settings.json` 首次启动时原子迁移为
 一个市场频道，原文件不覆盖。禁用、删除频道或修改 `appName` 时，服务向旧 Custom App 名
 发送空对象清理；设备离线导致清理失败只记录为降级状态，不回滚已保存的工作区。
+时钟地址若在控制台改过，会记在 `.runtime/clock-host.json`，重启后仍然生效并压过 `CLOCK_HOST`。
 
 ## 市场数据
 
@@ -220,6 +221,9 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/state`、`/health` | 设备、频道、行情和清理状态 |
 | `GET` / `PUT` | `/api/device/settings/general` | 读取或写入 TC002 常规设置 |
 | `GET` | `/api/access` | 返回同网段手机访问地址和监听状态 |
+| `GET` | `/api/device/info` | 实时读取时钟基础信息（SN、SSID、IP、MAC、MCU / SOC 版本），与设备自带「设备信息」页一致；时钟无响应时返回 503 |
+| `GET` / `PUT` | `/api/device/host` | 读取或改写时钟局域网地址，立即生效并落盘 `.runtime/clock-host.json`；`PUT` 同时回报一次连通性探测，探测失败不影响保存 |
+| `DELETE` | `/api/device/host` | 清除覆盖，恢复安装时的 `CLOCK_HOST` |
 | `GET` | `/api/market/search` | 按关键词与类型搜索可添加的市场资产 |
 | `GET` / `POST` | `/api/market/instruments` | 列出已添加资产；按候选引用注册新资产 |
 | `GET` | `/api/market/icons/:iconRef.png` | 运行时资产的 16×16 像素图标（不可变缓存） |
@@ -264,8 +268,9 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 `/api/live/frames` 与 `/api/music/mirror` 例外使用 2 MiB 正文上限，并共用独立于频道 FIFO 的
 串行 live 写队列；live 请求限 1–400 个 52×16 RGB 帧，页面端负责只保留最新的待推帧。
 `/api/library/video/import` 是另一处例外（multipart 100MB），转码由本机 ffmpeg 完成、120 秒超时。
-live 与 notify 的设备写为压延迟使用 Bun 原生 fetch 直连时钟（单批链路 <50ms），
-**不经过 `CLOCK_HTTP_PROXY`**；仅频道推送保留 curl 与代理路径。
+live 与 notify 的设备写为压延迟使用 Bun 原生 fetch（单批链路 <50ms），频道推送保留 curl；
+两条路都遵守 `CLOCK_HTTP_PROXY`——由 launchd 拉起的服务进程在 macOS 上没有「本地网络」授权，
+直连时钟的局域网地址会在几毫秒内失败，回环代理是它唯一能碰到设备的通道。
 
 ## Webhook 通知
 

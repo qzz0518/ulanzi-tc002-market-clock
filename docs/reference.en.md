@@ -25,7 +25,7 @@ port 43820.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `CLOCK_HOST` | required | TC002 LAN IP or hostname, without protocol or port |
+| `CLOCK_HOST` | required | TC002 LAN IP or hostname, without protocol or port. A first-run seed: once the console sets an address, `.runtime/clock-host.json` takes precedence |
 | `CONTROL_HOST` | `0.0.0.0` for the macOS install; `127.0.0.1` when run directly | Control panel listen address; phones need `0.0.0.0` |
 | `HEALTH_PORT` | `43820` | Control panel, API, and health-check port |
 | `REQUEST_TIMEOUT_MS` | `5000` | Market and device request timeout |
@@ -33,7 +33,7 @@ port 43820.
 | `DISPLAY_DURATION_SECONDS` | `90` | Minimum Custom App lifetime on the device |
 | `APP_NAME` | `btc` | Default channel name for fresh installs and first-run legacy migration |
 | `ADB_BIN` | auto-detected at install | Absolute `adb` path; a LaunchAgent doesn't inherit the shell PATH |
-| `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials) for device requests |
+| `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials); **every** device request goes through it, live and notify included |
 
 ## Control-panel behavior
 
@@ -47,7 +47,8 @@ Configuration lives in `.runtime/workspace.json`; a legacy `.runtime/settings.js
 atomically migrated into one market channel on first launch without overwriting the original.
 Disabling, deleting, or renaming a channel posts an empty object to its former Custom App
 name; a cleanup that fails while the device is offline is recorded as degraded state and
-never rolls back the save.
+never rolls back the save. A clock address set from the console is stored in
+`.runtime/clock-host.json` and outranks `CLOCK_HOST` on every later start.
 
 ## Market data
 
@@ -241,6 +242,9 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/state`, `/health` | Device, channel, market, and cleanup status |
 | `GET` / `PUT` | `/api/device/settings/general` | Read or write TC002 general settings |
 | `GET` | `/api/access` | Same-subnet phone URL and listener status |
+| `GET` | `/api/device/info` | Live device facts (SN, SSID, IP, MAC, MCU / SOC versions), matching the clock's own info page; 503 when the clock does not answer |
+| `GET` / `PUT` | `/api/device/host` | Read or repoint the clock's LAN address; applied immediately and persisted to `.runtime/clock-host.json`. `PUT` also reports one reachability probe, and a failed probe never blocks the save |
+| `DELETE` | `/api/device/host` | Drop the override and fall back to the installed `CLOCK_HOST` |
 | `GET` | `/api/market/search` | Search addable market assets by query and kind |
 | `GET` / `POST` | `/api/market/instruments` | List added assets; register one by candidate ref |
 | `GET` | `/api/market/icons/:iconRef.png` | 16×16 pixel icon of a runtime asset (immutable cache) |

@@ -139,6 +139,29 @@ export interface DeviceGeneralSettings {
   lowBatteryAutoSleep: boolean;
 }
 
+// Mirrors ClockDeviceInfo in src/clock-client.ts — the six rows the clock's own
+// 设备信息 page shows. Every field is optional: a partial /getBase still renders.
+export interface DeviceInfo {
+  serialNumber?: string;
+  ssid?: string;
+  ip?: string;
+  mac?: string;
+  mcuVersion?: string;
+  appVersion?: string;
+}
+
+export interface DeviceHostStatus {
+  host: string;
+  envHost: string;
+  source: "env" | "override";
+}
+
+export interface DeviceHostProbe {
+  ok: boolean;
+  info?: DeviceInfo;
+  error?: string;
+}
+
 export interface ControlAccessInfo {
   port: number;
   address: string | null;

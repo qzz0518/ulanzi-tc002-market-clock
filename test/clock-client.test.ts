@@ -5,6 +5,7 @@ import {
   deleteClockApp,
   pushClockPayload,
   pushClockPayloadNamed,
+  readClockDeviceInfo,
   readClockGeneralSettings,
   readClockInfo,
   writeClockGeneralSettings,
@@ -54,6 +55,38 @@ describe("TC002 HTTP client", () => {
       ip: "192.0.2.240",
       mcuVersion: "V1.0.17",
       appVersion: "1.0.5",
+    });
+  });
+
+  test("reads every field the device's own information page shows", async () => {
+    const fetcher: FetchLike = async () =>
+      new Response(JSON.stringify({
+        devSn: "B0D26I008U3670972",
+        ssid: "xiaoya-2.4G",
+        ip: "192.0.2.240",
+        mac: "ccc4b277a772",
+        mcuVer: "V1.0.17",
+        appVer: "1.0.8",
+      }));
+    expect(await readClockDeviceInfo(testConfig(), fetcher)).toEqual({
+      serialNumber: "B0D26I008U3670972",
+      ssid: "xiaoya-2.4G",
+      ip: "192.0.2.240",
+      mac: "ccc4b277a772",
+      mcuVersion: "V1.0.17",
+      appVersion: "1.0.8",
+    });
+  });
+
+  test("leaves non-string device fields undefined instead of coercing them", async () => {
+    const fetcher: FetchLike = async () => new Response(JSON.stringify({ devSn: 42, ip: null }));
+    expect(await readClockDeviceInfo(testConfig(), fetcher)).toEqual({
+      serialNumber: undefined,
+      ssid: undefined,
+      ip: undefined,
+      mac: undefined,
+      mcuVersion: undefined,
+      appVersion: undefined,
     });
   });
 
@@ -163,5 +196,37 @@ describe("TC002 HTTP client", () => {
       url: "http://192.0.2.240/api/custom?name=old_stocks",
       body: {},
     });
+  });
+
+  test("routes the fetch transport through CLOCK_HTTP_PROXY when one is configured", async () => {
+    // Live frames and notifications take the fetch transport for latency. On a
+    // host that only reaches the clock through the proxy, dropping it here made
+    // every notification fail while curl-based channel pushes kept working.
+    const proxies: Array<string | undefined> = [];
+    const fetcher: FetchLike = async (_input, init) => {
+      proxies.push((init as { proxy?: string } | undefined)?.proxy);
+      return new Response(JSON.stringify({ ip: "192.0.2.240" }));
+    };
+    const payload = buildImagePayload(
+      renderOfflineDashboard().image,
+      renderOfflineDashboard().mimeType,
+      30,
+    );
+    const proxied = loadConfig({
+      CLOCK_HOST: "192.0.2.240",
+      CLOCK_HTTP_PROXY: "http://127.0.0.1:6152",
+    });
+    await pushClockPayloadNamed(proxied, "notify", payload, fetcher);
+    await deleteClockApp(proxied, "notify", fetcher);
+    await readClockInfo(proxied, fetcher);
+    expect(proxies).toEqual([
+      "http://127.0.0.1:6152",
+      "http://127.0.0.1:6152",
+      "http://127.0.0.1:6152",
+    ]);
+
+    proxies.length = 0;
+    await pushClockPayloadNamed(testConfig(), "notify", payload, fetcher);
+    expect(proxies).toEqual([undefined]);
   });
 });

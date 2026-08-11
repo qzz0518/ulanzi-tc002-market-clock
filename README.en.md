@@ -22,8 +22,10 @@ multiple items in one channel are composed into an ordered carousel.
 | Creative | 52×16 canvas (pen, pixel text, image pixelization, optional live streaming to the clock plus QR-code collaborative doodling); Library imports of Ulanzi community assets (PNG / GIF) or local videos (ffmpeg to 52×16 pixel animation) |
 
 The top-right settings dialog reads and writes the clock's brightness, volume, timezone, and
-other general settings directly; phone browsers get a dedicated touch layout with
-add-to-home-screen support.
+other general settings directly. Its device tab shows the SN, SSID, IP, MAC, and firmware
+versions, and lets you repoint the clock when its IP moves — applied immediately, kept across
+restarts, no reinstall. Phone browsers get a dedicated touch layout with add-to-home-screen
+support.
 
 <p align="center">
   <img src="docs/images/tc002-mobile-content.png" width="390" alt="Ulanzi TC002 Pixel Studio mobile channel composition">

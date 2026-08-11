@@ -2,11 +2,13 @@ import { fileURLToPath } from "node:url";
 import {
   deleteClockApp,
   pushClockPayloadNamed,
+  readClockDeviceInfo,
   readClockGeneralSettings,
   readClockInfo,
   writeClockGeneralSettings,
 } from "./clock-client.ts";
 import { loadConfig } from "./config.ts";
+import { ClockHostStore, type DeviceHostStatus } from "./device-host.ts";
 import { createControlHandler, resetDeviceMusicSelection } from "./control-api.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
@@ -42,6 +44,25 @@ function log(event: string, details: Record<string, unknown> = {}): void {
 }
 
 const config = loadConfig();
+// The launchd plist is not editable from the console, so an address the user typed
+// there has to outrank CLOCK_HOST or it would be reverted by the very restart it is
+// meant to survive. CLOCK_HOST remains the first-run seed (ADR 0005).
+const clockHostStore = new ClockHostStore(".runtime/clock-host.json");
+const envClockHost = config.clockHost;
+let clockHostOverridden = false;
+const storedClockHost = await clockHostStore.load();
+if (storedClockHost) {
+  clockHostOverridden = true;
+  if (storedClockHost !== config.clockHost) {
+    config.clockHost = storedClockHost;
+    log("clock_host_override_applied", { host: storedClockHost, envHost: envClockHost });
+  }
+}
+const clockHostStatus = (): DeviceHostStatus => ({
+  host: config.clockHost,
+  envHost: envClockHost,
+  source: clockHostOverridden ? "override" : "env",
+});
 const workspaceStore = new WorkspaceStore(
   ".runtime/workspace.json",
   ".runtime/settings.json",
@@ -97,7 +118,10 @@ await music.initialize();
 for (const [provider, error] of music.initializeFailures) {
   log("music_session_load_failed", { provider, error, fallback: "signed_out" });
 }
-const controlAccess = discoverControlAccess({
+// Re-resolved per call: once PUT /api/device/host repoints the clock, a boot-time
+// same-subnet verdict is stale and the phone-control popover would keep advertising
+// the wrong answer. This route only fires when that popover opens.
+const controlAccess = () => discoverControlAccess({
   clockHost: config.clockHost,
   controlHost: config.controlHost,
   port: config.healthPort,
@@ -137,7 +161,9 @@ const sideloadServiceOrigin = async () => {
   return access.address ? `http://${access.address}:${config.healthPort}` : null;
 };
 const musicInstaller = new Tc002SideloadInstaller({
-  clockHost: config.clockHost,
+  // A getter, not a value: the clock is repointable at runtime, and the ADB target
+  // must follow it instead of freezing whatever CLOCK_HOST said at boot (ADR 0005).
+  get clockHost() { return config.clockHost; },
   adbPath: process.env.ADB_BIN,
   profile: MUSIC_SIDELOAD_PROFILE,
   bundleStore: new MusicPlayerBundleStore(
@@ -148,7 +174,7 @@ const musicInstaller = new Tc002SideloadInstaller({
   serviceOrigin: sideloadServiceOrigin,
 });
 const arcadeInstaller = new Tc002SideloadInstaller({
-  clockHost: config.clockHost,
+  get clockHost() { return config.clockHost; },
   adbPath: process.env.ADB_BIN,
   profile: ARCADE_SIDELOAD_PROFILE,
   bundleStore: new MusicPlayerBundleStore(
@@ -169,8 +195,10 @@ function queueLiveWrite<T>(operation: () => Promise<T>): Promise<T> {
 // Latency-critical device writes (live frames, notifications) use Bun's native
 // fetch: spawning a curl subprocess per write costs ~170ms while a direct fetch
 // is ~16ms, which is the difference between 25fps animation and a slideshow.
-// Channel pushes keep curl because they are not latency-bound and curl carries
-// the CLOCK_HTTP_PROXY scenario; live/notify therefore bypass that proxy.
+// Channel pushes keep curl because they are not latency-bound. Both transports
+// route through CLOCK_HTTP_PROXY when it is set — the proxy is not an optional
+// extra but the only path to the device on hosts where the service process may
+// not open LAN sockets itself (see requestWithFetch in clock-client.ts).
 const notify = new NotifyManager({
   pushPayload: (payload) => queueLiveWrite(() => pushClockPayloadNamed(config, NOTIFY_APP, payload, fetch)),
   clearApp: () => queueLiveWrite(() => deleteClockApp(config, NOTIFY_APP, fetch)),
@@ -198,10 +226,40 @@ function interruptibleSleep(ms: number): Promise<void> {
 
 const controlHandler = createControlHandler(controller, {
   onSettingsChanged: () => wakeSleep?.(),
-  controlAccess: () => controlAccess,
+  controlAccess,
   deviceGeneralSettings: {
     read: () => readClockGeneralSettings(config),
     write: (settings) => writeClockGeneralSettings(config, settings),
+  },
+  deviceInfo: {
+    read: async () => {
+      const info = await readClockDeviceInfo(config);
+      // Keep /health's versions in step with the last successful probe; the boot
+      // probe below is the only other writer and it never runs again. The narrow
+      // shape is deliberate — serial and MAC must not enter the health snapshot.
+      controller.setDeviceInfo({ mcuVersion: info.mcuVersion, appVersion: info.appVersion });
+      return info;
+    },
+  },
+  deviceHost: {
+    read: () => clockHostStatus(),
+    write: async (host) => {
+      const saved = await clockHostStore.save(host);
+      // One assignment is the whole rewiring: clock-client interpolates
+      // config.clockHost on every request, the installers read it through a
+      // getter, and controlAccess re-resolves per call (ADR 0005).
+      config.clockHost = saved;
+      clockHostOverridden = true;
+      log("clock_host_changed", { host: saved, envHost: envClockHost });
+      return clockHostStatus();
+    },
+    reset: async () => {
+      await clockHostStore.clear();
+      config.clockHost = envClockHost;
+      clockHostOverridden = false;
+      log("clock_host_reset", { host: envClockHost });
+      return clockHostStatus();
+    },
   },
   pixelAssetLibrary: { client: ulanziPixelAssets, store: pixelAssetStore },
   music,

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createControlHandler, resetDeviceMusicSelection } from "../src/control-api.ts";
+import { ClockRequestError } from "../src/clock-client.ts";
 import {
   DEFAULT_DEVICE_GENERAL_SETTINGS,
   type DeviceGeneralSettings,
@@ -957,5 +958,118 @@ describe("local control API", () => {
       "http://127.0.0.1:43820/api/weather/geocode?q=paris",
     ));
     expect(upstream.status).toBe(503);
+  });
+
+  test("serves the full device information page fields, and surfaces an unreachable clock", async () => {
+    const info = {
+      serialNumber: "B0D26I008U3670972",
+      ssid: "xiaoya-2.4G",
+      ip: "192.0.2.240",
+      mac: "ccc4b277a772",
+      mcuVersion: "V1.0.17",
+      appVersion: "1.0.8",
+    };
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      deviceInfo: { read: async () => info },
+    });
+    const response = await handler(new Request("http://127.0.0.1:43820/api/device/info"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).info).toEqual(info);
+
+    // The tab keys its address-recovery UI off this failure, so it must not be
+    // flattened into an empty 200.
+    const downHandler = createControlHandler(fakeWorkspaceController(), {
+      deviceInfo: {
+        read: async () => {
+          throw new ClockRequestError("clock request failed: timed out after 5000ms");
+        },
+      },
+    });
+    const down = await downHandler(new Request("http://127.0.0.1:43820/api/device/info"));
+    expect(down.status).toBe(503);
+    expect((await down.json()).error).toContain("clock request failed");
+
+    const missing = await createControlHandler(fakeWorkspaceController(), {})(
+      new Request("http://127.0.0.1:43820/api/device/info"),
+    );
+    expect(missing.status).toBe(404);
+  });
+
+  test("repoints the clock host through a same-origin adapter and probes the new address", async () => {
+    let current = "192.0.2.240";
+    const envHost = "192.0.2.240";
+    let cleared = false;
+    let reachable = false;
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      deviceInfo: {
+        read: async () => {
+          if (!reachable) throw new ClockRequestError("clock request failed: no route to host");
+          return { ip: current, mcuVersion: "V1.0.17", appVersion: "1.0.8" };
+        },
+      },
+      deviceHost: {
+        read: () => ({ host: current, envHost, source: cleared || current === envHost ? "env" : "override" }),
+        write: async (host) => {
+          current = host;
+          cleared = false;
+          return { host: current, envHost, source: "override" };
+        },
+        reset: async () => {
+          current = envHost;
+          cleared = true;
+          return { host: current, envHost, source: "env" };
+        },
+      },
+    });
+
+    const initial = await handler(new Request("http://127.0.0.1:43820/api/device/host"));
+    expect(initial.status).toBe(200);
+    expect((await initial.json()).host).toEqual({ host: "192.0.2.240", envHost, source: "env" });
+
+    // A save must still succeed when the clock does not answer — it may be off —
+    // but it has to report the probe rather than pretend the address works.
+    const saved = await handler(new Request("http://127.0.0.1:43820/api/device/host", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ host: "192.0.2.77" }),
+    }));
+    expect(saved.status).toBe(200);
+    const savedBody = await saved.json();
+    expect(savedBody.host).toEqual({ host: "192.0.2.77", envHost, source: "override" });
+    expect(savedBody.probe.ok).toBe(false);
+    expect(savedBody.probe.error).toContain("no route to host");
+
+    reachable = true;
+    const retried = await handler(new Request("http://127.0.0.1:43820/api/device/host", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ host: "192.0.2.88" }),
+    }));
+    expect((await retried.json()).probe).toEqual({
+      ok: true,
+      info: { ip: "192.0.2.88", mcuVersion: "V1.0.17", appVersion: "1.0.8" },
+    });
+
+    const invalid = await handler(new Request("http://127.0.0.1:43820/api/device/host", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ host: "http://192.0.2.88:80" }),
+    }));
+    expect(invalid.status).toBe(400);
+
+    const crossOrigin = await handler(new Request("http://127.0.0.1:43820/api/device/host", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example" },
+      body: JSON.stringify({ host: "192.0.2.99" }),
+    }));
+    // Same-origin failures use the house 400 + SettingsValidationError funnel.
+    expect(crossOrigin.status).toBe(400);
+    expect((await crossOrigin.json()).error).toContain("cross-origin");
+
+    const reset = await handler(new Request("http://127.0.0.1:43820/api/device/host", {
+      method: "DELETE",
+      headers: { Origin: "http://127.0.0.1:43820" },
+    }));
+    expect((await reset.json()).host).toEqual({ host: envHost, envHost, source: "env" });
   });
 });

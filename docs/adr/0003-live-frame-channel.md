@@ -5,9 +5,15 @@
 - Amended: 2026-08-10 — hardware testing surfaced the flicker risk as real: the service spent
   ~170 ms per write spawning a curl subprocess, so a 30 ms single-frame stream degraded to ~6 fps
   with visible tearing. Latency-critical writes (live, notify) now inject Bun's native fetch
-  (~16 ms, bypassing `CLOCK_HTTP_PROXY`), and producers ship record-and-replay batches
+  (~16 ms), and producers ship record-and-replay batches
   (4 frames × 25 ms per 100 ms push, `web/src/lib/live-screen.ts`) instead of single frames.
   Measured after the fix: 28 ms median per batch, continuous ~25 fps on the device.
+- Amended: 2026-08-11 — that fetch transport also dropped `CLOCK_HTTP_PROXY`, which silently broke
+  every live frame and notification on hosts that need the proxy. A launchd-started service on
+  macOS holds no local-network permission: connecting to the clock's LAN address fails to open a
+  socket in ~5 ms ("Was there a typo in the url or port?") while curl-through-proxy channel pushes
+  keep working, so the failure looked device-specific. Bun's fetch takes a per-request `proxy`, and
+  proxied writes measure 24–35 ms — the latency argument never required bypassing the proxy.
 
 ## Context
 

@@ -236,7 +236,7 @@
 .device-access-popover__state > span:last-of-type { max-width: 16rem; font-family: var(--mono); font-size: 0.6rem; overflow-wrap: anywhere; }
 .device-access-popover__state.is-error > svg { color: var(--muted-foreground); }
 .device-settings-form {
-  max-height: min(68vh, 41rem);
+  max-height: min(74vh, 46rem);
   margin-top: 1rem;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -310,13 +310,35 @@
   border-radius: 999px;
   cursor: pointer;
 }
-.device-settings-number { width: 8rem; }
-.device-settings-validation {
-  margin: 0;
-  padding: 0.65rem 1.25rem;
-  border-top: 1px solid color-mix(in oklch, var(--destructive) 30%, var(--border));
-  color: var(--destructive);
-  font-size: 0.65rem;
+.device-settings-links {
+  display: flex;
+  min-height: 3.8rem;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  padding: 0.58rem 1.25rem;
+}
+.device-setting-control--slider {
+  width: min(15rem, 52vw);
+  align-items: center;
+  gap: 0.7rem;
+}
+.device-setting-slider { display: block; flex: 1; min-width: 0; }
+/* cladd's thumb slider always lifts a value bubble on drag/focus (no prop to
+   disable it); it duplicates the readout on the right, so keep it hidden. The
+   slider's focus ring lives inside that bubble, so give the thumb its own. */
+.device-setting-slider [data-part="value"] { display: none; }
+.device-setting-slider:focus-within [data-part="thumb"] {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.device-setting-slider-value {
+  flex: none;
+  min-width: 2.9rem;
+  text-align: right;
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
 }
 .device-settings-actions {
   display: flex;
@@ -343,6 +365,27 @@
 }
 .device-settings-state.is-error strong { color: var(--destructive); }
 .device-settings-timezone-options { max-height: min(22rem, 55vh); overflow-y: auto; }
+.device-settings-tabs { flex: none; margin: 0.9rem 1.25rem 0; }
+/* keepMounted 让未激活的面板留在 DOM 里、只带 hidden 属性。这里显式声明，
+   别赌 UA 的 [hidden] 规则能压过 flex 容器里 .device-settings-form 的 flex:1。 */
+.device-settings-panel { display: contents; }
+.device-settings-panel[hidden] { display: none; }
+/* 只读信息行复用 .device-setting-field 的栅格与字号，dt 补进标签选择器即可。 */
+.device-setting-copy dt { display: block; font-size: 0.75rem; font-weight: 550; }
+.device-info-list { margin: 0; }
+/* 常规那边的 0.72rem 灰字是滑块旁的注解；这里右侧就是这一行的正文，
+   所以取和标签同号、同色，只靠字重（550 vs 常规）拉出主次。 */
+.device-info-value {
+  margin: 0;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.device-setting-control--host { width: min(23rem, 66vw); align-items: start; gap: 0.5rem; }
+.device-host-input { flex: 1; min-width: 0; }
+.device-host-note { margin: 0 1.25rem; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+.device-host-note code { font-family: var(--mono); font-size: 0.68rem; }
+.device-host-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.35rem 1.25rem 0.2rem; }
 
 .page-heading {
   padding: 0.72rem 0 0.68rem;

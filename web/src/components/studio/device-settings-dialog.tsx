@@ -1,23 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, RefreshCw, Save, Smartphone, Wifi } from "lucide-react";
+import {
+  Check,
+  Copy,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Smartphone,
+  SlidersHorizontal,
+  Wifi,
+} from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Button,
   Dialog,
-  NumberScrubber,
+  Input,
   Popover,
   PopoverRoot,
   PopoverTrigger,
+  Segmented,
+  SegmentedButton,
   Select,
+  Slider,
+  SurfaceCut,
   Switch,
+  Tab,
+  TabPanel,
+  Tabs,
+  TabsList,
 } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
 import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
 import type {
-  DeviceBrightnessLevel,
   DeviceCarouselSpeed,
   DeviceGeneralSettings,
+  DeviceHostProbe,
+  DeviceHostStatus,
+  DeviceInfo,
   DeviceTimezone,
   ControlAccessInfo,
 } from "@/types";
@@ -35,10 +54,51 @@ interface ControlAccessResponse {
   access: ControlAccessInfo;
 }
 
-const BRIGHTNESS_LEVELS: Array<{ value: DeviceBrightnessLevel; label: string }> = [
-  { value: "low", label: "低" },
-  { value: "mid", label: "中" },
-  { value: "high", label: "高" },
+interface DeviceInfoResponse {
+  info: DeviceInfo;
+}
+
+interface DeviceHostResponse {
+  host: DeviceHostStatus;
+}
+
+interface DeviceHostWriteResponse {
+  host: DeviceHostStatus;
+  probe: DeviceHostProbe;
+}
+
+// Mirrors validateClockHost in src/config.ts, field by field and in the same order
+// so the two can be diffed by eye. The server stays authoritative; this only spares
+// the user a round trip on the obvious paste of "http://192.168.1.9:80".
+export function clockHostError(value: string): string | null {
+  const host = value.trim();
+  if (host.length === 0) return "请填写时钟的局域网地址";
+  if (host.length > 253) return "地址过长";
+  if (host.includes("://")) return "不要带 http:// 前缀";
+  if (host.includes(":")) return "不要带端口号";
+  if (/[\s/?#@]/.test(host)) return "地址不能包含空格或 / ? # @";
+  return null;
+}
+
+// The clock reports the MAC unseparated (ccc4b277a772); show it the way every
+// other tool on the network does. Anything that is not 12 hex digits passes
+// through untouched rather than being mangled into a plausible-looking address.
+export function formatMacAddress(value: string): string {
+  if (!/^[0-9a-f]{12}$/i.test(value)) return value;
+  return (value.match(/.{2}/g) ?? []).join(":").toUpperCase();
+}
+
+const DEVICE_INFO_ROWS: Array<{
+  key: keyof DeviceInfo;
+  label: string;
+  format?: (value: string) => string;
+}> = [
+  { key: "serialNumber", label: "设备 SN" },
+  { key: "ssid", label: "WiFi 名称" },
+  { key: "ip", label: "IP 地址" },
+  { key: "mac", label: "MAC 地址", format: formatMacAddress },
+  { key: "mcuVersion", label: "MCU 固件版本" },
+  { key: "appVersion", label: "SOC 固件版本" },
 ];
 
 const CAROUSEL_SPEEDS: Array<{ value: DeviceCarouselSpeed; label: string }> = [
@@ -86,21 +146,40 @@ async function copyText(value: string): Promise<void> {
   if (!copied) throw new Error("copy unavailable");
 }
 
+// lucide-react no longer ships brand icons, so the two marks are inlined;
+// Button's `[&>svg]:size-4` handles the sizing.
+function GithubIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.25.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.09 0 4.41-2.69 5.38-5.25 5.66.41.35.78 1.05.78 2.12 0 1.53-.01 2.76-.01 3.14 0 .31.21.67.8.56A10.52 10.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M18.24 2.25h3.31l-7.23 8.26 8.5 11.24h-6.66l-5.21-6.82-5.97 6.82H1.67l7.73-8.84L1.25 2.25h6.83l4.71 6.23 5.45-6.23Zm-1.16 17.52h1.83L7.08 4.13H5.12l11.96 15.64Z" />
+    </svg>
+  );
+}
+
 interface SettingFieldProps {
   id: string;
   label: string;
   help?: string;
+  controlClassName?: string;
   children: React.ReactNode;
 }
 
-function SettingField({ id, label, help, children }: SettingFieldProps) {
+function SettingField({ id, label, help, controlClassName, children }: SettingFieldProps) {
   return (
     <div className="device-setting-field">
       <div className="device-setting-copy">
         <label id={`${id}-label`} htmlFor={id}>{label}</label>
         {help && <p id={`${id}-help`}>{help}</p>}
       </div>
-      <div className="device-setting-control">{children}</div>
+      <div className={controlClassName ? `device-setting-control ${controlClassName}` : "device-setting-control"}>{children}</div>
     </div>
   );
 }
@@ -125,6 +204,140 @@ export function DeviceSettingSwitch({ label, checked, onChange }: DeviceSettingS
   );
 }
 
+interface DeviceHostPanelProps {
+  info: DeviceInfo | null;
+  infoLoading: boolean;
+  infoError: string | null;
+  host: DeviceHostStatus | null;
+  hostDraft: string;
+  savingHost: boolean;
+  onHostDraftChange: (value: string) => void;
+  onSaveHost: () => void;
+  onResetHost: () => void;
+  onRetry: () => void;
+}
+
+// Exported for tests: cladd's Dialog renders through a portal and server-renders to
+// an empty string, so the panel body is the only seam that can be asserted on.
+export function DeviceHostPanel({
+  info,
+  infoLoading,
+  infoError,
+  host,
+  hostDraft,
+  savingHost,
+  onHostDraftChange,
+  onSaveHost,
+  onResetHost,
+  onRetry,
+}: DeviceHostPanelProps) {
+  const draftError = clockHostError(hostDraft);
+  const dirty = host ? hostDraft.trim() !== host.host : hostDraft.trim().length > 0;
+  const hasAnyField = info ? DEVICE_INFO_ROWS.some((row) => info[row.key]) : false;
+
+  return (
+    <>
+      <section className="device-settings-section" aria-labelledby="settings-info-title">
+        <div className="device-settings-section__heading">
+          <span>01</span>
+          <div>
+            <h3 id="settings-info-title">设备信息</h3>
+            <p>与时钟本机的「设备信息」页一致。</p>
+          </div>
+        </div>
+        {infoLoading && !hasAnyField ? (
+          <div className="device-settings-state" role="status">
+            <span className="loading-mark" aria-hidden="true" />
+            <strong>正在读取设备信息</strong>
+            <span>正在访问 {host?.host ?? "时钟"}。</span>
+          </div>
+        ) : hasAnyField && info ? (
+          // Same row markup as every settings field, so the two tabs share one
+          // type scale instead of inventing a second one for read-only rows.
+          <dl className="device-settings-fields device-info-list">
+            {DEVICE_INFO_ROWS.map((row) => {
+              const value = info[row.key];
+              return (
+                <div key={row.key} className="device-setting-field">
+                  <div className="device-setting-copy"><dt>{row.label}</dt></div>
+                  <dd className="device-setting-control device-info-value">
+                    {value ? row.format?.(value) ?? value : "—"}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        ) : (
+          <div className="device-settings-state is-error" role="alert">
+            <strong>无法读取设备信息</strong>
+            <span>{infoError ?? "时钟没有响应。请在下方确认它的局域网地址。"}</span>
+            <Button type="button" size="sm" onClick={onRetry}><RefreshCw />重试</Button>
+          </div>
+        )}
+      </section>
+
+      <section className="device-settings-section" aria-labelledby="settings-host-title">
+        <div className="device-settings-section__heading">
+          <span>02</span>
+          <div>
+            <h3 id="settings-host-title">时钟地址</h3>
+            <p>时钟换了 IP 就在这里改，立即生效，重启后仍然有效。</p>
+          </div>
+        </div>
+        <div className="device-settings-fields">
+          <SettingField
+            id="device-clock-host"
+            label="局域网地址"
+            help="填 IP 或主机名，不要带 http:// 和端口号。"
+            controlClassName="device-setting-control--host"
+          >
+            <Input
+              inputId="device-clock-host"
+              size="md"
+              className="device-host-input"
+              value={hostDraft}
+              placeholder="192.168.1.9"
+              valid={!draftError || !dirty}
+              errorMessage={dirty ? draftError : undefined}
+              onChange={(value) => onHostDraftChange(value)}
+            />
+            <Button
+              type="button"
+              size="md"
+              color="brand"
+              loading={savingHost}
+              disabled={savingHost || Boolean(draftError) || !dirty}
+              onClick={onSaveHost}
+            >
+              <Save />保存并连接
+            </Button>
+          </SettingField>
+          {host && host.source === "override" && host.envHost !== host.host ? (
+            <p className="device-host-note">
+              安装时配置的是 <code>{host.envHost}</code>，当前生效的是控制台设置的地址。
+            </p>
+          ) : null}
+          {host?.source === "override" ? (
+            <div className="device-host-actions">
+              <Button
+                type="button"
+                size="sm"
+                color="neutral"
+                variant="transparent"
+                outline={false}
+                disabled={savingHost}
+                onClick={onResetHost}
+              >
+                <RotateCcw />恢复安装时地址
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </>
+  );
+}
+
 export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialogProps) {
   const toast = useAppToast();
   const [saved, setSaved] = useState<DeviceGeneralSettings | null>(null);
@@ -137,6 +350,14 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
   const [accessError, setAccessError] = useState(false);
   const [accessCopied, setAccessCopied] = useState(false);
   const [accessPopoverOpen, setAccessPopoverOpen] = useState(false);
+  const [tab, setTab] = useState<"general" | "device">("general");
+  const [info, setInfo] = useState<DeviceInfo | null>(null);
+  const [infoLoading, setInfoLoading] = useState(false);
+  const [infoError, setInfoError] = useState<string | null>(null);
+  const [host, setHost] = useState<DeviceHostStatus | null>(null);
+  const [hostDraft, setHostDraft] = useState("");
+  const [savingHost, setSavingHost] = useState(false);
+  const infoRevisionRef = useRef(0);
   const loadRevisionRef = useRef(0);
   // 已经有草稿时，重读失败不该顶掉正在编辑的表单——走 toast，和同对话框的保存失败一致。
   const hasDraftRef = useRef(false);
@@ -179,9 +400,91 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
     }
   }, []);
 
+  // The device tab must work when the clock is unreachable, so its two reads are
+  // independent: the host status comes from the service and always succeeds, the
+  // info probe may fail and only degrades the panel above the address form.
+  const loadDeviceTab = useCallback(async () => {
+    const revision = ++infoRevisionRef.current;
+    setInfoLoading(true);
+    setInfoError(null);
+    try {
+      const status = await jsonApi<DeviceHostResponse>("/api/device/host", { cache: "no-store" });
+      if (revision !== infoRevisionRef.current) return;
+      setHost(status.host);
+      setHostDraft((current) => (current.trim().length > 0 ? current : status.host.host));
+    } catch {
+      // A missing host adapter is not worth a toast; the info error below says enough.
+    }
+    try {
+      const response = await jsonApi<DeviceInfoResponse>("/api/device/info", { cache: "no-store" });
+      if (revision !== infoRevisionRef.current) return;
+      setInfo(response.info);
+      setInfoError(null);
+    } catch (error) {
+      if (revision !== infoRevisionRef.current) return;
+      setInfo(null);
+      setInfoError(errorMessage(error));
+    } finally {
+      if (revision === infoRevisionRef.current) setInfoLoading(false);
+    }
+  }, []);
+
+  const saveHost = async () => {
+    const next = hostDraft.trim();
+    if (savingHost || clockHostError(next)) return;
+    setSavingHost(true);
+    try {
+      const response = await jsonApi<DeviceHostWriteResponse>("/api/device/host", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host: next }),
+      });
+      setHost(response.host);
+      setHostDraft(response.host.host);
+      setInfo(response.probe.info ?? null);
+      setInfoError(response.probe.ok ? null : response.probe.error ?? "时钟没有响应");
+      if (response.probe.ok) {
+        toast.success("时钟地址已更新", { description: "已连上设备，服务无需重启。" });
+        await loadSettings();
+      } else {
+        toast.error("地址已保存，但仍读不到设备", { description: response.probe.error });
+      }
+    } catch (error) {
+      toast.error("时钟地址保存失败", { description: errorMessage(error) });
+    } finally {
+      setSavingHost(false);
+    }
+  };
+
+  const resetHost = async () => {
+    if (savingHost) return;
+    setSavingHost(true);
+    try {
+      const response = await jsonApi<DeviceHostResponse>("/api/device/host", { method: "DELETE" });
+      setHost(response.host);
+      setHostDraft(response.host.host);
+      toast.success("已恢复安装时的时钟地址", { description: response.host.host });
+      await loadDeviceTab();
+    } catch (error) {
+      toast.error("恢复失败", { description: errorMessage(error) });
+    } finally {
+      setSavingHost(false);
+    }
+  };
+
   useEffect(() => {
     if (open) void loadSettings();
   }, [loadSettings, open]);
+
+  useEffect(() => {
+    if (open && tab === "device") void loadDeviceTab();
+  }, [loadDeviceTab, open, tab]);
+
+  // Reading the clock's settings failing means the address is the user's real
+  // problem — land them on the tab that can fix it instead of on a dead form.
+  useEffect(() => {
+    if (open && loadError && !hasDraftRef.current) setTab("device");
+  }, [loadError, open]);
 
   useEffect(() => {
     if (open && accessPopoverOpen) void loadAccess();
@@ -195,19 +498,14 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
     () => Boolean(saved && draft && JSON.stringify(saved) !== JSON.stringify(draft)),
     [draft, saved],
   );
-  const validationError = draft && (
-    draft.brightness.low > draft.brightness.mid
-    || draft.brightness.mid > draft.brightness.high
-  )
-    ? "亮度必须满足：低档 ≤ 中档 ≤ 高档"
-    : null;
-
   const requestOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen && saving) return;
+    if (!nextOpen && (saving || savingHost)) return;
     if (!nextOpen) {
       loadRevisionRef.current += 1;
       accessRevisionRef.current += 1;
+      infoRevisionRef.current += 1;
       setLoading(false);
+      setInfoLoading(false);
       setAccessLoading(false);
       setAccessCopied(false);
       setAccessPopoverOpen(false);
@@ -238,7 +536,7 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
   };
 
   const save = async () => {
-    if (!draft || validationError || saving) return;
+    if (!draft || saving) return;
     setSaving(true);
     try {
       const response = await jsonApi<DeviceSettingsResponse>("/api/device/settings/general", {
@@ -257,13 +555,13 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
     }
   };
 
-  const updateBrightness = (
-    key: keyof DeviceGeneralSettings["brightness"],
-    value: number | DeviceBrightnessLevel,
-  ) => {
+  // The clock's /setConfig still wants level + three tier percentages. Writing the
+  // slider value into every tier makes the physical level button a no-op, so one
+  // number fully describes brightness regardless of which tier the device is on.
+  const setBrightness = (value: number) => {
     setDraft((current) => current ? {
       ...current,
-      brightness: { ...current.brightness, [key]: value },
+      brightness: { ...current.brightness, low: value, mid: value, high: value },
     } : current);
   };
 
@@ -358,31 +656,60 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
       closeOnBackdropClick={!dirty && !saving}
       closeOnEscape={!dirty && !saving}
       buttons={(
+        // The device tab saves through its own button, so the footer's write action
+        // would be a no-op there — it offers a re-probe and a plain close instead.
         <div className="device-settings-actions">
           <Button
             type="button"
             color="neutral"
             variant="transparent"
             outline={false}
-            disabled={loading || saving}
-            onClick={() => void loadSettings()}
+            disabled={tab === "general" ? loading || saving : infoLoading || savingHost}
+            onClick={() => void (tab === "general" ? loadSettings() : loadDeviceTab())}
           >
             <RefreshCw />重新读取
           </Button>
           <span className="device-settings-actions__spacer" />
-          <Button type="button" color="neutral" onClick={cancel} disabled={saving}>取消</Button>
-          <Button
-            type="button"
-            color="brand"
-            loading={saving}
-            disabled={!dirty || Boolean(validationError) || loading || saving}
-            onClick={() => void save()}
-          >
-            <Save />保存设置
-          </Button>
+          {tab === "general" ? (
+            <>
+              <Button type="button" color="neutral" onClick={cancel} disabled={saving}>取消</Button>
+              <Button
+                type="button"
+                color="brand"
+                loading={saving}
+                disabled={!dirty || loading || saving}
+                onClick={() => void save()}
+              >
+                <Save />保存设置
+              </Button>
+            </>
+          ) : (
+            <Button
+              type="button"
+              color="neutral"
+              onClick={() => requestOpenChange(false)}
+              disabled={savingHost}
+            >
+              关闭
+            </Button>
+          )}
         </div>
       )}
     >
+      <Tabs value={tab} onValueChange={(value) => setTab(value as "general" | "device")}>
+        <SurfaceCut
+          className="segmented-track device-settings-tabs"
+          color="neutral"
+          outline={false}
+          contentClassName="segmented-track__content"
+        >
+          <TabsList size="sm" rounded activeColor="brand" aria-label="设置分类">
+            <Tab value="general"><SlidersHorizontal />常规</Tab>
+            <Tab value="device"><Wifi />设备信息</Tab>
+          </TabsList>
+        </SurfaceCut>
+
+        <TabPanel value="general" className="device-settings-panel" keepMounted>
       {loading && !draft ? (
         <div className="device-settings-state" role="status">
           <span className="loading-mark" aria-hidden="true" />
@@ -402,62 +729,52 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
               <span>01</span>
               <div>
                 <h3 id="settings-display-title">显示与声音</h3>
-                <p>当前档位使用下方对应的亮度百分比。</p>
+                <p>屏幕亮度与提示音量。</p>
               </div>
             </div>
             <div className="device-settings-fields">
-              <SettingField id="device-brightness-level" label="屏幕亮度">
-                <Select
-                  id="device-brightness-level"
-                  aria-labelledby="device-brightness-level-label"
-                  value={draft.brightness.level}
-                  options={BRIGHTNESS_LEVELS.map((option) => option.value)}
-                  renderOption={({ value }) => labelFor(BRIGHTNESS_LEVELS, value)}
-                  onChange={(value) => updateBrightness("level", value)}
-                >
-                  {labelFor(BRIGHTNESS_LEVELS, draft.brightness.level)}
-                </Select>
+              <SettingField
+                id="device-brightness"
+                label="屏幕亮度"
+                controlClassName="device-setting-control--slider"
+              >
+                <label className="device-setting-slider">
+                  <span className="sr-only">屏幕亮度</span>
+                  <Slider
+                    value={draft.brightness[draft.brightness.level]}
+                    min={5}
+                    max={100}
+                    step={1}
+                    color="brand"
+                    onChange={setBrightness}
+                  />
+                </label>
+                <span className="device-setting-slider-value">
+                  {draft.brightness[draft.brightness.level]} %
+                </span>
               </SettingField>
 
-              {(["low", "mid", "high"] as const).map((level) => {
-                const labels = { low: "低档亮度", mid: "中档亮度", high: "高档亮度" };
-                const id = `device-brightness-${level}`;
-                return (
-                  <SettingField key={level} id={id} label={`${labels[level]}（%）`}>
-                    <NumberScrubber
-                      id={id}
-                      className="device-settings-number"
-                      contentClassName="number-scrubber__content"
-                      inputClassName="number-scrubber__input"
-                      color="neutral"
-                      value={draft.brightness[level]}
-                      min={5}
-                      max={100}
-                      step={1}
-                      displayValue={(value) => `${value} %`}
-                      aria-labelledby={`${id}-label`}
-                      title="左右拖动调整，点击输入"
-                      onTemporaryChange={(value) => updateBrightness(level, value)}
-                      onChange={(value) => updateBrightness(level, value)}
-                    />
-                  </SettingField>
-                );
-              })}
-
-              <SettingField id="device-volume" label="音量调节">
-                <Select
-                  id="device-volume"
-                  aria-labelledby="device-volume-label"
-                  value={String(draft.volume)}
-                  options={["0", "1", "2", "3", "4", "5", "6"]}
-                  renderOption={({ value }) => value === "0" ? "静音" : `${value} 级`}
-                  onChange={(value) => setDraft({ ...draft, volume: Number(value) })}
-                >
+              <SettingField
+                id="device-volume"
+                label="音量调节"
+                controlClassName="device-setting-control--slider"
+              >
+                <label className="device-setting-slider">
+                  <span className="sr-only">音量调节</span>
+                  <Slider
+                    value={draft.volume}
+                    min={0}
+                    max={6}
+                    step={1}
+                    color="brand"
+                    onChange={(value) => setDraft({ ...draft, volume: value })}
+                  />
+                </label>
+                <span className="device-setting-slider-value">
                   {draft.volume === 0 ? "静音" : `${draft.volume} 级`}
-                </Select>
+                </span>
               </SettingField>
             </div>
-            {validationError && <p className="device-settings-validation" role="alert">{validationError}</p>}
           </section>
 
           <section className="device-settings-section" aria-labelledby="settings-motion-title">
@@ -469,32 +786,48 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
               </div>
             </div>
             <div className="device-settings-fields">
-              <SettingField id="device-carousel-speed" label="自动翻页速度">
-                <Select
-                  id="device-carousel-speed"
-                  aria-labelledby="device-carousel-speed-label"
-                  value={String(draft.carouselSpeed)}
-                  options={CAROUSEL_SPEEDS.map((option) => String(option.value))}
-                  renderOption={({ value }) => labelFor(CAROUSEL_SPEEDS, Number(value) as DeviceCarouselSpeed)}
-                  onChange={(value) => setDraft({
-                    ...draft,
-                    carouselSpeed: Number(value) as DeviceCarouselSpeed,
-                  })}
-                >
+              <SettingField
+                id="device-carousel-speed"
+                label="自动翻页速度"
+                controlClassName="device-setting-control--slider"
+              >
+                <label className="device-setting-slider">
+                  <span className="sr-only">自动翻页速度</span>
+                  <Slider
+                    value={draft.carouselSpeed}
+                    min={0}
+                    max={60}
+                    step={10}
+                    color="brand"
+                    onChange={(value) => setDraft({
+                      ...draft,
+                      carouselSpeed: value as DeviceCarouselSpeed,
+                    })}
+                  />
+                </label>
+                <span className="device-setting-slider-value">
                   {labelFor(CAROUSEL_SPEEDS, draft.carouselSpeed)}
-                </Select>
+                </span>
               </SettingField>
-              <SettingField id="device-scroll-speed" label="滚动速度">
-                <Select
-                  id="device-scroll-speed"
-                  aria-labelledby="device-scroll-speed-label"
-                  value={String(draft.scrollSpeed)}
-                  options={["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]}
-                  renderOption={({ value }) => value === "0" ? "不滚动" : `${value} 档`}
-                  onChange={(value) => setDraft({ ...draft, scrollSpeed: Number(value) })}
-                >
+              <SettingField
+                id="device-scroll-speed"
+                label="滚动速度"
+                controlClassName="device-setting-control--slider"
+              >
+                <label className="device-setting-slider">
+                  <span className="sr-only">滚动速度</span>
+                  <Slider
+                    value={draft.scrollSpeed}
+                    min={0}
+                    max={10}
+                    step={1}
+                    color="brand"
+                    onChange={(value) => setDraft({ ...draft, scrollSpeed: value })}
+                  />
+                </label>
+                <span className="device-setting-slider-value">
                   {draft.scrollSpeed === 0 ? "不滚动" : `${draft.scrollSpeed} 档`}
-                </Select>
+                </span>
               </SettingField>
             </div>
           </section>
@@ -521,15 +854,18 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
                 </Select>
               </SettingField>
               <SettingField id="device-date-format" label="日期">
-                <Select
-                  id="device-date-format"
-                  aria-labelledby="device-date-format-label"
-                  value={draft.dateFormat}
-                  options={["MM/DD", "DD/MM"]}
-                  onChange={(value) => setDraft({ ...draft, dateFormat: value })}
-                >
-                  {draft.dateFormat}
-                </Select>
+                <Segmented aria-label="日期格式" activeColor="brand">
+                  {(["MM/DD", "DD/MM"] as const).map((format) => (
+                    <SegmentedButton
+                      key={format}
+                      type="button"
+                      active={draft.dateFormat === format}
+                      onClick={() => setDraft({ ...draft, dateFormat: format })}
+                    >
+                      {format}
+                    </SegmentedButton>
+                  ))}
+                </Segmented>
               </SettingField>
               <SettingField id="device-show-week" label="显示星期">
                 <DeviceSettingSwitch
@@ -539,16 +875,18 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
                 />
               </SettingField>
               <SettingField id="device-week-start" label="一周第一天">
-                <Select
-                  id="device-week-start"
-                  aria-labelledby="device-week-start-label"
-                  value={String(draft.weekStart)}
-                  options={["0", "1"]}
-                  renderOption={({ value }) => value === "0" ? "周日" : "周一"}
-                  onChange={(value) => setDraft({ ...draft, weekStart: value === "0" ? 0 : 1 })}
-                >
-                  {draft.weekStart === 0 ? "周日" : "周一"}
-                </Select>
+                <Segmented aria-label="一周第一天" activeColor="brand">
+                  {([{ value: 0, label: "周日" }, { value: 1, label: "周一" }] as const).map((day) => (
+                    <SegmentedButton
+                      key={day.value}
+                      type="button"
+                      active={draft.weekStart === day.value}
+                      onClick={() => setDraft({ ...draft, weekStart: day.value })}
+                    >
+                      {day.label}
+                    </SegmentedButton>
+                  ))}
+                </Segmented>
               </SettingField>
             </div>
           </section>
@@ -571,8 +909,61 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
               </SettingField>
             </div>
           </section>
+
+          <section className="device-settings-section" aria-labelledby="settings-about-title">
+            <div className="device-settings-section__heading">
+              <span>05</span>
+              <div>
+                <h3 id="settings-about-title">关于</h3>
+                <p>开源项目，欢迎关注。</p>
+              </div>
+            </div>
+            <div className="device-settings-fields">
+              <div className="device-settings-links">
+                <Button
+                  as="a"
+                  href="https://github.com/qzz0518/ulanzi-tc002-market-clock"
+                  target="_blank"
+                  rel="noreferrer"
+                  color="neutral"
+                  title="qzz0518/ulanzi-tc002-market-clock"
+                >
+                  <GithubIcon />GitHub
+                </Button>
+                <Button
+                  as="a"
+                  href="https://x.com/zerah_eth"
+                  target="_blank"
+                  rel="noreferrer"
+                  color="neutral"
+                  title="在 X 上关注 @zerah_eth"
+                >
+                  <XIcon />@zerah_eth
+                </Button>
+              </div>
+            </div>
+          </section>
         </div>
       ) : null}
+        </TabPanel>
+
+        <TabPanel value="device" className="device-settings-panel" keepMounted>
+          <div className="device-settings-form">
+            <DeviceHostPanel
+              info={info}
+              infoLoading={infoLoading}
+              infoError={infoError}
+              host={host}
+              hostDraft={hostDraft}
+              savingHost={savingHost}
+              onHostDraftChange={setHostDraft}
+              onSaveHost={() => void saveHost()}
+              onResetHost={() => void resetHost()}
+              onRetry={() => void loadDeviceTab()}
+            />
+          </div>
+        </TabPanel>
+      </Tabs>
     </Dialog>
   );
 }

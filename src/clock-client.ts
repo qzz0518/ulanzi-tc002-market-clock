@@ -13,6 +13,20 @@ export interface ClockInfo {
   appVersion?: string;
 }
 
+// Everything the clock's own "设备信息" page shows. That page is static HTML which
+// fetches /getBase itself and paints six rows (val-devSn / val-ssid / val-ip /
+// val-mac / val-mcuVer / val-appVer) — the endpoint always returned all six, this
+// client simply discarded three. They stay out of ClockInfo on purpose: that shape
+// feeds /health, an unauthenticated snapshot anything on the LAN can poll.
+export interface ClockDeviceInfo {
+  serialNumber?: string;
+  ssid?: string;
+  ip?: string;
+  mac?: string;
+  mcuVersion?: string;
+  appVersion?: string;
+}
+
 export class ClockRequestError extends Error {
   constructor(message: string, public readonly status?: number) {
     super(message);
@@ -47,6 +61,12 @@ async function requestWithFetch(
       headers: options.headers,
       body: options.body,
       signal: controller.signal,
+      // Bun's fetch takes a per-request proxy, so the latency-critical transport
+      // honours CLOCK_HTTP_PROXY too. A launchd-started service has no macOS
+      // local-network permission: connecting straight to the clock's LAN
+      // address fails to open a socket within milliseconds, and the loopback
+      // proxy is the only way it can reach the device at all.
+      ...(options.proxy ? { proxy: options.proxy } : {}),
     });
     return {
       ok: response.ok,
@@ -134,10 +154,10 @@ function requestClock(
     : curlClockRequest(url, timeoutMs, options);
 }
 
-export async function readClockInfo(
+export async function readClockDeviceInfo(
   config: AppConfig,
   fetcher?: FetchLike,
-): Promise<ClockInfo> {
+): Promise<ClockDeviceInfo> {
   const response = await requestClock(
     `http://${config.clockHost}/getBase`,
     config.requestTimeoutMs,
@@ -157,10 +177,24 @@ export async function readClockInfo(
     throw new ClockRequestError("clock returned invalid device information");
   }
   return {
+    serialNumber: typeof body.devSn === "string" ? body.devSn : undefined,
+    ssid: typeof body.ssid === "string" ? body.ssid : undefined,
     ip: typeof body.ip === "string" ? body.ip : undefined,
+    mac: typeof body.mac === "string" ? body.mac : undefined,
     mcuVersion: typeof body.mcuVer === "string" ? body.mcuVer : undefined,
     appVersion: typeof body.appVer === "string" ? body.appVer : undefined,
   };
+}
+
+// The narrow projection every background caller keeps using: device detection,
+// the sideload verify, and /health. Widening this would leak the serial number
+// and MAC into the unauthenticated health snapshot.
+export async function readClockInfo(
+  config: AppConfig,
+  fetcher?: FetchLike,
+): Promise<ClockInfo> {
+  const { ip, mcuVersion, appVersion } = await readClockDeviceInfo(config, fetcher);
+  return { ip, mcuVersion, appVersion };
 }
 
 export async function readClockGeneralSettings(
