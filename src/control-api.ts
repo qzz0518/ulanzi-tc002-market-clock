@@ -1724,7 +1724,30 @@ export function createControlHandler(
         return new Response(null, { status: 204 });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/os/mirror") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        // Device-called, so no same-origin check. The body is raw RGB rather
+        // than JSON: base64 in a JSON envelope would cost a third more bytes
+        // per frame for nothing the firmware can use.
+        const bytes = new Uint8Array(await request.arrayBuffer());
+        if (bytes.length !== MIRROR_FRAME_BYTES) {
+          return jsonResponse({ error: `frame must be ${MIRROR_FRAME_BYTES} RGB bytes` }, 400);
+        }
+        options.osLink.putMirrorFrame(Buffer.from(bytes).toString("base64"));
+        // The answer tells the device whether to keep streaming, so it stops on
+        // its own when the console closes instead of waiting for a poll.
+        return jsonResponse({ wanted: options.osLink.mirrorWanted() });
+      }
+
       // --- tc002-os console control -----------------------------------------
+      if (request.method === "GET" && url.pathname === "/api/os/mirror") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        // Asking for the frame IS the subscription: a console that stops polling
+        // stops the stream ten seconds later with no explicit teardown to leak.
+        options.osLink.requestMirror();
+        return jsonResponse({ frame: options.osLink.getMirrorFrame() });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/os/state") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
         return jsonResponse({

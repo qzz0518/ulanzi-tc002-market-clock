@@ -1,5 +1,6 @@
 seq	3
 pinned	1
+mirror	0
 focus	notice
 menu	6
 item	channel	btc	市场轮播

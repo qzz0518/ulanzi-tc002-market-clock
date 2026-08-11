@@ -42,6 +42,8 @@ class StateDoc {
 
   int seq() const { return mSeq; }
   bool pinned() const { return mPinned; }
+  /** True while the console is watching; the device streams frames only then. */
+  bool mirror() const { return mMirror; }
   const std::string& focus() const { return mFocus; }
   const std::vector<Item>& items() const { return mItems; }
 
@@ -51,6 +53,7 @@ class StateDoc {
  private:
   int mSeq;
   bool mPinned;
+  bool mMirror;
   std::string mFocus;
   std::vector<Item> mItems;
 };

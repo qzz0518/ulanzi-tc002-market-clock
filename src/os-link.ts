@@ -28,6 +28,12 @@ export interface OsDisplayCommand {
   pinned: boolean;
 }
 
+export interface OsMirrorFrame {
+  /** Base64 of 52*16*3 raw RGB bytes, exactly as the panel received them. */
+  rgbBase64: string;
+  receivedAt: number;
+}
+
 export interface OsTelemetry {
   screen: string;
   focus: string;
@@ -66,6 +72,8 @@ export class OsLinkHub {
   private menu: OsMenuEntry[] = [];
   private display: OsDisplayCommand = { focus: null, pinned: false };
   private telemetry: OsTelemetry | null = null;
+  private mirror: OsMirrorFrame | null = null;
+  private mirrorRequestedAt = 0;
   private readonly waiters = new Set<Waiter>();
 
   constructor(private readonly now: () => number = () => Date.now()) {}
@@ -110,6 +118,39 @@ export class OsLinkHub {
     return this.telemetry === null ? null : { ...this.telemetry };
   }
 
+  /**
+   * The last frame the device actually put on the panel.
+   *
+   * This is a real capture, not a re-render: the LED bus is write-only and
+   * /dev/fb0 is unrelated to the matrix, so the only way to know what the panel
+   * shows is for the compositor to tee it on the way out. A TypeScript
+   * re-implementation of the firmware's UI would be free to drift from the C++
+   * without any test noticing — the repo already has that cautionary tale in
+   * seven C++ game engines beside four TypeScript ones.
+   */
+  putMirrorFrame(rgbBase64: string): void {
+    this.mirror = { rgbBase64, receivedAt: this.now() };
+  }
+
+  getMirrorFrame(): OsMirrorFrame | null {
+    return this.mirror === null ? null : { ...this.mirror };
+  }
+
+  /** True while the console has asked for frames; the device stops when nobody looks. */
+  mirrorWanted(): boolean {
+    return this.now() - this.mirrorRequestedAt < 10_000;
+  }
+
+  requestMirror(): void {
+    const wasWanted = this.mirrorWanted();
+    this.mirrorRequestedAt = this.now();
+    // The device only learns to start streaming through the state document, so
+    // the first request has to wake the parked poll. Refreshes of an already
+    // active request must not, or opening the console would bump the sequence
+    // every few seconds for nothing.
+    if (!wasWanted) this.bump();
+  }
+
   /** True when a report arrived recently enough to believe. */
   isDeviceLive(withinMs = 15_000): boolean {
     if (this.telemetry === null) return false;
@@ -124,6 +165,9 @@ export class OsLinkHub {
     const lines: string[] = [];
     lines.push(`seq\t${this.seq}`);
     lines.push(`pinned\t${this.display.pinned ? 1 : 0}`);
+    // The device only streams while someone is watching: 2496 bytes a frame is
+    // cheap on a LAN but not free on a device with one core and a 15 ms panel.
+    lines.push(`mirror\t${this.mirrorWanted() ? 1 : 0}`);
     if (this.display.focus !== null) lines.push(`focus\t${this.display.focus}`);
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {

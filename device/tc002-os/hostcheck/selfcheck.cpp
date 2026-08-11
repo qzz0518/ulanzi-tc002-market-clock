@@ -694,6 +694,7 @@ void checkStateDoc() {
   check(doc.parse(body), "the real service document parses");
   check(doc.seq() == 3, "seq is read");
   check(doc.pinned(), "pinned is read");
+  check(!doc.mirror(), "the mirror flag is read");
   check(doc.focus() == "notice", "focus is read");
   check(doc.items().size() == 6, "every item is read");
   if (doc.items().size() == 6) {

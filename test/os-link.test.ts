@@ -20,6 +20,7 @@ describe("tc002-os host link", () => {
     expect(body.endsWith("\n")).toBe(true);
     expect(lines[0]).toBe(`seq\t${hub.currentSeq()}`);
     expect(lines).toContain("pinned\t1");
+    expect(lines).toContain("mirror\t0");
     expect(lines).toContain("focus\tbtc");
     expect(lines).toContain("menu\t2");
     expect(lines).toContain("item\tchannel\tbtc\t市场轮播");
@@ -152,6 +153,37 @@ describe("tc002-os host link", () => {
       "utf8",
     );
     expect(hub.serialize()).toBe(fixture);
+  });
+
+  test("mirroring is a lease the console renews, not a session it must tear down", () => {
+    let now = 1_000_000;
+    const hub = new OsLinkHub(() => now);
+    expect(hub.mirrorWanted()).toBe(false);
+    expect(hub.getMirrorFrame()).toBeNull();
+
+    const before = hub.currentSeq();
+    hub.requestMirror();
+    expect(hub.mirrorWanted()).toBe(true);
+    // The device only learns to start streaming through the state document, so
+    // the first request must wake the parked poll.
+    expect(hub.currentSeq()).toBeGreaterThan(before);
+    expect(hub.serialize()).toContain("mirror\t1");
+
+    // Renewing an active lease must not bump: the console re-polls every couple
+    // of seconds and would otherwise wake every parked poll forever.
+    const active = hub.currentSeq();
+    now += 2_000;
+    hub.requestMirror();
+    expect(hub.currentSeq()).toBe(active);
+
+    hub.putMirrorFrame("AAAA");
+    expect(hub.getMirrorFrame()?.rgbBase64).toBe("AAAA");
+
+    // A console that simply goes away stops the stream on its own — there is no
+    // teardown call to leak if the browser tab is closed.
+    now += 20_000;
+    expect(hub.mirrorWanted()).toBe(false);
+    expect(hub.serialize()).toContain("mirror\t0");
   });
 
   test("liveness is judged by report age, not by ever having heard from the device", () => {

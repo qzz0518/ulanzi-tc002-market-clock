@@ -33,11 +33,12 @@ bool kindFromName(const std::string& name, StateDoc::Kind* out) {
 
 }  // namespace
 
-StateDoc::StateDoc() : mSeq(-1), mPinned(false) {}
+StateDoc::StateDoc() : mSeq(-1), mPinned(false), mMirror(false) {}
 
 bool StateDoc::parse(const std::string& body) {
   mSeq = -1;
   mPinned = false;
+  mMirror = false;
   mFocus.clear();
   mItems.clear();
 
@@ -60,6 +61,8 @@ bool StateDoc::parse(const std::string& body) {
       mSeq = atoi(fields[1].c_str());
     } else if (fields[0] == "pinned") {
       mPinned = (fields[1] == "1");
+    } else if (fields[0] == "mirror") {
+      mMirror = (fields[1] == "1");
     } else if (fields[0] == "focus") {
       mFocus = fields[1];
     } else if (fields[0] == "item" && n == 4) {
