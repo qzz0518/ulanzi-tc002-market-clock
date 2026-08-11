@@ -9,6 +9,7 @@ import {
 } from "./device-settings.ts";
 import { validateDeviceHost, type DeviceHostStatus } from "./device-host.ts";
 import type { ClockDeviceInfo } from "./clock-client.ts";
+import type { OsLinkHub } from "./os-link.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
 import {
@@ -87,6 +88,7 @@ export interface ControlApiOptions {
     write: (host: string) => Promise<DeviceHostStatus>;
     reset: () => Promise<DeviceHostStatus>;
   };
+  osLink?: OsLinkHub;
   pixelAssetLibrary?: {
     client: UlanziPixelAssetClient;
     store: PixelAssetStore;
@@ -1648,6 +1650,75 @@ export function createControlHandler(
         }
         options.onSettingsChanged?.();
         return jsonResponse({ host: status, probe });
+      }
+
+      // --- tc002-os link -----------------------------------------------------
+      // The firmware calls these two, so like the other device-called routes
+      // (/api/arcade/heartbeat, /api/music/device/*) they carry no same-origin
+      // check: the device is not a browser and has no Origin to send.
+      if (request.method === "GET" && url.pathname === "/api/os/pull") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        const since = Number(url.searchParams.get("seq") ?? "0");
+        // 8 s: comfortably inside any NAT idle timeout on a home router, and
+        // short enough that a device which missed a wake-up self-heals quickly.
+        const body = await options.osLink.waitForChange(since, 8_000);
+        return new Response(body, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/os/report") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        const input = await readJson(request) as Record<string, unknown>;
+        const str = (key: string): string =>
+          typeof input[key] === "string" ? (input[key] as string).slice(0, 64) : "";
+        const num = (key: string): number =>
+          typeof input[key] === "number" && Number.isFinite(input[key] as number)
+            ? (input[key] as number)
+            : 0;
+        options.osLink.report({
+          screen: str("screen"),
+          focus: str("focus"),
+          wifi: str("wifi"),
+          ip: str("ip"),
+          uptimeMs: num("uptimeMs"),
+          freeKb: num("freeKb"),
+          supplicantRestarts: num("supplicantRestarts"),
+        });
+        return new Response(null, { status: 204 });
+      }
+
+      // --- tc002-os console control -----------------------------------------
+      if (request.method === "GET" && url.pathname === "/api/os/state") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        return jsonResponse({
+          seq: options.osLink.currentSeq(),
+          menu: options.osLink.getMenu(),
+          display: options.osLink.getDisplay(),
+          telemetry: options.osLink.getTelemetry(),
+          live: options.osLink.isDeviceLive(),
+        });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/os/display") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { focus?: unknown; pinned?: unknown };
+        if (input.focus !== null && input.focus !== undefined && typeof input.focus !== "string") {
+          throw new SettingsValidationError("focus must be a string or null");
+        }
+        if (input.pinned !== undefined && typeof input.pinned !== "boolean") {
+          throw new SettingsValidationError("pinned must be a boolean");
+        }
+        options.osLink.setDisplay({
+          focus: typeof input.focus === "string" ? input.focus : null,
+          pinned: input.pinned === true,
+        });
+        return jsonResponse({ display: options.osLink.getDisplay(), seq: options.osLink.currentSeq() });
       }
 
       if (request.method === "DELETE" && url.pathname === "/api/device/host") {

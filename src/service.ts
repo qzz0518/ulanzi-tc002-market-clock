@@ -9,6 +9,7 @@ import {
 } from "./clock-client.ts";
 import { loadConfig } from "./config.ts";
 import { ClockHostStore, type DeviceHostStatus } from "./device-host.ts";
+import { OsLinkHub, type OsMenuEntry } from "./os-link.ts";
 import { createControlHandler, resetDeviceMusicSelection } from "./control-api.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
@@ -224,8 +225,30 @@ function interruptibleSleep(ms: number): Promise<void> {
   });
 }
 
+// The tc002-os firmware pulls its own menu, so the workspace's enabled channels
+// are republished on every settings change. setMenu is idempotent — an unchanged
+// list does not bump the sequence — so this can be called freely without waking
+// every parked long poll.
+const osLink = new OsLinkHub();
+function publishOsMenu(): void {
+  const entries: OsMenuEntry[] = controller.getWorkspace().channels
+    .filter((channel) => channel.enabled)
+    .map((channel) => ({ id: channel.appName, label: channel.name, kind: "channel" as const }));
+  // The three built-in destinations always follow the channels, so their
+  // position does not shift as the user adds and removes content.
+  entries.push({ id: "music", label: "音乐", kind: "music" });
+  entries.push({ id: "game", label: "游戏", kind: "game" });
+  entries.push({ id: "settings", label: "设置", kind: "settings" });
+  osLink.setMenu(entries);
+}
+publishOsMenu();
+
 const controlHandler = createControlHandler(controller, {
-  onSettingsChanged: () => wakeSleep?.(),
+  onSettingsChanged: () => {
+    publishOsMenu();
+    wakeSleep?.();
+  },
+  osLink,
   controlAccess,
   deviceGeneralSettings: {
     read: () => readClockGeneralSettings(config),
