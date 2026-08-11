@@ -159,3 +159,62 @@ mise run os-linkaudit    # 链接审计，见下
 `WifiPolicy` 负责 `ctl.start`、轮询 `init.svc.wpa_supplicant`、进程消失就重启，并把重启次数
 报给设置页。关联本身不带地址，因此每次连上都要显式请求一次 DHCP 租约，且必须异步发出：
 `NetUtils::dhcpRequestIp` 会阻塞数秒，内联调用会把整块面板冻住一次租约协商那么久。
+
+## 固化到 flash
+
+侧载是临时的：断电即回官方固件。固化把 ZOS 写进 `mtd3 res`，重启后仍在。
+
+### 打包
+
+```bash
+mise run os-image            # → .runtime/tc002-os/update.img
+mise run os-restore-image    # → .runtime/tc002-stock/restore-live.img（还原点）
+```
+
+容器格式是 `ZKSWEV1.0` 头 + squashfs 载荷，**没有签名**——只有一个覆盖 `file[0:568]`
+的 CRC-32 和一个内嵌 MD5，两者都由打包器重算。`os-image` 每次先把库存
+`update.img` 逐字节重建一遍，不一致就拒绝出包；572 字节头部无一字节抄自原文件
+（含那 509 字节填充，实为 MSVC `rand()`、种子 `0x14e4a39e`）。没有这道关卡，
+刷进去的就是一个猜测。
+
+### 安装（官方流程，逐字取自 `IDE使用说明/说明文档.md`）
+
+```bash
+adb push ./update.img /tmp/update.img
+adb shell setprop sys.zkupgrade.flag 255
+adb shell setprop sys.zkupgrade.dir /tmp
+adb shell setprop ctl.restart zkswe
+```
+
+驱动升级的是**框架**不是应用：`/bin/zkgui`（即 `service zkswe`）链接
+`libzkupgrade.so`，`libeasyui.so` 导入全套 `zk_upgrade_*` 并持有 `UpgradeMonitor`。
+应用的 `libzkgui.so` 里没有 `UpgradeActivity` 并不说明这条链是死的——它在应用之上，
+所以换掉应用不会换掉它。另一条路（`zkdaemon` → `/bin/zkupgradebin`）**确实是死的**，
+那个二进制在本机不存在。
+
+### 为什么刷 `res` 拿不走 adb
+
+这是动手前唯一需要相信的事，它有两条独立证据：
+
+1. **分区隔离**。`/bin/zkgui`、`/lib/libeasyui.so`、`/lib/libzknet.so`、
+   `/bin/wpa_supplicant`、`/bin/adbd` 全部位于 `/`（`mtd2 rootfs`，squashfs 只读）；
+   WiFi 凭据在 `/data`（`mtd6`）。刷 `mtd3` 一个都碰不到。
+2. **启动顺序**。`/bin/zkgui` 的 `main` 里，`NetManager::start()` 在
+   `EasyUIContext::initEasyUI()` **之前**（0x10f94 对 0x10f9c，连续指令、中间无分支），
+   而应用的 `.so` 是 `initEasyUI` 才加载的。所以即使 `/res` 完全损坏，网络照样起来。
+
+因此一次失败的刷写最坏是「面板不亮但 adb 还在」，可以再刷一次。
+
+### 恢复
+
+**没有 recovery 分区**（`/proc/mtd` 里 BOOT0/KERNEL/rootfs/res/config/MISC/data/UDISK，
+无 A/B 对），**也没有 TF 卡通道**（`mmc0` 上挂的是 aic8800 WiFi 的 SDIO 功能
+`mmc0:a9b3:1/2`，不是卡槽），USB 也不行（官方文档：带 Wi-Fi 的机型 USB 连接无效）。
+
+Ulanzi 不提供可下载的 TC002 固件包，所以唯一的还原源是从本机取下的副本。设备
+UDISK 上那份 `update.img` 比机器实际运行的版本**旧**，拿它「恢复」是静默降级；
+`mise run os-restore-image` 从**现役** `/res` 打包，才是真正的还原点。
+
+> **切勿按住任何按键超过 5 秒。** `/bin/zkdaemon` 的按键线程在 5000 ms 后执行
+> `rm -rf /data/*`，会连同 WiFi 凭据一起删除，把设备推进「无网 + 无 adb」——
+> 那不是恢复键。
