@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "core/Ease.h"
+#include "core/RingModel.h"
+#include "core/Shell.h"
 #include "core/Surface.h"
 #include "core/Text.h"
 #include "ui/BootScreen.h"
@@ -298,6 +300,131 @@ void checkText() {
   check(inRange, "the marquee never leaves [-(w-view), 0]");
 }
 
+void checkRingModel() {
+  using namespace tcos;
+  RingModel ring;
+  ring.setCount(4);
+  check(ring.count() == 4 && ring.index() == 0, "a fresh ring starts at 0");
+
+  // Wrapping must work in both directions; a negative % would index out of range.
+  check(ring.wrap(-1) == 3, "wrap handles negatives");
+  check(ring.wrap(4) == 0, "wrap handles overflow");
+  check(ring.wrap(9) == 1, "wrap handles multiples");
+
+  ring.turn(1, 0);
+  check(ring.index() == 1, "a detent commits immediately");
+  check(ring.isAnimating(0), "the slide starts animating");
+  check(ring.visualOffset(0) == -1.0f, "the slide starts one item behind");
+  check(ring.visualOffset(RingModel::kSlideMs) == 0.0f, "the slide lands on zero");
+  check(!ring.isAnimating(RingModel::kSlideMs), "the slide ends");
+
+  ring.setIndex(0, 0);
+  ring.turn(-1, 0);
+  check(ring.index() == 3, "turning back from 0 wraps to the last item");
+
+  // A fast spin: three detents inside one slide. The selection must keep up
+  // exactly, while the visual lag stays bounded — otherwise a long spin keeps
+  // scrolling for seconds after the user stops.
+  RingModel spin;
+  spin.setCount(10);
+  spin.turn(1, 0);
+  spin.turn(1, 10);
+  spin.turn(1, 20);
+  check(spin.index() == 3, "every detent of a fast spin commits");
+  const float lag = spin.visualOffset(20);
+  check(lag <= 0.0f && lag >= -(float)RingModel::kMaxCarry,
+        "visual lag is clamped to kMaxCarry items");
+
+  RingModel single;
+  single.setCount(1);
+  single.turn(1, 0);
+  check(single.index() == 0, "a one-item ring cannot move");
+  RingModel empty;
+  empty.setCount(0);
+  empty.turn(1, 0);
+  check(empty.index() == 0 && empty.wrap(5) == 0, "an empty ring is inert, not divide-by-zero");
+}
+
+// A screen that paints one solid colour, so transitions can be asserted by
+// looking at which colour is where.
+class SolidScreen : public tcos::Screen {
+ public:
+  SolidScreen(const Color& c) : mColor(c), mEnters(0), mExits(0), mInputs(0), mConsume(false) {}
+  void render(Surface& out, int) { out.fill(mColor); }
+  void onEnter(int) { ++mEnters; }
+  void onExit() { ++mExits; }
+  bool onInput(tcos::Input, int) {
+    ++mInputs;
+    return mConsume;
+  }
+  bool isAnimating(int) const { return false; }
+  Color mColor;
+  int mEnters;
+  int mExits;
+  int mInputs;
+  bool mConsume;
+};
+
+void checkShell() {
+  using namespace tcos;
+  SolidScreen red(Color(255, 0, 0));
+  SolidScreen green(Color(0, 255, 0));
+
+  Shell shell(52, 16);
+  Surface out(52, 16);
+
+  shell.reset(&red, 0);
+  check(shell.depth() == 1 && shell.top() == &red, "reset installs the root");
+  check(red.mEnters == 1, "the root gets onEnter");
+  shell.render(out, 0);
+  check(out.getPixel(0, 0).r == 255, "the root renders");
+
+  // Push: mid-transition both screens are on the panel, and the incoming one
+  // arrives from the right.
+  shell.push(&green, 100);
+  check(shell.depth() == 2 && shell.top() == &green, "push descends");
+  check(red.mExits == 1 && green.mEnters == 1, "push fires the lifecycle callbacks");
+  shell.render(out, 100 + Shell::kTransitionMs / 2);
+  bool sawRed = false;
+  bool sawGreen = false;
+  for (int x = 0; x < 52; ++x) {
+    const Color c = out.getPixel(x, 8);
+    if (c.r > 0) sawRed = true;
+    if (c.g > 0) sawGreen = true;
+  }
+  check(sawRed && sawGreen, "both screens are visible mid-transition");
+  check(out.getPixel(51, 8).g > 0, "the incoming screen enters from the right");
+
+  shell.render(out, 100 + Shell::kTransitionMs);
+  check(out.getPixel(0, 8).g == 255 && out.getPixel(0, 8).r == 0,
+        "the transition resolves to the new screen alone");
+  check(!shell.isAnimating(100 + Shell::kTransitionMs), "the transition ends");
+
+  // Pop mirrors it, arriving from the left.
+  shell.pop(1000);
+  check(shell.depth() == 1 && shell.top() == &red, "pop ascends");
+  shell.render(out, 1000 + Shell::kTransitionMs / 2);
+  check(out.getPixel(0, 8).r > 0, "the revealed screen enters from the left");
+
+  // The root is never popped — an empty stack would be an unrecoverable panel.
+  shell.pop(2000);
+  shell.pop(2100);
+  check(shell.depth() == 1 && shell.top() == &red, "the root cannot be popped");
+
+  // Input routing: consumed inputs stop at the screen; an unclaimed hold pops.
+  SolidScreen leaf(Color(0, 0, 255));
+  shell.push(&leaf, 3000);
+  leaf.mConsume = true;
+  shell.onInput(kInputHold, 3100);
+  check(leaf.mInputs == 1 && shell.depth() == 2, "a consumed hold does not pop");
+  leaf.mConsume = false;
+  shell.onInput(kInputHold, 3200);
+  check(shell.depth() == 1, "an unclaimed hold pops one level");
+
+  shell.onInput(kInputTurnCw, 4000);
+  check(shell.depth() == 1, "a turn never pops");
+}
+
 }  // namespace
 
 int main() {
@@ -310,6 +437,10 @@ int main() {
   std::printf("  glyphs ok\n");
   checkText();
   std::printf("  text ok\n");
+  checkRingModel();
+  std::printf("  ring model ok\n");
+  checkShell();
+  std::printf("  shell ok\n");
   checkBootScreen();
   std::printf("  boot screen ok\n");
 
