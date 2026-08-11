@@ -29,6 +29,16 @@
  * Usage:
  *   bun run device/tc002-os/release/pack-image.ts [--verify-only]
  *     [--stock <update.img>] [--bundle <dir>] [--out <update.img>]
+ *
+ *   --restore <resDir>   pack that directory verbatim instead of substituting
+ *                        ZOS into the stock tree. Used to turn a pulled copy of
+ *                        the device's LIVE /res into an exact restore image.
+ *
+ * Why --restore exists. Ulanzi publishes no downloadable TC002 firmware, so the
+ * only stock images that exist anywhere are the ones taken off this unit — and
+ * the one on /mnt/storage is older than what the device is actually running.
+ * Flashing that to "restore" would silently downgrade /res. A restore point has
+ * to be built from the running firmware, and this is how.
  */
 
 import { createHash } from "node:crypto";
@@ -477,7 +487,12 @@ function assertTreeParity(stockImage: string, builtImage: string): void {
  * than what is on flash; irrelevant here because the app itself is replaced and
  * the rest of /res is static assets.
  */
-async function buildResImage(stockImage: Buffer, bundleDir: string, workDir: string): Promise<Buffer> {
+async function buildResImage(
+  stockImage: Buffer,
+  bundleDir: string,
+  workDir: string,
+  restoreDir: string | null,
+): Promise<Buffer> {
   requireTool("unsquashfs");
   requireTool("mksquashfs");
 
@@ -495,6 +510,44 @@ async function buildResImage(stockImage: Buffer, bundleDir: string, workDir: str
     run("unsquashfs", ["-no-progress", "-d", tree, stockPayload]);
   } finally {
     process.umask(previousUmask);
+  }
+
+  // Restore mode: the caller's tree IS the payload, verbatim. No substitution,
+  // no config rewrite — the point is an image that puts back exactly what was
+  // pulled, so anything this function did to it would defeat it. The stock tree
+  // extracted above is still used, as the reference the parity assertion
+  // compares against.
+  if (restoreDir !== null) {
+    const stamp = Math.floor((await stat(restoreDir)).mtimeMs / 1000);
+    const restoreOut = join(workDir, "restore.sqfs");
+    run("mksquashfs", [
+      restoreDir, restoreOut,
+      "-comp", "xz",
+      "-b", String(1 << 17),
+      "-force-uid", "1000",
+      "-force-gid", "1000",
+      "-mkfs-time", String(stamp),
+      "-all-time", String(stamp),
+      "-noappend",
+      "-no-progress",
+    ]);
+    const restoreImage = await readFile(restoreOut);
+    const stockSb = readSuperBlock(stockImage);
+    const builtSb = readSuperBlock(restoreImage);
+    for (const key of ["blockSize", "compression", "blockLog", "flags", "noIds", "major", "minor"] as const) {
+      if (builtSb[key] !== stockSb[key]) {
+        throw new Error(
+          `restore squashfs ${key}=${builtSb[key]} but stock has ${stockSb[key]}`,
+        );
+      }
+    }
+    if (restoreImage.length % IMAGE_ALIGNMENT !== 0) {
+      throw new Error(`restore image is ${restoreImage.length} bytes, not aligned`);
+    }
+    if (restoreImage.length > RES_PARTITION_BYTES) {
+      throw new Error(`restore image is ${restoreImage.length} bytes but mtd3 is ${RES_PARTITION_BYTES}`);
+    }
+    return restoreImage;
   }
 
   // A flashed image has no /tmp bundle to load from: startupLibPath and resPath
@@ -576,6 +629,8 @@ const stockPath = resolve(
 const bundleDir = resolve(flag("bundle", join(repoRoot, "device/tc002-os/release/bundle")));
 const outPath = resolve(flag("out", join(repoRoot, ".runtime/tc002-os/update.img")));
 const verifyOnly = process.argv.includes("--verify-only");
+const restoreArg = flag("restore", "");
+const restoreDir = restoreArg === "" ? null : resolve(restoreArg);
 
 let stock: Buffer;
 try {
@@ -604,7 +659,7 @@ try {
   if (!verifyOnly) {
     const workDir = await mkdtemp(join(tmpdir(), "tc002-os-image-"));
     try {
-      const resImage = await buildResImage(stockRes, bundleDir, workDir);
+      const resImage = await buildResImage(stockRes, bundleDir, workDir, restoreDir);
       const packed = packContainer(resImage, PART_TYPE_RES);
 
       // Read our own output back with the independent parser before anyone sees
@@ -623,6 +678,9 @@ try {
           + `  res filesystem ${resImage.length} bytes `
           + `(${((resImage.length / RES_PARTITION_BYTES) * 100).toFixed(1)}% of mtd3)\n`
           + `  container      ${packed.length} bytes, md5 ${md5(packed).toString("hex")}\n`
+          + (restoreDir === null
+            ? "  This image REPLACES the stock app with ZOS.\n"
+            : `  This image RESTORES ${restoreDir} verbatim — it is a way back, not a change.\n`)
           + "  Flashing is a human step and is NOT performed here. Nothing in this script\n"
           + "  touches the device.",
       );

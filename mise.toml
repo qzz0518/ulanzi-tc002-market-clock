@@ -100,3 +100,27 @@ docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
 [tasks.os-image]
 description = "Verify the ZKSWE container spec, then pack tc002-os into a flashable update.img"
 run = "bun run device/tc002-os/release/pack-image.ts"
+
+[tasks.os-restore-image]
+description = "Pack the device's LIVE /res into a restore image (the way back from a flashed ZOS)"
+run = """
+# Ulanzi publishes no downloadable TC002 firmware, and the update.img sitting on
+# the device's UDISK partition is OLDER than what the device is actually running
+# — flashing that to "restore" would silently downgrade /res. The only true
+# restore point is built from the running firmware, which is what this does.
+#
+# adb pull does not preserve modes: /res is 0770 on the device and lands as 0644
+# locally. The modes are read back from `ls -laR` and reapplied, because a
+# restore image whose permissions differ from the original is not a restore.
+set -e
+ADB="${ADB:-adb}"
+DEV="${CLOCK_ADB:-192.168.8.240:5555}"
+TREE=.runtime/tc002-stock/res-live
+mkdir -p .runtime/tc002-stock
+rm -rf "$TREE"
+"$ADB" -s "$DEV" pull /res "$TREE"
+"$ADB" -s "$DEV" shell "ls -laR /res" > .runtime/tc002-stock/res-modes.txt
+bun run device/tc002-os/release/restore-modes.ts .runtime/tc002-stock/res-modes.txt "$TREE"
+bun run device/tc002-os/release/pack-image.ts \
+  --restore "$TREE" --out .runtime/tc002-stock/restore-live.img
+"""
