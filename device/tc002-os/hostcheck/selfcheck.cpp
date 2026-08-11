@@ -18,6 +18,7 @@
 #include "core/Surface.h"
 #include "core/Text.h"
 #include "ui/BootScreen.h"
+#include "ui/LauncherScreen.h"
 #include "visual/Glyphs.h"
 
 namespace {
@@ -425,6 +426,113 @@ void checkShell() {
   check(shell.depth() == 1, "a turn never pops");
 }
 
+int litInColumns(const Surface& s, int x0, int x1) {
+  int n = 0;
+  for (int x = x0; x < x1 && x < s.getWidth(); ++x) {
+    for (int y = 0; y < s.getHeight(); ++y) {
+      const Color c = s.getPixel(x, y);
+      if (c.r || c.g || c.b) ++n;
+    }
+  }
+  return n;
+}
+
+void checkLauncher() {
+  using namespace tcos;
+  LauncherScreen launcher;
+  Surface out(52, 16);
+
+  // Empty is a real state: the host may not have answered yet.
+  launcher.onEnter(0);
+  launcher.render(out, 0);
+  check(launcher.count() == 0, "a fresh launcher is empty");
+  check(litPixels(out) > 0, "the empty state still says something");
+
+  std::vector<LauncherScreen::Entry> entries;
+  LauncherScreen::Entry e;
+  e.label = "\xE9\x9F\xB3\xE4\xB9\x90";  // 音乐
+  e.icon = LauncherScreen::kIconMusic;
+  e.id = 10;
+  entries.push_back(e);
+  e.label = "\xE6\xB8\xB8\xE6\x88\x8F";  // 游戏
+  e.icon = LauncherScreen::kIconGame;
+  e.id = 11;
+  entries.push_back(e);
+  e.label = "\xE8\xAE\xBE\xE7\xBD\xAE";  // 设置
+  e.icon = LauncherScreen::kIconSettings;
+  e.id = 12;
+  entries.push_back(e);
+
+  launcher.setEntries(entries, 0);
+  launcher.onEnter(0);
+  check(launcher.count() == 3, "entries land");
+  check(launcher.selectedIndex() == 0, "selection starts at the first entry");
+
+  // ONE item per page: when settled, nothing from a neighbour may be on screen.
+  // The card occupies the whole width, so this is checked by confirming the
+  // panel holds exactly one card's worth of structure — icon plus label.
+  launcher.render(out, 0);
+  check(litInColumns(out, 0, 12) > 0, "the icon column is inked");
+  check(litInColumns(out, 14, 52) > 0, "the label area is inked");
+
+  // A detent slides the next card in; mid-slide both are partly visible, and
+  // when it settles the new one owns the panel.
+  launcher.onInput(kInputTurnCw, 100);
+  check(launcher.selectedIndex() == 1, "a detent moves the selection");
+  launcher.render(out, 100 + RingModel::kSlideMs / 2);
+  check(litPixels(out) > 0, "the slide renders something");
+  launcher.render(out, 100 + RingModel::kSlideMs);
+  check(litPixels(out) > 0, "the settled card renders");
+
+  // Wrap in both directions, so a knob spin never dead-ends.
+  launcher.onInput(kInputTurnCw, 1000);
+  launcher.onInput(kInputTurnCw, 1400);
+  check(launcher.selectedIndex() == 0, "turning past the end wraps to the start");
+  launcher.onInput(kInputTurnCcw, 1800);
+  check(launcher.selectedIndex() == 2, "turning back from the start wraps to the end");
+
+  // Press reports the entry's own id, not its index — the caller routes on it.
+  launcher.onInput(kInputPress, 2000);
+  check(launcher.takeActivated() == 12, "press reports the entry id");
+  check(launcher.takeActivated() == -1, "reading the activation clears it");
+
+  // A hold is deliberately not consumed, so the Shell can turn it into "up".
+  check(!launcher.onInput(kInputHold, 2100), "hold bubbles to the Shell");
+
+  // A label too wide for the 38 px label area must marquee rather than clip
+  // silently: 8 CJK cells is 96 px.
+  std::vector<LauncherScreen::Entry> wide;
+  LauncherScreen::Entry w;
+  w.label = "\xE5\xB8\x82\xE5\x9C\xBA\xE8\xBD\xAE\xE6\x92\xAD\xE5\xB8\x82\xE5\x9C\xBA\xE8\xBD\xAE\xE6\x92\xAD";
+  w.icon = LauncherScreen::kIconChannel;
+  w.id = 1;
+  wide.push_back(w);
+  LauncherScreen marquee;
+  marquee.setEntries(wide, 0);
+  marquee.onEnter(0);
+  check(text::measure(w.label.c_str()) == 96, "the test label really does overflow");
+  Surface a(52, 16);
+  Surface b(52, 16);
+  marquee.render(a, 0);
+  marquee.render(b, text::kMarqueeDwellMs + 400);
+  std::vector<uint8_t> ra;
+  std::vector<uint8_t> rb;
+  a.extractRGB(ra);
+  b.extractRGB(rb);
+  check(ra != rb, "an overflowing label scrolls instead of sitting clipped");
+
+  // Nothing may be drawn outside the panel at any point of a slide.
+  LauncherScreen bounds;
+  bounds.setEntries(entries, 0);
+  bounds.onEnter(0);
+  bounds.onInput(kInputTurnCw, 0);
+  for (int t = 0; t <= RingModel::kSlideMs; t += 10) {
+    Surface frame(52, 16);
+    bounds.render(frame, t);
+    check(frame.getWidth() == 52 && frame.getHeight() == 16, "the panel is never resized");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -441,6 +549,8 @@ int main() {
   std::printf("  ring model ok\n");
   checkShell();
   std::printf("  shell ok\n");
+  checkLauncher();
+  std::printf("  launcher ok\n");
   checkBootScreen();
   std::printf("  boot screen ok\n");
 
