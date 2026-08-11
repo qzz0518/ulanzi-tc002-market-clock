@@ -10,6 +10,7 @@ import {
 import { validateDeviceHost, type DeviceHostStatus } from "./device-host.ts";
 import type { ClockDeviceInfo } from "./clock-client.ts";
 import type { OsLinkHub } from "./os-link.ts";
+import { encodeFrameBundle, rgbaToRgb } from "./os-frames.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
 import {
@@ -1666,6 +1667,34 @@ export function createControlHandler(
           status: 200,
           headers: {
             "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/os/frames") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        if (!supportsWorkspace(controller)) {
+          return jsonResponse({ error: "workspace API is unavailable" }, 404);
+        }
+        const appName = url.searchParams.get("app") ?? "";
+        const channel = controller.getWorkspace().channels.find((c) => c.appName === appName);
+        if (!channel) return jsonResponse({ error: "channel not found" }, 404);
+        const rendered = await controller.previewChannel(channel.id);
+        const bundle = encodeFrameBundle(
+          rendered.frames.map((frame, index) => ({
+            rgb: rgbaToRgb(frame.pixels),
+            delayMs: rendered.frameDelaysMs[index] ?? 100,
+          })),
+          DISPLAY_WIDTH,
+          DISPLAY_HEIGHT,
+        );
+        // The typed array itself is not a BodyInit under this lib target; its
+        // backing buffer is, and encodeFrameBundle allocates exactly one.
+        return new Response(bundle.buffer as ArrayBuffer, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/octet-stream",
             "Cache-Control": "no-store",
           },
         });

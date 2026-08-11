@@ -17,6 +17,7 @@
 #include "core/Shell.h"
 #include "core/Surface.h"
 #include "core/Text.h"
+#include "net/FrameBundle.h"
 #include "net/StateDoc.h"
 #include "net/WifiPolicy.h"
 #include "ui/BootScreen.h"
@@ -589,6 +590,89 @@ void checkLauncher() {
   }
 }
 
+std::string readFixture(const char* path) {
+  std::string body;
+  std::FILE* f = std::fopen(path, "rb");
+  if (f == 0) return body;
+  char buffer[8192];
+  size_t n;
+  while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) body.append(buffer, n);
+  std::fclose(f);
+  return body;
+}
+
+void checkFrameBundle() {
+  using tcos::FrameBundle;
+
+  const std::string body = readFixture("device/tc002-os/hostcheck/fixtures/frames.bin");
+  check(!body.empty(), "the frame fixture is readable");
+
+  FrameBundle bundle;
+  check(bundle.parse(body), "the real encoder's bundle decodes");
+  check(bundle.count() == 3, "every frame is decoded");
+  check(bundle.delayMs(0) == 40 && bundle.delayMs(1) == 70 && bundle.delayMs(2) == 100,
+        "per-frame delays decode");
+  check(bundle.totalDurationMs() == 210, "the total duration is the sum of the delays");
+
+  // The fixture's pattern is position-dependent on purpose: a decoder that
+  // transposed x and y, or got the stride wrong, would still produce a
+  // plausible-looking image but fail this.
+  Surface out(52, 16);
+  bundle.blit(1, out);
+  bool exact = true;
+  for (int y = 0; y < 16; ++y) {
+    for (int x = 0; x < 52; ++x) {
+      const Color c = out.getPixel(x, y);
+      const int n = 1;
+      if (c.r != ((x * 5 + n) & 0xff)) exact = false;
+      if (c.g != ((y * 17 + n * 2) & 0xff)) exact = false;
+      if (c.b != (((x + y) * 3 + n * 4) & 0xff)) exact = false;
+    }
+  }
+  check(exact, "every pixel of a blitted frame matches the encoder, byte for byte");
+
+  // Playback timing walks the delay list rather than assuming a fixed cadence.
+  check(bundle.indexAt(0) == 0, "playback starts on frame 0");
+  check(bundle.indexAt(39) == 0, "it holds frame 0 for its own delay");
+  check(bundle.indexAt(40) == 1, "and advances exactly at the boundary");
+  check(bundle.indexAt(109) == 1, "frame 1 holds for 70 ms");
+  check(bundle.indexAt(110) == 2, "then frame 2");
+  check(bundle.indexAt(210) == 0, "playback loops at the total duration");
+  check(bundle.indexAt(215) == 0, "and keeps looping");
+  check(bundle.indexAt(-5) == 0, "a negative elapsed time does not index out of range");
+
+  // Validation. The service shares a LAN with everything else the user owns, so
+  // a bundle's own claims about its size are checked against this panel rather
+  // than allocated on trust.
+  FrameBundle bad;
+  check(!bad.parse(""), "an empty body is rejected");
+  check(!bad.parse("nope"), "a body shorter than the header is rejected");
+  std::string wrongMagic = body;
+  wrongMagic[0] = 'X';
+  check(!bad.parse(wrongMagic), "a wrong magic is rejected");
+  std::string wrongSize = body;
+  wrongSize[6] = 40;  // claims 40 columns
+  check(!bad.parse(wrongSize), "a bundle that is not panel-sized is rejected");
+  std::string truncated = body.substr(0, body.size() - 100);
+  check(!bad.parse(truncated),
+        "a truncated bundle is rejected rather than played as far as it goes");
+  check(bad.count() == 0, "a rejected bundle leaves nothing behind");
+
+  std::string huge = body;
+  huge[4] = 0xFF;
+  huge[5] = 0xFF;  // 65535 frames
+  check(!bad.parse(huge), "an implausible frame count is rejected, not allocated");
+
+  // A zero delay would spin the play loop; the decoder floors it even if the
+  // encoder's own clamp were bypassed by something else on the wire.
+  std::string zeroDelay = body;
+  zeroDelay[8] = 0;
+  zeroDelay[9] = 0;
+  FrameBundle floored;
+  check(floored.parse(zeroDelay), "a zero delay still parses");
+  check(floored.delayMs(0) == FrameBundle::kMinDelayMs, "and is floored to the minimum");
+}
+
 void checkStateDoc() {
   using tcos::StateDoc;
 
@@ -902,6 +986,8 @@ int main() {
   std::printf("  launcher ok\n");
   checkStateDoc();
   std::printf("  state doc ok\n");
+  checkFrameBundle();
+  std::printf("  frame bundle ok\n");
   checkWifiPolicy();
   std::printf("  wifi policy ok\n");
   checkBootScreen();

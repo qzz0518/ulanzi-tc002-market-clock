@@ -63,6 +63,7 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/app/src/visual/*.cpp \
   device/tc002-os/app/src/net/WifiPolicy.cpp \
   device/tc002-os/app/src/net/StateDoc.cpp \
+  device/tc002-os/app/src/net/FrameBundle.cpp \
   -o .runtime/os-selfcheck && .runtime/os-selfcheck
 """
 
