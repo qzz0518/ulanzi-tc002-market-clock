@@ -120,6 +120,9 @@ function uniqueAppName(workspace: WorkspaceSettings, seed: string): string {
   return name;
 }
 
+// Mirrors src/workspace.ts's maxChannels — the device's cap, not a UI taste.
+const MAX_CHANNELS = 24;
+
 function newChannel(
   workspace: WorkspaceSettings,
   catalog: ContentCatalogEntry[],
@@ -837,6 +840,41 @@ export function App() {
     });
   };
 
+  // 写入为单独 APP：把当前画布做成一个新频道，而不是写进选中的那个。
+  //
+  // The canvas is the one place in this console where a user draws something
+  // from nothing, and the existing action folds that into whatever channel
+  // happens to be selected — which is fine for editing an existing picture and
+  // wrong for making a new one. A drawing that deserves its own slot on the
+  // clock's ring should be able to get one without first going to 内容 to make
+  // an empty channel to write into.
+  const applyCanvasAsChannel = (pixels: number[]) => {
+    const definition = catalog.find((entry) => entry.id === "creative:canvas");
+    if (!definition || !workspace) return;
+    // 24 is the device's limit, not this page's; refusing here with the reason
+    // beats letting the save round-trip fail with a validation error.
+    if (workspace.channels.length >= MAX_CHANNELS) {
+      toast.error("频道已满", {
+        description: `时钟最多 ${MAX_CHANNELS} 个频道，先在「内容」里删掉一个再试。`,
+      });
+      return;
+    }
+    const item = newItem(definition);
+    item.options.pixels = pixels.slice();
+    // Numbered from what already exists so two drawings are told apart on the
+    // clock's own ring, where only the name is visible.
+    const taken = workspace.channels.filter((channel) => channel.name.startsWith("画板")).length;
+    const channel = newChannel(workspace, catalog, `画板 ${taken + 1}`, "canvas", item);
+    changeWorkspace((draft) => { draft.channels.push(channel); }, channel.id);
+    setSelectedChannelId(channel.id);
+    setSelectedItemId(item.id);
+    toast.success(`已写入新 APP“${channel.name}”`, {
+      description: firmwareMode === "zos"
+        ? `已加入时钟菜单（${channel.appName}），下次拉取即生效。`
+        : `已加入频道列表（${channel.appName}），推送后显示在时钟上。`,
+    });
+  };
+
   if (loading) {
     return (
       <div className="studio-page">
@@ -1075,6 +1113,7 @@ export function App() {
             lastPushAt={selectedChannelRuntime?.lastPushAt}
             onCreateTarget={createCanvasTarget}
             onApply={applyCanvas}
+            onApplyAsChannel={applyCanvasAsChannel}
             onPreview={() => void preview()}
             onPush={() => void push()}
           />

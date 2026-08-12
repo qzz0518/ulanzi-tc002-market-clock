@@ -435,3 +435,41 @@ describe("常规设置 under ZOS", () => {
     expect(source).toContain("时钟正在跑 ZOS，它不提供这套接口。");
   });
 });
+
+describe("canvas: 写入为单独 APP", () => {
+  test("the button sits left of 写入到所选频道 and is wired to its own handler", async () => {
+    const [canvasSource, appSource] = await Promise.all([
+      Bun.file(new URL("../web/src/components/studio/canvas-workspace.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/app.tsx", import.meta.url)).text(),
+    ]);
+
+    // Order matters: the user asked for it to the LEFT of the existing action,
+    // and in this flex row source order is visual order.
+    const asApp = canvasSource.indexOf("写入为单独 APP");
+    const toChannel = canvasSource.indexOf("写入到所选频道");
+    expect(asApp).toBeGreaterThan(-1);
+    expect(asApp).toBeLessThan(toChannel);
+
+    // A separate handler, not a modifier on the existing one: "add to what I am
+    // editing" and "make a new thing" are different intentions.
+    expect(canvasSource).toContain("onApplyAsChannel?.(pixels)");
+    expect(canvasSource).toContain("onApplyAsChannel?: (pixels: number[]) => void;");
+    expect(appSource).toContain("onApplyAsChannel={applyCanvasAsChannel}");
+  });
+
+  test("it refuses at the device's channel cap instead of failing on save", async () => {
+    const appSource = await Bun.file(new URL("../web/src/app.tsx", import.meta.url)).text();
+    // 24 is src/workspace.ts's maxChannels; a 25th would be rejected by the
+    // server, so the console says why rather than letting the round-trip fail.
+    expect(appSource).toContain("const MAX_CHANNELS = 24;");
+    expect(appSource).toMatch(/channels\.length >= MAX_CHANNELS[\s\S]{0,200}toast\.error/);
+  });
+
+  test("the new channel is numbered so two drawings are distinguishable", async () => {
+    const appSource = await Bun.file(new URL("../web/src/app.tsx", import.meta.url)).text();
+    // On the clock's ring only the name is visible, so "画板" twice would be
+    // two identical-looking entries.
+    expect(appSource).toMatch(/画板 \$\{taken \+ 1\}/);
+    expect(appSource).toContain('newChannel(workspace, catalog, `画板 ${taken + 1}`, "canvas", item)');
+  });
+});

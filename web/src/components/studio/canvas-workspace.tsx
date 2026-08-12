@@ -14,6 +14,7 @@ import {
   QrCode,
   Redo2,
   RotateCcw,
+  FilePlus2,
   Save,
   Trash2,
   Type,
@@ -98,6 +99,8 @@ interface CanvasWorkspaceProps {
   firmwareMode?: FirmwareMode;
   onCreateTarget: () => void;
   onApply: (pixels: number[]) => void;
+  /** Writes the same pixels into a brand-new channel instead of the selected one. */
+  onApplyAsChannel?: (pixels: number[]) => void;
   onPreview: () => void;
   onPush: () => void;
 }
@@ -137,6 +140,7 @@ export function CanvasWorkspace({
   firmwareMode = "official",
   onCreateTarget,
   onApply,
+  onApplyAsChannel,
   onPreview,
   onPush,
 }: CanvasWorkspaceProps) {
@@ -751,6 +755,14 @@ export function CanvasWorkspace({
     onApply(pixels);
   };
 
+  // Same pixels, different destination: a new channel of its own rather than
+  // the selected one. Kept separate from writeToChannel because "add to what I
+  // am editing" and "make a new thing" are different intentions and a modifier
+  // on one button would hide that.
+  const writeAsChannel = () => {
+    onApplyAsChannel?.(pixels);
+  };
+
   return (
     <>
       <main className="canvas-workspace">
@@ -868,6 +880,7 @@ export function CanvasWorkspace({
             <Button type="button" variant="transparent" outline={false} size="sm" square disabled={future.length === 0} onClick={redo} aria-label="重做" title="重做"><Redo2 /></Button>
             <Button type="button" color="red" variant="transparent" outline={false} size="sm" square onClick={clear} aria-label="清空画布" title="清空画布"><Trash2 /></Button>
           </div>
+          <Button type="button" size="sm" onClick={writeAsChannel}><FilePlus2 />写入为单独 APP</Button>
           <Button type="button" color="brand" size="sm" onClick={writeToChannel}><Save />写入到所选频道</Button>
         </section>
 
