@@ -1,18 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyPunctuationFallback,
+  beginTextPlacement,
   clampTextOrigin,
   layoutTextBlock,
   maxFullWidthCells,
   measureTextBlockFit,
+  moveTextPlacement,
   paintTextBlock,
   PANEL_HEIGHT,
   PANEL_WIDTH,
   PUNCTUATION_FALLBACK,
+  TEXT_FACES,
+  TEXT_FACE_SPECS,
   textBlockHasInk,
+  textPlacementRect,
   type TextBlock,
+  type TextFace,
+  type TextPaint,
 } from "../web/src/lib/pixel-text-block";
 import { glyphRows } from "../web/src/lib/pixel-glyphs";
+import { PIXEL_FONT } from "../web/src/lib/pixel-font";
+import { PIXEL_FONT_5X7 } from "../web/src/lib/pixel-font-5x7";
+import { PIXEL_FONT_5X7 as SERVICE_PIXEL_FONT_5X7 } from "../src/pixel-font.ts";
 
 const PIXELS = PANEL_WIDTH * PANEL_HEIGHT;
 
@@ -176,8 +186,8 @@ describe("four full-width characters, and what happens to a fifth", () => {
   });
 
   test("measured width always agrees with the laid-out bitmap", () => {
-    for (const face of ["ascii-5", "ascii-10", "shared-12"] as const) {
-      for (const text of ["", "A", "HELLO", "你好", "你A好，B"]) {
+    for (const face of TEXT_FACES) {
+      for (const text of ["", "A", "HELLO", "HI THERE", "WM1I", "你好", "你A好，B"]) {
         expect(measureTextBlockFit(text, face).width).toBe(layoutTextBlock(text, face).width);
       }
     }
@@ -211,48 +221,62 @@ describe("background fill", () => {
     const pixels = new Array(PIXELS).fill(0x101010);
     return pixels as number[];
   };
+  const FIELD = 0xff7a00;
 
-  test("covers exactly the block's bounding box and nothing else", () => {
+  test("covers every pixel of the 52x16 field except the glyphs — counted", () => {
     const block = layoutTextBlock("你好", "shared-12");
-    const painted = paintTextBlock(board(), block, 5, 2, {
-      color: 0xffffff,
-      background: 0x000000,
-    });
+    const painted = paintTextBlock(board(), block, 5, 2, { color: 0xffffff, background: FIELD });
 
     const glyphCells = new Set(expectedGlyphCells(block, 5, 2));
+    let ink = 0;
+    let field = 0;
     for (let y = 0; y < PANEL_HEIGHT; y += 1) {
       for (let x = 0; x < PANEL_WIDTH; x += 1) {
-        const inside = x >= 5 && x < 5 + block.width && y >= 2 && y < 2 + block.height;
-        const expected = !inside
-          ? 0x101010
-          : glyphCells.has(`${x},${y}`)
-            ? 0xffffff
-            : 0x000000;
-        expect(painted[y * PANEL_WIDTH + x]).toBe(expected);
+        const pixel = painted[y * PANEL_WIDTH + x];
+        if (glyphCells.has(`${x},${y}`)) {
+          expect(pixel).toBe(0xffffff);
+          ink += 1;
+        } else {
+          expect(pixel).toBe(FIELD);
+          field += 1;
+        }
       }
     }
+    // 你好 lights 84 of the 288 pixels its two 12x12 cells own; every other
+    // pixel of the panel — all 52*16 of them minus those — is the fill.
+    expect(ink).toBe(84);
+    expect(field).toBe(PIXELS - ink);
+    expect(ink + field).toBe(PIXELS);
+    // Nothing of the previous drawing survives anywhere on the board.
+    expect(painted.some((pixel) => pixel === 0x101010)).toBe(false);
   });
 
-  test("does not extend to the full panel height", () => {
+  test("extends past the block on every side, including the rows it never occupies", () => {
     const block = layoutTextBlock("你", "shared-12");
-    const painted = paintTextBlock(board(), block, 0, 2, { color: 0xffffff, background: 0x000000 });
-    // Rows 0-1 and 14-15 sit outside the 12px block and keep the drawing.
+    const painted = paintTextBlock(board(), block, 6, 2, { color: 0xffffff, background: FIELD });
+    // Rows 0-1 and 14-15 sit outside the 12px block: filled, edge to edge.
     for (const y of [0, 1, 14, 15]) {
       for (let x = 0; x < PANEL_WIDTH; x += 1) {
-        expect(painted[y * PANEL_WIDTH + x]).toBe(0x101010);
+        expect(painted[y * PANEL_WIDTH + x]).toBe(FIELD);
+      }
+    }
+    // So do the columns left of x=6 and right of the 12px cell.
+    for (let y = 0; y < PANEL_HEIGHT; y += 1) {
+      for (const x of [0, 5, 18, PANEL_WIDTH - 1]) {
+        expect(painted[y * PANEL_WIDTH + x]).toBe(FIELD);
       }
     }
   });
 
   test("fills the ASCII face's tracking columns too, so the plate has no holes", () => {
     const block = layoutTextBlock("II", "ascii-5");
-    const painted = paintTextBlock(board(), block, 0, 0, { color: 0xffffff, background: 0x000000 });
-    // x=3 is the blank column between the two glyphs — part of the plate.
+    const painted = paintTextBlock(board(), block, 0, 0, { color: 0xffffff, background: FIELD });
+    // x=3 is the blank column between the two glyphs.
     for (let y = 0; y < block.height; y += 1) {
-      expect(painted[y * PANEL_WIDTH + 3]).toBe(0x000000);
+      expect(painted[y * PANEL_WIDTH + 3]).toBe(FIELD);
     }
-    // x=block.width is the first column past the plate.
-    expect(painted[0 * PANEL_WIDTH + block.width]).toBe(0x101010);
+    // x=block.width is the first column past the block, and it is filled now.
+    expect(painted[0 * PANEL_WIDTH + block.width]).toBe(FIELD);
   });
 
   test("a null background leaves the board showing through", () => {
@@ -267,17 +291,27 @@ describe("background fill", () => {
     }
   });
 
-  test("a blank cell still gets its plate, so the hole is a deliberate gap", () => {
+  test("text with no ink at all leaves a board of pure fill", () => {
     const block = layoutTextBlock("《", "shared-12");
     expect(textBlockHasInk(block)).toBe(false);
-    const painted = paintTextBlock(board(), block, 0, 0, { color: 0xffffff, background: 0x000000 });
-    expect(painted.filter((pixel) => pixel === 0x000000).length).toBe(12 * 12);
+    const painted = paintTextBlock(board(), block, 0, 0, { color: 0xffffff, background: FIELD });
+    expect(painted.filter((pixel) => pixel === FIELD).length).toBe(PIXELS);
+  });
+
+  test("every face fills the same field, whatever its height", () => {
+    for (const face of TEXT_FACES) {
+      const block = layoutTextBlock(face === "shared-12" ? "字" : "A", face);
+      const painted = paintTextBlock(board(), block, 0, 0, { color: 0xffffff, background: FIELD });
+      const ink = painted.filter((pixel) => pixel === 0xffffff).length;
+      expect(painted.filter((pixel) => pixel === FIELD).length).toBe(PIXELS - ink);
+      expect(painted.some((pixel) => pixel === 0x101010)).toBe(false);
+    }
   });
 
   test("does not mutate the board it was handed", () => {
     const original = board();
     const block = layoutTextBlock("A", "ascii-5");
-    paintTextBlock(original, block, 0, 0, { color: 0xffffff, background: 0x000000 });
+    paintTextBlock(original, block, 0, 0, { color: 0xffffff, background: FIELD });
     expect(original.every((pixel) => pixel === 0x101010)).toBe(true);
   });
 });
@@ -298,5 +332,240 @@ describe("placement origin", () => {
       background: null,
     });
     expect(litCells(painted).sort()).toEqual(expectedGlyphCells(block, origin.x, origin.y).sort());
+  });
+});
+
+describe("font presets", () => {
+  /** The block's own bitmap, compared against a source glyph at an upscale. */
+  function expectScaledGlyph(block: TextBlock, rows: readonly string[], scale: number): void {
+    expect(block.width).toBe(rows[0]!.length * scale);
+    expect(block.height).toBe(rows.length * scale);
+    for (let row = 0; row < rows.length; row += 1) {
+      const line = rows[row]!;
+      for (let column = 0; column < line.length; column += 1) {
+        const lit = line[column] === "#" ? 1 : 0;
+        for (let scaleY = 0; scaleY < scale; scaleY += 1) {
+          for (let scaleX = 0; scaleX < scale; scaleX += 1) {
+            const x = column * scale + scaleX;
+            const y = row * scale + scaleY;
+            expect(block.on[y * block.width + x]).toBe(lit);
+          }
+        }
+      }
+    }
+  }
+
+  test("every preset states a height the 16-row panel can show whole", () => {
+    const heights: Record<TextFace, number> = {
+      "shared-12": 12,
+      "ascii-5": 5,
+      "ascii-10": 10,
+      "ascii-15": 15,
+      "wide-7": 7,
+      "wide-14": 14,
+    };
+    for (const face of TEXT_FACES) {
+      expect(TEXT_FACE_SPECS[face].height).toBe(heights[face]);
+      expect(heights[face]).toBeLessThanOrEqual(PANEL_HEIGHT);
+      // And the laid-out block agrees with the advertised height.
+      expect(layoutTextBlock("A", face).height).toBe(heights[face]);
+    }
+  });
+
+  test("the 3x5 face draws its own bitmap at 1x, 2x and 3x", () => {
+    const source = PIXEL_FONT.R!;
+    expect(source).toEqual(["###", "#.#", "###", "##.", "#.#"]);
+    expectScaledGlyph(layoutTextBlock("R", "ascii-5"), source, 1);
+    expectScaledGlyph(layoutTextBlock("R", "ascii-10"), source, 2);
+    expectScaledGlyph(layoutTextBlock("R", "ascii-15"), source, 3);
+  });
+
+  test("the 5x7 face draws its own bitmap at 1x and 2x", () => {
+    const source = PIXEL_FONT_5X7.A!;
+    expect(source).toEqual([".##.", "#..#", "#..#", "####", "#..#", "#..#", "#..#"]);
+    expectScaledGlyph(layoutTextBlock("A", "wide-7"), source, 1);
+    expectScaledGlyph(layoutTextBlock("A", "wide-14"), source, 2);
+  });
+
+  test("the 5x7 face keeps its variable widths, and its narrow glyphs stay narrow", () => {
+    // I is 3 columns, A is 4, M is 5 — one tracking column between each.
+    expect(layoutTextBlock("I", "wide-7").width).toBe(3);
+    expect(layoutTextBlock("A", "wide-7").width).toBe(4);
+    expect(layoutTextBlock("M", "wide-7").width).toBe(5);
+    expect(layoutTextBlock("IAM", "wide-7").width).toBe(3 + 1 + 4 + 1 + 5);
+    expect(layoutTextBlock("IAM", "wide-14").width).toBe((3 + 1 + 4 + 1 + 5) * 2);
+  });
+
+  test("each preset gets the row budget its cells actually buy", () => {
+    const capacity: Record<TextFace, number> = {
+      // 52 / 12 = 4 full-width cells.
+      "shared-12": 4,
+      // 4px advance, 3px ink: 13 * 4 - 1 = 51.
+      "ascii-5": 13,
+      "ascii-10": 6,
+      // 12px advance, 9px ink: 4 * 12 - 3 = 45; a fifth would need 57.
+      "ascii-15": 4,
+      // "A" is 4 + 1 tracking: 10 * 5 - 1 = 49; an eleventh would need 54.
+      "wide-7": 10,
+      "wide-14": 5,
+    };
+    for (const face of TEXT_FACES) {
+      const probe = face === "shared-12" ? "你" : "A";
+      expect(measureTextBlockFit(probe.repeat(64), face, PANEL_WIDTH).capacity)
+        .toBe(capacity[face]);
+    }
+  });
+
+  test("only the shared face can draw CJK; the others name what they dropped", () => {
+    for (const face of TEXT_FACES) {
+      const block = layoutTextBlock("你好", face);
+      if (TEXT_FACE_SPECS[face].cjk) {
+        expect(block.missing).toEqual([]);
+        expect(textBlockHasInk(block)).toBe(true);
+      } else {
+        expect(block.missing).toEqual(["你", "好"]);
+        expect(textBlockHasInk(block)).toBe(false);
+      }
+    }
+  });
+
+  test("the 5x7 face treats a space as a cell, not as a missing character", () => {
+    const block = layoutTextBlock("HI YO", "wide-7");
+    expect(block.missing).toEqual([]);
+    // H=4, I=3, space=4, Y=5, O=4 glyph columns with a tracking column between.
+    expect(block.width).toBe(4 + 1 + 3 + 1 + 4 + 1 + 5 + 1 + 4);
+    expect(block.cells).toBe(5);
+  });
+
+  test("a character the 5x7 face lacks is reported and still holds its cell", () => {
+    const withComma = layoutTextBlock("A,B", "wide-7");
+    expect(withComma.missing).toEqual([","]);
+    // The blank cell is the face's modal 4 columns, so B does not slide left.
+    expect(withComma.width).toBe(4 + 1 + 4 + 1 + 4);
+    const solo = layoutTextBlock("B", "wide-7");
+    for (let y = 0; y < solo.height; y += 1) {
+      for (let x = 0; x < solo.width; x += 1) {
+        expect(withComma.on[y * withComma.width + 10 + x]).toBe(solo.on[y * solo.width + x]!);
+      }
+    }
+    // And the cell between them really is blank.
+    for (let y = 0; y < withComma.height; y += 1) {
+      for (let x = 5; x < 10; x += 1) expect(withComma.on[y * withComma.width + x]).toBe(0);
+    }
+  });
+
+  test("the 5x7 table is one object, not a copy the service can drift from", () => {
+    // Same module, reached through `src/pixel-font.ts`'s re-export — identity is
+    // a stronger pin than any bit-for-bit comparison could be.
+    expect(SERVICE_PIXEL_FONT_5X7).toBe(PIXEL_FONT_5X7);
+  });
+});
+
+describe("dragging a placed block", () => {
+  const FIELD = 0xff7a00;
+
+  /** A three-colour drawing, so "the artwork survived" is observable per pixel. */
+  function artwork(): number[] {
+    const colors = [0x101010, 0x00ff66, 0x4285f4];
+    return Array.from({ length: PIXELS }, (_, index) => colors[index % colors.length]!);
+  }
+
+  /** Asserts the whole panel: glyph colour on the block's cells, `field` elsewhere. */
+  function expectBoard(
+    pixels: readonly number[],
+    block: TextBlock,
+    originX: number,
+    originY: number,
+    color: number,
+    field: (index: number) => number,
+  ): void {
+    const glyphs = new Set(expectedGlyphCells(block, originX, originY));
+    for (let y = 0; y < PANEL_HEIGHT; y += 1) {
+      for (let x = 0; x < PANEL_WIDTH; x += 1) {
+        const index = y * PANEL_WIDTH + x;
+        expect(pixels[index]).toBe(glyphs.has(`${x},${y}`) ? color : field(index));
+      }
+    }
+  }
+
+  test("placement paints the board and hands back the block's own rectangle", () => {
+    const block = layoutTextBlock("你好", "shared-12");
+    const paint: TextPaint = { color: 0xffffff, background: FIELD };
+    const placed = beginTextPlacement(blankBoard(), block, 5, 2, paint);
+    expect(placed.pixels).toEqual(paintTextBlock(blankBoard(), block, 5, 2, paint));
+    // The glyph bounding box, never the filled field — a selection the size of
+    // the panel has nowhere to be dragged to.
+    expect(textPlacementRect(placed.placement))
+      .toEqual({ x: 5, y: 2, width: block.width, height: block.height });
+    expect(block.width).toBeLessThan(PANEL_WIDTH);
+  });
+
+  test("a drag lands byte-identical to having placed it there, in both fill modes", () => {
+    const block = layoutTextBlock("你好", "shared-12");
+    for (const background of [FIELD, null]) {
+      const board = artwork();
+      const paint: TextPaint = { color: 0x00ff66, background };
+      const placed = beginTextPlacement(board, block, 5, 2, paint);
+      const moved = moveTextPlacement(placed.placement, 1, 3);
+      expect(moved.pixels).toEqual(paintTextBlock(board, block, 1, 3, paint));
+      expect(textPlacementRect(moved.placement))
+        .toEqual({ x: 1, y: 3, width: block.width, height: block.height });
+    }
+  });
+
+  test("black glyphs survive a drag across a light field", () => {
+    // 0x000000 is a palette swatch and dark-on-light is the natural styling once
+    // the fill covers the panel. A pixel lift cannot tell that ink from an unlit
+    // pixel, so a blit that skips zeros would silently annihilate the text on
+    // the first drag; repainting from the baseline cannot.
+    const block = layoutTextBlock("你好", "shared-12");
+    const paint: TextPaint = { color: 0x000000, background: FIELD };
+    const placed = beginTextPlacement(blankBoard(), block, 5, 2, paint);
+    expect(placed.pixels.filter((pixel) => pixel === 0x000000).length).toBe(84);
+
+    const moved = moveTextPlacement(placed.placement, 11, 3);
+    expect(moved.pixels.filter((pixel) => pixel === 0x000000).length).toBe(84);
+    expectBoard(moved.pixels, block, 11, 3, 0x000000, () => FIELD);
+  });
+
+  test("a caption over artwork puts the drawing back where it was", () => {
+    // background: null is the default and the "caption over a drawing" case. A
+    // lift would carry the artwork inside the bounding box away stuck to the
+    // letters and leave a torn rectangle behind.
+    const art = artwork();
+    const block = layoutTextBlock("你好", "shared-12");
+    const paint: TextPaint = { color: 0xffffff, background: null };
+    const placed = beginTextPlacement(art, block, 5, 2, paint);
+    const moved = moveTextPlacement(placed.placement, 9, 3);
+    // Only the glyph pixels of the *new* position differ from the drawing —
+    // every pixel of the vacated box is the artwork again, not a hole.
+    expectBoard(moved.pixels, block, 9, 3, 0xffffff, (index) => art[index]!);
+  });
+
+  test("repeated drags repaint from the same baseline, so nothing accumulates", () => {
+    const art = artwork();
+    const untouched = art.slice();
+    const block = layoutTextBlock("HELLO", "wide-14");
+    const paint: TextPaint = { color: 0xffd000, background: null };
+    const placed = beginTextPlacement(art, block, 4, 1, paint);
+    const first = moveTextPlacement(placed.placement, 20, 0);
+    const second = moveTextPlacement(first.placement, 30, 2);
+    const back = moveTextPlacement(second.placement, 4, 1);
+    // Three drags later, dropping it where it started restores that exact board.
+    expect(back.pixels).toEqual(placed.pixels);
+    // And the caller's array was never written to — the placement took a copy.
+    expect(art).toEqual(untouched);
+    expect(placed.placement.baseline).not.toBe(art);
+  });
+
+  test("a drag cannot push a glyph off the panel", () => {
+    const block = layoutTextBlock("你好世界", "shared-12");
+    const paint: TextPaint = { color: 0xffffff, background: null };
+    const placed = beginTextPlacement(blankBoard(), block, 0, 0, paint);
+    const moved = moveTextPlacement(placed.placement, 40, 12);
+    expect([moved.placement.x, moved.placement.y]).toEqual([4, 4]);
+    expect(litCells(moved.pixels).sort()).toEqual(expectedGlyphCells(block, 4, 4).sort());
+    // Negative coordinates clamp the same way.
+    expect(moveTextPlacement(placed.placement, -8, -3).placement).toMatchObject({ x: 0, y: 0 });
   });
 });

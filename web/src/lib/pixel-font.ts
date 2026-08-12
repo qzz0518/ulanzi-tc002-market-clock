@@ -58,8 +58,13 @@ export interface PixelTextBitmap {
   on: Uint8Array;
 }
 
-export function renderPixelText(text: string, fontHeight: 5 | 10): PixelTextBitmap {
-  const scale = fontHeight === 10 ? 2 : 1;
+/**
+ * `fontHeight` is the 3x5 face's 5 rows times an integer scale. 15 is the
+ * ceiling the hardware sets: the panel has 16 rows, so a 4x upscale (20) could
+ * never be shown whole.
+ */
+export function renderPixelText(text: string, fontHeight: 5 | 10 | 15): PixelTextBitmap {
+  const scale = fontHeight / 5;
   const glyphs = Array.from(text.toUpperCase()).map((character) => PIXEL_FONT[character] ?? PIXEL_FONT[" "]!);
   const baseWidth = glyphs.length === 0 ? 0 : glyphs.length * 3 + glyphs.length - 1;
   const width = baseWidth * scale;

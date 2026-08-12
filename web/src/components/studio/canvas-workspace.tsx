@@ -30,13 +30,15 @@ import {
   type LiveScreen,
 } from "@/lib/live-screen";
 import {
-  clampTextOrigin,
+  beginTextPlacement,
   layoutTextBlock,
   measureTextBlockFit,
-  paintTextBlock,
+  moveTextPlacement,
   TEXT_FACES,
   textBlockHasInk,
+  textPlacementRect,
   type TextFace,
+  type TextPlacement,
 } from "@/lib/pixel-text-block";
 import { cn, errorMessage } from "@/lib/utils";
 import { useAppToast } from "@/lib/use-app-toast";
@@ -58,20 +60,55 @@ const IMAGE_METHODS: Record<PixelizeMethod, string> = {
   nearest: "最近邻",
   smooth: "平滑采样",
 };
-// The two faces are alternatives, not a replacement: the 3x5 face is the only
-// one short enough to stack two lines in 16 rows, the shared 12px one is the
-// only one with CJK — and its bitmaps are the firmware's own.
-const TEXT_FACE_META: Record<TextFace, { name: string; note: string }> = {
-  "shared-12": { name: "12px 中日文", note: "与固件同字库，一行 4 个全角字" },
-  "ascii-5": { name: "5px 小字", note: "3×5 点阵，仅 ASCII，可叠两行" },
-  "ascii-10": { name: "10px 大字", note: "3×5 点阵放大一倍，仅 ASCII" },
+// The presets are the honest set the 16-row panel allows, not a taste menu:
+// the 3x5 face at 1x/2x/3x (4x would be 20 rows), the 5x7 face at 1x/2x, and
+// the firmware's own 12px blob, which is the only one with CJK and the only one
+// that must not be resampled. `charset` is what the face can actually draw and
+// is shown verbatim in the inspector — a face that quietly cannot type a comma
+// is the failure mode worth spending a line on.
+const TEXT_FACE_META: Record<TextFace, { name: string; note: string; charset: string }> = {
+  "shared-12": {
+    name: "12px 中日文",
+    note: "与固件同字库，唯一能写中日文",
+    charset: "中日文、假名与 ASCII",
+  },
+  "ascii-5": {
+    name: "5px 小字",
+    note: "3×5 点阵，仅 ASCII，可叠两行",
+    charset: "3×5 点阵只有 ASCII 字母、数字和常用标点",
+  },
+  "ascii-10": {
+    name: "10px 大字",
+    note: "3×5 点阵放大一倍，仅 ASCII",
+    charset: "3×5 点阵只有 ASCII 字母、数字和常用标点",
+  },
+  "ascii-15": {
+    name: "15px 特大字",
+    note: "3×5 点阵放大两倍，15 行几乎占满，一行 4 字",
+    charset: "3×5 点阵只有 ASCII 字母、数字和常用标点",
+  },
+  "wide-7": {
+    name: "7px 宽体",
+    note: "5×7 变宽点阵，字形更圆润",
+    charset: "5×7 宽体只有大写字母、数字和 ?",
+  },
+  "wide-14": {
+    name: "14px 宽体大字",
+    note: "5×7 放大一倍，一行 5 字左右",
+    charset: "5×7 宽体只有大写字母、数字和 ?",
+  },
 };
 // The probe character that measures a face's own row budget: a hanzi for the
-// shared face (12px cells), a letter for the ASCII ones.
+// shared face (12px cells), a letter for the latin ones. The 5x7 face is
+// variable-width, so its budget is only ever a typical-case number — "A" is its
+// modal 4px width, which is what the inspector should promise.
 const FACE_PROBE: Record<TextFace, string> = {
   "shared-12": "你",
   "ascii-5": "A",
   "ascii-10": "A",
+  "ascii-15": "A",
+  "wide-7": "A",
+  "wide-14": "A",
 };
 // Doodle-wall live mode (pixel-playground.md §7): static art does not chase
 // frame rate, one device frame per 300ms window is plenty.
@@ -91,6 +128,11 @@ interface Selection {
 type PointerAction =
   | { kind: "paint"; erase: boolean }
   | { kind: "marquee"; startX: number; startY: number; endX: number; endY: number }
+  // Dragging freshly placed text: not a pixel lift but a repaint from the board
+  // as it was before the text landed — see TextPlacement. `moved` stays false
+  // until the origin really changes, so a click that only re-grabs the text
+  // costs neither a history entry nor a status line claiming it went somewhere.
+  | { kind: "text-move"; grabX: number; grabY: number; moved: boolean }
   | {
       kind: "move";
       buffer: number[];
@@ -207,6 +249,10 @@ export function CanvasWorkspace({
   const toast = useAppToast();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointerActionRef = useRef<PointerAction | null>(null);
+  // The last placed text, while it is still movable. Dropped by anything that
+  // invalidates it (another tool, undo, a new selection), so the select tool
+  // only ever sees it when the green box on screen really is that text.
+  const textPlacementRef = useRef<TextPlacement | null>(null);
   const imageUrlRef = useRef<string | null>(null);
   const liveScreenRef = useRef<LiveScreen | null>(null);
   const liveSocketRef = useRef<RoomSocket | null>(null);
@@ -233,8 +279,9 @@ export function CanvasWorkspace({
   // can actually draw Chinese is the one to land on.
   const [textFace, setTextFace] = useState<TextFace>("shared-12");
   const [textFill, setTextFill] = useState(false);
-  // Black is the panel's "LED off", which is the backdrop a caption laid over
-  // artwork almost always wants.
+  // Black is the panel's "LED off", so the default fill reads as "clear the
+  // board and show only these words" — the least surprising thing a full-field
+  // fill can do the first time it is switched on.
   const [textFillColor, setTextFillColor] = useState(0x000000);
   const [imageView, setImageView] = useState<PixelView | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -248,6 +295,17 @@ export function CanvasWorkspace({
   const [liveInviteOpen, setLiveInviteOpen] = useState(false);
   const pixelsRef = useRef(pixels);
   pixelsRef.current = pixels;
+
+  // The green box and the live placement are one thing — a selection the user
+  // framed by hand must not be draggable as text — so they are always set
+  // together and can never drift apart.
+  const applySelection = useCallback(
+    (next: Selection | null, placement: TextPlacement | null = null) => {
+      textPlacementRef.current = placement;
+      setSelection(next);
+    },
+    [],
+  );
 
   // Laid out on every keystroke so the inspector can state the row budget and
   // name the undrawable characters *before* the canvas is clicked.
@@ -266,7 +324,7 @@ export function CanvasWorkspace({
     setPixels(stored ?? new Array(PIXEL_COUNT).fill(0));
     setHistory([]);
     setFuture([]);
-    setSelection(null);
+    applySelection(null);
     pointerActionRef.current = null;
     const loaded = targetItem
       ? "已载入所选频道中的画板内容。"
@@ -441,6 +499,9 @@ export function CanvasWorkspace({
         // The wall already has a session going — adopt it, undo can recover.
         snapshot();
         setPixels(incoming);
+        // The board this text was placed on is gone, so it is no longer a thing
+        // that can be moved back onto it.
+        applySelection(null);
         setStatus("已同步涂鸦墙内容，访客笔画会实时合并进来。");
       }
       return;
@@ -456,6 +517,10 @@ export function CanvasWorkspace({
       // Mirror into the agreed state too, so the local diff won't echo it back.
       const synced = lastSyncedRef.current;
       if (synced) synced[index] = value;
+      // …and into the board a live text placement repaints from, or moving the
+      // text would quietly wipe the guest's pixel.
+      const placement = textPlacementRef.current;
+      if (placement) placement.baseline[index] = value;
       setPixels((current) => {
         if (current[index] === value) return current;
         const next = current.slice();
@@ -566,13 +631,13 @@ export function CanvasWorkspace({
   const activateTool = (nextTool: CanvasTool) => {
     pointerActionRef.current = null;
     setTool(nextTool);
-    setSelection(null);
+    applySelection(null);
     setPointerRevision((current) => current + 1);
     const messages: Record<CanvasTool, string> = {
       pen: "画笔：左键绘制，右键临时擦除。",
       eraser: "橡皮：拖动清除像素。",
       select: "选择：拖出选区，再从选区内部拖动搬移。",
-      text: "文字：先在右侧设置内容与字体，再点击画布决定左上角。",
+      text: "文字：先在右侧设置内容与字体，再点击画布落字；落完自动变成可拖动的选区。",
       image: "图片：从右侧上传并生成，生成后可整体搬移。",
     };
     setStatus(messages[nextTool]);
@@ -584,7 +649,7 @@ export function CanvasWorkspace({
     setFuture((current) => [...current, pixels.slice()]);
     setPixels(previous);
     setHistory((current) => current.slice(0, -1));
-    setSelection(null);
+    applySelection(null);
     toast.success("已撤销");
   };
 
@@ -594,14 +659,14 @@ export function CanvasWorkspace({
     setHistory((current) => [...current, pixels.slice()]);
     setPixels(next);
     setFuture((current) => current.slice(0, -1));
-    setSelection(null);
+    applySelection(null);
     toast.success("已重做");
   };
 
   const clear = () => {
     snapshot();
     setPixels(new Array(PIXEL_COUNT).fill(0));
-    setSelection(null);
+    applySelection(null);
     toast.success("画布已清空", { description: "可以撤销恢复。" });
   };
 
@@ -617,7 +682,7 @@ export function CanvasWorkspace({
       toast.error("没有可显示的字符", {
         description: textFace === "shared-12"
           ? "这些字不在设备字库里，换个写法试试。"
-          : "点阵小字体只有 ASCII，中日文请切到「12px 中日文」。",
+          : `${TEXT_FACE_META[textFace].charset}；中日文请切到「${TEXT_FACE_META["shared-12"].name}」。`,
       });
       return;
     }
@@ -627,19 +692,27 @@ export function CanvasWorkspace({
       });
       return;
     }
-    const origin = clampTextOrigin(textBlock, x, y, WIDTH, HEIGHT);
-    snapshot();
-    setPixels((current) => paintTextBlock(current, textBlock, origin.x, origin.y, {
+    const placed = beginTextPlacement(pixelsRef.current, textBlock, x, y, {
       color,
       background,
       panelWidth: WIDTH,
       panelHeight: HEIGHT,
-    }));
+    });
+    const origin = placed.placement;
+    snapshot();
+    setPixels(placed.pixels);
+    // Same hand-off as the image tool: the placed block stays selected and the
+    // select tool is already live, so the position can be corrected by dragging
+    // instead of by re-framing a marquee around text that is already down. The
+    // selection is the glyph bounding box, never the filled field — a selection
+    // the size of the panel has nowhere to be dragged to.
+    setTool("select");
+    applySelection(textPlacementRect(placed.placement), placed.placement);
     const nudged = origin.x !== x || origin.y !== y ? "（已内移以放下整块）" : "";
     const gaps = textBlock.missing.length > 0
       ? `；${textBlock.missing.join(" ")} 不在字库中，已留空`
       : "";
-    setStatus(`已在 (${origin.x}, ${origin.y}) 放置“${canvasText}”${nudged}${gaps}，可继续点击放置。`);
+    setStatus(`已在 (${origin.x}, ${origin.y}) 落下“${canvasText}”${nudged}${gaps}；拖动绿色选区可再调位置，要继续落字请点「在画布上落字」。`);
   };
 
   const readImage = async (file: File) => {
@@ -664,7 +737,7 @@ export function CanvasWorkspace({
       setImageName(file.name);
       setImageView({ width: data.width, height: data.height, data: data.data });
       setTool("image");
-      setSelection(null);
+      applySelection(null);
       setStatus("图片已读取；在右侧调整像素化参数，然后生成到画布。");
     } catch {
       URL.revokeObjectURL(url);
@@ -700,7 +773,7 @@ export function CanvasWorkspace({
       return next;
     });
     setTool("select");
-    setSelection({ x: 0, y: 0, width: block.width, height: block.height });
+    applySelection({ x: 0, y: 0, width: block.width, height: block.height });
     setStatus(`已生成 ${block.width}×${block.height} 像素块；拖动绿色选区可搬移。`);
   };
 
@@ -731,7 +804,14 @@ export function CanvasWorkspace({
     if (!action) return;
     pointerActionRef.current = null;
 
-    if (action.kind === "move") {
+    if (action.kind === "text-move") {
+      // The board was repainted on every move, so there is nothing to commit —
+      // and the placement stays live, so the position can be nudged again.
+      const placement = textPlacementRef.current;
+      if (action.moved && placement) {
+        setStatus(`文字已移到 (${placement.x}, ${placement.y})；还可以继续拖动微调。`);
+      }
+    } else if (action.kind === "move") {
       const originX = boundedOrigin(action.cursorX - action.grabX, action.width, WIDTH);
       const originY = boundedOrigin(action.cursorY - action.grabY, action.height, HEIGHT);
       setPixels((current) => {
@@ -744,7 +824,7 @@ export function CanvasWorkspace({
         });
         return next;
       });
-      setSelection({ x: originX, y: originY, width: action.width, height: action.height });
+      applySelection({ x: originX, y: originY, width: action.width, height: action.height });
       setStatus(`选区已搬移到 (${originX}, ${originY})。`);
     } else if (action.kind === "marquee") {
       const x = Math.min(action.startX, action.endX);
@@ -755,7 +835,7 @@ export function CanvasWorkspace({
         width: Math.abs(action.endX - action.startX) + 1,
         height: Math.abs(action.endY - action.startY) + 1,
       };
-      setSelection(nextSelection);
+      applySelection(nextSelection);
       setStatus(`已框选 ${nextSelection.width}×${nextSelection.height}；从选区内部拖动即可搬移。`);
     }
     setPointerRevision((current) => current + 1);
@@ -778,6 +858,22 @@ export function CanvasWorkspace({
     event.currentTarget.setPointerCapture(event.pointerId);
     if (tool === "select") {
       if (insideSelection(selection, x, y) && selection) {
+        // Freshly placed text is not a rectangle of board pixels — it repaints
+        // from what was underneath instead of being cut out and stamped down.
+        // That is the only way black glyphs survive a drag over a light fill,
+        // and the only way a caption can be nudged without tearing the drawing
+        // it was laid over. See TextPlacement.
+        const placement = textPlacementRef.current;
+        if (placement) {
+          pointerActionRef.current = {
+            kind: "text-move",
+            grabX: x - placement.x,
+            grabY: y - placement.y,
+            moved: false,
+          };
+          setPointerRevision((current) => current + 1);
+          return;
+        }
         snapshot();
         const buffer: number[] = [];
         for (let selectionY = 0; selectionY < selection.height; selectionY += 1) {
@@ -804,7 +900,7 @@ export function CanvasWorkspace({
           cursorX: x,
           cursorY: y,
         };
-        setSelection(null);
+        applySelection(null);
       } else {
         pointerActionRef.current = { kind: "marquee", startX: x, startY: y, endX: x, endY: y };
       }
@@ -826,6 +922,23 @@ export function CanvasWorkspace({
     if (!action) return;
     if (action.kind === "paint") {
       paintAt(x, y, action.erase);
+      return;
+    }
+    if (action.kind === "text-move") {
+      const placement = textPlacementRef.current;
+      if (!placement) return;
+      const moved = moveTextPlacement(placement, x - action.grabX, y - action.grabY);
+      // Clamping and the 16px cell size mean most pointer moves land on the same
+      // origin; repainting then would only churn the board and, in live mode,
+      // the wall socket.
+      if (moved.placement.x === placement.x && moved.placement.y === placement.y) return;
+      // Snapshot on the first real move, so one drag is one undo step.
+      if (!action.moved) {
+        action.moved = true;
+        snapshot();
+      }
+      applySelection(textPlacementRect(moved.placement), moved.placement);
+      setPixels(moved.pixels);
       return;
     }
     if (action.kind === "marquee") {
@@ -969,7 +1082,7 @@ export function CanvasWorkspace({
           <section className={cn("canvas-inspector-section", tool === "text" && "is-active")}>
             <div className="canvas-tool-heading">
               <Type aria-hidden="true" />
-              <div><h3>像素文字</h3><p>点击画布决定文字左上角。</p></div>
+              <div><h3>像素文字</h3><p>点击画布落字，落完直接拖动微调。</p></div>
             </div>
             <label className="canvas-field" htmlFor="canvas-text">
               <span>文字内容</span>
@@ -1008,7 +1121,7 @@ export function CanvasWorkspace({
             <p className="m-0 text-[0.6rem] leading-[1.5] text-cladd-fg-softer">
               {textFace === "shared-12"
                 ? `与固件同一套字模，一行最多 ${faceBudget} 个全角字（半角字母与标点各占 6px，还能多挤几个）；放不下会拒绝落字并提示能放几个字。`
-                : `3×5 点阵只有 ASCII，一行最多 ${faceBudget} 个字符；中日文请切到「${TEXT_FACE_META["shared-12"].name}」。`}
+                : `${TEXT_FACE_META[textFace].charset}，一行大约 ${faceBudget} 个字符；中日文请切到「${TEXT_FACE_META["shared-12"].name}」。`}
             </p>
             {textBlock.missing.length > 0 && (
               <p className="cladd-color-yellow m-0 text-[0.6rem] leading-[1.5] text-cladd-primary">
@@ -1016,11 +1129,11 @@ export function CanvasWorkspace({
               </p>
             )}
             <label className="canvas-switch-row">
-              <span><strong>背景填色</strong><small>在文字方块下垫一层底色</small></span>
+              <span><strong>背景填色</strong><small>整屏铺满底色，只留笔画是文字颜色</small></span>
               <Switch as="span" input checked={textFill} onChange={setTextFill} />
             </label>
             {textFill && (
-              <SwatchPicker label="文字底色" value={textFillColor} onSelect={setTextFillColor} />
+              <SwatchPicker label="整屏底色" value={textFillColor} onSelect={setTextFillColor} />
             )}
             <Button type="button" color={tool === "text" ? "brand" : "neutral"} onClick={() => activateTool("text")}><Type />在画布上落字</Button>
           </section>
