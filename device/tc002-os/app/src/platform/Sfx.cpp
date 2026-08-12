@@ -105,10 +105,14 @@ void Sfx::initialize() {
   // effects are 18-320 ms and land many seconds apart, so every single one fell
   // inside the codec's cold start and was swallowed whole. The arcade firmware
   // never hit this because it plays multi-second .wav files: there the warm-up
-  // hides in the attack. Ten minutes keeps the output open across a whole play
-  // session; the cost is the codec staying powered, which this device does
-  // anyway while the panel is lit.
-  base::AudioManager::instance().setIdleTimeout(600000);
+  // hides in the attack.
+  // ZERO, which means "never close", and it is the vendor's own choice:
+  // Z21_TC002_Demo/src/managers/AudioManager.cpp does nothing in its
+  // constructor except setIdleTimeout(0). The ten-minute value this replaces
+  // did not fix the swallowed-first-sound bug, it merely re-armed it on a
+  // longer fuse — ten quiet minutes on a carousel channel is not a rare state,
+  // it is the normal one.
+  base::AudioManager::instance().setIdleTimeout(0);
 
   // Mute is global and survives whatever ran before us — the official firmware,
   // the arcade build, a previous ZOS session that was left at volume 0. Nothing

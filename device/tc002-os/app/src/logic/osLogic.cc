@@ -14,6 +14,7 @@
 #include "net/WifiPolicy.h"
 #include "net/SetupPortal.h"
 #include "platform/DeviceControls.h"
+#include "platform/BatteryMonitor.h"
 #include "platform/DeviceProvisioning.h"
 #include "platform/DeviceWifi.h"
 #include "platform/NetInfo.h"
@@ -453,6 +454,28 @@ void rebuildSettings(int nowMs) {
 	row.value = formatUptime(monoMs() - sStartMs);
 	rows.push_back(row);
 
+	// 电量 sits above MCU because it is the row a user actually looks for, and
+	// because a pending shutdown has to be visible somewhere.
+	row.label = "\xE7\x94\xB5\xE9\x87\x8F";                                  // 电量
+	{
+		const int pct = tcos::BatteryMonitor::instance().percent();
+		if (pct < 0) {
+			row.value = "--";
+		} else {
+			char buf[48];
+			const int left = tcos::BatteryMonitor::instance().shutdownInSeconds();
+			if (left >= 0) {
+				snprintf(buf, sizeof(buf), "%d%% %ds", pct, left);   // 关机倒计时
+			} else if (tcos::BatteryMonitor::instance().charging()) {
+				snprintf(buf, sizeof(buf), "%d%% +", pct);            // 充电中
+			} else {
+				snprintf(buf, sizeof(buf), "%d%%", pct);
+			}
+			row.value = buf;
+		}
+	}
+	rows.push_back(row);
+
 	row.label = "MCU";
 	row.value = sMcuVersion.empty() ? "\xE6\x97\xA0\xE5\xBA\x94\xE7\xAD\x94" : sMcuVersion;  // 无应答
 	rows.push_back(row);
@@ -508,6 +531,11 @@ static void onUI_init() {
 	// that the MCU is talking to us at all, and the night this was added proved
 	// that is worth a row.
 	McuManager::getInstance().queryMcuVersion(sMcuVersion);
+	// After the handshake, because it queries the same MCU. Flashed, ZOS is the
+	// only firmware left on a battery-powered device: the stock app's
+	// awtrix::BatteryMonitor went with the /res it replaced, and nothing else
+	// will ever notice a flat cell.
+	tcos::BatteryMonitor::instance().start();
 	// Before Sfx: initialize() sets the mixer level, and Sfx primes the audio
 	// output as part of coming up. Reversed, the priming burst and every effect
 	// until the first onUI_show ran at whatever level the previous firmware left.
