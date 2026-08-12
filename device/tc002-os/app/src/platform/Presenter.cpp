@@ -60,6 +60,7 @@ void Presenter::present(const Surface& surface) {
   }
   GpioHelper::output("GPIO_35", 1);
 
+
   // Frame pacing, not a lock. Nothing else contends for the bus because nothing
   // else in this firmware is allowed to write it.
   usleep(kFramePaceUs);

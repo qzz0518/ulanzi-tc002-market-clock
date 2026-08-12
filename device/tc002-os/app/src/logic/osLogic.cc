@@ -1,6 +1,7 @@
 #pragma once
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
 
 #include <mutex>
@@ -167,6 +168,10 @@ enum {
 // every few seconds), and rebuilding for those would jerk the user's selection
 // back to the first channel every time the song moved on.
 std::string sMenuSignature;
+// The MCU's reported firmware version, from the handshake at startup. Empty
+// means the MCU never answered — which is the difference between a working
+// panel and a dark one, so it earns a row on the settings screen.
+std::string sMcuVersion;
 std::string sPinnedFocus;
 
 // The link's view of the world, refreshed on a slower cadence than the render:
@@ -448,6 +453,10 @@ void rebuildSettings(int nowMs) {
 	row.value = formatUptime(monoMs() - sStartMs);
 	rows.push_back(row);
 
+	row.label = "MCU";
+	row.value = sMcuVersion.empty() ? "\xE6\x97\xA0\xE5\xBA\x94\xE7\xAD\x94" : sMcuVersion;  // 无应答
+	rows.push_back(row);
+
 	row.label = "ZOS";
 	row.value = "1.0";
 	rows.push_back(row);
@@ -485,6 +494,20 @@ static void onUI_init() {
 	// code here proven to drive this panel from a cold start.
 	McuManager::getInstance().initialize(
 		new PixelMcuProto::McuParse("/dev/ttyS1", 1500000));
+
+	// A blocking version query, immediately. The arcade firmware deliberately
+	// skips this ("the version is fetched by mcuThread") and gets away with it
+	// because it has only ever run sideloaded, on top of a stock app that had
+	// already talked to the MCU. apps/flythings/pixel-pet-display — the one app
+	// in the official repo written to be deployed on its own — does exactly
+	// this, and the ordering is the only thing that distinguishes its startup
+	// from ours. Opening the UART is not the same as talking over it: the
+	// round trip is what tells the MCU a host is present, and the panel stays
+	// on the MCU's own boot screen until it believes that.
+	// Kept and shown in 设置 rather than logged: it is the one piece of evidence
+	// that the MCU is talking to us at all, and the night this was added proved
+	// that is worth a row.
+	McuManager::getInstance().queryMcuVersion(sMcuVersion);
 	// Before Sfx: initialize() sets the mixer level, and Sfx primes the audio
 	// output as part of coming up. Reversed, the priming burst and every effect
 	// until the first onUI_show ran at whatever level the previous firmware left.

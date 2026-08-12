@@ -1,7 +1,6 @@
 #include "platform/Sfx.h"
 
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
 #include <vector>
@@ -73,7 +72,7 @@ struct Sfx::Impl {
   std::vector<uint8_t> scratch;
 };
 
-Sfx::Sfx() : mImpl(0), mReady(false), mMuted(false), mNoiseState(0x1234567u), mTraceCount(0) {}
+Sfx::Sfx() : mImpl(0), mReady(false), mMuted(false), mNoiseState(0x1234567u) {}
 
 Sfx& Sfx::instance() {
   static Sfx single;
@@ -123,16 +122,6 @@ void Sfx::initialize() {
   mImpl->player.putSamples(&silence[0], static_cast<int>(silence.size()));
 
   mReady = true;
-  // A breadcrumb rather than a log line: logcat is off limits on this device
-  // (it wedges adbd and needs a power cycle), so this is how "did audio come
-  // up, and is anything being dropped" gets answered from the host.
-  FILE* f = ::fopen("/tmp/zos-sfx.log", "w");
-  if (f != 0) {
-    ::fprintf(f, "audio ready, busy=%d vol=%d mute=%d\n", mImpl->player.busyCount(),
-              base::AudioManager::instance().getVolume(),
-              base::AudioManager::instance().isMute() ? 1 : 0);
-    ::fclose(f);
-  }
 }
 
 void Sfx::emit(const Voice& voice) {
@@ -206,19 +195,6 @@ void Sfx::emit(const Voice& voice) {
 
   mImpl->player.putSamples(&mImpl->scratch[0], static_cast<int>(mImpl->scratch.size()));
 
-  // First few emissions only: enough to tell "never called", "called and
-  // dropped" and "called and played" apart without writing every frame.
-  if (mTraceCount < 8) {
-    ++mTraceCount;
-    FILE* f = ::fopen("/tmp/zos-sfx.log", "a");
-    if (f != 0) {
-      ::fprintf(f, "emit %d: busy=%d samples=%d wave=%d vol=%d mute=%d\n",
-                mTraceCount, busy, samples, voice.wave,
-                base::AudioManager::instance().getVolume(),
-                base::AudioManager::instance().isMute() ? 1 : 0);
-      ::fclose(f);
-    }
-  }
 }
 
 void Sfx::play(Clip clip) {

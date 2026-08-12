@@ -88,7 +88,6 @@ class Sfx {
   bool mReady;
   bool mMuted;
   unsigned int mNoiseState;
-  int mTraceCount;
 };
 
 }  // namespace tcos
