@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -19,7 +20,7 @@ import {
   Trash2,
   Type,
 } from "lucide-react";
-import { Button, Input, NumberScrubber, Select, Switch } from "@cladd-ui/react";
+import { Button, Chip, Input, NumberScrubber, Select, Switch } from "@cladd-ui/react";
 import { pixelizeImage, type PixelView, type PixelizeMethod } from "@/lib/canvas-pixelize";
 import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
 import {
@@ -28,7 +29,15 @@ import {
   LIVE_FRAME_MS,
   type LiveScreen,
 } from "@/lib/live-screen";
-import { renderPixelText } from "@/lib/pixel-font";
+import {
+  clampTextOrigin,
+  layoutTextBlock,
+  measureTextBlockFit,
+  paintTextBlock,
+  TEXT_FACES,
+  textBlockHasInk,
+  type TextFace,
+} from "@/lib/pixel-text-block";
 import { cn, errorMessage } from "@/lib/utils";
 import { useAppToast } from "@/lib/use-app-toast";
 import type { FirmwareMode } from "@/lib/firmware-mode";
@@ -48,6 +57,21 @@ const IMAGE_METHODS: Record<PixelizeMethod, string> = {
   mode: "主色投票",
   nearest: "最近邻",
   smooth: "平滑采样",
+};
+// The two faces are alternatives, not a replacement: the 3x5 face is the only
+// one short enough to stack two lines in 16 rows, the shared 12px one is the
+// only one with CJK — and its bitmaps are the firmware's own.
+const TEXT_FACE_META: Record<TextFace, { name: string; note: string }> = {
+  "shared-12": { name: "12px 中日文", note: "与固件同字库，一行 4 个全角字" },
+  "ascii-5": { name: "5px 小字", note: "3×5 点阵，仅 ASCII，可叠两行" },
+  "ascii-10": { name: "10px 大字", note: "3×5 点阵放大一倍，仅 ASCII" },
+};
+// The probe character that measures a face's own row budget: a hanzi for the
+// shared face (12px cells), a letter for the ASCII ones.
+const FACE_PROBE: Record<TextFace, string> = {
+  "shared-12": "你",
+  "ascii-5": "A",
+  "ascii-10": "A",
 };
 // Doodle-wall live mode (pixel-playground.md §7): static art does not chase
 // frame rate, one device frame per 300ms window is plenty.
@@ -126,6 +150,41 @@ function boundedOrigin(value: number, extent: number, limit: number): number {
   return Math.max(0, Math.min(limit - extent, value));
 }
 
+interface SwatchPickerProps {
+  label: string;
+  value: number;
+  /** The pen row goes quiet while another tool is active, so highlight is opt-in. */
+  active?: boolean;
+  onSelect: (value: number) => void;
+}
+
+// One swatch row, used by both the pen and the text backdrop — a second colour
+// control built by hand would drift from this one on the first restyle.
+function SwatchPicker({ label, value, active = true, onSelect }: SwatchPickerProps) {
+  return (
+    <div className="palette" aria-label={label}>
+      {PALETTE.map((swatch) => (
+        <button
+          key={swatch}
+          type="button"
+          className={cn("color-swatch", active && value === swatch && "is-active")}
+          style={{ backgroundColor: hexColor(swatch) }}
+          aria-label={`${label} ${hexColor(swatch)}`}
+          aria-pressed={active && value === swatch}
+          onClick={() => onSelect(swatch)}
+        />
+      ))}
+      <Input
+        className="custom-color"
+        type="color"
+        value={hexColor(value)}
+        inputComponentProps={{ "aria-label": `${label}（自定义）` }}
+        onChange={(nextValue) => onSelect(Number.parseInt(nextValue.slice(1), 16))}
+      />
+    </div>
+  );
+}
+
 export function CanvasWorkspace({
   targetItem,
   targetChannelName,
@@ -170,7 +229,13 @@ export function CanvasWorkspace({
   const [pointerRevision, setPointerRevision] = useState(0);
   const [status, setStatus] = useState("左键绘制，右键擦除；也可以选择文字、图片或框选工具。");
   const [canvasText, setCanvasText] = useState("HELLO");
-  const [fontHeight, setFontHeight] = useState<5 | 10>(5);
+  // Defaults to the shared face: the console speaks Chinese, so the face that
+  // can actually draw Chinese is the one to land on.
+  const [textFace, setTextFace] = useState<TextFace>("shared-12");
+  const [textFill, setTextFill] = useState(false);
+  // Black is the panel's "LED off", which is the backdrop a caption laid over
+  // artwork almost always wants.
+  const [textFillColor, setTextFillColor] = useState(0x000000);
   const [imageView, setImageView] = useState<PixelView | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string | null>(null);
@@ -183,6 +248,18 @@ export function CanvasWorkspace({
   const [liveInviteOpen, setLiveInviteOpen] = useState(false);
   const pixelsRef = useRef(pixels);
   pixelsRef.current = pixels;
+
+  // Laid out on every keystroke so the inspector can state the row budget and
+  // name the undrawable characters *before* the canvas is clicked.
+  const textBlock = useMemo(() => layoutTextBlock(canvasText, textFace), [canvasText, textFace]);
+  const textFit = useMemo(
+    () => measureTextBlockFit(canvasText, textFace, WIDTH),
+    [canvasText, textFace],
+  );
+  const faceBudget = useMemo(
+    () => measureTextBlockFit(FACE_PROBE[textFace].repeat(64), textFace, WIDTH).capacity,
+    [textFace],
+  );
 
   useEffect(() => {
     const stored = validPixels(targetItem?.options.pixels);
@@ -495,7 +572,7 @@ export function CanvasWorkspace({
       pen: "画笔：左键绘制，右键临时擦除。",
       eraser: "橡皮：拖动清除像素。",
       select: "选择：拖出选区，再从选区内部拖动搬移。",
-      text: "文字：先在右侧设置内容，再点击画布决定左上角。",
+      text: "文字：先在右侧设置内容与字体，再点击画布决定左上角。",
       image: "图片：从右侧上传并生成，生成后可整体搬移。",
     };
     setStatus(messages[nextTool]);
@@ -530,29 +607,39 @@ export function CanvasWorkspace({
 
   const placeText = (x: number, y: number) => {
     if (!canvasText) {
-      toast.error("请先输入 ASCII 文字");
+      toast.error("请先输入文字");
       return;
     }
-    const bitmap = renderPixelText(canvasText, fontHeight);
-    if (!bitmap.on.some((value) => value === 1)) {
-      toast.error("没有可显示的字符", { description: "设备像素字体仅支持 ASCII。" });
+    const background = textFill ? textFillColor : null;
+    // With a backdrop switched on, a line of blanks is still a real edit (it
+    // clears a plate), so ink is only required when nothing else would land.
+    if (!textBlockHasInk(textBlock) && background === null) {
+      toast.error("没有可显示的字符", {
+        description: textFace === "shared-12"
+          ? "这些字不在设备字库里，换个写法试试。"
+          : "点阵小字体只有 ASCII，中日文请切到「12px 中日文」。",
+      });
       return;
     }
+    if (!textFit.fits) {
+      toast.error("这一行放不下", {
+        description: `${textBlock.cells} 个字要占 ${textFit.width}px，面板只有 ${WIDTH}px；最多放 ${textFit.capacity} 个字。`,
+      });
+      return;
+    }
+    const origin = clampTextOrigin(textBlock, x, y, WIDTH, HEIGHT);
     snapshot();
-    setPixels((current) => {
-      const next = current.slice();
-      for (let bitmapY = 0; bitmapY < bitmap.height; bitmapY += 1) {
-        for (let bitmapX = 0; bitmapX < bitmap.width; bitmapX += 1) {
-          if (bitmap.on[bitmapY * bitmap.width + bitmapX] !== 1) continue;
-          const pixelX = x + bitmapX;
-          const pixelY = y + bitmapY;
-          if (pixelX >= WIDTH || pixelY >= HEIGHT) continue;
-          next[pixelY * WIDTH + pixelX] = color;
-        }
-      }
-      return next;
-    });
-    setStatus(`已在 (${x}, ${y}) 放置“${canvasText}”，可继续点击放置。`);
+    setPixels((current) => paintTextBlock(current, textBlock, origin.x, origin.y, {
+      color,
+      background,
+      panelWidth: WIDTH,
+      panelHeight: HEIGHT,
+    }));
+    const nudged = origin.x !== x || origin.y !== y ? "（已内移以放下整块）" : "";
+    const gaps = textBlock.missing.length > 0
+      ? `；${textBlock.missing.join(" ")} 不在字库中，已留空`
+      : "";
+    setStatus(`已在 (${origin.x}, ${origin.y}) 放置“${canvasText}”${nudged}${gaps}，可继续点击放置。`);
   };
 
   const readImage = async (file: File) => {
@@ -839,26 +926,12 @@ export function CanvasWorkspace({
             <Button type="button" size="sm" aria-pressed={tool === "text"} color={tool === "text" ? "brand" : "neutral"} onClick={() => activateTool("text")}><Type />文字</Button>
             <Button type="button" size="sm" aria-pressed={tool === "image"} color={tool === "image" ? "brand" : "neutral"} onClick={() => activateTool("image")}><ImagePlus />图片</Button>
           </div>
-          <div className="palette" aria-label="颜色">
-            {PALETTE.map((value) => (
-              <button
-                key={value}
-                type="button"
-                className={cn("color-swatch", color === value && tool === "pen" && "is-active")}
-                style={{ backgroundColor: hexColor(value) }}
-                aria-label={`颜色 ${hexColor(value)}`}
-                aria-pressed={color === value && tool === "pen"}
-                onClick={() => { setColor(value); activateTool("pen"); }}
-              />
-            ))}
-            <Input
-              className="custom-color"
-              type="color"
-              value={hexColor(color)}
-              inputComponentProps={{ "aria-label": "自定义颜色" }}
-              onChange={(nextValue) => { setColor(Number.parseInt(nextValue.slice(1), 16)); activateTool("pen"); }}
-            />
-          </div>
+          <SwatchPicker
+            label="颜色"
+            value={color}
+            active={tool === "pen"}
+            onSelect={(value) => { setColor(value); activateTool("pen"); }}
+          />
         </section>
 
         <section className="canvas-command-bar">
@@ -896,25 +969,59 @@ export function CanvasWorkspace({
           <section className={cn("canvas-inspector-section", tool === "text" && "is-active")}>
             <div className="canvas-tool-heading">
               <Type aria-hidden="true" />
-              <div><h3>ASCII 文字</h3><p>点击画布决定文字左上角。</p></div>
+              <div><h3>像素文字</h3><p>点击画布决定文字左上角。</p></div>
             </div>
             <label className="canvas-field" htmlFor="canvas-text">
               <span>文字内容</span>
               <Input inputId="canvas-text" value={canvasText} maxLength={40} onChange={setCanvasText} />
             </label>
-            <label className="canvas-field" htmlFor="canvas-font-height">
-              <span>字高</span>
+            <label className="canvas-field" htmlFor="canvas-text-face">
+              <span>字体</span>
               <Select
-                id="canvas-font-height"
-                aria-label="像素文字字高"
-                value={String(fontHeight)}
-                options={["5", "10"]}
-                renderOption={({ value }) => `${value}px`}
-                onChange={(value) => setFontHeight(value === "10" ? 10 : 5)}
+                id="canvas-text-face"
+                aria-label="像素文字字体"
+                value={textFace}
+                options={[...TEXT_FACES]}
+                renderOption={({ value }) => TEXT_FACE_META[value].name}
+                renderOptionInfo={({ value }) => TEXT_FACE_META[value].note}
+                onChange={(value) => setTextFace(value)}
               >
-                {fontHeight}px
+                {TEXT_FACE_META[textFace].name}
               </Select>
             </label>
+            {/* The budget has to be readable before the click, not discovered by
+                a rejected one — so width, count and gaps all live next to the
+                button rather than inside a toast. */}
+            <div className="flex flex-wrap items-center gap-1">
+              <Chip size="sm" variant="transparent" color={textFit.fits ? "neutral" : "red"}>
+                {textFit.width} / {WIDTH} px
+              </Chip>
+              <Chip size="sm" variant="transparent" color="neutral">
+                {textBlock.cells} 字 · 高 {textBlock.height}px
+              </Chip>
+              {!textFit.fits && (
+                <Chip size="sm" variant="transparent" color="red">
+                  超出 {textFit.overflow}px，最多 {textFit.capacity} 字
+                </Chip>
+              )}
+            </div>
+            <p className="m-0 text-[0.6rem] leading-[1.5] text-cladd-fg-softer">
+              {textFace === "shared-12"
+                ? `与固件同一套字模，一行最多 ${faceBudget} 个全角字（半角字母与标点各占 6px，还能多挤几个）；放不下会拒绝落字并提示能放几个字。`
+                : `3×5 点阵只有 ASCII，一行最多 ${faceBudget} 个字符；中日文请切到「${TEXT_FACE_META["shared-12"].name}」。`}
+            </p>
+            {textBlock.missing.length > 0 && (
+              <p className="cladd-color-yellow m-0 text-[0.6rem] leading-[1.5] text-cladd-primary">
+                字库里没有这些字，落字时会留空：{textBlock.missing.join(" ")}
+              </p>
+            )}
+            <label className="canvas-switch-row">
+              <span><strong>背景填色</strong><small>在文字方块下垫一层底色</small></span>
+              <Switch as="span" input checked={textFill} onChange={setTextFill} />
+            </label>
+            {textFill && (
+              <SwatchPicker label="文字底色" value={textFillColor} onSelect={setTextFillColor} />
+            )}
             <Button type="button" color={tool === "text" ? "brand" : "neutral"} onClick={() => activateTool("text")}><Type />在画布上落字</Button>
           </section>
 
