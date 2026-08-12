@@ -11,6 +11,7 @@ import {
   MonitorCog,
   Music2,
   Pause,
+  PinOff,
   Play,
   Radio,
   RefreshCw,
@@ -56,6 +57,8 @@ import { createLatestTaskRunner, type LatestTaskRunner } from "@/lib/latest-task
 import { clampPlaybackPositionMs } from "@/lib/music-playback";
 import { renderMirrorFrames, type MirrorFrame } from "@/lib/music-mirror";
 import { spectrumForTrack, type SpectrumLookup } from "@/lib/spectrum-timeline";
+import { useZosFocus } from "@/lib/use-zos-focus";
+import { ZOS_MUSIC_FOCUS } from "@/lib/zos-link";
 import { errorMessage } from "@/lib/utils";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import type {
@@ -190,6 +193,10 @@ export function MusicPlayer({
   firmwareMode = "official",
 }: MusicPlayerProps) {
   const zos = firmwareMode === "zos";
+  // ZOS 的固件已经能接住非频道 focus（真机实测见 zos-link.ts 的 ZOS_MUSIC_FOCUS），
+  // 所以「时钟音乐页」是一个真的导航动作，而不是一句状态说明。
+  const zosFocus = useZosFocus(zos);
+  const zosMusicPinned = zosFocus.pinnedOn(ZOS_MUSIC_FOCUS);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeekMsRef = useRef<number | null>(null);
   const [overview, setOverview] = useState<MusicOverview | null>(null);
@@ -1723,20 +1730,31 @@ export function MusicPlayer({
                 </div>
                 <div className="music-stage__header-actions">
                   {zos ? (
-                    // 与 deviceOnline 分支同一个写法：这个位置留一个说明状态的按钮，
-                    // 而不是一个按下去会 503 的开关。
+                    // 官方固件的同屏通道在 ZOS 上是 503，但设备自己有一页音乐界面，
+                    // 而固件现在认 focus:"music"。所以这里与 内容 页同一个 idiom：
+                    // 接管旋钮把时钟切过去，再按一次交还。标签特意不叫「在时钟上显示」——
+                    // 它就挨着这块 52×16 预览，那样写会被读成把预览镜像过去，而那正是
+                    // ZOS 上做不到的事：设备那页由它自己渲染。
                     <Button
                       type="button"
                       className="music-mirror-toggle"
                       size="sm"
-                      color="neutral"
+                      color={zosMusicPinned ? "brand" : "neutral"}
                       variant="transparent"
                       outline
                       tightFocusRing
-                      aria-disabled="true"
-                      title="时钟运行 ZOS：官方固件的同屏通道不存在，歌词由设备自己的音乐页显示"
+                      aria-pressed={zosMusicPinned}
+                      aria-busy={zosFocus.busy}
+                      disabled={zosFocus.busy}
+                      title={zosMusicPinned
+                        ? "交还旋钮，时钟恢复自己切台"
+                        : "把时钟切到它自己的音乐页并锁住旋钮；那一页由设备渲染，不是这块预览的镜像"}
+                      onClick={() => zosFocus.toggle(ZOS_MUSIC_FOCUS)}
                     >
-                      <MonitorCog aria-hidden="true" />ZOS 音乐页
+                      {zosMusicPinned
+                        ? <PinOff aria-hidden="true" />
+                        : <MonitorCog aria-hidden="true" />}
+                      {zosMusicPinned ? "交还旋钮" : "切到时钟音乐页"}
                     </Button>
                   ) : deviceOnline ? (
                     <Button
@@ -1821,6 +1839,10 @@ export function MusicPlayer({
                       : "时钟的「音乐」页只跟随 Spotify Connect：换到 Spotify 并登录后，歌词才会出现在时钟上；当前来源只影响这里的预览。"}
                   </span>
                 </div>
+              )}
+
+              {zos && zosFocus.error && (
+                <p className="music-inline-error" role="alert">切换时钟界面失败：{zosFocus.error}</p>
               )}
 
               {mirrorError && <p className="music-inline-error" role="alert">同屏推送失败：{mirrorError}</p>}

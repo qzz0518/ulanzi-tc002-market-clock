@@ -213,3 +213,42 @@ describe("tc002-os host link", () => {
     expect(hub.isDeviceLive()).toBe(false);
   });
 });
+
+describe("device settings requested from the console", () => {
+  test("a write bumps a sequence the device can compare against", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+    expect(hub.serialize()).not.toContain("setseq");
+
+    hub.setDeviceSettings({ volume: 4 });
+    const first = hub.serialize();
+    expect(first).toContain("setseq\t1");
+    expect(first).toContain("setvol\t4");
+    expect(first).not.toContain("setbri");
+
+    hub.setDeviceSettings({ brightness: 7 });
+    const second = hub.serialize();
+    // The sequence is what lets the knob win afterwards: the document still
+    // carries the console's old volume, and a device that re-applied it on
+    // every poll would make the physical control unusable.
+    expect(second).toContain("setseq\t2");
+    expect(second).toContain("setvol\t4");
+    expect(second).toContain("setbri\t7");
+  });
+
+  test("values are clamped to the device's own scales, not the caller's", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+    hub.setDeviceSettings({ volume: 99, brightness: -5 });
+    expect(hub.getDeviceSettings()).toMatchObject({ volume: 6, brightness: 1 });
+  });
+
+  test("a write with nothing in it neither bumps nor wakes the parked polls", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+    const before = hub.currentSeq();
+    hub.setDeviceSettings({});
+    expect(hub.currentSeq()).toBe(before);
+    expect(hub.getDeviceSettings().seq).toBe(0);
+  });
+});

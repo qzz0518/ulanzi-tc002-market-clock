@@ -62,9 +62,14 @@ void equalizer(Surface& out, int x, int y, int nowMs, bool playing) {
 }  // namespace
 
 MusicScreen::MusicScreen()
-    : mPresent(false), mPlaying(false), mPositionMs(0), mDurationMs(0), mStampMs(0),
-      mEnteredMs(0), mLyricChangedMs(0), mFlashMs(-1), mAction(kNone),
-      mOptimisticUntilMs(-1), mOptimisticPlaying(false) {}
+    : mPresent(false), mLinkConfigured(true), mLinkOnline(true), mPlaying(false),
+      mPositionMs(0), mDurationMs(0), mStampMs(0), mEnteredMs(0), mLyricChangedMs(0),
+      mFlashMs(-1), mAction(kNone), mOptimisticUntilMs(-1), mOptimisticPlaying(false) {}
+
+void MusicScreen::setLink(bool configured, bool online) {
+  mLinkConfigured = configured;
+  mLinkOnline = online;
+}
 
 void MusicScreen::setNowPlaying(bool present, const std::string& track,
                                 const std::string& artist, const std::string& lyric,

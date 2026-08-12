@@ -143,23 +143,7 @@ void HostLink::runPull() {
     if (ok && doc.parse(response.body)) {
       seq = doc.seq();
       backoffMs = 1000;
-      ::pthread_mutex_lock(&mLock);
-      mSnapshot.online = true;
-      mSnapshot.seq = doc.seq();
-      mSnapshot.pinned = doc.pinned();
-      mSnapshot.mirrorWanted = doc.mirror();
-      mSnapshot.focus = doc.focus();
-      mSnapshot.items = doc.items();
-      mSnapshot.consecutiveFailures = 0;
-      mSnapshot.nowPlaying = doc.hasNowPlaying();
-      mSnapshot.playing = doc.playing();
-      mSnapshot.track = doc.track();
-      mSnapshot.artist = doc.artist();
-      mSnapshot.lyric = doc.lyric();
-      mSnapshot.positionMs = doc.positionMs();
-      mSnapshot.durationMs = doc.durationMs();
-      mSnapshot.stampMonoMs = monoMs();
-      ::pthread_mutex_unlock(&mLock);
+      adoptDocument(doc, monoMs());
       continue;  // straight back into the hold; no sleep on the happy path
     }
 
@@ -300,6 +284,30 @@ void HostLink::runWorker() {
 
     ::usleep(30000);  // 30 ms: fine enough to hit the 100 ms mirror cadence
   }
+}
+
+void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
+  ::pthread_mutex_lock(&mLock);
+  mSnapshot.online = true;
+  mSnapshot.seq = doc.seq();
+  mSnapshot.pinned = doc.pinned();
+  mSnapshot.mirrorWanted = doc.mirror();
+  mSnapshot.focus = doc.focus();
+  mSnapshot.items = doc.items();
+  mSnapshot.consecutiveFailures = 0;
+  // Every now-playing field, unconditionally — including the ones the document
+  // left out. A document with no `np` block means nothing is playing, and
+  // keeping the previous song's title alive through it would put a track on the
+  // panel that the service has already stopped describing.
+  mSnapshot.nowPlaying = doc.hasNowPlaying();
+  mSnapshot.playing = doc.playing();
+  mSnapshot.track = doc.track();
+  mSnapshot.artist = doc.artist();
+  mSnapshot.lyric = doc.lyric();
+  mSnapshot.positionMs = doc.positionMs();
+  mSnapshot.durationMs = doc.durationMs();
+  mSnapshot.stampMonoMs = stampMonoMs;
+  ::pthread_mutex_unlock(&mLock);
 }
 
 HostLink::Snapshot HostLink::snapshot() const {

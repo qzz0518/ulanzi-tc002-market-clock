@@ -3,6 +3,8 @@ import {
   ZOS_MIRROR_IDLE_POLL_MS,
   ZOS_MIRROR_POLL_MS,
   ZOS_MIRROR_RGB_BYTES,
+  ZOS_MUSIC_FOCUS,
+  ZOS_SETTINGS_FOCUS,
   ZOS_STATE_POLL_MS,
   createZosLink,
   decodeMirrorFrame,
@@ -13,6 +15,9 @@ import {
   formatUptime,
   nextPollDelayMs,
   screenLabel,
+  zosGameFocus,
+  zosPinnedOn,
+  zosToggleFocus,
   type ZosMenuEntry,
   type ZosState,
   type ZosTelemetry,
@@ -402,6 +407,31 @@ describe("zos link polling", () => {
     expect(timers.pending).toHaveLength(0);
   });
 
+  test("sends the exact focus string the firmware was measured to honour", async () => {
+    // Observed on the device at 192.168.8.108 (see zos-link.ts): "music" moved
+    // telemetry.screen to "music", "settings" to "settings", "game" to "games".
+    // The strings themselves are the contract, so a typo here is a test failure
+    // rather than a button that silently leaves the panel where it was.
+    const sent: unknown[] = [];
+    const link = createZosLink({
+      fetcher: (_url, init) => {
+        sent.push(typeof init?.body === "string" ? JSON.parse(init.body) : undefined);
+        return Promise.resolve(Response.json({ display: { focus: null, pinned: false }, seq: 1 }));
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+
+    await link.setDisplay(ZOS_MUSIC_FOCUS, true);
+    await link.setDisplay(ZOS_SETTINGS_FOCUS, true);
+    await link.setDisplay(zosGameFocus("tetris"), true);
+    expect(sent).toEqual([
+      { focus: "music", pinned: true },
+      { focus: "settings", pinned: true },
+      { focus: "game:tetris", pinned: true },
+    ]);
+  });
+
   test("setDisplay puts the command and returns what the service accepted", async () => {
     const requests: { url: string; method: string; body: unknown }[] = [];
     const link = createZosLink({
@@ -436,5 +466,54 @@ describe("zos link polling", () => {
       clearTimer: () => {},
     });
     expect(link.setDisplay("x", true)).rejects.toThrow("focus must be a string or null");
+  });
+});
+
+describe("zos focus targets", () => {
+  // The seven ids are the arcade engines' own id() strings on both sides. This
+  // list is duplicated on purpose: importing GAME_REGISTRY would let a rename
+  // sail through, and the firmware would just silently ignore the new value.
+  const GAME_IDS = ["breakout", "flappy", "snake", "pong", "racer", "shooter", "tetris"] as const;
+
+  test("names a game with the device's own engine id", () => {
+    expect(GAME_IDS.map(zosGameFocus)).toEqual([
+      "game:breakout",
+      "game:flappy",
+      "game:snake",
+      "game:pong",
+      "game:racer",
+      "game:shooter",
+      "game:tetris",
+    ]);
+    // Plain "game" only opens the ring — measured on hardware. The suffix is
+    // what makes it enter the engine, so it can never be dropped.
+    expect(zosGameFocus("tetris")).not.toBe("game");
+  });
+
+  test("every console engine id has a focus, and they are all distinct", () => {
+    const focuses = new Set(GAME_IDS.map(zosGameFocus));
+    expect(focuses.size).toBe(GAME_IDS.length);
+    expect(focuses.has(ZOS_MUSIC_FOCUS)).toBe(false);
+    expect(focuses.has(ZOS_SETTINGS_FOCUS)).toBe(false);
+  });
+
+  test("pinned means pinned on THIS target, not merely pinned", () => {
+    expect(zosPinnedOn({ focus: "music", pinned: true }, ZOS_MUSIC_FOCUS)).toBe(true);
+    // A different screen holding the knob must not light up this button.
+    expect(zosPinnedOn({ focus: "game:snake", pinned: true }, ZOS_MUSIC_FOCUS)).toBe(false);
+    // The device sitting on a focus it was never pinned to is the knob's own
+    // doing; the console has not taken anything and must not claim it did.
+    expect(zosPinnedOn({ focus: "music", pinned: false }, ZOS_MUSIC_FOCUS)).toBe(false);
+    expect(zosPinnedOn(null, ZOS_MUSIC_FOCUS)).toBe(false);
+  });
+
+  test("pressing the target it is already on is the way back", () => {
+    // Pinning locks the console's choice, so the same button has to release it
+    // — otherwise the knob stays taken with no visible way out.
+    expect(zosToggleFocus({ focus: "game:tetris", pinned: true }, zosGameFocus("tetris"))).toBeNull();
+    expect(zosToggleFocus({ focus: "game:tetris", pinned: true }, zosGameFocus("snake")))
+      .toBe("game:snake");
+    expect(zosToggleFocus({ focus: "btc", pinned: true }, ZOS_MUSIC_FOCUS)).toBe("music");
+    expect(zosToggleFocus(null, ZOS_MUSIC_FOCUS)).toBe("music");
   });
 });

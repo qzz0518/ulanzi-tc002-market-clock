@@ -36,6 +36,25 @@ class MusicScreen : public Screen {
                      const std::string& lyric, bool playing, int positionMs,
                      int durationMs, int stampMs);
 
+  /**
+   * What the console link is doing, so the empty state can say which emptiness
+   * it is.
+   *
+   * Without this the screen renders the same "未播放" for three unrelated
+   * situations: the service says nothing is playing, the device cannot reach the
+   * service, and the device was never told where the service lives. The third is
+   * the normal state of a freshly FLASHED unit — /tmp/zos-host is written by the
+   * sideload script and a cold boot has no /tmp — and it is the one where
+   * "未播放" is an outright lie that sends the user hunting the music feature
+   * instead of the address. Every other screen either has no link (games) or
+   * shows its own status (the channel ring); this was the one place a dead link
+   * was indistinguishable from a quiet one.
+   *
+   * Defaults to configured+online, so a caller that never sets it behaves
+   * exactly as before.
+   */
+  void setLink(bool configured, bool online);
+
   /** True when the link is up but nothing is playing, or no provider is set. */
   bool idle() const { return !mPresent; }
 
@@ -55,6 +74,8 @@ class MusicScreen : public Screen {
   int playheadMs(int nowMs) const;
 
   bool mPresent;
+  bool mLinkConfigured;
+  bool mLinkOnline;
   bool mPlaying;
   std::string mTrack;
   std::string mArtist;

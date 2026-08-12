@@ -72,6 +72,18 @@ class HostLink {
   Snapshot snapshot() const;
 
   /**
+   * Copies a parsed document into the snapshot. `stampMonoMs` is the raw
+   * monotonic clock at which it arrived.
+   *
+   * Public, and separate from runPull, because the pull thread's body cannot be
+   * reached without a socket and a self-check that re-implemented the copy would
+   * have agreed with a runPull that silently dropped a field — which is exactly
+   * how the whole now-playing block could reach StateDoc and never reach the
+   * music screen.
+   */
+  void adoptDocument(const StateDoc& doc, uint64_t stampMonoMs);
+
+  /**
    * Ask for a channel's frames. Idempotent for the same app: asking again while
    * that app's frames are already loaded does nothing, so a screen can call it
    * every tick without thinking about it.

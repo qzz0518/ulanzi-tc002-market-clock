@@ -219,6 +219,49 @@ export function entryOnScreen(entry: ZosMenuEntry, telemetry: ZosTelemetry | nul
   return entry.kind !== "channel" || telemetry.focus === entry.id;
 }
 
+/**
+ * The device's own music page, as a focus command names it.
+ *
+ * Not a channel — the ZOS menu carries it as a `music`-kind entry. The firmware
+ * used to ignore any focus that was not a channel id, which is why the console
+ * shipped a dead chip here; it now honours this one. Measured at
+ * 192.168.8.108: `{"focus":"music","pinned":true}` moved `telemetry.screen` to
+ * "music" (and `settings` to "settings") within one 10s heartbeat.
+ */
+export const ZOS_MUSIC_FOCUS = "music";
+
+/** The device's settings page, same non-channel focus family as above. */
+export const ZOS_SETTINGS_FOCUS = "settings";
+
+/**
+ * One arcade game on the device: `game:<engineId>`.
+ *
+ * Plain `game` only pushes the games ring (measured: `telemetry.screen` →
+ * "games"); the suffix also selects that card and enters the engine. The id is
+ * the firmware engine's own `id()` string, which is the same seven-value set as
+ * `GameEngine["meta"]["id"]` on this side — that shared vocabulary is the whole
+ * reason a console-side pick can name a device-side game.
+ */
+export function zosGameFocus(engineId: string): string {
+  return `game:${engineId}`;
+}
+
+/** Whether the console's last accepted command pinned the device on `focus`. */
+export function zosPinnedOn(display: ZosDisplay | null, focus: string): boolean {
+  return display?.pinned === true && display.focus === focus;
+}
+
+/**
+ * What a second press on the same target means.
+ *
+ * Pinning locks the console's choice — the knob stops switching — so the button
+ * that took the knob has to be the way back, or the only release left is the
+ * 系统 panel the user may never open.
+ */
+export function zosToggleFocus(display: ZosDisplay | null, focus: string): string | null {
+  return zosPinnedOn(display, focus) ? null : focus;
+}
+
 export function formatUptime(uptimeMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(uptimeMs / 1000));
   const hours = Math.floor(totalSeconds / 3600);

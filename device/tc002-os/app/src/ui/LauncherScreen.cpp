@@ -394,4 +394,13 @@ void LauncherScreen::render(Surface& out, int nowMs) {
   }
 }
 
+bool LauncherScreen::selectById(int id, int nowMs) {
+  for (size_t i = 0; i < mEntries.size(); ++i) {
+    if (mEntries[i].id != id) continue;
+    mRing.setIndex(static_cast<int>(i), nowMs);
+    return true;
+  }
+  return false;
+}
+
 }  // namespace tcos

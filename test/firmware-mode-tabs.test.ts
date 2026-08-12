@@ -25,6 +25,40 @@ function markup(node: ReactNode): string {
   return renderToStaticMarkup(createElement(CladdProvider, null, node));
 }
 
+/**
+ * The `<button>…</button>` whose label contains `label`.
+ *
+ * Rendered classes are the only evidence a test has that a cladd control still
+ * looks like the control it is meant to be — `在时钟上显示` once shipped as a
+ * tinted fill with no ring, which reads as a disabled chip and is invisible to
+ * every assertion that only looks for the text.
+ */
+function buttonHtml(html: string, label: string): string {
+  const at = html.indexOf(label);
+  expect([label, at > -1]).toEqual([label, true]);
+  const start = html.lastIndexOf("<button", at);
+  const end = html.indexOf("</button>", at);
+  expect([label, start > -1 && end > start]).toEqual([label, true]);
+  return html.slice(start, end + "</button>".length);
+}
+
+/** cladd paints the outline ring as `shadow-cladd-outline` on the surface layer. */
+function hasOutline(buttonMarkup: string): boolean {
+  return buttonMarkup.includes("shadow-cladd-outline");
+}
+
+/**
+ * The accent carried by the `<button>` element itself.
+ *
+ * Not the whole subtree: cladd's focus-ring layer is stamped `cladd-color-brand`
+ * on every button from the provider's accent, so a substring search over the
+ * markup reports an accent on controls that visibly have none.
+ */
+function accented(buttonMarkup: string): boolean {
+  const root = buttonMarkup.slice(0, buttonMarkup.indexOf(">"));
+  return /cladd-color-\w+/.test(root);
+}
+
 function noticeChannel(enabled = true): ChannelConfig {
   return {
     id: "ch_notice",
@@ -109,6 +143,70 @@ describe("内容 under ZOS", () => {
     // 「尚未推送到设备」在 ZOS 下是纯假话:频道一直可达,只是由设备来取。
     expect(html).not.toContain("尚未推送到设备");
     expect(html).toContain("ZOS 主动拉取");
+  });
+
+  test("the pin reads as the primary action, ring included, in both states", () => {
+    // Regression: `outline={pinnedHere}` meant the *unpinned* state — the one
+    // that actually does something — rendered the brand tint with no
+    // shadow-cladd-outline, i.e. a pale pill with no border on a light card.
+    const html = markup(createElement(WorkspaceActions, {
+      busy: null,
+      dirty: false,
+      saving: false,
+      lastSavedAt: Date.now(),
+      deviceOutOfDate: false,
+      firmwareMode: "zos",
+      channelAppName: "btc",
+      onPreview: noop,
+      onPush: noop,
+    }));
+
+    const pin = buttonHtml(html, "在时钟上显示");
+    expect(hasOutline(pin)).toBe(true);
+    // Primary treatment = cladd's default gradient surface + the app accent,
+    // exactly what 推送频道 renders under the stock firmware.
+    expect(accented(pin)).toBe(true);
+    expect(pin).toContain("cladd-color-brand");
+    expect(pin).toContain("from-cladd-surface-highlight");
+    // Not disabled and not read-only: it is the live action on this page.
+    expect(pin).not.toContain("disabled=\"\"");
+    // 预览 sits in the same row and must not out-weigh it.
+    expect(accented(buttonHtml(html, "预览"))).toBe(false);
+  });
+
+  test("both treatments the pin toggles between keep the ring", async () => {
+    // 固定态只有 useZosFocus 拿到设备状态后才渲染得出来，SSR 到不了那一步；
+    // 所以这里直接对 cladd 立约：这两组 props 都必须画出 shadow-cladd-outline。
+    // 真正会回归的是「有人又把 outline 绑到某个布尔上」，那在源码里就能抓。
+    const { Button } = await import("@cladd-ui/react");
+    for (const variant of ["gradient", "transparent"] as const) {
+      const html = markup(createElement(
+        Button,
+        { type: "button", color: "brand", variant, outline: true },
+        "标签",
+      ));
+      expect([variant, hasOutline(html)]).toEqual([variant, true]);
+    }
+
+    const source = await Bun.file(
+      new URL("../web/src/components/studio/workspace-actions.tsx", import.meta.url),
+    ).text();
+    // 这一颗按钮的 outline 不接受任何条件：它是这一页的主操作。
+    expect(source).not.toMatch(/outline=\{(?!true\})/);
+    expect(source).toContain('variant={pinnedHere ? "transparent" : "gradient"}');
+  });
+
+  test("the stock push button carries the same ring, so the two states match", () => {
+    const push = buttonHtml(markup(createElement(WorkspaceActions, {
+      busy: null,
+      dirty: false,
+      saving: false,
+      lastSavedAt: Date.now(),
+      deviceOutOfDate: false,
+      onPush: noop,
+    })), "推送频道");
+    expect(hasOutline(push)).toBe(true);
+    expect(accented(push)).toBe(true);
   });
 
   test("says why pinning a disabled channel would do nothing", () => {
@@ -247,6 +345,57 @@ describe("游戏 under ZOS", () => {
     expect(html).toContain('width="52" height="16"');
   });
 
+  test("offers to send the clock into the game the picker is on", () => {
+    const html = renderToStaticMarkup(createElement(GameShell, {
+      firmwareOnline: false,
+      firmwareMode: "zos",
+    }));
+
+    const jump = buttonHtml(html, "在时钟上玩");
+    expect(jump).not.toContain('disabled=""');
+    expect(jump).toContain('aria-pressed="false"');
+    expect(hasOutline(jump)).toBe(true);
+    // 「开始」已经是这一排唯一的 brand 重音；再来一个就是 pitfalls 里说的重音打架。
+    expect(accented(jump)).toBe(false);
+    expect(buttonHtml(html, "开始")).toContain("cladd-color-brand");
+    // 默认选中第一款，按钮的 title 必须点名它，不能是泛指的「游戏」。
+    expect(jump).toContain("时间打砖块");
+  });
+
+  test("never claims the two sides are in sync", () => {
+    const html = renderToStaticMarkup(createElement(GameShell, {
+      firmwareOnline: false,
+      firmwareMode: "zos",
+    }));
+    // 设备用 time(0) 播种，两边跑出来必然不同——文案不能暗示同步/投屏/续玩。
+    expect(html).toContain("两边各自开局，进度和随机数都不共享");
+    expect(html).toContain("进度不共享");
+    for (const lie of ["同步", "投到时钟", "接着玩", "同一局"]) {
+      expect([lie, html.includes(lie)]).toEqual([lie, false]);
+    }
+    // 旧文案假设控制台没有钥匙，现在有了。
+    expect(html).not.toContain("在设备上用旋钮进「游戏」即可直接玩");
+  });
+
+  test("the game jump names the engine id the firmware knows", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/game/game-shell.tsx", import.meta.url),
+    ).text();
+    // GAME_REGISTRY 的 id 就是设备引擎 id() 的那七个值，focus 直接由它派生 ——
+    // 硬编码一份就是两边悄悄跑偏的开始。
+    expect(source).toContain("zosGameFocus(gameId)");
+    expect(source).toContain("zosFocus.toggle(zosGameTarget)");
+    expect(source).not.toContain('"game:tetris"');
+    expect(source).toContain("切换时钟界面失败：");
+  });
+
+  test("the stock firmware sees no jump button at all", () => {
+    // 官方固件上 PUT /api/os/display 无人接听，那颗按钮按下去只会是个错误。
+    const html = renderToStaticMarkup(createElement(GameShell, { firmwareOnline: false }));
+    expect(html).not.toContain("在时钟上玩");
+    expect(html).toContain("重开");
+  });
+
   test("warns that a sideload would push ZOS off the device", async () => {
     const source = await Bun.file(
       new URL("../web/src/components/game/game-shell.tsx", import.meta.url),
@@ -260,15 +409,40 @@ describe("游戏 under ZOS", () => {
 });
 
 describe("音乐 under ZOS", () => {
-  test("replaces the mirror toggle with the device's own music page", () => {
+  test("replaces the mirror toggle with a real jump to the device's music page", () => {
     const html = renderToStaticMarkup(createElement(MusicPlayer, { firmwareMode: "zos" }));
 
-    expect(html).toContain("ZOS 音乐页");
+    // 固件现在认 focus:"music"（真机 telemetry.screen → "music"），所以这里是一颗
+    // 真按钮，不再是那个 aria-disabled 的说明芯片。
+    expect(html).toContain("切到时钟音乐页");
+    expect(html).not.toContain("ZOS 音乐页");
+    const jump = buttonHtml(html, "切到时钟音乐页");
+    expect(jump).not.toContain('aria-disabled="true"');
+    expect(jump).not.toContain('disabled=""');
+    expect(jump).toContain('aria-pressed="false"');
+    // 与同排的 设备同屏 同一个写法：transparent + outline，按下才亮 brand。
+    expect(hasOutline(jump)).toBe(true);
+    // 标签不能读成「把这块预览镜像过去」——那正是 ZOS 上做不到的事。
+    expect(jump).not.toContain("在时钟上显示");
+    expect(jump).toContain("那一页由设备渲染，不是这块预览的镜像");
+
     // 同屏走 /api/music/mirror → live frames → Custom App,ZOS 上是 503。
     expect(html).not.toContain("设备同屏");
     // 设备那页由 service.ts 的 publishOsNowPlaying 喂,而它要求 provider.remote
     // —— 只有 Spotify 有。默认来源是网易云,所以要说清楚。
     expect(html).toContain("时钟的「音乐」页只跟随 Spotify Connect");
+  });
+
+  test("the music jump is wired to the measured focus, not a hand-typed string", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
+    ).text();
+    expect(source).toContain("zosFocus.toggle(ZOS_MUSIC_FOCUS)");
+    expect(source).toContain('import { ZOS_MUSIC_FOCUS } from "@/lib/zos-link";');
+    // 接管之后必须有回去的路，否则旋钮就一直被控制台占着。
+    expect(source).toContain("交还旋钮");
+    // 失败要说出来：这颗按钮唯一的反馈在三米外的灯板上。
+    expect(source).toContain("切换时钟界面失败：");
   });
 
   test("keeps the mirror on the stock firmware", () => {

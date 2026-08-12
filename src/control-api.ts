@@ -9,7 +9,7 @@ import {
 } from "./device-settings.ts";
 import { validateDeviceHost, type DeviceHostStatus } from "./device-host.ts";
 import type { ClockDeviceInfo } from "./clock-client.ts";
-import type { OsLinkHub } from "./os-link.ts";
+import { OS_INPUT_ACTIONS, type OsInputAction, type OsLinkHub } from "./os-link.ts";
 import { encodeFrameBundle, rgbaToRgb } from "./os-frames.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
@@ -1785,6 +1785,8 @@ export function createControlHandler(
           // Sticky and independent of `live`: what a power cycle restores does
           // not stop being true because the device stopped reporting.
           zosFlashed: options.osLink.zosFlashed(),
+          requestedSettings: options.osLink.getDeviceSettings(),
+          pendingInputs: options.osLink.pendingInputs(),
         });
       }
 
@@ -1812,6 +1814,50 @@ export function createControlHandler(
           pinned: input.pinned === true,
         });
         return jsonResponse({ display: options.osLink.getDisplay(), seq: options.osLink.currentSeq() });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/os/input") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { action?: unknown };
+        if (typeof input.action !== "string"
+          || !OS_INPUT_ACTIONS.includes(input.action as OsInputAction)) {
+          throw new SettingsValidationError(
+            `action must be one of ${OS_INPUT_ACTIONS.join(", ")}`,
+          );
+        }
+        const event = options.osLink.pressInput(input.action as OsInputAction);
+        // The sequence is the receipt: the console can tell a press that reached
+        // the hub from one that did not, without waiting for the panel to move.
+        return jsonResponse({ event });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/os/settings") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as { volume?: unknown; brightness?: unknown };
+        const number = (value: unknown, name: string, low: number, high: number) => {
+          if (value === undefined) return undefined;
+          if (typeof value !== "number" || !Number.isFinite(value)) {
+            throw new SettingsValidationError(`${name} must be a number`);
+          }
+          if (value < low || value > high) {
+            throw new SettingsValidationError(`${name} must be between ${low} and ${high}`);
+          }
+          return value;
+        };
+        const volume = number(input.volume, "volume", 0, 6);
+        const brightness = number(input.brightness, "brightness", 1, 10);
+        if (volume === undefined && brightness === undefined) {
+          throw new SettingsValidationError("volume or brightness is required");
+        }
+        options.osLink.setDeviceSettings({
+          ...(volume === undefined ? {} : { volume }),
+          ...(brightness === undefined ? {} : { brightness }),
+        });
+        // The device is the authority on what it ended up at; this only echoes
+        // what was asked for, and telemetry reports what actually happened.
+        return jsonResponse({ requested: options.osLink.getDeviceSettings() });
       }
 
       if (request.method === "DELETE" && url.pathname === "/api/device/host") {

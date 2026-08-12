@@ -76,6 +76,18 @@ class LauncherScreen : public Screen {
 
   int selectedIndex() const { return mRing.index(); }
 
+  /**
+   * Moves to the entry with this id, without animating a slide across the whole
+   * ring. Used by the console to name a destination directly: a remote jump is
+   * not a knob turn, and spinning through six cards to reach the seventh would
+   * read as the device doing something the user did not ask for.
+   *
+   * Returns false when no entry carries that id, so the caller can tell a
+   * missing destination from a successful one rather than silently landing
+   * somewhere else.
+   */
+  bool selectById(int id, int nowMs);
+
  private:
   void renderCard(Surface& out, const Entry& entry, int originX, int nowMs, int riseY) const;
   void renderRail(Surface& out) const;

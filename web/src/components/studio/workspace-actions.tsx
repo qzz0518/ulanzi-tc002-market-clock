@@ -1,4 +1,3 @@
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   Clock3,
@@ -11,8 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@cladd-ui/react";
 import { relativeTimestamp } from "@/lib/studio-state";
-import { createZosLink, type ZosDisplay, type ZosLink } from "@/lib/zos-link";
-import { errorMessage } from "@/lib/utils";
+import { useZosFocus } from "@/lib/use-zos-focus";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import type { BusyAction } from "@/types";
 
@@ -50,52 +48,13 @@ export function WorkspaceActions({
   onPush,
 }: WorkspaceActionsProps) {
   const zos = firmwareMode === "zos";
-  const linkRef = useRef<ZosLink | null>(null);
-  const [display, setDisplay] = useState<ZosDisplay | null>(null);
-  const [pinBusy, setPinBusy] = useState(false);
-  const [pinError, setPinError] = useState<string | null>(null);
-
-  // One read, not a loop. This drives a button label; the live pin state belongs
-  // to the 系统 panel, which polls. Every action here answers with the display
-  // the service accepted, so the label stays correct without a second cadence.
-  useEffect(() => {
-    if (!zos) {
-      setDisplay(null);
-      return;
-    }
-    let cancelled = false;
-    const link = createZosLink({
-      onState: (state) => {
-        if (!cancelled) setDisplay(state.display);
-      },
-    });
-    linkRef.current = link;
-    void link.refreshState();
-    return () => {
-      cancelled = true;
-      linkRef.current = null;
-    };
-  }, [zos]);
-
-  const applyDisplay = useCallback(async (focus: string | null) => {
-    const link = linkRef.current ?? createZosLink();
-    setPinBusy(true);
-    setPinError(null);
-    try {
-      setDisplay(await link.setDisplay(focus, focus !== null));
-    } catch (error) {
-      setPinError(errorMessage(error));
-    } finally {
-      setPinBusy(false);
-    }
-  }, []);
+  const zosFocus = useZosFocus(zos);
+  const pinBusy = zosFocus.busy;
+  const pinError = zosFocus.error;
 
   const locked = disabled || busy !== null;
   const pushing = busy === "push";
-  const pinnedHere = zos
-    && channelAppName !== undefined
-    && display?.pinned === true
-    && display.focus === channelAppName;
+  const pinnedHere = channelAppName !== undefined && zosFocus.pinnedOn(channelAppName);
   const saveLabel = saving
     ? "正在自动保存"
     : dirty
@@ -142,14 +101,24 @@ export function WorkspaceActions({
           <Button
             type="button"
             color="brand"
-            variant={pinnedHere ? "transparent" : undefined}
-            outline={pinnedHere}
+            // This is the page's primary action, so it takes cladd's primary
+            // Button treatment: gradient fill AND the outline ring. `outline`
+            // was previously tied to `pinnedHere`, which meant the *unpinned*
+            // state — the one that actually does something — rendered with the
+            // tint but no `shadow-cladd-outline` and read as a disabled chip.
+            // Only the release state steps down to transparent, and it keeps
+            // its ring so it still reads as a control.
+            variant={pinnedHere ? "transparent" : "gradient"}
+            outline
             disabled={Boolean(disabled) || !channelEnabled || pinBusy}
             aria-busy={pinBusy}
-            title={channelEnabled
-              ? "把时钟切到这个频道并锁住旋钮"
-              : "频道未启用，不会出现在时钟菜单里"}
-            onClick={() => void applyDisplay(pinnedHere ? null : channelAppName)}
+            aria-pressed={pinnedHere}
+            title={pinnedHere
+              ? "交还旋钮，时钟恢复自己切台"
+              : channelEnabled
+                ? "把时钟切到这个频道并锁住旋钮"
+                : "频道未启用，不会出现在时钟菜单里"}
+            onClick={() => zosFocus.toggle(channelAppName)}
           >
             {pinBusy
               ? <LoaderCircle className="animate-spin" aria-hidden="true" />

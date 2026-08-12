@@ -34,6 +34,32 @@ export interface OsMirrorFrame {
   receivedAt: number;
 }
 
+/**
+ * A press the console made on the device's behalf.
+ *
+ * The device has a knob and three buttons and no other way in. Reproducing them
+ * remotely is what turns the console from a viewer into a control surface —
+ * every screen the firmware has is reachable by the knob, so a console that can
+ * turn the knob needs no per-screen remote API.
+ */
+export type OsInputAction = "cw" | "ccw" | "press" | "hold" | "left" | "right";
+
+export interface OsInputEvent {
+  seq: number;
+  action: OsInputAction;
+}
+
+export const OS_INPUT_ACTIONS: readonly OsInputAction[] = [
+  "cw", "ccw", "press", "hold", "left", "right",
+];
+
+export interface OsDeviceSettings {
+  /** 0..6, the device's own notch scale. */
+  volume: number | null;
+  /** 1..10. */
+  brightness: number | null;
+}
+
 export interface OsNowPlaying {
   track: string;
   artist: string;
@@ -103,6 +129,20 @@ export class OsLinkHub {
   // would fall back to promising the stock firmware — the dangerous direction,
   // at exactly the moment the user is reading a restore guide.
   private zosEverFlashed = false;
+  private settings: OsDeviceSettings = { volume: null, brightness: null };
+  // Every console write bumps this. The device applies a setting only when the
+  // sequence is HIGHER than the last one it applied, which is what lets the
+  // knob win afterwards: the document still carries the console's old value,
+  // and without the sequence the device would snap back to it on the next poll
+  // and the user could never turn the volume up by hand again.
+  private settingsSeq = 0;
+  // A short tail rather than a queue the device drains. The document is pulled,
+  // not pushed, so anything the device has not read yet has to still be in it —
+  // but a press the device missed by more than a few hundred milliseconds is a
+  // press the user has already given up on, and replaying it later would be
+  // worse than dropping it.
+  private inputs: OsInputEvent[] = [];
+  private inputSeq = 0;
   private nowPlaying: OsNowPlaying | null = null;
   private nowPlayingStampedAt = 0;
   private readonly waiters = new Set<Waiter>();
@@ -183,6 +223,50 @@ export class OsLinkHub {
     return this.zosEverFlashed;
   }
 
+  /**
+   * Asks the device to adopt a volume and/or brightness.
+   *
+   * A request, not a mirror of device state: the device is the authority on
+   * what it is currently set to and reports that in telemetry. Passing null
+   * leaves a setting alone rather than clearing it.
+   */
+  setDeviceSettings(next: Partial<OsDeviceSettings>): void {
+    const clamp = (value: number, low: number, high: number) =>
+      Math.max(low, Math.min(high, Math.round(value)));
+    let changed = false;
+    if (typeof next.volume === "number" && Number.isFinite(next.volume)) {
+      this.settings.volume = clamp(next.volume, 0, 6);
+      changed = true;
+    }
+    if (typeof next.brightness === "number" && Number.isFinite(next.brightness)) {
+      this.settings.brightness = clamp(next.brightness, 1, 10);
+      changed = true;
+    }
+    if (!changed) return;
+    this.settingsSeq += 1;
+    this.bump();
+  }
+
+  /** Queues a button or knob event for the device to inject. */
+  pressInput(action: OsInputAction): OsInputEvent {
+    this.inputSeq += 1;
+    const event: OsInputEvent = { seq: this.inputSeq, action };
+    this.inputs.push(event);
+    // Eight is two full turns of the knob plus a press — more than anyone
+    // produces between two polls of an endpoint that answers in milliseconds.
+    if (this.inputs.length > 8) this.inputs.splice(0, this.inputs.length - 8);
+    this.bump();
+    return event;
+  }
+
+  pendingInputs(): OsInputEvent[] {
+    return this.inputs.map((event) => ({ ...event }));
+  }
+
+  getDeviceSettings(): OsDeviceSettings & { seq: number } {
+    return { ...this.settings, seq: this.settingsSeq };
+  }
+
   report(telemetry: Omit<OsTelemetry, "receivedAt">): void {
     if (telemetry.flashed) this.zosEverFlashed = true;
     // Telemetry never bumps the sequence: it flows device->console, and waking
@@ -245,6 +329,14 @@ export class OsLinkHub {
     // cheap on a LAN but not free on a device with one core and a 15 ms panel.
     lines.push(`mirror\t${this.mirrorWanted() ? 1 : 0}`);
     if (this.display.focus !== null) lines.push(`focus\t${this.display.focus}`);
+    if (this.settingsSeq > 0) {
+      lines.push(`setseq\t${this.settingsSeq}`);
+      if (this.settings.volume !== null) lines.push(`setvol\t${this.settings.volume}`);
+      if (this.settings.brightness !== null) lines.push(`setbri\t${this.settings.brightness}`);
+    }
+    for (const event of this.inputs) {
+      lines.push(`input\t${event.seq}\t${event.action}`);
+    }
     const np = this.nowPlaying;
     if (np !== null) {
       lines.push(`np\t1`);

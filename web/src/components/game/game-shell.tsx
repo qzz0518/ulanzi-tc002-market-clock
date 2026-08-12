@@ -15,6 +15,7 @@ import {
   HardDrive,
   MonitorCog,
   Pause,
+  PinOff,
   Play,
   QrCode,
   Radio,
@@ -57,6 +58,8 @@ import { createShooterGame } from "@/lib/games/shooter";
 import { createTetrisGame } from "@/lib/games/tetris";
 import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
 import { createLiveScreen, type LiveScreen } from "@/lib/live-screen";
+import { useZosFocus } from "@/lib/use-zos-focus";
+import { zosGameFocus } from "@/lib/zos-link";
 import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
 import { InviteQrDialog } from "@/components/game/invite-qr-dialog";
 import { errorMessage } from "@/lib/utils";
@@ -172,6 +175,9 @@ export function GameShell({
   // 上屏走 /api/live/frames → 官方 Custom App。两种情况下这条路都不存在：
   // 侧载固件顶掉了官方 app，ZOS 则整套换掉了固件（真机实测 503）。
   const liveBlocked = zos || firmwareOnline;
+  // ZOS 上时钟自己跑着同样七款游戏，固件认 focus:"game:<engineId>"。这不是把这
+  // 局投过去——两边各自开局（设备用 time(0) 播种），只是把设备叫到同一款游戏。
+  const zosFocus = useZosFocus(zos);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
   if (!engineRef.current) engineRef.current = GAME_REGISTRY[0]!.create();
@@ -538,6 +544,11 @@ export function GameShell({
           ? { color: "neutral" as const, icon: Pause, label: "已暂停" }
           : { color: "brand" as const, icon: Radio, label: "直播中" };
 
+  // The picker's id IS the device engine's id() — that shared vocabulary is what
+  // lets a console-side pick name a device-side game (see zosGameFocus).
+  const zosGameTarget = zosGameFocus(gameId);
+  const zosGamePinned = zosFocus.pinnedOn(zosGameTarget);
+
   const startLabel = hud.phase === "ready"
     ? "开始"
     : hud.phase === "game-over"
@@ -667,6 +678,29 @@ export function GameShell({
             <Button type="button" size="md" variant="transparent" onClick={restart}>
               <RotateCcw aria-hidden="true" />重开
             </Button>
+            {zos && (
+              // 「开始」已经占了这一排唯一的 brand 重音，所以这颗按钮走 transparent
+              // + outline，只在真的接管了旋钮时才亮成 brand——与音乐页那颗同一写法。
+              <Button
+                type="button"
+                size="md"
+                color={zosGamePinned ? "brand" : undefined}
+                variant="transparent"
+                outline
+                disabled={zosFocus.busy}
+                aria-busy={zosFocus.busy}
+                aria-pressed={zosGamePinned}
+                title={zosGamePinned
+                  ? "交还旋钮，时钟恢复自己切台"
+                  : `把时钟切到它自带的「${engineMeta.title}」并锁住旋钮；两边各自开局，进度不共享`}
+                onClick={() => zosFocus.toggle(zosGameTarget)}
+              >
+                {zosGamePinned
+                  ? <PinOff aria-hidden="true" />
+                  : <MonitorCog aria-hidden="true" />}
+                {zosGamePinned ? "交还旋钮" : "在时钟上玩"}
+              </Button>
+            )}
             {twoPlayers && (
               <Button type="button" size="md" variant="transparent" onClick={() => setInviteOpen(true)}>
                 <QrCode aria-hidden="true" />邀请手柄
@@ -700,12 +734,13 @@ export function GameShell({
 
           {zos ? (
             // ZOS 上七款游戏是设备自己在跑（与这里同一套引擎），所以这不是"功能
-            // 没了"，是入口换了地方。控制台没有能把设备切到游戏页的指令：
-            // PUT /api/os/display 只认频道，固件那侧 focus 走的是 channel ring。
+            // 没了"，是入口换了地方——而 focus:"game:<id>" 之后控制台有钥匙了。
+            // 措辞刻意不提"同步"：设备用 time(0) 播种，两边跑出来必然不一样。
             <p className="game-note game-note--warning" role="status">
               <MonitorCog aria-hidden="true" />
               时钟正在运行 ZOS，官方固件的上屏通道已经不存在，这局只在浏览器里跑。
-              时钟自带同样七款游戏：在设备上用旋钮进「游戏」即可直接玩。
+              时钟自带同样七款游戏：点「在时钟上玩」把它切到当前这款，用旋钮和按键在设备上开一局；
+              两边各自开局，进度和随机数都不共享。
             </p>
           ) : firmwareOnline && (
             <p className="game-note game-note--warning" role="status">
@@ -728,6 +763,9 @@ export function GameShell({
           )}
           {pushError && (
             <p className="game-note game-note--error" role="alert">上屏失败：{pushError}</p>
+          )}
+          {zosFocus.error && (
+            <p className="game-note game-note--error" role="alert">切换时钟界面失败：{zosFocus.error}</p>
           )}
         </section>
       </div>

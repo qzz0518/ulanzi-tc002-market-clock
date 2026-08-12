@@ -745,6 +745,26 @@ static bool onUI_Timer(int id) {
 			// The ids are the ones service.ts publishes in publishOsMenu.
 			if (sLink.focus == "music") {
 				if (shell().top() != &sMusic) shell().push(&sMusic, nowMs);
+			} else if (sLink.focus.compare(0, 5, "game:") == 0) {
+				// `game:tetris` — the console naming one engine rather than the ring.
+				// The ids are the engines' own id() strings, which is also what the
+				// arcade heartbeat reports, so there is one spelling of "which game"
+				// in the whole system rather than a console-side table to drift.
+				const std::string wanted = sLink.focus.substr(5);
+				int index = -1;
+				for (int i = 0; i < 7; ++i) {
+					if (wanted == sEngines[i]->id()) index = i;
+				}
+				if (index >= 0) {
+					if (shell().top() != &sGameList && shell().top() != &sGameScreen) {
+						shell().push(&sGameList, nowMs);
+					}
+					sGameList.selectById(ID_GAME_BASE + index, nowMs);
+					sGameScreen.setEngine(sEngines[index]);
+					if (shell().top() != &sGameScreen) shell().push(&sGameScreen, nowMs);
+					sSfxGame = tcos::Sfx::gameFromId(sEngines[index]->id());
+					tcos::Sfx::instance().playGame(sSfxGame, tcos::Sfx::kGameStart);
+				}
 			} else if (sLink.focus == "game") {
 				if (shell().top() != &sGameList) shell().push(&sGameList, nowMs);
 			} else if (sLink.focus == "settings") {
