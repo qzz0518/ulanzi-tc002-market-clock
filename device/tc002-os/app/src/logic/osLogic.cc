@@ -791,6 +791,11 @@ static bool onUI_Timer(int id) {
 		sPrevHud = hud;
 	}
 
+	// Commit volume/brightness once the user has stopped adjusting them. Here
+	// rather than in nudge*(), so a held key does not put a flash erase between
+	// two frames.
+	tcos::DeviceControls::instance().flushIfDue(nowMs);
+
 	shell().render(canvas(), nowMs);
 	presenter().present(canvas());
 

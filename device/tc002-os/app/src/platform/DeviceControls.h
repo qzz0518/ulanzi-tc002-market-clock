@@ -39,12 +39,26 @@ class DeviceControls {
   int nudgeVolume(int delta);
   int nudgeBrightness(int delta);
 
+  /**
+   * Writes pending changes to /data, but only once the user has stopped
+   * turning the knob.
+   *
+   * Called from the render tick. The debounce is not politeness: /data is jffs2
+   * on raw NAND, so committing on every detent would put a flash erase in the
+   * input path — audibly, since the volume keys are the ones being held.
+   */
+  void flushIfDue(int nowMs);
+
+  /** How long after the last change the value is committed. */
+  static const int kFlushDelayMs = 2000;
+
  private:
   DeviceControls();
   DeviceControls(const DeviceControls&);
   DeviceControls& operator=(const DeviceControls&);
 
   int mVolume;
+  int mDirtySinceMs;  // -1 when there is nothing to write
   int mBrightnessStep;
   bool mInitialized;
 };
