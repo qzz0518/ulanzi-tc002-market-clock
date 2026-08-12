@@ -307,6 +307,13 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   mSnapshot.positionMs = doc.positionMs();
   mSnapshot.durationMs = doc.durationMs();
   mSnapshot.stampMonoMs = stampMonoMs;
+  // Console -> device. Copied here with everything else for the same reason the
+  // now-playing fields are: a snapshot assembled in two places is a snapshot
+  // that will one day disagree with itself.
+  mSnapshot.settingsSeq = doc.settingsSeq();
+  mSnapshot.requestedVolume = doc.requestedVolume();
+  mSnapshot.requestedBrightness = doc.requestedBrightness();
+  mSnapshot.inputs = doc.inputs();
   ::pthread_mutex_unlock(&mLock);
 }
 

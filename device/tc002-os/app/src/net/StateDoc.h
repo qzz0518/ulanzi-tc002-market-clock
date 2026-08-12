@@ -69,6 +69,32 @@ class StateDoc {
    * for a moving playhead, so a poll-rate-limited progress bar is not an
    * option and would not be smooth anyway.
    */
+  /**
+   * Settings the console asked for, and the sequence that makes them safe.
+   *
+   * The device applies a value only when `settingsSeq()` is HIGHER than the one
+   * it last applied. Without that the console's old value sits in every
+   * document forever and is re-applied on each poll, which makes the knob
+   * useless: the volume springs back the instant the user lets go.
+   */
+  int settingsSeq() const { return mSettingsSeq; }
+  int requestedVolume() const { return mRequestedVolume; }      // -1 when absent
+  int requestedBrightness() const { return mRequestedBrightness; }
+
+  /**
+   * Button and knob events the console pressed on the device's behalf.
+   *
+   * Each carries its own sequence; the device injects the ones it has not seen.
+   * The service keeps only a short tail — the document is pulled, so anything
+   * unread must still be in it, but a press the device missed by more than a
+   * moment is one the user has already given up on.
+   */
+  struct Input {
+    int seq;
+    std::string action;  // cw ccw press hold left right
+  };
+  const std::vector<Input>& inputs() const { return mInputs; }
+
   bool hasNowPlaying() const { return mHasNowPlaying; }
   const std::string& track() const { return mTrack; }
   const std::string& artist() const { return mArtist; }
@@ -83,6 +109,10 @@ class StateDoc {
   bool mMirror;
   std::string mFocus;
   std::vector<Item> mItems;
+  int mSettingsSeq;
+  int mRequestedVolume;
+  int mRequestedBrightness;
+  std::vector<Input> mInputs;
   bool mHasNowPlaying;
   bool mPlaying;
   int mPositionMs;

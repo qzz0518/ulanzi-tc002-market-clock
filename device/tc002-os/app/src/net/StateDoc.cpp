@@ -34,7 +34,8 @@ bool kindFromName(const std::string& name, StateDoc::Kind* out) {
 }  // namespace
 
 StateDoc::StateDoc()
-    : mSeq(-1), mPinned(false), mMirror(false), mHasNowPlaying(false),
+    : mSeq(-1), mPinned(false), mMirror(false), mSettingsSeq(0),
+      mRequestedVolume(-1), mRequestedBrightness(-1), mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0) {}
 
 bool StateDoc::parse(const std::string& body) {
@@ -43,6 +44,10 @@ bool StateDoc::parse(const std::string& body) {
   mMirror = false;
   mFocus.clear();
   mItems.clear();
+  mSettingsSeq = 0;
+  mRequestedVolume = -1;
+  mRequestedBrightness = -1;
+  mInputs.clear();
   mHasNowPlaying = false;
   mPlaying = false;
   mPositionMs = 0;
@@ -74,6 +79,19 @@ bool StateDoc::parse(const std::string& body) {
       mMirror = (fields[1] == "1");
     } else if (fields[0] == "focus") {
       mFocus = fields[1];
+    } else if (fields[0] == "setseq") {
+      mSettingsSeq = atoi(fields[1].c_str());
+    } else if (fields[0] == "setvol") {
+      mRequestedVolume = atoi(fields[1].c_str());
+    } else if (fields[0] == "setbri") {
+      mRequestedBrightness = atoi(fields[1].c_str());
+    } else if (fields[0] == "input" && n >= 3) {
+      Input event;
+      event.seq = atoi(fields[1].c_str());
+      event.action = fields[2];
+      // A malformed event is skipped rather than injected as some default: a
+      // guessed button press is worse than a dropped one.
+      if (event.seq > 0 && !event.action.empty()) mInputs.push_back(event);
     } else if (fields[0] == "np") {
       mHasNowPlaying = (fields[1] == "1");
     } else if (fields[0] == "track") {

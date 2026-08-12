@@ -1,21 +1,36 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ZOS_GAME_SHORTCUTS,
+  ZOS_HOLD_MS,
+  ZOS_INPUT_LABELS,
+  ZOS_KNOB_DETENT_DEG,
   ZOS_MIRROR_IDLE_POLL_MS,
   ZOS_MIRROR_POLL_MS,
   ZOS_MIRROR_RGB_BYTES,
   ZOS_MUSIC_FOCUS,
   ZOS_SETTINGS_FOCUS,
   ZOS_STATE_POLL_MS,
+  accumulateDetents,
+  angleDeltaDeg,
+  brightnessText,
+  createPressTracker,
   createZosLink,
   decodeMirrorFrame,
+  describeBattery,
   describeDriver,
   describeMirror,
+  describeResidency,
   describeTelemetry,
+  describeVitals,
   entryOnScreen,
   formatUptime,
   nextPollDelayMs,
+  pointerAngleDeg,
   screenLabel,
+  volumeText,
   zosGameFocus,
+  zosInputForKey,
+  zosKeyCaptured,
   zosPinnedOn,
   zosToggleFocus,
   type ZosMenuEntry,
@@ -38,6 +53,9 @@ function telemetry(overrides: Partial<ZosTelemetry> = {}): ZosTelemetry {
     uptimeMs: 310_501,
     freeKb: 16_568,
     supplicantRestarts: 0,
+    batteryPercent: 82,
+    charging: false,
+    flashed: true,
     receivedAt: 1_000_000,
     ...overrides,
   };
@@ -148,11 +166,12 @@ describe("zos telemetry readout", () => {
     const rows = describeTelemetry(state(), 1_006_000);
     const byKey = new Map(rows.map((row) => [row.key, row]));
     expect(byKey.get("screen")?.value).toBe("启动器");
-    expect(byKey.get("focus")?.value).toBe("btc");
     expect(byKey.get("ip")?.value).toBe("192.168.8.240");
-    expect(byKey.get("uptime")?.value).toBe("5 分 10 秒");
     expect(byKey.get("free")?.value).toBe("16568 KB");
     expect(byKey.get("heartbeat")?.value).toBe("6 秒前");
+    // Wi-Fi / 电量 / 运行时长挪去了镜像下方的概况条，详情表不再重复。
+    expect(byKey.has("wifi")).toBe(false);
+    expect(byKey.has("uptime")).toBe(false);
   });
 
   test("zero supplicant restarts is reported as the safety property it is", () => {
@@ -515,5 +534,277 @@ describe("zos focus targets", () => {
       .toBe("game:snake");
     expect(zosToggleFocus({ focus: "btc", pinned: true }, ZOS_MUSIC_FOCUS)).toBe("music");
     expect(zosToggleFocus(null, ZOS_MUSIC_FOCUS)).toBe("music");
+  });
+
+  test("the quick-launch list names exactly the firmware's seven engines", () => {
+    expect(ZOS_GAME_SHORTCUTS.map((game) => game.id)).toEqual([
+      "breakout", "flappy", "snake", "pong", "racer", "shooter", "tetris",
+    ]);
+    // 每个都有可读中文标签，不能把裸 id 打到界面上。
+    for (const game of ZOS_GAME_SHORTCUTS) {
+      expect(game.label.length).toBeGreaterThan(0);
+      expect(game.label).not.toBe(game.id);
+    }
+  });
+});
+
+describe("zos press-vs-hold tracker", () => {
+  test("a release before the threshold is a press", () => {
+    const tracker = createPressTracker();
+    tracker.down(1_000);
+    expect(tracker.tick(1_100)).toBeNull();
+    expect(tracker.progress(1_300)).toBeCloseTo(0.5);
+    expect(tracker.up(1_300)).toBe("press");
+    // The gesture is over; nothing lingers.
+    expect(tracker.isDown()).toBe(false);
+    expect(tracker.progress(2_000)).toBe(0);
+  });
+
+  test("hold fires from the tick that crosses the threshold, exactly once", () => {
+    // osLogic.cc fires on the tick, not the release — waiting for the release
+    // makes every long press feel laggy. Same machine, same timing.
+    const tracker = createPressTracker();
+    tracker.down(1_000);
+    expect(tracker.tick(1_000 + ZOS_HOLD_MS - 1)).toBeNull();
+    expect(tracker.tick(1_000 + ZOS_HOLD_MS)).toBe("hold");
+    expect(tracker.tick(1_000 + ZOS_HOLD_MS + 50)).toBeNull();
+    // The release after a fired hold must not add a press on top.
+    expect(tracker.up(1_000 + ZOS_HOLD_MS + 200)).toBeNull();
+  });
+
+  test("a release past the threshold without a tick still means hold", () => {
+    // A background tab throttles rAF; the user who held past 600 ms meant BACK
+    // regardless of our frame rate.
+    const tracker = createPressTracker();
+    tracker.down(1_000);
+    expect(tracker.up(1_000 + ZOS_HOLD_MS + 300)).toBe("hold");
+  });
+
+  test("cancel forgets the press without emitting anything", () => {
+    const tracker = createPressTracker();
+    tracker.down(1_000);
+    tracker.cancel();
+    expect(tracker.up(3_000)).toBeNull();
+    expect(tracker.progress(3_000)).toBe(0);
+  });
+
+  test("progress saturates at 1 once fired", () => {
+    const tracker = createPressTracker();
+    tracker.down(0);
+    tracker.tick(ZOS_HOLD_MS);
+    expect(tracker.progress(ZOS_HOLD_MS + 5_000)).toBe(1);
+  });
+});
+
+describe("zos knob geometry", () => {
+  test("pointer angles put 0° at 12 o'clock and grow clockwise", () => {
+    expect(pointerAngleDeg(0, 0, 0, -10)).toBeCloseTo(0);
+    expect(pointerAngleDeg(0, 0, 10, 0)).toBeCloseTo(90);
+    expect(pointerAngleDeg(0, 0, 0, 10)).toBeCloseTo(180);
+    expect(pointerAngleDeg(0, 0, -10, 0)).toBeCloseTo(-90);
+  });
+
+  test("angle deltas take the short way across the ±180° seam", () => {
+    expect(angleDeltaDeg(10, 30)).toBe(20);
+    expect(angleDeltaDeg(30, 10)).toBe(-20);
+    // Dragging through the bottom of the dial must read as a small step in the
+    // travel direction, not a near-full spin the other way.
+    expect(angleDeltaDeg(170, -170)).toBe(20);
+    expect(angleDeltaDeg(-170, 170)).toBe(-20);
+  });
+
+  test("detents fold travel into whole clicks and carry the remainder", () => {
+    expect(accumulateDetents(0, 10)).toEqual({ steps: 0, carry: 10 });
+    expect(accumulateDetents(10, 20)).toEqual({ steps: 1, carry: 6 });
+    expect(accumulateDetents(0, -30)).toEqual({ steps: -1, carry: -6 });
+    // A fast flick emits several detents at once.
+    expect(accumulateDetents(0, ZOS_KNOB_DETENT_DEG * 3 + 3)).toEqual({ steps: 3, carry: 3 });
+    // A custom threshold serves the wheel (pixels, not degrees).
+    expect(accumulateDetents(90, 20, 100)).toEqual({ steps: 1, carry: 10 });
+  });
+});
+
+describe("zos keyboard remote", () => {
+  test("arrows are the knob, Enter the press, Backspace the hold", () => {
+    expect(zosInputForKey("ArrowRight")).toBe("cw");
+    expect(zosInputForKey("ArrowLeft")).toBe("ccw");
+    expect(zosInputForKey("Enter")).toBe("press");
+    expect(zosInputForKey(" ")).toBe("press");
+    expect(zosInputForKey("Backspace")).toBe("hold");
+    expect(zosInputForKey("Escape")).toBe("hold");
+    expect(zosInputForKey("a")).toBe("left");
+    expect(zosInputForKey("D")).toBe("right");
+    expect(zosInputForKey("x")).toBeNull();
+  });
+
+  test("auto-repeat turns the knob but can never machine-gun a confirm", () => {
+    // The hardware cannot emit five confirms from one finger.
+    expect(zosInputForKey("ArrowRight", true)).toBe("cw");
+    expect(zosInputForKey("a", true)).toBe("left");
+    expect(zosInputForKey("Enter", true)).toBeNull();
+    expect(zosInputForKey("Backspace", true)).toBeNull();
+  });
+
+  test("focused controls keep the keys they own", () => {
+    const plain = { editable: false, button: false, slider: false };
+    expect(zosKeyCaptured("Enter", plain)).toBe(false);
+    // An editable owns everything — typing must never drive the clock.
+    expect(zosKeyCaptured("a", { ...plain, editable: true })).toBe(true);
+    // A focused button owns its activation keys (its click routes through the
+    // same send path; a global handler on top would double-fire)…
+    expect(zosKeyCaptured("Enter", { ...plain, button: true })).toBe(true);
+    expect(zosKeyCaptured(" ", { ...plain, button: true })).toBe(true);
+    // …but not the letters, so A/D side keys still work with a button focused.
+    expect(zosKeyCaptured("a", { ...plain, button: true })).toBe(false);
+    // A slider owns the arrows it steps by.
+    expect(zosKeyCaptured("ArrowLeft", { ...plain, slider: true })).toBe(true);
+    expect(zosKeyCaptured("Enter", { ...plain, slider: true })).toBe(false);
+  });
+
+  test("every action has a human label for the receipt line", () => {
+    for (const action of ["cw", "ccw", "press", "hold", "left", "right"] as const) {
+      expect(ZOS_INPUT_LABELS[action].length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("zos input and settings transport", () => {
+  test("sendInput POSTs the action and returns the queued event as receipt", async () => {
+    const requests: { url: string; method: string; body: unknown }[] = [];
+    const link = createZosLink({
+      fetcher: (url, init) => {
+        requests.push({
+          url,
+          method: init?.method ?? "GET",
+          body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+        });
+        return Promise.resolve(Response.json({ event: { seq: 7, action: "cw" } }));
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+
+    const event = await link.sendInput("cw");
+    expect(requests[0]).toMatchObject({
+      url: "/api/os/input",
+      method: "POST",
+      body: { action: "cw" },
+    });
+    // The seq is the only receipt that exists: it proves the service queued the
+    // press, not that the device performed it — the mirror is the evidence for
+    // that, and the panel's copy must keep the two claims apart.
+    expect(event).toEqual({ seq: 7, action: "cw" });
+  });
+
+  test("a refused input surfaces the service's own message", async () => {
+    const link = createZosLink({
+      fetcher: () => Promise.resolve(
+        Response.json({ error: "action must be one of cw, ccw, press, hold, left, right" }, { status: 400 }),
+      ),
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    expect(link.sendInput("cw")).rejects.toThrow("action must be one of");
+  });
+
+  test("setSettings PUTs only the field being changed", async () => {
+    // Sending both would overwrite the one the user did not touch with whatever
+    // this tab last saw — the service merges, so partial writes are the safe shape.
+    const bodies: unknown[] = [];
+    const link = createZosLink({
+      fetcher: (_url, init) => {
+        bodies.push(typeof init?.body === "string" ? JSON.parse(init.body) : undefined);
+        return Promise.resolve(Response.json({ requested: { volume: 3, brightness: null, seq: 2 } }));
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+
+    const requested = await link.setSettings({ volume: 3 });
+    await link.setSettings({ brightness: 8 });
+    await link.setSettings({ volume: 0, brightness: 1 });
+    expect(bodies).toEqual([
+      { volume: 3 },
+      { brightness: 8 },
+      { volume: 0, brightness: 1 },
+    ]);
+    expect(requested).toEqual({ volume: 3, brightness: null, seq: 2 });
+  });
+
+  test("a rejected settings write surfaces the service's own message", async () => {
+    const link = createZosLink({
+      fetcher: () => Promise.resolve(
+        Response.json({ error: "brightness must be between 1 and 10" }, { status: 400 }),
+      ),
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    expect(link.setSettings({ brightness: 11 })).rejects.toThrow("between 1 and 10");
+  });
+});
+
+describe("zos battery and vitals", () => {
+  test("-1 and absent battery readings render as nothing, never as 0%", () => {
+    expect(describeBattery(-1)).toBeNull();
+    expect(describeBattery(undefined)).toBeNull();
+    expect(describeBattery(Number.NaN)).toBeNull();
+    // 0 is a real reading (the device is about to die), only -1 means unknown.
+    expect(describeBattery(0)?.label).toBe("0%");
+  });
+
+  test("battery tone tracks the reading and charging passes through", () => {
+    expect(describeBattery(82, true)).toEqual({ label: "82%", charging: true, tone: "ok" });
+    expect(describeBattery(30)?.tone).toBe("low");
+    expect(describeBattery(10)?.tone).toBe("critical");
+    expect(describeBattery(120)?.label).toBe("100%");
+  });
+
+  test("vitals exist only while the device is live", () => {
+    // A stale battery percentage reads exactly like a current one.
+    expect(describeVitals(state({ live: false }))).toEqual({ battery: null, wifi: null, uptime: null });
+    expect(describeVitals(null)).toEqual({ battery: null, wifi: null, uptime: null });
+
+    const vitals = describeVitals(state());
+    expect(vitals.battery?.label).toBe("82%");
+    expect(vitals.wifi).toBe("xiaoya-2.4G");
+    expect(vitals.uptime).toBe("5 分 10 秒");
+  });
+
+  test("an empty wifi name collapses to null rather than an empty chip", () => {
+    expect(describeVitals(state({ telemetry: telemetry({ wifi: "" }) })).wifi).toBeNull();
+  });
+});
+
+describe("zos firmware residency", () => {
+  test("a flashed ZOS stays flashed even while the device is off the air", () => {
+    // What a power cycle restores does not stop being true because the device
+    // stopped reporting — the sticky service-side flag is the authority.
+    const row = describeResidency(state({ live: false, telemetry: null, zosFlashed: true }));
+    expect(row.value).toBe("已刷入闪存");
+    expect(row.note).toContain("仍是 ZOS");
+  });
+
+  test("a live sideload session names what a power cycle takes away", () => {
+    const row = describeResidency(state({ zosFlashed: false }));
+    expect(row.value).toBe("临时侧载");
+    expect(row.note).toContain("原厂固件");
+  });
+
+  test("offline with no flash record admits it does not know", () => {
+    expect(describeResidency(state({ live: false, telemetry: null })).value).toBe("未知");
+    expect(describeResidency(null).value).toBe("未知");
+  });
+});
+
+describe("zos settings text", () => {
+  test("volume names mute and the unknown state", () => {
+    expect(volumeText(null)).toBe("未知");
+    expect(volumeText(0)).toBe("静音");
+    expect(volumeText(4)).toBe("4 级");
+  });
+
+  test("brightness shows the device's own 1..10 scale", () => {
+    expect(brightnessText(null)).toBe("未知");
+    expect(brightnessText(7)).toBe("7 / 10");
   });
 });

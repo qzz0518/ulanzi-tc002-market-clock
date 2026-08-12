@@ -1,0 +1,356 @@
+/* 系统（ZOS）控制台。镜像是重心，遥控甲板紧贴其下，右侧是菜单 / 音量亮度 / 详情。
+   类名用 zc- 前缀：globals.css 里还留着旧版 zos- 规则（那份文件不归本组件管），
+   新旧选择器必须零交集，样式才不会隔着文件打架。 */
+
+.zc-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
+
+.zc-topbar {
+  display: flex;
+  width: min(100%, 72rem);
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  flex-wrap: wrap;
+  margin-inline: auto;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+.zc-topbar__driver { display: grid; min-width: 0; gap: 0.14rem; }
+.zc-topbar__driver > span { color: var(--primary); font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.1em; }
+.zc-topbar__driver > strong { font-size: 0.95rem; font-weight: 620; letter-spacing: -0.01em; }
+.zc-topbar__driver > small { color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.45; }
+.zc-topbar__status { display: inline-flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+
+.zc-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(19rem, 22rem);
+  width: min(100%, 72rem);
+  gap: 1.1rem;
+  margin-inline: auto;
+  padding-top: 1rem;
+  align-items: start;
+}
+
+/* 整数倍放大：一个 LED 像素恒等于 N × N 个屏幕像素，边缘不会出现半像素糊边。
+   尺寸从画布本身给出、边框向外包住它——反过来让边框盒去凑 52:16，扣掉边框后
+   剩下的内容宽就再也不是 52 的整数倍了（真机上量到过 14.66×）。
+   设备列整列按屏宽对齐，甲板和提示不会比屏幕更宽。 */
+.zc-device { --zc-pixel: 14px; --zc-bezel: 0.55rem; min-width: 0; }
+.zc-device > * { max-width: calc(52 * var(--zc-pixel) + 2 * var(--zc-bezel)); }
+/* 整数倍档位：每档都要满足 52 × N px ≤ 视口内容宽（视口 − 页边距 − 边框），
+   否则 max-width 会把它压成小数倍。档位集中在这里，改一处就够。 */
+@media (max-width: 76rem) { .zc-device { --zc-pixel: 12px; } }
+@media (max-width: 52rem) { .zc-device { --zc-pixel: 10px; } }
+@media (max-width: 36rem) { .zc-device { --zc-pixel: 8px; } }
+@media (max-width: 30rem) { .zc-device { --zc-pixel: 6px; } }
+@media (max-width: 23rem) { .zc-device { --zc-pixel: 4px; } }
+
+.zc-side { display: grid; gap: 0.8rem; min-width: 0; }
+.zc-card { border-radius: 0.6rem; }
+.zc-cardtitle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 0.5rem; }
+
+/* --- LED 镜像 ------------------------------------------------------------- */
+
+.zc-screen { width: 100%; margin: 0; }
+.zc-screen__frame {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: var(--zc-bezel, 0.55rem) solid #111612;
+  border-radius: 0.72rem;
+  background: #000;
+  box-shadow: 0 0.65rem 1.5rem rgb(12 18 12 / 0.12);
+  isolation: isolate;
+}
+/* 视口窄到装不下最小档时 max-width 兜底，此时不再是整数倍，但 pixelated 仍然
+   保证硬边——宁可不整倍也不横向溢出。 */
+.zc-screen__frame canvas {
+  display: block;
+  width: calc(52 * var(--zc-pixel, 14px));
+  max-width: 100%;
+  aspect-ratio: 52 / 16;
+  height: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+/* 画面不可信时盖在屏幕上的说明——空黑屏和「在工作的黑屏」在视觉上没有区别，
+   所以永远不留一个没有说明的黑框。 */
+.zc-screen__notice {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0.5rem 1rem;
+  background: color-mix(in oklch, #000 72%, transparent);
+  text-align: center;
+}
+.zc-screen__notice strong { color: oklch(0.92 0.02 110); font-size: 0.78rem; font-weight: 620; }
+.zc-screen__notice span { color: oklch(0.76 0.015 110); font-size: 0.64rem; line-height: 1.45; text-wrap: pretty; }
+.zc-screen__frame::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-image:
+    linear-gradient(90deg, transparent calc(100% - 1px), rgb(255 255 255 / 0.18) 0),
+    linear-gradient(transparent calc(100% - 1px), rgb(255 255 255 / 0.18) 0);
+  background-size: calc(100% / 52) 100%, 100% calc(100% / 16);
+  content: "";
+  opacity: 0.14;
+  pointer-events: none;
+}
+.zc-screen figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.42rem;
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: 0.58rem;
+}
+.zc-screen__state.is-live { color: var(--primary); }
+
+/* --- 概况条 ---------------------------------------------------------------- */
+
+.zc-vitals { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.7rem; margin-top: 0.55rem; }
+
+/* --- 遥控甲板 -------------------------------------------------------------- */
+
+.zc-deck { margin-top: 0.85rem; border-radius: 0.6rem; }
+.zc-deck__content { display: grid; gap: 0.75rem; padding: 0.9rem 1rem 0.75rem; }
+
+.zc-deck__cluster {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.9rem, 4vw, 2rem);
+}
+.zc-deck__cluster.is-off { opacity: 0.55; }
+
+.zc-sidekey { display: grid; justify-items: center; gap: 0.4rem; }
+.zc-sidekey__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  white-space: nowrap;
+}
+
+/* 旋钮：可拖转、可滚轮、可点两侧；中键点按 = 确认，按住 0.6s = 返回。
+   这不是模仿某个 cladd 组件——cladd 没有旋钮，这里按官方 surfaces 文档的
+   「自定义 surface 元素」路数手绘，颜色全部走主题变量。 */
+.zc-knob {
+  position: relative;
+  width: 8.5rem;
+  aspect-ratio: 1;
+  flex: none;
+}
+.zc-knob__dial {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 30%, rgb(255 255 255 / 0.06), transparent 58%),
+    #14171a;
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    0 0.45rem 1.1rem rgb(0 0 0 / 0.35);
+  cursor: grab;
+  touch-action: none;
+  /* 一格 24°，过渡略短于连续两次触发的最短间隔，转起来是「咔哒」而不是「滑」。 */
+  transition: transform 110ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  user-select: none;
+}
+.zc-knob__dial:active { cursor: grabbing; }
+/* 旋钮外缘的防滑齿：repeating-conic 画 15 齿（360/24），用径向 mask 只留轮圈。 */
+.zc-knob__dial::before {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from -2deg,
+    rgb(255 255 255 / 0.13) 0deg 4deg,
+    transparent 4deg 24deg
+  );
+  -webkit-mask: radial-gradient(closest-side, transparent 84%, #000 85%);
+  mask: radial-gradient(closest-side, transparent 84%, #000 85%);
+  content: "";
+  pointer-events: none;
+}
+/* 指位标记：随盘面一起转，是「转过了」最直接的证据。 */
+.zc-knob__marker {
+  position: absolute;
+  top: 7%;
+  left: calc(50% - 0.14rem);
+  width: 0.28rem;
+  height: 0.62rem;
+  border-radius: 999px;
+  background: var(--primary);
+  pointer-events: none;
+}
+.zc-knob__cue {
+  position: absolute;
+  top: calc(50% - 0.45rem);
+  width: 0.9rem;
+  height: 0.9rem;
+  color: var(--muted-foreground);
+  opacity: 0.4;
+  transition: opacity 150ms ease;
+  pointer-events: none;
+}
+.zc-knob:hover .zc-knob__cue { opacity: 0.85; }
+.zc-knob__cue--ccw { left: -1.25rem; }
+.zc-knob__cue--cw { right: -1.25rem; }
+
+/* 长按进度环：conic 从 12 点方向按 --zc-hold 扫过，mask 成细环。
+   0.6s 阈值与固件 osLogic.cc 的 HOLD_MS 同值，动画就是阈值本身的可视化。 */
+.zc-knob__ring {
+  position: absolute;
+  inset: 18%;
+  border-radius: 50%;
+  background: conic-gradient(var(--primary) calc(var(--zc-hold, 0) * 360deg), transparent 0);
+  -webkit-mask: radial-gradient(closest-side, transparent 86%, #000 87%);
+  mask: radial-gradient(closest-side, transparent 86%, #000 87%);
+  pointer-events: none;
+}
+
+.zc-knob__core {
+  position: absolute;
+  inset: 24%;
+  display: grid;
+  place-content: center;
+  gap: 0.1rem;
+  border: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 36% 32%, rgb(255 255 255 / 0.07), transparent 60%),
+    #1b1f23;
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: inherit;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+.zc-knob__core:hover:not(:disabled) { box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 55%, var(--border)); }
+.zc-knob__core:active:not(:disabled) { background-color: #14171a; }
+.zc-knob__core:disabled { cursor: default; }
+/* 长按触发的一瞬：环已满、语义换成「返回」，核心闪一下主题色作为确认。 */
+.zc-knob__core.is-held {
+  box-shadow: inset 0 0 0 1.5px var(--primary);
+  color: var(--primary);
+}
+/* 盘面是硬件式的深色，与页面主题无关，文字颜色必须自带——继承页面前景色
+   在浅色主题下就是深字压深盘，第一版截图里「确认」直接隐形。 */
+.zc-knob__corelabel { color: oklch(0.9 0.012 110); font-size: 0.78rem; font-weight: 620; letter-spacing: 0.02em; }
+.zc-knob__coresub { color: oklch(0.62 0.015 110); font-family: var(--mono); font-size: 0.52rem; }
+.zc-knob__core.is-held .zc-knob__corelabel,
+.zc-knob__core.is-held .zc-knob__coresub { color: var(--primary); }
+
+.zc-deck__hints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem 0.9rem;
+  color: var(--muted-foreground);
+  font-size: 0.62rem;
+}
+.zc-deck__hints > span { display: inline-flex; align-items: center; gap: 0.3rem; }
+.zc-deck__hints-free { font-family: var(--mono); font-size: 0.56rem; }
+.zc-hintkey { font-weight: 500; }
+
+.zc-deck__receipt {
+  margin: 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  line-height: 1.5;
+  text-align: center;
+  text-wrap: pretty;
+}
+
+/* --- 侧栏 ------------------------------------------------------------------ */
+
+/* 直达游戏：挂在「游戏」条目下面的一排小按钮，缩进对齐条目文字。 */
+.zc-games {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.15rem 0.75rem 0.5rem 2.35rem;
+}
+
+.zc-setting {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+}
+.zc-setting__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.zc-setting__label svg { width: 0.85rem; height: 0.85rem; }
+.zc-setting__slider { display: block; min-width: 0; }
+/* 服务里还没有任何请求值时滑轨压暗：位置是占位，不是设备读数。 */
+.zc-setting__slider.is-unset { opacity: 0.45; }
+.zc-setting__value {
+  min-width: 3.2rem;
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  text-align: right;
+}
+
+.zc-note {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.7rem 0 0;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 0.65rem;
+  line-height: 1.5;
+}
+.zc-note svg { flex: none; width: 0.8rem; height: 0.8rem; }
+.zc-note--error { color: var(--destructive); }
+
+/* --- 响应式 ---------------------------------------------------------------- */
+
+@media (max-width: 80rem) {
+  .zc-body { grid-template-columns: minmax(0, 1fr) minmax(17rem, 19rem); }
+}
+@media (max-width: 52rem) {
+  .zc-shell { padding-top: 0.65rem; }
+  .zc-body { grid-template-columns: minmax(0, 1fr); }
+  .zc-side { margin-top: 0.2rem; }
+}
+@media (max-width: 36rem) {
+  .zc-knob { width: 7rem; }
+  .zc-knob__cue--ccw { left: -1.05rem; }
+  .zc-knob__cue--cw { right: -1.05rem; }
+  .zc-deck__cluster { gap: 0.6rem; }
+  /* 窄屏下旋转箭头会挤进侧键提示里；点按换台的教学由下方文字承担。 */
+  .zc-knob__cue { display: none; }
+  /* 侧键提示在窄屏换行而不是把整张卡撑出视口（390px 实测右键的 D 被裁掉）。 */
+  .zc-sidekey__hint {
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 6rem;
+    white-space: normal;
+    text-align: center;
+  }
+}

@@ -197,6 +197,17 @@ tcos::HostLink::Snapshot sLink;
 uint64_t sLinkPolledMs = 0;
 uint64_t sSettingsBuiltMs = 0;
 uint64_t sTelemetryReadMs = 0;
+// The highest console sequence already acted on.
+//
+// PRIMED from the first document rather than started at zero. The service keeps
+// a tail of recent presses so a device that missed one can still see it, which
+// means a device that has just booted would otherwise replay every press in
+// that tail — observed: a reboot mid-testing walked the menu on its own. The
+// same reasoning covers settings, where a stale request would override the
+// volume the user actually last chose (restored from /data by Prefs).
+int sAppliedSettingsSeq = 0;
+int sAppliedInputSeq = 0;
+bool sConsoleSeqPrimed = false;
 
 tcos::Shell& shell() {
 	static tcos::Shell instance(tcos::kPanelWidth, tcos::kPanelHeight);
@@ -727,6 +738,64 @@ static bool onUI_Timer(int id) {
 			}
 		}
 		sLink = hostLink().snapshot();
+
+		// The first document only establishes where the sequences already are.
+		// Acting on it would replay whatever the console did before this boot.
+		if (!sConsoleSeqPrimed && sLink.online) {
+			sConsoleSeqPrimed = true;
+			sAppliedSettingsSeq = sLink.settingsSeq;
+			for (size_t i = 0; i < sLink.inputs.size(); ++i) {
+				if (sLink.inputs[i].seq > sAppliedInputSeq) sAppliedInputSeq = sLink.inputs[i].seq;
+			}
+		}
+
+		// Settings the console asked for. Applied ONLY on a rising sequence: the
+		// document keeps carrying the last request forever, and re-applying it
+		// every poll would make the physical knob useless — the volume would
+		// spring back the instant the user let go.
+		if (sLink.settingsSeq > sAppliedSettingsSeq) {
+			sAppliedSettingsSeq = sLink.settingsSeq;
+			tcos::DeviceControls& controls = tcos::DeviceControls::instance();
+			if (sLink.requestedVolume >= 0) {
+				controls.nudgeVolume(sLink.requestedVolume - controls.volume());
+				shell().overlay().show(tcos::LevelOverlay::kVolume, controls.volume(),
+				                       tcos::DeviceControls::kVolumeMax, nowMs);
+			}
+			if (sLink.requestedBrightness >= 0) {
+				controls.nudgeBrightness(sLink.requestedBrightness - controls.brightness());
+				shell().overlay().show(tcos::LevelOverlay::kBrightness, controls.brightness(),
+				                       tcos::DeviceControls::kBrightnessSteps, nowMs);
+			}
+		}
+
+		// Button and knob presses the console made on the user's behalf. Injected
+		// through the same path a real key takes, so a remote press cannot behave
+		// differently from a physical one — which is the whole point of driving the
+		// device by its knob rather than by a remote API per screen.
+		for (size_t i = 0; i < sLink.inputs.size(); ++i) {
+			const tcos::StateDoc::Input& event = sLink.inputs[i];
+			if (event.seq <= sAppliedInputSeq) continue;
+			sAppliedInputSeq = event.seq;
+			if (event.action == "cw") {
+				tcos::Sfx::instance().play(tcos::Sfx::kTick);
+				dispatchInput(tcos::kInputTurnCw, nowMs);
+			} else if (event.action == "ccw") {
+				tcos::Sfx::instance().play(tcos::Sfx::kTick);
+				dispatchInput(tcos::kInputTurnCcw, nowMs);
+			} else if (event.action == "press") {
+				tcos::Sfx::instance().play(tcos::Sfx::kConfirm);
+				dispatchInput(tcos::kInputPress, nowMs);
+			} else if (event.action == "hold") {
+				tcos::Sfx::instance().play(tcos::Sfx::kBack);
+				dispatchInput(tcos::kInputHold, nowMs);
+			} else if (event.action == "left") {
+				adjustLevel(shell().overlay().shortPressKind(nowMs)
+				                == tcos::LevelOverlay::kBrightness, -1, nowMs);
+			} else if (event.action == "right") {
+				adjustLevel(shell().overlay().shortPressKind(nowMs)
+				                == tcos::LevelOverlay::kBrightness, +1, nowMs);
+			}
+		}
 		const std::string signature = menuSignature(sLink.items);
 		if (!sLink.items.empty() && signature != sMenuSignature) {
 			sMenuSignature = signature;
@@ -816,6 +885,10 @@ static bool onUI_Timer(int id) {
 			sChannelRing.setStatus(tcos::ChannelRingScreen::kFailed, nowMs);
 		}
 	} else if (shell().top() == &sMusic) {
+		// The empty state must say WHICH emptiness it is: "nothing is playing" is a
+		// lie on a device that was never given a console address (a flashed unit
+		// has no /tmp/zos-host) or cannot reach the one it has.
+		sMusic.setLink(!hostLink().baseUrl().empty(), sLink.online);
 		sMusic.setNowPlaying(sLink.nowPlaying, sLink.track, sLink.artist, sLink.lyric,
 		                     sLink.playing, sLink.positionMs, sLink.durationMs,
 		                     (int)(sLink.stampMonoMs - sStartMs));

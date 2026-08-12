@@ -511,117 +511,20 @@
 
 /* 系统固件控制台：左边是固件直出的实时镜像，右边是频道接管 + 设备读数。
    LED 屏沿用游戏厅同一套网格质感配方，像素在两处是同一个东西。 */
-.zos-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
-.zos-topbar {
-  display: flex;
-  width: min(100%, 72rem);
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 0.75rem 1rem;
-  flex-wrap: wrap;
-  margin-inline: auto;
-  padding-bottom: 0.8rem;
-  border-bottom: 1px solid var(--border);
-}
-.zos-topbar__driver { display: grid; min-width: 0; gap: 0.14rem; }
-.zos-topbar__driver > span { color: var(--primary); font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.1em; }
-.zos-topbar__driver > strong { font-size: 0.95rem; font-weight: 620; letter-spacing: -0.01em; }
-.zos-topbar__driver > small { color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.45; }
-.zos-topbar__status { display: inline-flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
 
-.zos-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(19rem, 22rem);
-  width: min(100%, 72rem);
-  gap: 1.1rem;
-  margin-inline: auto;
-  padding-top: 1rem;
-  align-items: start;
-}
 /* 整数倍放大：一个 LED 像素恒等于 N × N 个屏幕像素，边缘不会出现半像素糊边。
    尺寸从画布本身给出、边框向外包住它——反过来让边框盒去凑 52:16，扣掉边框后
    剩下的内容宽就再也不是 52 的整数倍了（真机上量到过 14.66×）。
    舞台整列按屏宽对齐，工具条和提示不会比屏幕更宽。 */
-.zos-stage { --zos-pixel: 14px; --zos-bezel: 0.55rem; min-width: 0; }
-.zos-stage > * { max-width: calc(52 * var(--zos-pixel) + 2 * var(--zos-bezel)); }
 /* 整数倍档位：每档都要满足 52 × N px ≤ 视口内容宽（视口 − 页边距 − 边框），
    否则 max-width 会把它压成小数倍。档位集中在这里，改一处就够。 */
-@media (max-width: 76rem) { .zos-stage { --zos-pixel: 12px; } }
-@media (max-width: 52rem) { .zos-stage { --zos-pixel: 10px; } }
-@media (max-width: 36rem) { .zos-stage { --zos-pixel: 8px; } }
-@media (max-width: 30rem) { .zos-stage { --zos-pixel: 6px; } }
-@media (max-width: 23rem) { .zos-stage { --zos-pixel: 4px; } }
-.zos-side { display: grid; gap: 0.8rem; min-width: 0; }
-.zos-card { border-radius: 0.6rem; }
 
-.zos-screen { width: 100%; margin: 0; }
-.zos-screen__frame {
-  position: relative;
-  width: fit-content;
-  max-width: 100%;
-  overflow: hidden;
-  border: var(--zos-bezel, 0.55rem) solid #111612;
-  border-radius: 0.72rem;
-  background: #000;
-  box-shadow: 0 0.65rem 1.5rem rgb(12 18 12 / 0.12);
-  isolation: isolate;
-}
 /* 视口窄到装不下最小档时 max-width 兜底，此时不再是整数倍，但 pixelated 仍然
    保证硬边——宁可不整倍也不横向溢出。 */
-.zos-screen__frame canvas {
-  display: block;
-  width: calc(52 * var(--zos-pixel, 14px));
-  max-width: 100%;
-  aspect-ratio: 52 / 16;
-  height: auto;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-}
 /* 画面不可信时盖在屏幕上的说明——空黑屏和「在工作的黑屏」在视觉上没有区别，
    所以永远不留一个没有说明的黑框。 */
-.zos-screen__notice {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: grid;
-  place-content: center;
-  gap: 0.25rem;
-  margin: 0;
-  padding: 0.5rem 1rem;
-  background: color-mix(in oklch, #000 72%, transparent);
-  text-align: center;
-}
-.zos-screen__notice strong { color: oklch(0.92 0.02 110); font-size: 0.78rem; font-weight: 620; }
-.zos-screen__notice span { color: oklch(0.76 0.015 110); font-size: 0.64rem; line-height: 1.45; text-wrap: pretty; }
-.zos-screen__frame::after {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  background-image:
-    linear-gradient(90deg, transparent calc(100% - 1px), rgb(255 255 255 / 0.18) 0),
-    linear-gradient(transparent calc(100% - 1px), rgb(255 255 255 / 0.18) 0);
-  background-size: calc(100% / 52) 100%, 100% calc(100% / 16);
-  content: "";
-  opacity: 0.14;
-  pointer-events: none;
-}
-.zos-screen figcaption {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding-top: 0.42rem;
-  color: var(--muted-foreground);
-  font-family: var(--mono);
-  font-size: 0.58rem;
-}
-.zos-screen__state.is-live { color: var(--primary); }
 
-.zos-actions { margin-top: 0.85rem; }
-.zos-actions svg { width: 0.85rem; height: 0.85rem; }
 
-.zos-note { display: flex; align-items: center; gap: 0.4rem; margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 0.65rem; line-height: 1.5; }
-.zos-note svg { flex: none; width: 0.8rem; height: 0.8rem; }
-.zos-note--error { color: var(--destructive); }
 
 .channel-sidebar {
   display: grid;
@@ -941,7 +844,6 @@
   .canvas-inspector-scroll { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: visible; }
   .canvas-inspector-section { align-content: start; padding-inline: 0.75rem; border-right: 1px solid var(--border); }
   .canvas-inspector-section:last-child { border-right: 0; }
-  .zos-body { grid-template-columns: minmax(0, 1fr) minmax(17rem, 19rem); }
 }
 
 @media (max-width: 52rem) {
@@ -1007,9 +909,6 @@
   .page-heading p { display: none; }
   .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library, .studio-layout.is-game { display: block; padding-top: 0; }
   .studio-layout.is-zos { display: block; padding-top: 0; }
-  .zos-shell { padding-top: 0.65rem; }
-  .zos-body { display: block; padding-top: 0.75rem; }
-  .zos-side { margin-top: 0.9rem; }
   .game-shell { padding-top: 0.65rem; }
   .game-body { padding-top: 0.75rem; }
   .game-stage { width: 100%; }

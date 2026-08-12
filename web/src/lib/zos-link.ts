@@ -48,9 +48,22 @@ export interface ZosTelemetry {
   uptimeMs: number;
   freeKb: number;
   supplicantRestarts: number;
+  /** 0..100, or -1 before the device has a reading. Optional: older services omit it. */
+  batteryPercent?: number;
+  charging?: boolean;
+  /** True when ZOS runs from flash rather than a sideload session. */
+  flashed?: boolean;
   receivedAt: number;
   /** Report age per the service's clock; see ZosMirrorFrame.ageMs. */
   ageMs?: number;
+}
+
+/** What the console last asked the device to adopt — a request, not device truth. */
+export interface ZosRequestedSettings {
+  volume: number | null;
+  brightness: number | null;
+  /** Bumped per write; the firmware applies only sequences it has not seen. */
+  seq: number;
 }
 
 export interface ZosState {
@@ -60,6 +73,11 @@ export interface ZosState {
   telemetry: ZosTelemetry | null;
   /** Server-side liveness verdict. Trust this over any local clock arithmetic. */
   live: boolean;
+  /** Sticky: a flashed ZOS stays true even while the device is off the air. */
+  zosFlashed?: boolean;
+  requestedSettings?: ZosRequestedSettings;
+  /** Service-side event tail. Not drained on consumption, so never shown as "pending". */
+  pendingInputs?: ZosInputEvent[];
 }
 
 export interface ZosMirrorFrame {
@@ -171,6 +189,194 @@ export function describeMirror(input: {
   return { phase: "live", label: "实时同步中", notice: null, showsFrame: true };
 }
 
+// --- Remote input -----------------------------------------------------------
+//
+// The device has one knob and three buttons, and every screen the firmware has
+// is reachable through them — so the console reproduces exactly those six
+// injectable events instead of growing a per-screen remote API. POST /api/os/input queues
+// the event at the service; the firmware injects it on its next pull. The seq
+// in the response is the only receipt that exists today: the console may say
+// "queued #N" and let the mirror show whether the panel actually moved.
+
+export type ZosInputAction = "cw" | "ccw" | "press" | "hold" | "left" | "right";
+
+export interface ZosInputEvent {
+  seq: number;
+  action: ZosInputAction;
+}
+
+/** Receipt copy: what the user just did, named the way the hardware names it. */
+export const ZOS_INPUT_LABELS: Record<ZosInputAction, string> = {
+  cw: "旋钮右旋",
+  ccw: "旋钮左旋",
+  press: "按下确认",
+  hold: "长按返回",
+  left: "左键",
+  right: "右键",
+};
+
+/**
+ * Mirror of HOLD_MS in osLogic.cc. The console's center button must feel like
+ * the hardware's: the same 600 ms threshold, and hold fires the moment the
+ * threshold passes rather than on release — waiting for the release is what
+ * makes a long press feel laggy, on the device and here alike.
+ */
+export const ZOS_HOLD_MS = 600;
+
+export interface ZosPressTracker {
+  down(nowMs: number): void;
+  /**
+   * Poll while held (rAF cadence). Returns "hold" exactly once when the
+   * threshold passes — the firmware fires from the tick that crosses it.
+   */
+  tick(nowMs: number): ZosInputAction | null;
+  /**
+   * Release. "press" before the threshold; "hold" when the threshold passed
+   * without a tick having fired (a background tab throttles rAF, and the user
+   * who held past 600 ms meant BACK regardless of our frame rate); null when
+   * the hold already fired — one gesture must never emit both meanings.
+   */
+  up(nowMs: number): ZosInputAction | null;
+  /** Pointer left / capture lost: forget the press without emitting anything. */
+  cancel(): void;
+  /** 0..1 toward the hold threshold; 1 once fired, 0 when idle. */
+  progress(nowMs: number): number;
+  isDown(): boolean;
+}
+
+export function createPressTracker(holdMs = ZOS_HOLD_MS): ZosPressTracker {
+  let downAt: number | null = null;
+  let fired = false;
+  return {
+    down(nowMs) {
+      downAt = nowMs;
+      fired = false;
+    },
+    tick(nowMs) {
+      if (downAt === null || fired) return null;
+      if (nowMs - downAt < holdMs) return null;
+      fired = true;
+      return "hold";
+    },
+    up(nowMs) {
+      if (downAt === null) return null;
+      const heldMs = nowMs - downAt;
+      const alreadyFired = fired;
+      downAt = null;
+      fired = false;
+      if (alreadyFired) return null;
+      return heldMs >= holdMs ? "hold" : "press";
+    },
+    cancel() {
+      downAt = null;
+      fired = false;
+    },
+    progress(nowMs) {
+      if (fired) return 1;
+      if (downAt === null) return 0;
+      return Math.max(0, Math.min(1, (nowMs - downAt) / holdMs));
+    },
+    isDown() {
+      return downAt !== null;
+    },
+  };
+}
+
+/**
+ * One knob detent = 24° of dial, 15 detents per revolution — the coarse,
+ * positive click spacing of the hardware encoder rather than a smooth axis.
+ * The same accumulator serves pointer-drag degrees and wheel pixels; only the
+ * threshold differs.
+ */
+export const ZOS_KNOB_DETENT_DEG = 24;
+
+/** Wheel travel per detent. One notch of a mouse wheel (~100px) is one detent. */
+export const ZOS_WHEEL_DETENT_PX = 100;
+
+/**
+ * Pointer position → dial angle in degrees, 0° at 12 o'clock, clockwise
+ * positive, range (-180, 180]. atan2 of (dx, -dy) rather than the usual
+ * (dy, dx) puts zero at the top, which is where the knob's marker sits.
+ */
+export function pointerAngleDeg(centerX: number, centerY: number, x: number, y: number): number {
+  return (Math.atan2(x - centerX, -(y - centerY)) * 180) / Math.PI;
+}
+
+/**
+ * Shortest signed rotation from one angle to another, normalized to
+ * [-180, 180). A drag crossing the ±180° seam must read as a small step in the
+ * direction of travel, not a near-full spin the other way.
+ */
+export function angleDeltaDeg(fromDeg: number, toDeg: number): number {
+  let delta = (toDeg - fromDeg) % 360;
+  if (delta >= 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  return delta;
+}
+
+/**
+ * Fold continuous travel into whole detents plus a carried remainder.
+ * `steps` is signed (positive = cw); the carry keeps sub-detent travel so a
+ * slow drag still clicks over eventually instead of being rounded away.
+ */
+export function accumulateDetents(
+  carry: number,
+  delta: number,
+  detent = ZOS_KNOB_DETENT_DEG,
+): { steps: number; carry: number } {
+  const total = carry + delta;
+  const steps = Math.trunc(total / detent);
+  return { steps, carry: total - steps * detent };
+}
+
+/**
+ * Keyboard → device input. Arrows are the knob (auto-repeat allowed: a held
+ * arrow is a steadily turning knob), Enter/Space the middle button, Backspace
+ * and Escape the hold-for-back, A/D the side buttons. Press and hold suppress
+ * auto-repeat — the hardware cannot emit five confirms from one finger, so
+ * neither may the keyboard.
+ */
+export function zosInputForKey(key: string, repeat = false): ZosInputAction | null {
+  switch (key) {
+    case "ArrowRight":
+      return "cw";
+    case "ArrowLeft":
+      return "ccw";
+    case "Enter":
+    case " ":
+      return repeat ? null : "press";
+    case "Backspace":
+    case "Escape":
+      return repeat ? null : "hold";
+    case "a":
+    case "A":
+      return "left";
+    case "d":
+    case "D":
+      return "right";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether the focused element owns this key, so the global remote must stand
+ * down. Editables own everything; a focused button owns its activation keys
+ * (its native click already routes through the same send path — a global
+ * handler would double-fire); a slider owns the arrows it steps by.
+ */
+export function zosKeyCaptured(
+  key: string,
+  target: { editable: boolean; button: boolean; slider: boolean },
+): boolean {
+  if (target.editable) return true;
+  if (target.button && (key === "Enter" || key === " ")) return true;
+  if (target.slider && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(key)) {
+    return true;
+  }
+  return false;
+}
+
 const SCREEN_LABELS: Record<string, string> = {
   launcher: "启动器",
   channel: "频道",
@@ -280,8 +486,71 @@ export interface ZosReadoutRow {
   note?: string;
 }
 
+export interface ZosBatteryStatus {
+  /** e.g. "82%"; the raw -1 sentinel never reaches here. */
+  label: string;
+  charging: boolean;
+  tone: "ok" | "low" | "critical";
+}
+
 /**
- * The telemetry block, resolved to text.
+ * Battery, or nothing. -1 means the device has no reading yet, and an absent
+ * field means an older service — both must render as nothing at all, never as
+ * 0%: a wrong battery number reads as "grab the charger" or "all fine", and
+ * either can be the opposite of the truth.
+ */
+export function describeBattery(percent?: number, charging?: boolean): ZosBatteryStatus | null {
+  if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0) return null;
+  const clamped = Math.min(100, Math.round(percent));
+  return {
+    label: `${clamped}%`,
+    charging: charging === true,
+    tone: clamped <= 15 ? "critical" : clamped <= 40 ? "low" : "ok",
+  };
+}
+
+/**
+ * The glanceable facts: battery, Wi-Fi, uptime. These are what a person looks
+ * up in passing, so they live right under the mirror as a strip rather than in
+ * a table. Offline means every field is null — the strip shows nothing rather
+ * than the last numbers the device happened to send.
+ */
+export interface ZosVitals {
+  battery: ZosBatteryStatus | null;
+  wifi: string | null;
+  uptime: string | null;
+}
+
+export function describeVitals(state: ZosState | null): ZosVitals {
+  const telemetry = state?.live === true ? state.telemetry : null;
+  if (!telemetry) return { battery: null, wifi: null, uptime: null };
+  return {
+    battery: describeBattery(telemetry.batteryPercent, telemetry.charging),
+    wifi: telemetry.wifi || null,
+    uptime: formatUptime(telemetry.uptimeMs),
+  };
+}
+
+/**
+ * What a power cycle restores. Only the device can answer, and the answer is
+ * sticky on the service (`zosFlashed`) because it outlives the report: telling
+ * a user "power-cycle brings back the stock firmware" while ZOS is in flash is
+ * the failure that matters, and it is exactly what falling back to the live
+ * telemetry would do the moment the device stops reporting.
+ */
+export function describeResidency(state: ZosState | null): ZosReadoutRow {
+  if (state?.zosFlashed === true) {
+    return { key: "residency", label: "固件驻留", value: "已刷入闪存", note: "断电重启后仍是 ZOS。" };
+  }
+  if (state?.live === true && state.telemetry) {
+    return { key: "residency", label: "固件驻留", value: "临时侧载", note: "断电重启会回到原厂固件。" };
+  }
+  return { key: "residency", label: "固件驻留", value: "未知" };
+}
+
+/**
+ * The detail block, resolved to text. Battery / Wi-Fi / uptime moved to the
+ * vitals strip; what remains here is the seldom-read remainder.
  *
  * Offline means offline: every field collapses to 离线 rather than showing the
  * last numbers the device happened to send, because a stale IP and uptime read
@@ -295,10 +564,7 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
   if (!telemetry) {
     return [
       offline("screen", "当前界面"),
-      offline("focus", "设备焦点"),
-      offline("wifi", "Wi-Fi"),
       offline("ip", "IP 地址"),
-      offline("uptime", "运行时长"),
       offline("free", "空闲内存"),
       offline("supplicant", "Wi-Fi 重连"),
       offline("heartbeat", "最近心跳"),
@@ -309,10 +575,7 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
     : Math.max(0, now - telemetry.receivedAt);
   return [
     { key: "screen", label: "当前界面", value: screenLabel(telemetry.screen) },
-    { key: "focus", label: "设备焦点", value: telemetry.focus || "—" },
-    { key: "wifi", label: "Wi-Fi", value: telemetry.wifi || "—" },
     { key: "ip", label: "IP 地址", value: telemetry.ip || "—" },
-    { key: "uptime", label: "运行时长", value: formatUptime(telemetry.uptimeMs) },
     { key: "free", label: "空闲内存", value: `${telemetry.freeKb} KB` },
     {
       key: "supplicant",
@@ -329,6 +592,36 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
     { key: "heartbeat", label: "最近心跳", value: `${Math.round(heartbeatAgeMs / 1000)} 秒前` },
   ];
 }
+
+/**
+ * The device's own volume scale is 0..6 notches; 0 is genuinely mute, not
+ * merely quiet, so it gets the word rather than a number.
+ */
+export function volumeText(level: number | null): string {
+  if (level === null) return "未知";
+  return level === 0 ? "静音" : `${level} 级`;
+}
+
+/** Brightness is 1..10 — the firmware never lets the panel go fully dark. */
+export function brightnessText(level: number | null): string {
+  return level === null ? "未知" : `${level} / 10`;
+}
+
+/**
+ * Quick-launch labels for `game:<id>` focus targets. The ids are the firmware
+ * engines' own id() strings, duplicated here on purpose (same reasoning as the
+ * test suite): importing GAME_REGISTRY would let a console-side rename sail
+ * through while the firmware silently ignores the new value.
+ */
+export const ZOS_GAME_SHORTCUTS: readonly { id: string; label: string }[] = [
+  { id: "breakout", label: "打砖块" },
+  { id: "flappy", label: "像素小鸟" },
+  { id: "snake", label: "贪吃蛇" },
+  { id: "pong", label: "Pong" },
+  { id: "racer", label: "赛车" },
+  { id: "shooter", label: "射击" },
+  { id: "tetris", label: "俄罗斯方块" },
+];
 
 export interface ZosDriverStatus {
   pinned: boolean;
@@ -393,6 +686,14 @@ export interface ZosLink {
   refreshState(): Promise<void>;
   /** PUT /api/os/display. Resolves with the display the service accepted. */
   setDisplay(focus: string | null, pinned: boolean): Promise<ZosDisplay>;
+  /**
+   * POST /api/os/input. Resolves with the queued event — the seq is the only
+   * receipt: it proves the service accepted the press, not that the device
+   * performed it. The mirror is the evidence for that.
+   */
+  sendInput(action: ZosInputAction): Promise<ZosInputEvent>;
+  /** PUT /api/os/settings. Resolves with what the service will now request. */
+  setSettings(settings: { volume?: number; brightness?: number }): Promise<ZosRequestedSettings>;
 }
 
 async function describeFailure(response: Response): Promise<string> {
@@ -502,6 +803,27 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
       // The service echoes the sanitized command, so the console shows what the
       // firmware will actually get rather than what the click asked for.
       return body.display;
+    },
+    async sendInput(action) {
+      const body = await readJson<{ event: ZosInputEvent }>("/api/os/input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      return body.event;
+    },
+    async setSettings(settings) {
+      // Only name the field being changed: PUT with both would overwrite the
+      // one the user did not touch with whatever this tab last saw.
+      const payload: { volume?: number; brightness?: number } = {};
+      if (settings.volume !== undefined) payload.volume = settings.volume;
+      if (settings.brightness !== undefined) payload.brightness = settings.brightness;
+      const body = await readJson<{ requested: ZosRequestedSettings }>("/api/os/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return body.requested;
     },
   };
 }

@@ -136,10 +136,22 @@ void MusicScreen::render(Surface& out, int nowMs) {
   if (!mPresent) {
     equalizer(out, kIconX, 2, nowMs, false);
     const int clipW = out.getWidth() - kTextX;
-    // 未播放
-    const char* text = "\xE6\x9C\xAA\xE6\x92\xAD\xE6\x94\xBE";
+    // Which emptiness this is. The three are genuinely different problems and
+    // only one of them is about music, so they must not share a word.
+    const char* text;
+    if (!mLinkConfigured) {
+      text = "\xE6\x9C\xAA\xE9\x85\x8D\xE7\xBD\xAE";  // 未配置 — no console address on this device
+    } else if (!mLinkOnline) {
+      text = "\xE7\xA6\xBB\xE7\xBA\xBF";              // 离线 — address known, no document has arrived
+    } else {
+      text = "\xE6\x9C\xAA\xE6\x92\xAD\xE6\x94\xBE";  // 未播放 — the service says nothing is playing
+    }
     const float k = ease::outQuad(ease::progress(nowMs, mEnteredMs, 320));
-    text::draw(out, text, kTextX, 2, dim(kArtist, k), kTextX, clipW);
+    // Centred rather than left-aligned: these are two and three cells wide, and
+    // a flush-left 离线 next to a window-filling 未播放 reads as a layout bug.
+    const int width = text::measure(text);
+    const int x = kTextX + (clipW - width) / 2;
+    text::draw(out, text, x, 2, dim(kArtist, k), kTextX, clipW);
     return;
   }
 
@@ -165,7 +177,17 @@ void MusicScreen::render(Surface& out, int nowMs) {
     color = title ? kTitle : kArtist;
     elapsed = (nowMs - mEnteredMs) % kRotateMs;
   }
-  if (line.empty()) line = mTrack.empty() ? "--" : mTrack;
+  // A now-playing document carrying no text at all is a real shape, not a
+  // defensive hypothetical: the service resolves a track id to a title through
+  // the provider, and when that lookup fails it still publishes the transport so
+  // the buttons keep working. The old fallback was "--" — two five-pixel dashes
+  // on a 52x16 panel, indistinguishable from a screen that is not drawing, which
+  // is exactly the reading that sent this bug to the firmware.
+  if (line.empty()) {
+    line = playing ? "\xE6\x92\xAD\xE6\x94\xBE\xE4\xB8\xAD"   // 播放中
+                   : "\xE5\xB7\xB2\xE6\x9A\x82\xE5\x81\x9C";  // 已暂停
+    color = kArtist;
+  }
 
   const int width = text::measure(line.c_str());
   const int x = width <= clipW ? kTextX + (clipW - width) / 2

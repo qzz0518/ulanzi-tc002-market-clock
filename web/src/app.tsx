@@ -905,7 +905,7 @@ export function App() {
     ? {
         kicker: "TC002 ZOS CONSOLE",
         title: "系统固件控制台",
-        description: "接管时钟正在显示的频道，并同步镜像固件真正送上面板的每一帧。",
+        description: "远程转动旋钮、接管正在显示的频道，并同步镜像固件真正送上面板的每一帧。",
       }
     : view === "music"
     ? {

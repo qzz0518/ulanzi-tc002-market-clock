@@ -55,9 +55,16 @@ class HostLink {
     int durationMs;
     uint64_t stampMonoMs;
 
+    // Console -> device. See StateDoc for why each carries a sequence.
+    int settingsSeq;
+    int requestedVolume;
+    int requestedBrightness;
+    std::vector<StateDoc::Input> inputs;
+
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
                  consecutiveFailures(0), nowPlaying(false), playing(false),
-                 positionMs(0), durationMs(0), stampMonoMs(0) {}
+                 positionMs(0), durationMs(0), stampMonoMs(0), settingsSeq(0),
+                 requestedVolume(-1), requestedBrightness(-1) {}
   };
 
   HostLink();

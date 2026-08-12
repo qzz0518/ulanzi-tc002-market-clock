@@ -21,6 +21,7 @@
 #include "core/Text.h"
 #include "core/Transitions.h"
 #include "net/FrameBundle.h"
+#include "net/HostLink.h"
 #include "net/HttpClient.h"
 #include "net/HttpServer.h"
 #include "net/SetupPortal.h"
@@ -64,6 +65,30 @@ int litPixels(const Surface& s) {
   int n = 0;
   for (int y = 0; y < s.getHeight(); ++y) {
     for (int x = 0; x < s.getWidth(); ++x) {
+      const Color c = s.getPixel(x, y);
+      if (c.r || c.g || c.b) ++n;
+    }
+  }
+  return n;
+}
+
+bool surfacesDiffer(const Surface& a, const Surface& b) {
+  for (int y = 0; y < a.getHeight(); ++y) {
+    for (int x = 0; x < a.getWidth(); ++x) {
+      if (a.getPixel(x, y).toRGB888() != b.getPixel(x, y).toRGB888()) return true;
+    }
+  }
+  return false;
+}
+
+// The music screen's text window: right of the 12 px equaliser cell and above
+// the playhead row. Counting only this region is what separates "the panel is
+// drawing" from "the panel is drawing the track" — the reported failure had a
+// lit equaliser and a lit playhead and nothing between them.
+int musicTextPixels(const Surface& s) {
+  int n = 0;
+  for (int y = 0; y < s.getHeight() - 1; ++y) {
+    for (int x = 14; x < s.getWidth(); ++x) {
       const Color c = s.getPixel(x, y);
       if (c.r || c.g || c.b) ++n;
     }
@@ -2019,6 +2044,76 @@ void checkStateDoc() {
   StateDoc staleFocus;
   staleFocus.parse("seq\t7\nfocus\tgone\nitem\tchannel\ta\tb\n");
   check(staleFocus.focusIndex() == -1, "a focus naming a removed channel reports -1");
+
+  // --- now playing ---------------------------------------------------------
+  // state-doc.txt above is a hub with no music session, so every assertion in
+  // this function used to pass on a document that has never carried an `np`
+  // block — and checkMusicScreen hand-feeds setNowPlaying(), so neither half
+  // ever saw the other. That is how a panel showing nothing could sit behind a
+  // green self-check.
+  //
+  // These bytes are OsLinkHub.serialize() with a now-playing session applied,
+  // copied verbatim. The field ORDER matters and is asserted by using it: `pos`
+  // and `dur` sit between `playing` and `lyric`, and `np` sits between `mirror`
+  // and `menu`, so a parser that keyed off line position rather than name would
+  // pass on the menu-only fixture and fail here.
+  static const char* kNowPlayingDoc =
+      "seq\t3\npinned\t0\nmirror\t0\n"
+      "np\t1\ntrack\tOne Last Kiss\nartist\tHikaru Utada\nplaying\t1\n"
+      "pos\t41000\ndur\t244000\nlyric\tWasurerarenai hito\n"
+      "menu\t4\n"
+      "item\tchannel\tbtc\t\xE5\xB8\x82\xE5\x9C\xBA\xE8\xBD\xAE\xE6\x92\xAD\n"
+      "item\tmusic\tmusic\t\xE9\x9F\xB3\xE4\xB9\x90\n"
+      "item\tgame\tgame\t\xE6\xB8\xB8\xE6\x88\x8F\n"
+      "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+
+  StateDoc np;
+  check(np.parse(kNowPlayingDoc), "a document carrying now playing parses");
+  check(np.hasNowPlaying(), "np\t1 reads as something playing");
+  check(np.playing(), "playing\t1 reads as running rather than paused");
+  // Each field by name and in full. A title is one tab-separated value with a
+  // space in it, which is the case the 4-field cap in splitTabs has to get right:
+  // the value keeps everything after the first tab rather than stopping at the
+  // space, and it must not spill into the `item` records that share the loop.
+  check(np.track() == "One Last Kiss", "the track survives, spaces and all");
+  check(np.artist() == "Hikaru Utada", "the artist survives");
+  check(np.lyric() == "Wasurerarenai hito", "the lyric survives");
+  check(np.positionMs() == 41000, "pos is read as milliseconds");
+  check(np.durationMs() == 244000, "dur is read as milliseconds");
+  check(np.seq() == 3 && !np.pinned() && !np.mirror(),
+        "the fields around the np block still parse");
+  check(np.items().size() == 4, "the menu still parses after an np block");
+  if (np.items().size() == 4) {
+    check(np.items()[0].id == "btc" && np.items()[3].id == "settings",
+          "and no np line was mistaken for an item");
+  }
+
+  // Reparsing is a full reset, not a merge. The service omits the whole block
+  // when nothing is playing, and a parser that kept the last song would leave a
+  // stopped track on the panel indefinitely.
+  check(np.parse("seq\t4\nmenu\t0\n"), "a document with no np block still parses");
+  check(!np.hasNowPlaying() && np.track().empty() && np.artist().empty() &&
+            np.lyric().empty() && np.positionMs() == 0 && np.durationMs() == 0,
+        "and clears every now-playing field rather than keeping the last song");
+
+  // The service omits `lyric` entirely when the line is empty, and omits
+  // `pos`/`dur` for nothing — but a firmware that only worked on the complete
+  // shape would be one service change away from a blank row.
+  StateDoc noLyric;
+  noLyric.parse("seq\t5\nnp\t1\ntrack\tHer Majesty\nartist\tThe Beatles\nplaying\t0\n"
+                "pos\t0\ndur\t23000\nmenu\t0\n");
+  check(noLyric.hasNowPlaying() && !noLyric.playing() && noLyric.lyric().empty() &&
+            noLyric.track() == "Her Majesty",
+        "an omitted lyric leaves the track, not an empty document");
+
+  StateDoc unnamed;
+  unnamed.parse("seq\t6\nnp\t1\ntrack\t\nartist\t\nplaying\t1\npos\t10\ndur\t20\nmenu\t0\n");
+  check(unnamed.hasNowPlaying() && unnamed.track().empty(),
+        "np survives a title the service could not resolve");
+
+  StateDoc stopped;
+  stopped.parse("seq\t7\nnp\t0\nmenu\t0\n");
+  check(!stopped.hasNowPlaying(), "np\t0 is not playing");
 }
 
 // A scriptable stand-in for zknet: every predicate is a field the test sets, so
@@ -2481,6 +2576,187 @@ void checkMusicScreen() {
     }
   }
   check(differs, "a lyric displaces the title rather than being dropped");
+
+  // A now-playing document with no resolvable text. The service publishes the
+  // transport even when the provider lookup for the title fails, so this shape
+  // reaches the panel; the old fallback drew "--", ten lit pixels, which on this
+  // panel is what "the screen has nothing on it" looks like.
+  tcos::MusicScreen unnamed;
+  Surface nameless(52, 16);
+  unnamed.onEnter(0);
+  unnamed.setNowPlaying(true, "", "", "", true, 41000, 244000, 0);
+  unnamed.render(nameless, 2000);
+  check(musicTextPixels(nameless) > 30,
+        "a track with no title says so in words rather than in two dashes");
+
+  // The empty state has to name WHICH emptiness it is. All three used to render
+  // the identical "未播放": the service saying nothing is playing, the device
+  // failing to reach the service, and the device never having been told where
+  // the service is. Only the first is about music, and the third is the ordinary
+  // state of a freshly flashed unit.
+  tcos::MusicScreen link;
+  Surface quiet(52, 16);
+  Surface offline(52, 16);
+  Surface unset(52, 16);
+  link.onEnter(0);
+  link.setLink(true, true);
+  link.render(quiet, 1000);
+  link.setLink(true, false);
+  link.render(offline, 1000);
+  link.setLink(false, false);
+  link.render(unset, 1000);
+  check(surfacesDiffer(quiet, offline) && surfacesDiffer(offline, unset) &&
+            surfacesDiffer(quiet, unset),
+        "nothing playing, offline and unconfigured are three different panels");
+  check(musicTextPixels(quiet) > 0 && musicTextPixels(offline) > 0 &&
+            musicTextPixels(unset) > 0,
+        "and each of them puts words on the panel");
+}
+
+// The seam between the parser, the link and the screen.
+//
+// Every piece of the music path had a test and the path itself had none:
+// checkStateDoc above ran on a fixture with no now-playing block at all, and
+// checkMusicScreen calls setNowPlaying() by hand. A field that reached StateDoc
+// and never reached the panel — or a snapshot copy that forgot one — was
+// invisible to both, which is exactly the shape of "the service is serving it
+// and the panel shows nothing".
+//
+// So this drives the real service bytes through the real HostLink copy and the
+// real Shell, with osLogic's own argument order and clock conversion, and then
+// asserts pixels.
+void checkMusicPath() {
+  using tcos::HostLink;
+  using tcos::LauncherScreen;
+  using tcos::MusicScreen;
+  using tcos::Shell;
+  using tcos::StateDoc;
+
+  // Verbatim OsLinkHub.serialize() for a playing Spotify session.
+  static const char* kDoc =
+      "seq\t12\npinned\t0\nmirror\t0\n"
+      "np\t1\ntrack\tOne Last Kiss\nartist\tHikaru Utada\nplaying\t1\n"
+      "pos\t41000\ndur\t244000\nlyric\tWasurerarenai hito\n"
+      "menu\t2\n"
+      "item\tmusic\tmusic\t\xE9\x9F\xB3\xE4\xB9\x90\n"
+      "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+
+  // Real device numbers, not zero-based ones: osLogic's sStartMs is the uptime
+  // at onUI_init and the document's stamp is a raw CLOCK_MONOTONIC reading, so
+  // the conversion (int)(stampMonoMs - sStartMs) is a subtraction of two large
+  // unsigned values truncated to int. Both being small would hide a sign error.
+  const uint64_t kStartMs = 1234567;
+  const uint64_t kStampMs = 1250000;
+
+  StateDoc doc;
+  check(doc.parse(kDoc), "the live document parses");
+
+  // The real copy runPull performs, not a re-implementation of it here.
+  HostLink hlink;
+  hlink.adoptDocument(doc, kStampMs);
+  const HostLink::Snapshot snap = hlink.snapshot();
+  check(snap.online && snap.seq == 12, "the link adopts the document");
+  check(snap.nowPlaying, "now playing survives the copy into the snapshot");
+  check(snap.playing, "and so does the transport state");
+  check(snap.track == "One Last Kiss" && snap.artist == "Hikaru Utada" &&
+            snap.lyric == "Wasurerarenai hito",
+        "and every text field, not just the ones the ring needs");
+  check(snap.positionMs == 41000 && snap.durationMs == 244000,
+        "and the playhead the screen advances locally");
+  check(snap.stampMonoMs == kStampMs,
+        "and the stamp, without which the playhead has no origin");
+  check(snap.items.size() == 2, "the menu still arrives alongside it");
+
+  // Now the screen, wired the way osLogic wires it.
+  LauncherScreen launcher;
+  MusicScreen music;
+  Shell shell(52, 16);
+  Surface frame(52, 16);
+
+  std::vector<LauncherScreen::Entry> entries;
+  LauncherScreen::Entry entry;
+  entry.label = "\xE9\x9F\xB3\xE4\xB9\x90";  // 音乐
+  entry.icon = LauncherScreen::kIconMusic;
+  entry.id = 1;
+  entries.push_back(entry);
+  entry.label = "\xE8\xAE\xBE\xE7\xBD\xAE";  // 设置
+  entry.icon = LauncherScreen::kIconSettings;
+  entry.id = 3;
+  entries.push_back(entry);
+  launcher.setEntries(entries, 0);
+  shell.setEntryStyle(&music, Shell::kEntryEqualiser);
+  shell.reset(&launcher, (int)(kStampMs - kStartMs));
+
+  // 40 ms ticks, and the user pressing the knob on 音乐 — the manual navigation
+  // the bug was reported against, not a console pin.
+  int blankTextFrames = 0;
+  int firstBlankStep = -1;
+  int enteredAtMs = 0;
+  uint64_t mono = kStampMs + 500;
+  for (int step = 0; step < 500; ++step) {
+    mono += 40;
+    const int nowMs = (int)(mono - kStartMs);
+    if (step == 5) shell.onInput(tcos::kInputPress, nowMs);
+
+    if (launcher.takeActivated() == 1) {
+      shell.push(&music, nowMs);
+      enteredAtMs = nowMs;
+    }
+    if (shell.top() == &music) {
+      // osLogic's call, argument for argument.
+      music.setNowPlaying(snap.nowPlaying, snap.track, snap.artist, snap.lyric, snap.playing,
+                          snap.positionMs, snap.durationMs,
+                          (int)(snap.stampMonoMs - kStartMs));
+      music.takeAction();
+    }
+    shell.render(frame, nowMs);
+
+    // Once the 300 ms equaliser entry is over, there is no frame in which the
+    // panel is allowed to be wordless: the marquee only ever moves the origin
+    // between -(width - window) and 0, so part of the line is always inside the
+    // clip. A blank row here is the reported bug.
+    if (enteredAtMs > 0 && nowMs - enteredAtMs > Shell::entryMs(Shell::kEntryEqualiser) &&
+        musicTextPixels(frame) == 0) {
+      ++blankTextFrames;
+      if (firstBlankStep < 0) firstBlankStep = step;
+    }
+  }
+  check(shell.top() == &music, "pressing 音乐 lands on the music screen");
+  check(blankTextFrames == 0, "and the text row is never blank once it is there");
+
+  // What is on that row has to be the lyric that came off the wire, not merely
+  // something. Compared against a screen fed the same values directly: any field
+  // lost between StateDoc, the snapshot and the screen changes these pixels.
+  const int sampleMs = (int)(mono - kStartMs);
+  MusicScreen direct;
+  Surface expected(52, 16);
+  direct.onEnter(enteredAtMs);
+  direct.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "Wasurerarenai hito", true,
+                       41000, 244000, (int)(kStampMs - kStartMs));
+  direct.render(expected, sampleMs);
+  shell.render(frame, sampleMs);
+  check(!surfacesDiffer(frame, expected),
+        "the panel is pixel-identical to the document it was served");
+
+  // And the lyric specifically won the row: fed the same document minus its
+  // lyric line, the panel must look different. Without this the check above
+  // would pass on a firmware that dropped `lyric` and drew the title.
+  MusicScreen titleOnly;
+  Surface withoutLyric(52, 16);
+  titleOnly.onEnter(enteredAtMs);
+  titleOnly.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "", true, 41000, 244000,
+                          (int)(kStampMs - kStartMs));
+  titleOnly.render(withoutLyric, sampleMs);
+  check(surfacesDiffer(frame, withoutLyric), "the lyric, not the title, is on the row");
+
+  // A document with no np block must put the screen back into its empty state
+  // rather than leaving the last song on the panel forever.
+  StateDoc stopped;
+  check(stopped.parse("seq\t13\nmenu\t0\n"), "a document with music stopped parses");
+  hlink.adoptDocument(stopped, kStampMs + 60000);
+  const HostLink::Snapshot after = hlink.snapshot();
+  check(!after.nowPlaying && after.track.empty() && after.lyric.empty(),
+        "and clears the snapshot rather than keeping a track nobody is playing");
 }
 
 // A server's reply, assembled by hand. Everything a real one carries that this
@@ -3270,6 +3546,8 @@ int main() {
   std::printf("  settings screen ok\n");
   checkMusicScreen();
   std::printf("  music screen ok\n");
+  checkMusicPath();
+  std::printf("  music path ok\n");
   checkNavigationFlow();
   std::printf("  navigation flow ok\n");
   checkLevelOverlay();

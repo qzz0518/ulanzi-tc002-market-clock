@@ -45,8 +45,8 @@ export function ZosMirrorScreen({ rgbBase64, status }: ZosMirrorScreenProps) {
   }, [rgbBase64, status.showsFrame]);
 
   return (
-    <figure className="zos-screen">
-      <div className="zos-screen__frame">
+    <figure className="zc-screen">
+      <div className="zc-screen__frame">
         <canvas
           ref={canvasRef}
           width={ZOS_SCREEN_WIDTH}
@@ -55,7 +55,7 @@ export function ZosMirrorScreen({ rgbBase64, status }: ZosMirrorScreenProps) {
           aria-label={`时钟面板 52 × 16 实时镜像；${status.label}`}
         />
         {status.notice && (
-          <p className="zos-screen__notice" role="status">
+          <p className="zc-screen__notice" role="status">
             <strong>{status.label}</strong>
             <span>{status.notice}</span>
           </p>
@@ -63,7 +63,7 @@ export function ZosMirrorScreen({ rgbBase64, status }: ZosMirrorScreenProps) {
       </div>
       <figcaption>
         <span>52 × 16 · 固件合成器直出</span>
-        <span className={status.phase === "live" ? "zos-screen__state is-live" : "zos-screen__state"}>
+        <span className={status.phase === "live" ? "zc-screen__state is-live" : "zc-screen__state"}>
           {status.label}
         </span>
       </figcaption>
