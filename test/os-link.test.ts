@@ -251,4 +251,142 @@ describe("device settings requested from the console", () => {
     expect(hub.currentSeq()).toBe(before);
     expect(hub.getDeviceSettings().seq).toBe(0);
   });
+
+  // --- 主题设置 --------------------------------------------------------------
+  // One theme store for two firmwares (ADR 0007): the console's panel writes
+  // sDeviceState, the sideloaded lyrics player reads it from
+  // /api/music/device/state, and ZOS reads the same three values out of here.
+
+  test("carries the theme even before anyone has chosen one", () => {
+    const hub = new OsLinkHub();
+    const lines = hub.serialize().split("\n");
+    // The defaults are sDeviceState's, so the two agree before the first write
+    // rather than only after one.
+    expect(hub.getLyricTheme()).toEqual({ mode: "spotlight", skin: "signal", accent: null });
+    expect(lines).toContain("mode\tspotlight");
+    expect(lines).toContain("skin\tsignal");
+    expect(lines.some((line) => line.startsWith("accent\t"))).toBe(false);
+  });
+
+  test("emits the theme outside the np block, so the empty states keep their colour", () => {
+    const hub = new OsLinkHub();
+    hub.setLyricTheme({ mode: "cascade", skin: "tape", accent: "FF8844" });
+    const lines = hub.serialize().split("\n");
+    // Nothing is playing here at all. A theme nested under `np` would drop back
+    // to the defaults the moment the user pressed pause — the colour would walk
+    // off the panel with the music, and the three empty states (未配置 / 离线 /
+    // 未播放) would never have one.
+    expect(lines.some((line) => line.startsWith("np\t"))).toBe(false);
+    expect(lines).toContain("mode\tcascade");
+    expect(lines).toContain("skin\ttape");
+    // Lower-cased on the way in, because the firmware compares six hex digits
+    // and the console's colour picker does not promise a case.
+    expect(lines).toContain("accent\tff8844");
+  });
+
+  test("the theme survives a track ending", () => {
+    const hub = new OsLinkHub();
+    hub.setLyricTheme({ skin: "arcade" });
+    hub.setNowPlaying({
+      track: "One Last Kiss", artist: "Hikaru Utada", playing: true,
+      positionMs: 41_000, durationMs: 244_000, lyric: "Wasurerarenai hito",
+      lyricStartMs: 40_500, lyricEndMs: 44_000,
+    });
+    hub.setNowPlaying(null);
+    expect(hub.serialize()).toContain("skin\tarcade");
+  });
+
+  test("ignores a value it does not recognise instead of failing the write", () => {
+    const hub = new OsLinkHub();
+    hub.setLyricTheme({ skin: "tape" });
+    const before = hub.currentSeq();
+    // Defence in depth behind applyControlPatch, which has already rejected
+    // these. A hub is not a request handler: dropping one bad field beats
+    // failing an update that also carried a good one.
+    hub.setLyricTheme({ mode: "kaleidoscope" as never, skin: "vaporwave" as never });
+    hub.setLyricTheme({ accent: "ff88" });
+    hub.setLyricTheme({ accent: "ff8844aa" });
+    hub.setLyricTheme({ accent: 0xff8844 as never });
+    expect(hub.getLyricTheme()).toEqual({ mode: "spotlight", skin: "tape", accent: null });
+    expect(hub.currentSeq()).toBe(before);
+  });
+
+  test("a theme write that changes nothing does not wake every parked poll", async () => {
+    const hub = new OsLinkHub();
+    hub.setLyricTheme({ mode: "ticker", skin: "blueprint", accent: "00ff99" });
+    const seq = hub.currentSeq();
+    const pending = hub.waitForChange(seq, 40);
+    // The control handler re-publishes this on every /control and /report, and
+    // the console re-sends its restored theme after the first poll. Bumping for
+    // an unchanged value would turn that into a broadcast storm.
+    hub.setLyricTheme({ mode: "ticker", skin: "blueprint", accent: "00FF99" });
+    expect(hub.currentSeq()).toBe(seq);
+    expect(hub.pendingWaiters()).toBe(1);
+    await pending;
+  });
+
+  test("clearing the accent is a change, not a missing field", () => {
+    const hub = new OsLinkHub();
+    hub.setLyricTheme({ accent: "ff8844" });
+    const seq = hub.currentSeq();
+    hub.setLyricTheme({ accent: null });
+    expect(hub.currentSeq()).toBeGreaterThan(seq);
+    expect(hub.serialize().split("\n").some((line) => line.startsWith("accent\t"))).toBe(false);
+    // A patch that simply omits `accent` must not clear it — the console sends
+    // one key per click, so every write is a patch of exactly one field.
+    hub.setLyricTheme({ accent: "112233" });
+    hub.setLyricTheme({ mode: "skyline" });
+    expect(hub.getLyricTheme().accent).toBe("112233");
+  });
+
+  // --- the lyric window ------------------------------------------------------
+
+  test("carries the current line's window, which is what the modes animate against", () => {
+    const hub = new OsLinkHub();
+    hub.setNowPlaying({
+      track: "One Last Kiss", artist: "Hikaru Utada", playing: true,
+      positionMs: 41_000, durationMs: 244_000, lyric: "Wasurerarenai hito",
+      lyricStartMs: 40_500, lyricEndMs: 44_000,
+    });
+    const lines = hub.serialize().split("\n");
+    expect(lines).toContain("lyric\tWasurerarenai hito");
+    expect(lines).toContain("lyricat\t40500");
+    expect(lines).toContain("lyricend\t44000");
+  });
+
+  test("omits the window rather than sending a degenerate one", () => {
+    const hub = new OsLinkHub();
+    hub.setNowPlaying({
+      track: "Her Majesty", artist: "The Beatles", playing: true,
+      positionMs: 1_000, durationMs: 23_000, lyric: "a pretty nice girl",
+      // A caller that cannot answer — an untimed lyric, or a console that
+      // predates this field. The absence carries the meaning, which is also
+      // exactly what an older service looks like to a newer firmware.
+      lyricStartMs: 0, lyricEndMs: 0,
+    });
+    const lines = hub.serialize().split("\n");
+    expect(lines).toContain("lyric\ta pretty nice girl");
+    expect(lines.some((line) => line.startsWith("lyricat\t"))).toBe(false);
+    expect(lines.some((line) => line.startsWith("lyricend\t"))).toBe(false);
+  });
+
+  test("a repeated chorus line still wakes the device", () => {
+    let now = 1_000_000;
+    const hub = new OsLinkHub(() => now);
+    const line = (lyricStartMs: number) => ({
+      track: "T", artist: "A", playing: true,
+      positionMs: lyricStartMs, durationMs: 200_000, lyric: "啦啦啦",
+      lyricStartMs, lyricEndMs: lyricStartMs + 3_000,
+    });
+    hub.setNowPlaying(line(30_000));
+    const seq = hub.currentSeq();
+    now += 3_000;
+    // Same words, new line. Keyed on the text alone this would not bump, the
+    // device would never see the new window, and it would keep animating the
+    // previous line with progress pinned at 1 — the line sitting there fully
+    // sung while the song moved on.
+    hub.setNowPlaying(line(33_000));
+    expect(hub.currentSeq()).toBeGreaterThan(seq);
+    expect(hub.serialize()).toContain("lyricat\t33000");
+  });
 });

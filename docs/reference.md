@@ -76,10 +76,11 @@ Frankfurter / Gold API，无备用路由），报价失败即降级显示。
 
 ## 天气与日出日落
 
-「天气粒子」与「日出日落色温钟」按地名搜索定位：在内容设置里输入地名（英文或拼音），
-服务端经 Open-Meteo Geocoding（免 key）返回候选，选中后自动填入经纬度，无需手填坐标。
-天气屏左上角用 5px ASCII 字显示所选地点的英文名（放不下按像素宽度截断）；天气实况来自
-Open-Meteo Forecast，约每 10 分钟一档，地名搜索结果同样在服务端缓存 10 分钟。
+「天气粒子」「大字天气钟」「取景框钟」与「日出日落色温钟」按地名搜索定位：在内容设置里
+输入地名（英文或拼音），服务端经 Open-Meteo Geocoding（免 key）返回候选，选中后自动填入
+经纬度，无需手填坐标。「天气粒子」左上角用 5px ASCII 字显示所选地点的英文名（放不下按
+像素宽度截断）；天气实况来自 Open-Meteo Forecast，约每 10 分钟一档，地名搜索结果同样在
+服务端缓存 10 分钟。
 
 ## 素材库
 
@@ -142,8 +143,11 @@ Spotify 没有公开歌词接口，歌词来自 [LRCLIB](https://lrclib.net)（�
 
 网易云曲目在浏览器中会后台读取同源音频，离线解码后用 1024 点 Hann 窗 FFT 按 80ms hop
 生成 17 段（60Hz–14kHz）频谱时间线；预览与“设备同屏”用同一个播放位置查表，分析结果在
-内存中按最近使用缓存 3 首。解码或分析失败会静默回落到原有伪频谱。Spotify 音频不经过本机，
-音乐固件直连时网页也拿不到设备 PCM，因此这两种来源继续显示确定性模拟律动，并在主题面板标明。
+内存中按最近使用缓存 3 首。解码或分析失败会静默回落到原有伪频谱。真频谱只在「网页自己就是
+播放器、且这块屏只归预览管」时才取：Spotify 音频不经过本机；侧载音乐固件直连时网页拿不到
+设备 PCM；时钟跑 ZOS 时屏是设备自己画的，而它画的是 `LyricModes.h` 那套确定性伪频谱、不做
+FFT。这三种来源都显示模拟律动，并在主题面板标明——否则预览里跳真频谱、面板上跳 hash 频谱，
+而用户正是照着预览挑的主题。
 下文所述 8fps 量化专指这条伪频谱路径；网易云真频谱按 80ms 槽位更新。
 
 两条上屏路径的细节：
@@ -268,6 +272,13 @@ seq	7
 pinned	1
 mirror	1
 focus	btc
+mode	spotlight
+skin	tape
+accent	ff8844
+setseq	3
+setvol	4
+setbri	7
+input	12	press
 np	1
 track	Her Majesty
 artist	The Beatles
@@ -275,6 +286,8 @@ playing	1
 pos	18400
 dur	23000
 lyric	Her Majesty's a pretty nice girl
+lyricat	18000
+lyricend	21500
 menu	3
 item	channel	btc	市场轮播
 item	music	music	音乐
@@ -320,6 +333,41 @@ item	settings	settings	设置
 用处——曲名要调音源的 trackDetail，而那需要固件没有的凭据；在服务端解析同时也让同一次查询
 喂出歌词行。这条轮询只在设备真的在线时才跑（固件每 10 秒上报一次遥测，闸门自己会开），
 不然就是为了一台没接的设备一直骚扰第三方 API。
+
+`lyricat` / `lyricend` 是**当前这一句**在整首歌里的起止（毫秒）。四种显示形式的几何、着色与
+节拍都是「这一句唱到哪儿」的函数，不是「这首歌放到哪儿」的函数：`pos`/`dur` 描述的是歌，
+而一句解析好的歌词字符串既没有开头也没有结尾，所以没有这个窗口设备就无从动画。末句的兜底
+与侧载歌词播放器逐字节相同（下一句的起点；没有下一句就取曲长，曲长不可用则 +4000ms），
+否则同一首歌的最后一句在两套固件上会动得不一样。两个键都可选：老服务不发，设备退化成单次
+扫过而不是黑屏。副歌里重复的一模一样的句子也靠 `lyricat` 判「换行了」——只比文字的话不会
+bump，设备会拿着上一句的窗口把进度钉在 1，句子唱完了还杵在那儿。
+
+`mode` / `skin` / `accent` 是控制台**主题设置**面板的三个值，四种显示形式（走带 / 天际 /
+聚光 / 升降）、四种像素配色（信号绿 / 磁带橙 / 蓝晒 / 街机红）、以及覆盖主色的 `rrggbb`
+（无覆盖时整行省略）。它们与侧载歌词播放器从 `/api/music/device/state` 读到的是**同一份**
+状态（`sDeviceState`，见 ADR 0007）——控制台只有一个主题面板，设备只有一块屏，两份存储只会
+是需要有人手工保持一致的副本：在 ZOS 下选了磁带橙，侧载播放器听本地音频，回来变成信号绿。
+
+三点值得记：**它在 `np` 块之外**，因为三种空状态（未配置 / 离线 / 未播放）也要有配色，塞进
+`np` 里就会在暂停的一瞬间掉回默认——颜色跟着音乐一起走掉。**它没有 `themeseq`**，这是唯一
+一条不带序列的控制台 → 设备通道：`setseq` 存在是因为音量还有旋钮这个本地写方，主题在 ZOS
+的音乐页上没有本地控件可争（旋钮是上一首/下一首，中键是播放/暂停，侧键刻意留给音量），
+所以每份文档无条件应用即可，且这正是设备**第一次**轮询就正确的原因；哪天真加了本地循环，
+必须连同 `themeseq` 与上升沿判断一起加，否则控制台的旧值会在下一次轮询里弹回来。**设备侧
+另存一份到 `/data/zos-prefs.ini`** 作为暖启动缓存：冷启动有好几秒没有链路，刷写过、又没有
+`/tmp/zos-host` 的机器则永远没有，默认值会当着几个月前选了橙色的用户的面把面板刷成绿色；
+写入走 `DeviceControls::flushIfDue` 那条既有的防抖提交（`/data` 是裸 NAND 上的 jffs2，每份
+文档提交一次就是把一次擦除放进轮询路径）。文档一到，永远以文档为准。
+
+**服务端也存一份**，落在 `.runtime/lyric-theme.json`，在建立 HTTP 处理器之前读回
+`sDeviceState`。`sDeviceState` 是模块内存，不存就意味着重启后服务发的是 spotlight/signal，
+而设备是无条件应用主题的（见上），于是同一次轮询里既把面板刷回绿色、又把设备那份
+`/data` 暖启动缓存一起覆盖掉——正是这份缓存要救的场景。三个字段之外没有别的内容，所以是
+整文件重写而不是合并，也不需要 `0600`：这里只有颜色，没有凭据。写入是排队串行的，两次
+`rename` 竞争会让先发的那次后落地。控制台的 `localStorage` 因此降级成首帧缓存：页面拿它
+先画一帧，第一次 `/state` 轮询回来就以服务端为准——反过来把 `localStorage` 推给服务端，
+就会让「最后打开的那个浏览器」成为权威，一部一个月没看过主题面板的手机能凭记忆把时钟
+重刷一遍。
 
 ### 侧载与 host 文件
 
@@ -370,7 +418,7 @@ UI tick 是绝对不能的。
 **还没实现的：** 热点（SoftAP）。`WifiPolicy` 有状态、执行器有接口，但 `startSoftAp()` /
 `stopSoftAp()` 目前只写一行日志就返回——配方是知道的（停 wpa_supplicant、写 hostapd.conf、
 起 hostapd、发地址），但它每一步都动 adb 所骑的那条链路，而官方 SDK 的 `SoftApManager` 正是
-[ADR 0006](adr/0006-no-flythings-network-managers.md) 禁止链接的东西。因此**一台没有存储
+[ADR 0007](adr/0006-no-flythings-network-managers.md) 禁止链接的东西。因此**一台没有存储
 凭据的设备现在还不能由 ZOS 自己配网**，`docs/design/tc002-os-provisioning.md` 里那套四屏
 热点流程仍是设计而非实现。
 
@@ -441,8 +489,11 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts}`（字符串截断 64 字符，免同源，不 bump seq） |
 | `POST` | `/api/os/mirror` | ZOS 回传面板实拍帧（正文即 2496 字节原始 RGB，免同源）；应答 `{wanted}` 告诉设备是否继续推 |
 | `GET` | `/api/os/mirror` | 控制台取最新一帧，**取本身就是订阅**：10 秒不取设备自动停流 |
-| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live}`（遥测 15 秒内到达才算 live） |
+| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live） |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
+| `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
+| `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值 |
+| `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?}`，正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |
 | `GET` | `/api/game/socket` | WebSocket 升级：`?room=<4位码>&role=host\|pad`，双人手柄与涂鸦墙的纯中继通道 |

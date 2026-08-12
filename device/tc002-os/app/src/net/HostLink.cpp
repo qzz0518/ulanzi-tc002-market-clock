@@ -306,7 +306,16 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   mSnapshot.lyric = doc.lyric();
   mSnapshot.positionMs = doc.positionMs();
   mSnapshot.durationMs = doc.durationMs();
+  mSnapshot.lyricStartMs = doc.lyricStartMs();
+  mSnapshot.lyricEndMs = doc.lyricEndMs();
   mSnapshot.stampMonoMs = stampMonoMs;
+  // The theme, copied with everything else. StateDoc has already resolved an
+  // absent or unrecognised value to the default, so there is nothing to guard
+  // here — and guarding it here instead would put the fallback in two places.
+  mSnapshot.lyricMode = doc.lyricMode();
+  mSnapshot.lyricSkin = doc.lyricSkin();
+  mSnapshot.accentRgb = doc.accentRgb();
+  mSnapshot.hasAccent = doc.hasAccent();
   // Console -> device. Copied here with everything else for the same reason the
   // now-playing fields are: a snapshot assembled in two places is a snapshot
   // that will one day disagree with itself.

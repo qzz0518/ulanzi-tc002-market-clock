@@ -741,7 +741,7 @@ describe("local control API", () => {
     const handler = createControlHandler(fakeWorkspaceController(previewCalls));
     const catalog = await handler(new Request("http://127.0.0.1:43820/api/catalog"));
     const catalogBody = await catalog.json();
-    expect(catalogBody.contents).toHaveLength(31);
+    expect(catalogBody.contents).toHaveLength(34);
     expect(catalogBody.categories.map((category: { id: string }) => category.id)).toEqual([
       "market", "tools", "visual", "creative",
     ]);
@@ -1154,5 +1154,193 @@ describe("tc002-os console routes", () => {
     }));
     expect(released.status).toBe(200);
     expect(osLink.getDisplay()).toEqual({ focus: null, pinned: false });
+  });
+
+  // The console has exactly one 主题设置 panel and the device has one panel, so
+  // there is one store: sDeviceState, which the sideloaded lyrics player already
+  // reads from /api/music/device/state and which ZOS now reads out of its pull
+  // document (ADR 0007). A second store would be a copy somebody keeps equal by
+  // hand — and the disagreement would be invisible until someone was in the room
+  // with the clock.
+  test("the console's theme panel reaches ZOS through the same store as the sideload", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+
+    // Before any click at all: the hub must already agree with sDeviceState,
+    // because the device polls from the moment it boots.
+    expect(osLink.getLyricTheme().skin).toBe("signal");
+
+    const control = await handler(new Request(`${origin}/api/music/device/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ mode: "cascade", skin: "tape", accent: "FF8844" }),
+    }));
+    expect(control.status).toBe(200);
+    expect(osLink.getLyricTheme()).toEqual({
+      mode: "cascade", skin: "tape", accent: "ff8844",
+    });
+    const doc = osLink.serialize().split("\n");
+    expect(doc).toContain("mode\tcascade");
+    expect(doc).toContain("skin\ttape");
+    expect(doc).toContain("accent\tff8844");
+
+    // A key press on the sideloaded player is the same authority as a click.
+    await handler(new Request(`${origin}/api/music/device/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skin: "arcade" }),
+    }));
+    expect(osLink.getLyricTheme().skin).toBe("arcade");
+
+    // Readable without parsing the pull document, which is what the ZOS panel
+    // and these tests need.
+    const state = await handler(new Request(`${origin}/api/os/state`));
+    expect((await state.json() as { lyricTheme: unknown }).lyricTheme).toEqual({
+      mode: "cascade", skin: "arcade", accent: "ff8844",
+    });
+
+    // An invalid patch is refused at the handler and must not reach the device:
+    // an unknown mode on the wire would repaint the panel with the fallback,
+    // which is not what the console is showing.
+    const refused = await handler(new Request(`${origin}/api/music/device/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ mode: "kaleidoscope" }),
+    }));
+    expect(refused.status).toBe(400);
+    expect(osLink.getLyricTheme().mode).toBe("cascade");
+
+    // A MIXED patch, which is the case that actually broke the invariant: the
+    // first field validates, the second throws, and a field-by-field merge left
+    // the throw sitting between two applied writes. The sideloaded player's
+    // /state then served 走带 while the ZOS document — republished only on the
+    // success path — still said 升降, out of ONE store. The console sends one
+    // field per click, but /api/music/device/report reaches the same code with
+    // no same-origin check.
+    const partial = await handler(new Request(`${origin}/api/music/device/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ mode: "ticker", accent: "nothex" }),
+    }));
+    expect(partial.status).toBe(400);
+    const sideload = await handler(new Request(`${origin}/api/music/device/state`));
+    expect(await sideload.text()).toContain("MODE\tcascade");
+    expect(osLink.getLyricTheme()).toEqual({
+      mode: "cascade", skin: "arcade", accent: "ff8844",
+    });
+
+    // sDeviceState is module state shared by every test in this file.
+    await handler(new Request(`${origin}/api/music/device/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ mode: "spotlight", skin: "signal", accent: null }),
+    }));
+  });
+
+  // Only this browser knows what a device-audio provider is playing, so it is
+  // also the only thing that can say where the current line starts and ends —
+  // and without that window every 显示形式 has nothing to animate.
+  test("a console now-playing report carries the lyric line's window", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+
+    const put = await handler(new Request(`${origin}/api/os/now-playing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({
+        track: "夜航", artist: "某人", playing: true,
+        positionMs: 41_000, durationMs: 244_000, lyric: "第一行",
+        lyricStartMs: 40_500, lyricEndMs: 44_000,
+      }),
+    }));
+    expect(put.status).toBe(200);
+    const doc = osLink.serialize().split("\n");
+    expect(doc).toContain("lyricat\t40500");
+    expect(doc).toContain("lyricend\t44000");
+
+    // An older console sends neither. It must still play — the panel falls back
+    // to an untimed sweep rather than to a blank screen.
+    await handler(new Request(`${origin}/api/os/now-playing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({
+        track: "夜航", artist: "某人", playing: true,
+        positionMs: 60_000, durationMs: 244_000, lyric: "第二行",
+      }),
+    }));
+    const legacy = osLink.serialize().split("\n");
+    expect(legacy).toContain("lyric\t第二行");
+    expect(legacy.some((line) => line.startsWith("lyricat\t"))).toBe(false);
+  });
+
+  // A restart used to be indistinguishable from a factory reset for this one
+  // setting: sDeviceState is module memory, ZOS applies the document's theme
+  // unconditionally (a theme has no second writer on the device, so there is no
+  // sequence to gate on), and the device then stages what it was given into
+  // /data. So `bun start` repainted the panel 信号绿 AND destroyed the warm-start
+  // cache that exists for exactly this — the user's own complaint, one restart
+  // later.
+  test("the theme survives a restart instead of being reset to the defaults", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const { LyricThemeStore } = await import("../src/lyric-theme-store.ts");
+    const { restoreDeviceLyricTheme } = await import("../src/control-api.ts");
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-lyric-theme-"));
+    directories.push(directory);
+    const path = join(directory, "lyric-theme.json");
+    const origin = "http://127.0.0.1:43820";
+
+    const store = new LyricThemeStore(path);
+    expect(await store.load()).toBeNull();
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      osLink: new OsLinkHub(),
+      lyricThemeStore: store,
+    });
+    const chosen = await handler(new Request(`${origin}/api/music/device/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ mode: "cascade", skin: "tape", accent: "FF8844" }),
+    }));
+    expect(chosen.status).toBe(200);
+    // Fire-and-forget: a colour must not be able to fail a request, so the write
+    // is not awaited by the handler and is awaited here instead. It is also the
+    // SECOND write this store has queued — building the handler saved whatever
+    // the defaults were — so this is where an unordered chain would leave the
+    // defaults on disk and the user's choice underneath them.
+    await store.settled();
+    expect(await Bun.file(path).json()).toMatchObject({
+      mode: "cascade", skin: "tape", accent: "ff8844",
+    });
+
+    // The restart. A brand-new hub — everything the process knew is gone — and
+    // the very first document it serves has to carry the user's choice, because
+    // the device polls before anybody opens a browser.
+    const rebooted = new OsLinkHub();
+    restoreDeviceLyricTheme(await new LyricThemeStore(path).load());
+    createControlHandler(fakeWorkspaceController(), { osLink: rebooted });
+    expect(rebooted.getLyricTheme()).toEqual({
+      mode: "cascade", skin: "tape", accent: "ff8844",
+    });
+    expect(rebooted.serialize().split("\n")).toContain("skin\ttape");
+
+    // A file somebody hand-edited into nonsense is a colour, not a credential:
+    // the bad fields are dropped and the service still starts.
+    await Bun.write(path, JSON.stringify({ mode: "kaleidoscope", skin: "signal" }));
+    restoreDeviceLyricTheme(await new LyricThemeStore(path).load());
+    const salvaged = new OsLinkHub();
+    createControlHandler(fakeWorkspaceController(), { osLink: salvaged });
+    expect(salvaged.getLyricTheme()).toEqual({
+      mode: "cascade", skin: "signal", accent: "ff8844",
+    });
+
+    // sDeviceState is module state shared by every test in this file.
+    await handler(new Request(`${origin}/api/music/device/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ mode: "spotlight", skin: "signal", accent: null }),
+    }));
   });
 });

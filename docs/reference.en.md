@@ -88,6 +88,16 @@ Frankfurter/ECB daily reference rates; the four US stocks via Yahoo Chart (1D vs
 close). Search-added runtime assets use one fixed provider per kind (Coinbase / Yahoo /
 Frankfurter / Gold API, no fallback route) and degrade gracefully on quote failure.
 
+## Weather and sunrise/sunset
+
+"Weather particles", "bold weather clock", "viewfinder clock", and the sunrise/sunset color
+clock locate by place-name search: type a place name (English or pinyin) in the content
+settings, the server queries Open-Meteo Geocoding (no key) for candidates, and picking one
+fills in the latitude/longitude — no raw coordinates. The weather-particles face shows the
+selected place's English name in 5px ASCII at the top-left (truncated by pixel width when it
+doesn't fit); live conditions come from Open-Meteo Forecast at roughly 10-minute
+granularity, and geocoding results are likewise cached server-side for 10 minutes.
+
 ## Library
 
 The Library talks to the official Ulanzi community live (every browse, search, and page
@@ -313,6 +323,13 @@ seq	7
 pinned	1
 mirror	1
 focus	btc
+mode	spotlight
+skin	tape
+accent	ff8844
+setseq	3
+setvol	4
+setbri	7
+input	12	press
 np	1
 track	Her Majesty
 artist	The Beatles
@@ -320,6 +337,8 @@ playing	1
 pos	18400
 dur	23000
 lyric	Her Majesty's a pretty nice girl
+lyricat	18000
+lyricend	21500
 menu	3
 item	channel	btc	市场轮播
 item	music	music	音乐
@@ -378,6 +397,56 @@ trackDetail call, which needs credentials the firmware does not have — and res
 is also what lets the same lookup feed the lyric line. That poll is gated on the device
 actually being attached (the firmware reports every 10 s, so the gate opens on its own),
 because otherwise it would hammer a third-party API for a device nobody connected.
+
+`lyricat` / `lyricend` are the **current line's** start and end in track time. Every display
+mode's geometry, colouring and beat is a function of progress *within the line*, not of the
+track: `pos`/`dur` describe the song, and one resolved lyric string has neither a start nor an
+end, so without this window the device has nothing to animate. The last line's fallback is
+byte for byte the sideloaded lyrics player's (the next line's start; failing that the track
+duration, failing that +4000 ms) — otherwise the last line of every song animates differently
+on the two firmwares. Both keys are optional: an older service sends neither and the device
+falls back to a single sweep rather than to a blank screen. `lyricat` is also what detects a
+new line in a chorus that repeats itself verbatim — keyed on the text alone no sequence bump
+fires, and the device keeps animating the previous window with progress pinned at 1, the line
+sitting there fully sung while the song moves on.
+
+`mode` / `skin` / `accent` are the console's **主题设置** panel: four display forms (ticker /
+skyline / spotlight / cascade), four palettes (signal / tape / blueprint / arcade), and an
+`rrggbb` override of the palette's primary tier (the whole line is omitted when there is
+none). They are the **same** state the sideloaded lyrics player reads from
+`/api/music/device/state` (`sDeviceState`, ADR 0007) — the console has one theme panel and the
+device has one panel, so a second store would only be a copy somebody keeps equal by hand:
+pick tape under ZOS, sideload the player for local audio, and get signal back.
+
+Three things worth recording. **They sit outside the `np` block**, because the three empty
+states (未配置 / 离线 / 未播放) need a palette too, and nesting them under `np` would drop the
+theme to the defaults the instant playback stopped — the colour would walk off the panel with
+the music. **There is no `themeseq`**, making this the one console→device channel without a
+sequence: `setseq` exists because volume has a second writer (the knob), and the theme has no
+local control to fight on ZOS's music screen (the knob is prev/next, the press is play/pause,
+and the side buttons are deliberately left to volume), so applying it unconditionally on every
+document is idempotent — and is also what makes a device correct on its *first* poll rather
+than on the first click after boot. A local theme cycle added later must arrive with a
+`themeseq` and rising-edge gating, or the console's stale value snaps back on the next poll.
+**The device keeps its own copy in `/data/zos-prefs.ini`** as a warm-start cache: a cold boot
+has no link for several seconds — and a flashed unit with no `/tmp/zos-host` never gets one —
+so the defaults would repaint the panel green in front of a user who chose orange months ago.
+Writes go through the existing debounced commit (`DeviceControls::flushIfDue`); `/data` is
+jffs2 on raw NAND and committing per document would put a flash erase in the poll path. The
+document is authoritative the instant one arrives.
+
+**The service keeps a copy too**, in `.runtime/lyric-theme.json`, read back into `sDeviceState`
+before the HTTP handler is built. `sDeviceState` is module memory, so without this a restart
+served spotlight/signal — and because the device applies the document's theme unconditionally
+(above), that one poll both repainted the panel green and overwrote the device's `/data`
+warm-start cache, which is the situation the cache exists for. Three fields and nothing else, so
+it is a whole-file rewrite rather than a merge, and no `0600`: there is a colour in here, not a
+credential. Writes are queued rather than merely fired, because two racing renames land in the
+order they finish rather than the order they were asked for. The console's `localStorage` is
+demoted to a first-paint cache by the same decision: the page draws one frame from it and the
+first `/state` poll replaces it. Pushing `localStorage` at the service instead would make
+whichever browser loaded last the authority — a phone that has not seen the theme panel in a
+month could repaint the clock from memory.
 
 ### Sideloading and the `host` file
 
@@ -444,7 +513,7 @@ experiment and a power cycle disarms it with no way to forget.
 entry points, but `startSoftAp()` / `stopSoftAp()` currently log a line and return. The recipe
 is known (stop wpa_supplicant, write hostapd.conf, run hostapd, hand out addresses), but every
 step of it touches the link adb rides on — and the SDK's `SoftApManager` is exactly what
-[ADR 0006](adr/0006-no-flythings-network-managers.md) forbids linking. **A device with no stored
+[ADR 0007](adr/0006-no-flythings-network-managers.md) forbids linking. **A device with no stored
 credentials therefore cannot currently be provisioned by ZOS itself**, and the four-screen
 hotspot flow in `docs/design/tc002-os-provisioning.md` remains a design rather than an
 implementation.
@@ -520,8 +589,11 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts}` (strings truncated at 64 chars, cross-origin, never bumps seq) |
 | `POST` | `/api/os/mirror` | ZOS uploads a captured panel frame (body is 2496 raw RGB bytes, cross-origin); the reply `{wanted}` tells the device whether to keep streaming |
 | `GET` | `/api/os/mirror` | Console reads the latest frame — **asking is the subscription**: stop polling and the device stops streaming 10 s later |
-| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live}` (live means a report arrived within 15 s) |
+| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}` (live means a report arrived within 15 s) |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
+| `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
+| `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned |
+| `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?}`; a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing
 `report` / `heartbeat` endpoints and ZOS's `/api/os/pull`, `/api/os/frames`, `/api/os/report`

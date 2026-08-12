@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cstdlib>
@@ -13,6 +15,12 @@
 namespace tcos {
 
 namespace {
+
+int monotonicMs() {
+  struct timespec ts;
+  ::clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int>(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
 
 int hexDigit(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -26,6 +34,7 @@ const char* statusText(int status) {
     case 200: return "OK";
     case 400: return "Bad Request";
     case 404: return "Not Found";
+    case 409: return "Conflict";
     case 413: return "Payload Too Large";
     default: return "OK";
   }
@@ -167,6 +176,21 @@ bool HttpServer::serveOnce(int timeoutMs) {
   const int fd = ::accept(mListenFd, 0, 0);
   if (fd < 0) return false;
 
+  // A DEADLINE ON THE CONVERSATION, not just on the accept. The select() above
+  // covers the listening socket only; the recv loop below used to block with no
+  // timeout at all, on the single thread PortalService runs. One client that
+  // opened a connection and sent nothing took the setup page down for everyone,
+  // permanently — and that client is not hypothetical on this path: iOS's
+  // captive assistant pre-opens speculative sockets, and a phone that roams off
+  // the hotspot mid-request leaves a half-open connection that never sends and
+  // never resets. The symptom would have been "associated, addressed, page
+  // dead", which costs the user the same wasted power cycle as no DHCP at all.
+  struct timeval io;
+  io.tv_sec = kSocketTimeoutMs / 1000;
+  io.tv_usec = (kSocketTimeoutMs % 1000) * 1000;
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &io, sizeof(io));
+
   // Read until the headers are complete, then until Content-Length is satisfied.
   // A phone form post is a few hundred bytes; anything past the cap is refused
   // rather than buffered, so a hostile client cannot grow this process.
@@ -175,7 +199,11 @@ bool HttpServer::serveOnce(int timeoutMs) {
   size_t contentLength = 0;
   bool haveHeaders = false;
   char buffer[1024];
+  const int startedMs = monotonicMs();
   for (;;) {
+    // The per-read timeout alone is not enough: a client dribbling one byte
+    // inside every window would hold this thread for as long as it liked.
+    if (monotonicMs() - startedMs > kRequestDeadlineMs) break;
     const ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
     if (n <= 0) break;
     raw.append(buffer, static_cast<size_t>(n));

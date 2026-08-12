@@ -15,11 +15,50 @@ import {
   spotlightOffsetPx,
 } from "../web/src/components/music/pixel-lyric-modes";
 import {
+  drawPixelLyricsFrame,
   focusGlyphIndexForProgress,
   lyricScrollOffsetForProgress,
   MusicThemePanel,
   projectedLyricProgress,
+  type PixelLyricsFrameInput,
 } from "../web/src/components/music/pixel-lyrics-preview";
+
+// The preview only ever sets fillStyle and paints rectangles, so a recording
+// stub is a whole rasterizer. That is what lets the browser's 52 × 16 be
+// asserted pixel for pixel next to the firmware's, which is the only way the
+// two can be held to the same geometry.
+function rasterizePreview(input: PixelLyricsFrameInput): string[][] {
+  const grid: string[][] = Array.from({ length: 16 }, () => Array.from({ length: 52 }, () => "#000000"));
+  let fill = "#000000";
+  const context = {
+    imageSmoothingEnabled: true,
+    clearRect: () => {},
+    fillRect: (x: number, y: number, w: number, h: number) => {
+      for (let row = y; row < y + h; row += 1) {
+        for (let column = x; column < x + w; column += 1) {
+          if (row < 0 || row > 15 || column < 0 || column > 51) continue;
+          grid[row]![column] = fill;
+        }
+      }
+    },
+    get fillStyle() {
+      return fill;
+    },
+    set fillStyle(value: string) {
+      fill = value;
+    },
+  };
+  drawPixelLyricsFrame(context as unknown as CanvasRenderingContext2D, input);
+  return grid;
+}
+
+function litPixelsInRows(grid: string[][], from: number, to: number): number {
+  let lit = 0;
+  for (let row = from; row <= to; row += 1) {
+    for (const color of grid[row]!) if (color !== "#000000") lit += 1;
+  }
+  return lit;
+}
 
 describe("music player UI", () => {
   test("renders source before preview with an honest empty state", () => {
@@ -197,7 +236,12 @@ describe("music player UI", () => {
     }
   });
 
-  test("offers four rendering modes with the ticker as the classic default", () => {
+  test("offers four rendering modes in the order that IS the wire protocol", () => {
+    // The index is what crosses the link to both firmwares — ticker=0 …
+    // cascade=3 — matching LYRIC_MODES / OS_LYRIC_MODES on the service side and
+    // MusicScreen::Mode on the device. Reordering this list for looks would
+    // repaint the panel in a form the console is not showing, with nothing to
+    // fail anywhere in between.
     expect(MUSIC_MODES.map((mode) => mode.id)).toEqual([
       "ticker",
       "skyline",
@@ -252,6 +296,48 @@ describe("music player UI", () => {
     expect(skylineBarLevel(0, 0, true, 0, 12, 1)).toBe(11);
     expect(skylineBarLevel(0, 99_999, true, 1, 12, 1)).toBe(12);
     expect(skylineBarLevel(0, 0, true, 1, 12, 0)).toBe(1);
+  });
+
+  // 天际's spectrum is a three-row FLOOR under a full-width line, in all three
+  // implementations. It used to climb to twelve rows and drop the text whenever
+  // `hasLyric` was false — and since the sideloaded player only ever paints once
+  // a timed line exists, and ZOS always has a row to draw (the lyric, else the
+  // title/artist rotation, else 播放中 / 已暂停), the preview was the only one of
+  // the three that could show it. What it showed was the reported bug with the
+  // words gone rather than merely covered.
+  test("skyline keeps its spectrum a floor and never trades the line for it", () => {
+    const base: PixelLyricsFrameInput = {
+      skin: "signal",
+      mode: "skyline",
+      currentText: "Hey Jude",
+      hasLyric: true,
+      lyricProgress: 0.5,
+      trackProgress: 0.25,
+      playing: true,
+      scrollOffsetPx: 0,
+      timeMs: 4_000,
+      reducedMotion: false,
+    };
+
+    for (const hasLyric of [true, false]) {
+      for (const playing of [true, false]) {
+        const grid = rasterizePreview({ ...base, hasLyric, playing });
+        const where = `hasLyric=${hasLyric} playing=${playing}`;
+        // The line, on rows 0..11.
+        expect(litPixelsInRows(grid, 0, 11), where).toBeGreaterThan(0);
+        // Row 12 is the gutter between the line and the bars.
+        expect(litPixelsInRows(grid, 12, 12), where).toBe(0);
+        // And the bars stand at x = 1 + 3b for seventeen bars, so they span the
+        // panel rather than owning a column of it.
+        for (let row = 13; row <= 15; row += 1) {
+          for (let column = 0; column < 52; column += 1) {
+            if (grid[row]![column] === "#000000") continue;
+            expect((column - 1) % 3 <= 1 && column >= 1 && column <= 50, `${where} x=${column}`)
+              .toBe(true);
+          }
+        }
+      }
+    }
   });
 
   test("labels sources that cannot provide real spectrum audio", () => {

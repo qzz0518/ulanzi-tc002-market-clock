@@ -7,10 +7,14 @@
 //
 // Run with: mise run os-hostcheck
 
+#include <netinet/in.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -81,19 +85,101 @@ bool surfacesDiffer(const Surface& a, const Surface& b) {
   return false;
 }
 
-// The music screen's text window: right of the 12 px equaliser cell and above
-// the playhead row. Counting only this region is what separates "the panel is
+// The music screen's text band: the 12 px glyph cell, rows 2..13, across the
+// whole panel. Counting only this region is what separates "the panel is
 // drawing" from "the panel is drawing the track" — the reported failure had a
 // lit equaliser and a lit playhead and nothing between them.
+//
+// It used to start at x=14 because a 12 px equaliser owned the left of the
+// panel. That equaliser is gone (the lyric now uses all 52 columns, exactly as
+// the sideloaded lyrics player does), so the window is the band instead: rows
+// 2..13 exclude spotlight's bracket marks on row 1, its fill meter on row 14 and
+// every mode's cue row on row 15, which leaves glyph ink as the only thing that
+// can satisfy it.
 int musicTextPixels(const Surface& s) {
   int n = 0;
-  for (int y = 0; y < s.getHeight() - 1; ++y) {
-    for (int x = 14; x < s.getWidth(); ++x) {
+  for (int y = 2; y <= 13; ++y) {
+    for (int x = 0; x < s.getWidth(); ++x) {
       const Color c = s.getPixel(x, y);
       if (c.r || c.g || c.b) ++n;
     }
   }
   return n;
+}
+
+// The four 像素配色 the console's 主题设置 panel offers, written out rather than
+// read back from visual/Palette.h. Sourcing them from the same header the screen
+// renders from would assert nothing; the contract under test is that the hex the
+// user picks in the browser is the hex that reaches the LEDs, and these values
+// are shared by three implementations (web preview, lyrics-player firmware,
+// this one).
+struct SkinTiers {
+  uint32_t primary;
+  uint32_t secondary;
+  uint32_t context;
+  uint32_t muted;
+};
+
+const SkinTiers kSkinTiers[4] = {
+    {0xC1FF3D, 0x6CA34E, 0x47733D, 0x284B2C},  // 0 signal 信号绿
+    {0xFFB341, 0xF0782A, 0xA75522, 0x73401E},  // 1 tape 磁带橙
+    {0xD6F4FF, 0x55B7E8, 0x347BA8, 0x1E527A},  // 2 blueprint 蓝晒
+    {0xFFF0CF, 0xFF4C58, 0xB33A43, 0x7B2930},  // 3 arcade 街机红
+};
+
+int tierPixels(const Surface& s, uint32_t rgb) {
+  int n = 0;
+  for (int y = 0; y < s.getHeight(); ++y) {
+    for (int x = 0; x < s.getWidth(); ++x) {
+      if (s.getPixel(x, y).toRGB888() == rgb) ++n;
+    }
+  }
+  return n;
+}
+
+int litPixelsInRows(const Surface& s, int y0, int y1) {
+  int n = 0;
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = 0; x < s.getWidth(); ++x) {
+      const Color c = s.getPixel(x, y);
+      if (c.r || c.g || c.b) ++n;
+    }
+  }
+  return n;
+}
+
+// x of the first pixel on row `y` painted in the palette's primary tier — the
+// cue row's cursor, which is the only primary pixel any cue row draws (its
+// anchors are muted and its trail is secondary).
+int cueCursorX(const Surface& s, int y, uint32_t primary) {
+  for (int x = 0; x < s.getWidth(); ++x) {
+    if (s.getPixel(x, y).toRGB888() == primary) return x;
+  }
+  return -1;
+}
+
+// Lit bits in a glyph, so a check can assert the exact ink a character puts on
+// the panel instead of "something is there".
+int glyphBits(uint32_t cp) {
+  const tcos::glyphs::Bitmap bitmap = tcos::glyphs::lookup(cp);
+  if (bitmap.rows == 0) return 0;
+  int n = 0;
+  for (int row = 0; row < tcos::glyphs::kCellHeight; ++row) {
+    for (int col = 0; col < bitmap.width; ++col) {
+      if (bitmap.rows[row] & (1 << col)) ++n;
+    }
+  }
+  return n;
+}
+
+// Skyline's 17 bars sit at x = 1 + 3b and the column beside it, so columns 0 and
+// 51 are never part of the spectrum and every third column is a gap.
+bool isSkylineBarColumn(int x) {
+  for (int b = 0; b < 17; ++b) {
+    const int bx = 1 + b * 3;
+    if (x == bx || x == bx + 1) return true;
+  }
+  return false;
 }
 
 // Transition assertions read pixels back by provenance. The two fixtures are a
@@ -1526,6 +1612,27 @@ void checkHttpServer() {
     check(handler.lastBody == "ssid=home&password=x", "the whole form body arrives");
 
     check(!server.serveOnce(50), "serveOnce times out when nobody connects");
+
+    // A CLIENT THAT SAYS NOTHING. PortalService gives this class one thread, and
+    // the recv loop used to have no deadline of any kind — a single connection
+    // that opened and went quiet took the setup page down for good. iOS's
+    // captive assistant pre-opens sockets exactly like this, and a phone that
+    // roams off the hotspot mid-request leaves one behind that never sends and
+    // never resets. This check costs a few seconds of wall clock on purpose:
+    // without the fix it does not fail, it HANGS, which is the point.
+    const int quiet = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (quiet >= 0) {
+      struct sockaddr_in to;
+      std::memset(&to, 0, sizeof(to));
+      to.sin_family = AF_INET;
+      to.sin_port = htons((uint16_t)port);
+      to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      if (::connect(quiet, (struct sockaddr*)&to, sizeof(to)) == 0) {
+        check(server.serveOnce(3000),
+              "a client that connects and never speaks is dropped, not waited on forever");
+      }
+      ::close(quiet);
+    }
   }
 
   server.stop();
@@ -1581,6 +1688,25 @@ void checkSetupPortal() {
   check(page.body.find("<script") != std::string::npos, "its script is inline");
   check(page.body.find("<style") != std::string::npos, "its styles are inline");
   check(page.body.find("2.4G") != std::string::npos, "it states the 2.4G-only limit");
+
+  // A TYPED SSID IS ALWAYS AVAILABLE. Raising the hotspot stops wpa_supplicant,
+  // so the device cannot scan for as long as this page is the one being used —
+  // the list is legitimately empty for the whole session. Without this box the
+  // page was a dead end: nothing selectable and no other way to name a network.
+  check(page.body.find("id=m") != std::string::npos, "the page carries a free-text SSID box");
+  check(page.body.find("getElementById('m').value") != std::string::npos,
+        "and the submit prefers what the user typed");
+  // The placeholder used to have no value attribute, so a select showing it
+  // submitted its own LABEL as the SSID — an accepted submission that tore the
+  // hotspot down to associate with a network called "正在扫描…".
+  check(page.body.find("o.value='';") != std::string::npos,
+        "the placeholder option carries an empty value, so it cannot be submitted");
+  check(page.body.find("if(!ssid)") != std::string::npos,
+        "and an empty SSID is refused before the radio is touched");
+  // A refusal comes back as 409 with a reason; the page used to ignore the
+  // status entirely and drop into polling as though it had been accepted.
+  check(page.body.find("if(!r.ok)") != std::string::npos,
+        "a refused submit is shown rather than polled over");
 
   // A captive-portal probe hits an arbitrary path; answering it with the form is
   // what makes the phone's "sign in to network" banner open straight onto it.
@@ -2114,6 +2240,88 @@ void checkStateDoc() {
   StateDoc stopped;
   stopped.parse("seq\t7\nnp\t0\nmenu\t0\n");
   check(!stopped.hasNowPlaying(), "np\t0 is not playing");
+
+  // --- 主题设置 ------------------------------------------------------------
+  // The console's one theme panel drives both firmwares (ADR 0007), so these
+  // three keys are the whole reason ZOS's music screen can claim parity with
+  // the sideloaded lyrics player. The integers are the protocol: the fixture
+  // above already asserts the default pair round-trips, so these cover the rest
+  // of the range and every way the value can be wrong.
+  check(doc.lyricMode() == 2 && doc.lyricSkin() == 0 && !doc.hasAccent(),
+        "the real service document carries spotlight/signal and no accent");
+
+  StateDoc themed;
+  themed.parse("seq\t8\nmode\tcascade\nskin\ttape\naccent\tFF8844\nmenu\t0\n");
+  check(themed.lyricMode() == 3, "cascade is mode 3, as LYRIC_MODES orders them");
+  check(themed.lyricSkin() == 1, "tape is skin 1");
+  check(themed.hasAccent() && themed.accentRgb() == 0xff8844u,
+        "an accent is read as RGB, upper case included");
+
+  // Every id, not a spot check. A transposed pair here would paint 街机红 for
+  // 蓝晒 on a panel nobody is looking at while the console shows the right
+  // swatch — the exact failure that has no symptom until someone is in the room.
+  static const char* kModes[4] = {"ticker", "skyline", "spotlight", "cascade"};
+  static const char* kSkins[4] = {"signal", "tape", "blueprint", "arcade"};
+  for (int i = 0; i < 4; ++i) {
+    StateDoc one;
+    char body[128];
+    std::snprintf(body, sizeof(body), "seq\t9\nmode\t%s\nskin\t%s\nmenu\t0\n",
+                  kModes[i], kSkins[i]);
+    one.parse(body);
+    char label[96];
+    std::snprintf(label, sizeof(label), "%s/%s map to %d", kModes[i], kSkins[i], i);
+    check(one.lyricMode() == i && one.lyricSkin() == i, label);
+  }
+
+  // A newer service naming a mode this build has never heard of. Falling back
+  // to the default is a choice: "keep whatever was there" would leave two
+  // devices on one account showing different screens with no way to tell which
+  // is stale, and blanking would be worse than both.
+  StateDoc future2;
+  future2.parse("seq\t10\nmode\tkaleidoscope\nskin\tvaporwave\nmenu\t0\n");
+  check(future2.lyricMode() == 2 && future2.lyricSkin() == 0,
+        "an unknown mode/skin falls back to spotlight/signal rather than to nothing");
+
+  // Malformed accents. strtoul would happily read "ff" out of "ff88zz"; a
+  // colour nobody chose is worse than the skin's own.
+  static const char* kBadAccents[5] = {"ff88", "ff8844aa", "ff88zz", "", "-"};
+  for (int i = 0; i < 5; ++i) {
+    StateDoc bad;
+    char body[128];
+    std::snprintf(body, sizeof(body), "seq\t11\naccent\t%s\nmenu\t0\n", kBadAccents[i]);
+    bad.parse(body);
+    char label[96];
+    std::snprintf(label, sizeof(label), "accent \"%s\" is refused, not half-read",
+                  kBadAccents[i]);
+    check(!bad.hasAccent() && bad.accentRgb() == 0u, label);
+  }
+
+  // An OLDER service, which sends no theme at all. This is the compatibility
+  // direction that actually ships: firmware is flashed by hand and the service
+  // updates itself, so a device running ahead of its host is the normal state
+  // for a while after any release.
+  StateDoc untimed;
+  check(untimed.parse("seq\t12\nnp\t1\ntrack\tX\nplaying\t1\npos\t0\ndur\t1000\nmenu\t0\n"),
+        "a document with no theme lines at all still parses");
+  check(untimed.lyricMode() == 2 && untimed.lyricSkin() == 0 && !untimed.hasAccent(),
+        "and lands on the defaults");
+  check(untimed.lyricStartMs() == -1 && untimed.lyricEndMs() == -1,
+        "and reports no lyric window rather than a zero-length one at 0");
+
+  // Reparsing resets the theme too. A rollback to an older service must not
+  // leave the last theme it ever sent frozen on the panel.
+  themed.parse("seq\t13\nmenu\t0\n");
+  check(themed.lyricMode() == 2 && themed.lyricSkin() == 0 && !themed.hasAccent(),
+        "a document without a theme clears the previous one instead of merging");
+
+  // The lyric window. Without it every mode has a progress of zero and the
+  // screen sweeps once and stops — the line would sit there, sung, while the
+  // song moved on.
+  StateDoc window;
+  window.parse("seq\t14\nnp\t1\ntrack\tX\nplaying\t1\npos\t41000\ndur\t244000\n"
+               "lyric\tWasurerarenai hito\nlyricat\t40500\nlyricend\t44000\nmenu\t0\n");
+  check(window.lyricStartMs() == 40500 && window.lyricEndMs() == 44000,
+        "the lyric window is read as absolute track milliseconds");
 }
 
 // A scriptable stand-in for zknet: every predicate is a field the test sets, so
@@ -2514,36 +2722,27 @@ void checkMusicScreen() {
   check(!screen.idle(), "a document with a track is not idle");
 
   // The playhead advances locally. The service deliberately does not bump the
-  // sequence for a moving position, so anything else would be a bar that jumps
-  // once a minute.
-  out.clear();
+  // sequence for a moving position, so anything else would be a cursor that
+  // jumps once a minute.
+  //
+  // Whole-track progress is the cue row's cursor now, not a filled bar: the
+  // reference renderer has no full-width bottom bar in any mode, and the default
+  // mode (聚光, matching sDeviceState) puts a cue row on row 15 whose cursor
+  // travels 47 px from x=2.
   screen.render(out, 1000);
-  int filledAt1s = 0;
-  for (int x = 0; x < out.getWidth(); ++x) {
-    const Color c = out.getPixel(x, 15);
-    if (c.g > 100) ++filledAt1s;
-  }
-  out.clear();
+  const int cursorAt1s = cueCursorX(out, 15, kSkinTiers[0].primary);
   screen.render(out, 11000);  // ten seconds later
-  int filledAt11s = 0;
-  for (int x = 0; x < out.getWidth(); ++x) {
-    const Color c = out.getPixel(x, 15);
-    if (c.g > 100) ++filledAt11s;
-  }
-  check(filledAt11s > filledAt1s, "the playhead advances between documents");
-  check(filledAt1s == 13 && filledAt11s == 26,
-        "and lands where the arithmetic says: 10/40 then 20/40 of 52 px");
+  const int cursorAt11s = cueCursorX(out, 15, kSkinTiers[0].primary);
+  check(cursorAt11s > cursorAt1s, "the playhead advances between documents");
+  check(cursorAt1s == 14 && cursorAt11s == 26,
+        "and lands where the arithmetic says: 10/40 then 20/40 along a 47 px travel from x=2");
 
-  // A paused track must not advance, or the bar would run past the end of a
+  // A paused track must not advance, or the cursor would run past the end of a
   // song nobody is playing.
   screen.setNowPlaying(true, "Her Majesty", "The Beatles", "", false, 10000, 40000, 20000);
-  out.clear();
   screen.render(out, 40000);
-  int pausedFill = 0;
-  for (int x = 0; x < out.getWidth(); ++x) {
-    if (out.getPixel(x, 15).g > 100) ++pausedFill;
-  }
-  check(pausedFill == 13, "a paused playhead stays where it was");
+  check(cueCursorX(out, 15, kSkinTiers[0].primary) == 14,
+        "a paused playhead stays where it was");
 
   // Transport. The knob has no list to scroll here, so it moves between tracks.
   screen.setNowPlaying(true, "Her Majesty", "The Beatles", "", true, 0, 40000, 0);
@@ -2613,6 +2812,210 @@ void checkMusicScreen() {
         "and each of them puts words on the panel");
 }
 
+// The parity claim, in pixels, over every combination the console offers.
+//
+// Everything else in this file drives ONE 显示形式 (聚光, the default) and ONE
+// 像素配色 (信号绿), which is the blind spot that let a bespoke 12 px equaliser
+// sit beside the lyric for as long as it did: the panel was drawing, the wire
+// was carrying every field, and the other fifteen combinations were never
+// looked at. The user's bar is not "similar to the sideloaded lyrics player" but
+// identical to it, so this walks all four modes against all four skins and
+// asserts both halves of that — the exact hex the console shows, and the
+// geometry the reference renderer has.
+void checkMusicTheme() {
+  using tcos::MusicScreen;
+
+  // A line that fills the 48 px text window exactly: eight half-width cells,
+  // centred at (52 - 48) / 2 = 2, so nothing is clipped in any mode and the ink
+  // on the panel can be compared against the font tables themselves rather than
+  // against "more than nothing".
+  static const char* kLine = "Hey Jude";
+  int expectedInk = 0;
+  for (const char* p = kLine; *p; ++p) {
+    expectedInk += glyphBits((uint32_t)(unsigned char)*p);
+  }
+  check(expectedInk > 0, "the sample line has ink to look for");
+
+  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+    for (int skin = 0; skin < MusicScreen::kSkinCount; ++skin) {
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(mode, skin, 0, false);
+      // 5000 ms in with the line running 4000..8000 puts progress at exactly
+      // 0.5: mid-line in every mode, and cascade's HOLD phase rather than one of
+      // its two moving ones, so the geometry below is arithmetic and not timing.
+      screen.setNowPlaying(true, "Hey Jude", "The Beatles", kLine, true, 5000, 200000, 0,
+                           4000, 8000);
+      screen.render(frame, 1000);
+
+      char label[160];
+
+      // Every lit pixel is one of THIS skin's four tiers. The sixteen tiers are
+      // pairwise distinct, so this one count also proves no other skin's colour
+      // reached the panel — and, because a painter can only write a tier, that
+      // nothing invented a colour of its own along the way.
+      int foreign = 0;
+      for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 52; ++x) {
+          const Color c = frame.getPixel(x, y);
+          if (!(c.r || c.g || c.b)) continue;
+          const uint32_t rgb = c.toRGB888();
+          if (rgb != kSkinTiers[skin].primary && rgb != kSkinTiers[skin].secondary &&
+              rgb != kSkinTiers[skin].context && rgb != kSkinTiers[skin].muted) {
+            ++foreign;
+          }
+        }
+      }
+      std::snprintf(label, sizeof(label),
+                    "mode %d skin %d lights only its own four tiers", mode, skin);
+      check(foreign == 0, label);
+
+      std::snprintf(label, sizeof(label),
+                    "mode %d skin %d puts the console's primary hex on the panel", mode, skin);
+      check(tierPixels(frame, kSkinTiers[skin].primary) > 0, label);
+
+      // The text band, exactly. 天际 hangs the line from row 0 to leave the
+      // spectrum a floor; the other three sit it at row 2. Twelve rows either
+      // way, and in every mode those twelve rows are supposed to hold glyph ink
+      // and nothing else — no equaliser cell, no decoration. Equality rather
+      // than "> 0" is what makes that a claim: a stray lit pixel anywhere in the
+      // band fails, and so does a clipped line.
+      const int bandY = mode == MusicScreen::kModeSkyline ? 0 : 2;
+      std::snprintf(label, sizeof(label),
+                    "mode %d skin %d lands the font's ink and nothing else in rows %d..%d",
+                    mode, skin, bandY, bandY + 11);
+      check(litPixelsInRows(frame, bandY, bandY + 11) == expectedInk, label);
+
+      if (mode != MusicScreen::kModeSkyline) continue;
+
+      // 天际's spectrum is a FLOOR, and the distinction is the whole bug report.
+      // Row 12 is the gutter between the line and the bars; rows 13..15 are the
+      // bars; the bars stand at x = 1 + 3b for seventeen bars, so they span the
+      // panel instead of owning a column of it.
+      std::snprintf(label, sizeof(label), "skin %d keeps row 12 empty as the gutter", skin);
+      check(litPixelsInRows(frame, 12, 12) == 0, label);
+
+      int offBar = 0;
+      for (int y = 13; y <= 15; ++y) {
+        for (int x = 0; x < 52; ++x) {
+          const Color c = frame.getPixel(x, y);
+          if ((c.r || c.g || c.b) && !isSkylineBarColumn(x)) ++offBar;
+        }
+      }
+      std::snprintf(label, sizeof(label),
+                    "skin %d draws the spectrum only in its own bar columns", skin);
+      check(offBar == 0, label);
+
+      // The floor's anchors are unconditional, two pixels per bar, so this is an
+      // exact count — and it is the assertion that a 12 px panel at x=0 could
+      // never satisfy.
+      std::snprintf(label, sizeof(label),
+                    "skin %d anchors all seventeen bars across the full width", skin);
+      check(litPixelsInRows(frame, 15, 15) == 34, label);
+    }
+  }
+
+  // THE REPORTED BUG, in the one mode that has a spectrum.
+  //
+  // A playing track whose lyric lookup failed is the ordinary case, not a corner
+  // — Spotify Connect answers with a title and no words — and the row it gets is
+  // the title/artist rotation. The reference conflates "this row is a timed
+  // lyric" with "there is a row to draw", because its own gate makes the two the
+  // same thing; ported literally that turned 天际 into a twelve-row spectrum
+  // with no text at all, which is the user's complaint with the words removed
+  // rather than merely covered. Both transports, because the reference's dead
+  // expression only came alive on one of them.
+  for (int playing = 0; playing < 2; ++playing) {
+    MusicScreen rotating;
+    Surface frame(52, 16);
+    rotating.onEnter(0);
+    rotating.setTheme(MusicScreen::kModeSkyline, MusicScreen::kSkinSignal, 0, false);
+    rotating.setNowPlaying(true, "Yesterday", "The Beatles", "", playing != 0, 5000, 200000, 0);
+    rotating.render(frame, 1000);
+    char label[160];
+    std::snprintf(label, sizeof(label),
+                  "skyline shows the title of a %s track with no lyrics",
+                  playing ? "playing" : "paused");
+    check(litPixelsInRows(frame, 0, 11) > 0, label);
+    std::snprintf(label, sizeof(label),
+                  "and keeps the spectrum to its three-row floor while %s",
+                  playing ? "playing" : "paused");
+    check(litPixelsInRows(frame, 12, 12) == 0, label);
+  }
+
+  // And the same for a document with no resolvable text at all, which falls back
+  // to 播放中 / 已暂停. That row is not a lyric either.
+  {
+    MusicScreen nameless;
+    Surface frame(52, 16);
+    nameless.onEnter(0);
+    nameless.setTheme(MusicScreen::kModeSkyline, MusicScreen::kSkinArcade, 0, false);
+    nameless.setNowPlaying(true, "", "", "", true, 5000, 200000, 0);
+    nameless.render(frame, 1000);
+    check(litPixelsInRows(frame, 0, 11) > 0,
+          "skyline says 播放中 for a track with no text rather than drawing bars alone");
+    check(litPixelsInRows(frame, 12, 12) == 0, "with the gutter still clear");
+  }
+
+  // THE 24.86-DAY WRAP, which on a clock is a Tuesday.
+  //
+  // osLogic hands this screen `(int)(monoMs() - sStartMs)`, a SIGNED count of
+  // milliseconds since boot, so at 2^31 it goes negative. The reference's
+  // animation clock is a uint32_t counter and simply wraps; a negative one does
+  // not degrade gracefully, it stops: skylineBarLevel clamps a negative timeMs
+  // to zero, pinning the spectrum to slot 0 as a still image, and paintIdle's
+  // cast of a negative float to uint32_t is undefined and lands on 0 on both
+  // clang and this device's saturating vcvt, freezing the sparkles with it — for
+  // the following 24.86 days, and then again.
+  //
+  // Asserted on a track parked at its own duration: the playhead clamps there,
+  // so progress within the line — and with it beatKick, and with it the bars'
+  // energy — is a constant, and the animation clock is the only variable left.
+  // Anything looser and the beat's own drift would keep the bars moving and the
+  // check would pass over a frozen spectrum.
+  {
+    MusicScreen wrapped;
+    Surface before(52, 16);
+    Surface after(52, 16);
+    const int wrappedMs = -2000000000;
+    wrapped.onEnter(wrappedMs);
+    wrapped.setTheme(MusicScreen::kModeSkyline, MusicScreen::kSkinSignal, 0, false);
+    wrapped.setNowPlaying(true, "Hey Jude", "The Beatles", "Hey Jude", true, 200000,
+                          200000, wrappedMs, 190000, 195000);
+    wrapped.render(before, wrappedMs + 1000);
+    wrapped.render(after, wrappedMs + 3000);
+    int moved = 0;
+    for (int y = 13; y <= 15; ++y) {
+      for (int x = 0; x < 52; ++x) {
+        if (before.getPixel(x, y).toRGB888() != after.getPixel(x, y).toRGB888()) ++moved;
+      }
+    }
+    check(moved > 0, "the spectrum still moves after the animation clock passes 2^31 ms");
+  }
+
+  // The accent replaces the primary tier and ONLY the primary tier. Without the
+  // last three checks this would pass on a firmware that repainted everything in
+  // the accent, which is a different screen from the one the console previews.
+  {
+    MusicScreen accented;
+    Surface frame(52, 16);
+    accented.onEnter(0);
+    accented.setTheme(MusicScreen::kModeTicker, MusicScreen::kSkinTape, 0xff8844u, true);
+    accented.setNowPlaying(true, "Hey Jude", "The Beatles", kLine, true, 5000, 200000, 0,
+                           4000, 8000);
+    accented.render(frame, 1000);
+    check(tierPixels(frame, 0xff8844u) > 0, "the accent reaches the panel as its own hex");
+    check(tierPixels(frame, kSkinTiers[1].primary) == 0,
+          "and displaces the skin's primary rather than joining it");
+    check(tierPixels(frame, kSkinTiers[1].secondary) > 0 &&
+              tierPixels(frame, kSkinTiers[1].context) > 0 &&
+              tierPixels(frame, kSkinTiers[1].muted) > 0,
+          "while the skin keeps the other three tiers — an accent is a focus colour, "
+          "not a repaint");
+  }
+}
+
 // The seam between the parser, the link and the screen.
 //
 // Every piece of the music path had a test and the path itself had none:
@@ -2632,11 +3035,16 @@ void checkMusicPath() {
   using tcos::Shell;
   using tcos::StateDoc;
 
-  // Verbatim OsLinkHub.serialize() for a playing Spotify session.
+  // Verbatim OsLinkHub.serialize() for a playing Spotify session, with the
+  // console's 主题设置 set to something that is NOT the default — the whole
+  // point of this check is that a field can reach StateDoc and never reach the
+  // panel, and a document carrying spotlight/signal would look identical to one
+  // carrying no theme at all.
   static const char* kDoc =
-      "seq\t12\npinned\t0\nmirror\t0\n"
+      "seq\t12\npinned\t0\nmirror\t0\nmode\tcascade\nskin\ttape\naccent\tff8844\n"
       "np\t1\ntrack\tOne Last Kiss\nartist\tHikaru Utada\nplaying\t1\n"
       "pos\t41000\ndur\t244000\nlyric\tWasurerarenai hito\n"
+      "lyricat\t40500\nlyricend\t44000\n"
       "menu\t2\n"
       "item\tmusic\tmusic\t\xE9\x9F\xB3\xE4\xB9\x90\n"
       "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
@@ -2663,8 +3071,13 @@ void checkMusicPath() {
         "and every text field, not just the ones the ring needs");
   check(snap.positionMs == 41000 && snap.durationMs == 244000,
         "and the playhead the screen advances locally");
+  check(snap.lyricStartMs == 40500 && snap.lyricEndMs == 44000,
+        "and the line's own window, which is what every mode animates against");
   check(snap.stampMonoMs == kStampMs,
         "and the stamp, without which the playhead has no origin");
+  check(snap.lyricMode == 3 && snap.lyricSkin == 1 && snap.hasAccent &&
+            snap.accentRgb == 0xff8844u,
+        "and the console's 主题设置, which is the other half of the parity claim");
   check(snap.items.size() == 2, "the menu still arrives alongside it");
 
   // Now the screen, wired the way osLogic wires it.
@@ -2702,11 +3115,16 @@ void checkMusicPath() {
       shell.push(&music, nowMs);
       enteredAtMs = nowMs;
     }
+    // osLogic applies the theme outside the music screen's branch, because the
+    // user picks a colour while the launcher is up and it has to be right the
+    // moment they walk into 音乐. Mirrored here, ordering included.
+    music.setTheme(snap.lyricMode, snap.lyricSkin, snap.accentRgb, snap.hasAccent);
     if (shell.top() == &music) {
       // osLogic's call, argument for argument.
       music.setNowPlaying(snap.nowPlaying, snap.track, snap.artist, snap.lyric, snap.playing,
                           snap.positionMs, snap.durationMs,
-                          (int)(snap.stampMonoMs - kStartMs));
+                          (int)(snap.stampMonoMs - kStartMs),
+                          snap.lyricStartMs, snap.lyricEndMs);
       music.takeAction();
     }
     shell.render(frame, nowMs);
@@ -2731,12 +3149,66 @@ void checkMusicPath() {
   MusicScreen direct;
   Surface expected(52, 16);
   direct.onEnter(enteredAtMs);
+  direct.setTheme(3, 1, 0xff8844u, true);
   direct.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "Wasurerarenai hito", true,
-                       41000, 244000, (int)(kStampMs - kStartMs));
+                       41000, 244000, (int)(kStampMs - kStartMs), 40500, 44000);
   direct.render(expected, sampleMs);
   shell.render(frame, sampleMs);
   check(!surfacesDiffer(frame, expected),
         "the panel is pixel-identical to the document it was served");
+
+  // The theme reached PIXELS, not merely the snapshot. A screen fed the same
+  // song under the document's own defaults must look different — otherwise
+  // setTheme could be a no-op and every assertion above would still be green,
+  // which is precisely how the equaliser-beside-the-lyric shipped.
+  MusicScreen defaulted;
+  Surface withDefaults(52, 16);
+  defaulted.onEnter(enteredAtMs);
+  defaulted.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "Wasurerarenai hito", true,
+                          41000, 244000, (int)(kStampMs - kStartMs), 40500, 44000);
+  defaulted.render(withDefaults, sampleMs);
+  check(surfacesDiffer(frame, withDefaults),
+        "the console's 主题设置 changes what is on the panel, not just the snapshot");
+
+  // And the accent specifically: same mode, same skin, colour override dropped.
+  // Without this the check above would pass on a firmware that read mode and
+  // skin and threw the accent away.
+  MusicScreen noAccent;
+  Surface withoutAccent(52, 16);
+  noAccent.onEnter(enteredAtMs);
+  noAccent.setTheme(3, 1, 0, false);
+  noAccent.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "Wasurerarenai hito", true,
+                         41000, 244000, (int)(kStampMs - kStartMs), 40500, 44000);
+  noAccent.render(withoutAccent, sampleMs);
+  check(surfacesDiffer(frame, withoutAccent), "and so does the accent override on its own");
+
+  // The lyric window is load-bearing too: every mode's geometry is a function
+  // of progress within the LINE, so a screen given the window and one left to
+  // guess must part company.
+  //
+  // Sampled mid-line rather than at sampleMs, and that is the point rather than
+  // a convenience. sampleMs is 20 s of local extrapolation past a document whose
+  // line was 3.5 s long, so BOTH screens sit at progress 1 there and would agree
+  // — which is the real behaviour, and the reason the service bumps its sequence
+  // on every line change instead of letting the device coast.
+  const int midMs = enteredAtMs + 900;
+  MusicScreen timed;
+  Surface withWindow(52, 16);
+  timed.onEnter(enteredAtMs);
+  timed.setTheme(3, 1, 0xff8844u, true);
+  timed.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "Wasurerarenai hito", true,
+                      41000, 244000, (int)(kStampMs - kStartMs), 40500, 44000);
+  timed.render(withWindow, midMs);
+
+  MusicScreen untimed;
+  Surface withoutWindow(52, 16);
+  untimed.onEnter(enteredAtMs);
+  untimed.setTheme(3, 1, 0xff8844u, true);
+  untimed.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "Wasurerarenai hito", true,
+                        41000, 244000, (int)(kStampMs - kStartMs));
+  untimed.render(withoutWindow, midMs);
+  check(surfacesDiffer(withWindow, withoutWindow),
+        "and the lyric window, without which the line only ever sweeps once");
 
   // And the lyric specifically won the row: fed the same document minus its
   // lyric line, the panel must look different. Without this the check above
@@ -2744,8 +3216,9 @@ void checkMusicPath() {
   MusicScreen titleOnly;
   Surface withoutLyric(52, 16);
   titleOnly.onEnter(enteredAtMs);
+  titleOnly.setTheme(3, 1, 0xff8844u, true);
   titleOnly.setNowPlaying(true, "One Last Kiss", "Hikaru Utada", "", true, 41000, 244000,
-                          (int)(kStampMs - kStartMs));
+                          (int)(kStampMs - kStartMs), 40500, 44000);
   titleOnly.render(withoutLyric, sampleMs);
   check(surfacesDiffer(frame, withoutLyric), "the lyric, not the title, is on the row");
 
@@ -3452,14 +3925,60 @@ void checkWifiPolicy() {
     policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kDhcpTimeoutMs + 1);
     check(w.dhcpCalls == 2, "a silent DHCP server is asked again");
   }
+
+  // ...and keeps asking, without ever escaping to the hotspot. A lease budget
+  // here reads as prudence and is not: bringUpSoftAp stops wpa_supplicant, and
+  // /etc/init.rc declares that service disabled+oneshot, so the kProvisioning
+  // background retry — which is gated on supplicantRunning() — cannot fire once
+  // the AP is on the air. The escape is one-way, and the state it fires on is a
+  // router that is merely slower to lease than the clock is to boot. This check
+  // is here so that the next person to find kObtainingIp's missing exit finds
+  // the reason with it.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    int now = WifiPolicy::kAdoptGraceMs + 10;
+    policy.tick(now);
+    policy.tick(now += 10);
+    w.assoc = true;
+    policy.tick(now += 10);
+    check(policy.state() == WifiPolicy::kObtainingIp, "associated, waiting on a lease");
+    for (int attempt = 0; attempt < 6; ++attempt) {
+      policy.tick(now += WifiPolicy::kDhcpTimeoutMs + 1);
+    }
+    check(policy.state() == WifiPolicy::kObtainingIp,
+          "a slow DHCP server is waited on, not escaped from into a one-way hotspot");
+    check(w.dhcpCalls == 7, "and asked again on every timeout");
+    check(w.apStarts == 0, "the radio is never taken off the network the user chose");
+  }
 }
 
-// The two halves of the hotspot recipe that do not need a radio.
+// True when exactly one argument starts with `prefix`, and it equals `whole`.
 //
-// Everything else about the SoftAP — whether hostapd actually claims wlan0,
-// whether dnsmasq hands a phone an address, whether 2.4 GHz association works
-// at all — is only answerable on hardware. These two are answerable here, and
-// they are the two that a user reads off the panel and types into a phone.
+// Prefix-unique matters as much as the value: dnsmasq's list options append
+// rather than replace, so a second --dhcp-range is a second range, not a
+// correction. That is the shape of the bug in the vendor's own conf file.
+bool hasOneArg(const std::vector<std::string>& args, const std::string& prefix,
+               const std::string& whole) {
+  int found = 0;
+  bool matched = false;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i].compare(0, prefix.size(), prefix) != 0) continue;
+    ++found;
+    if (args[i] == whole) matched = true;
+  }
+  return found == 1 && matched;
+}
+
+// The parts of the hotspot recipe that do not need a radio.
+//
+// Whether hostapd actually claims wlan0 and whether 2.4 GHz association works at
+// all remain answerable on hardware alone. The rest is answerable here — the two
+// strings a user reads off the panel, and the argument list that decides whether
+// a phone is ever handed an address. That last one used to be a local array
+// nothing could see, and it shipped missing the one flag that made it run.
 void checkSoftApRecipe() {
   using tcos::DeviceWifi;
 
@@ -3506,6 +4025,126 @@ void checkSoftApRecipe() {
   check(conf.find("wpa_psk=") == std::string::npos,
         "and never as a PBKDF2 hash, which would mean linking libssl");
   check(conf[conf.size() - 1] == '\n', "the file ends with a newline");
+
+  // --- dnsmasq, the half that made the hotspot useless ----------------------
+  //
+  // Measured on the device: with the pid file left at its compiled-in default,
+  // /var/run/dnsmasq.pid, dnsmasq exits 3 — there is no /var on this rootfs at
+  // all — so the SSID went on the air and no phone was ever handed an address.
+  const std::vector<std::string> args = DeviceWifi::dnsmasqArgs("192.168.100.1");
+  const std::vector<std::string> proven = DeviceWifi::dnsmasqProvenArgs("192.168.100.1");
+
+  // THE FALLBACK IS THE MEASUREMENT, character for character.
+  //
+  // This is the check that matters most in this file, and it is a check on
+  // restraint rather than on cleverness. dnsmasq exits EC_BADCONF on any
+  // argument it does not accept, so an unverified flag in the preferred list is
+  // a way to reproduce the original bug exactly — the SSID on the air and not
+  // one lease. What makes that survivable is that superviseDhcp falls back to
+  // the argument list actually executed on this unit: the four arguments this
+  // firmware always passed, plus the --pid-file that turned exit 3 into exit 0.
+  // Nothing may be added to it. An "improvement" here is an improvement to the
+  // only thing known to work.
+  {
+    std::vector<std::string> measured;
+    measured.push_back("--interface=wlan0");
+    measured.push_back("--dhcp-range=192.168.100.100,192.168.100.200,1h");
+    measured.push_back("--address=/#/192.168.100.1");
+    measured.push_back("--no-resolv");
+    measured.push_back("--no-poll");
+    measured.push_back("--pid-file=/tmp/zos-dnsmasq.pid");
+    check(proven == measured,
+          "the fallback list is exactly the invocation measured working on the device — "
+          "the original four arguments plus the pid file, and nothing else");
+    // Deliberately absent, and the absence is the point: /etc/dnsmasq.conf is
+    // left to be read implicitly, exactly as it was when the measurement was
+    // taken, so `user=root`, `no-hosts` and a writable lease path come from the
+    // vendor's own file rather than from flags this build may reject.
+    check(!hasOneArg(proven, "--conf-file", "--conf-file=/dev/null") &&
+              !hasOneArg(proven, "--user", "--user=root"),
+          "and it does not neutralise the vendor conf it is relying on");
+  }
+
+  // The preferred list has to contain the fallback: whatever else it tries, it
+  // may not drop the one line that was measured to make dnsmasq start.
+  for (size_t i = 0; i < proven.size(); ++i) {
+    bool present = false;
+    for (size_t j = 0; j < args.size(); ++j) {
+      if (args[j] == proven[i]) present = true;
+    }
+    check(present, "the preferred list keeps every argument of the measured one");
+  }
+
+  check(hasOneArg(args, "--pid-file", "--pid-file=/tmp/zos-dnsmasq.pid"),
+        "the pid file is on tmpfs — /var does not exist on this device, and its "
+        "absence is the whole bug");
+  check(hasOneArg(args, "--dhcp-leasefile", "--dhcp-leasefile=/tmp/zos-dnsmasq.leases"),
+        "and so is the lease file, whose default lives under the same missing /var");
+  for (size_t i = 0; i < args.size(); ++i) {
+    check(args[i].find("/var/") == std::string::npos, "no argument names a path under /var");
+  }
+  for (size_t i = 0; i < proven.size(); ++i) {
+    check(proven[i].find("/var/") == std::string::npos,
+          "and neither does the fallback, whose lease path comes from the vendor conf");
+  }
+
+  // /etc/dnsmasq.conf is read implicitly and on this unit carries a dhcp-range
+  // in a subnet the AP does not have. Which file wins for a scalar option is a
+  // claim about dnsmasq's parse order that nothing here can verify, so the
+  // preferred list does not depend on it either way: neutralise the file and own
+  // every setting it supplied. If the flag is rejected, the fallback above is
+  // the state the measurement was taken in.
+  check(hasOneArg(args, "--conf-file", "--conf-file=/dev/null"),
+        "the vendor's /etc/dnsmasq.conf is taken out of the picture");
+  check(hasOneArg(args, "--user", "--user=root"),
+        "root is spelled out: dnsmasq's default user is `nobody`, and a getpwnam "
+        "that fails is fatal — every start measured on this unit was as root");
+  check(hasOneArg(args, "--no-hosts", "--no-hosts"),
+        "/etc/hosts stays unread, or a local record would answer before the "
+        "captive-portal catch-all");
+  check(hasOneArg(args, "--dhcp-authoritative", "--dhcp-authoritative"),
+        "a phone arriving with a cached lease is NAKed rather than ignored");
+  check(hasOneArg(args, "--no-resolv", "--no-resolv") &&
+            hasOneArg(args, "--no-poll", "--no-poll"),
+        "no upstream resolver is looked for; there is none while the AP is up");
+
+  // THE invariant. A pool outside the address on wlan0 matches no DHCP context,
+  // so dnsmasq stays up, answers nothing, and every supervision check still
+  // reports a healthy hotspot — which is exactly the mistake the vendor conf
+  // ships (dhcp-range=192.168.1.101 on a device whose AP is 192.168.100.1).
+  check(hasOneArg(args, "--dhcp-range",
+                  "--dhcp-range=192.168.100.100,192.168.100.200,1h"),
+        "the pool is libzknet's own, inside the gateway's /24");
+  check(hasOneArg(args, "--address=", "--address=/#/192.168.100.1"),
+        "every name resolves to the gateway, which is what opens the captive sheet");
+  check(hasOneArg(args, "--interface", "--interface=wlan0"), "and it serves wlan0 only");
+
+  // Derived, not written twice: move the gateway and the pool has to follow, or
+  // the two disagree the way the vendor's file does. Both tiers, because the
+  // fallback is a real code path and a fallback that leases on the wrong subnet
+  // is the bug it exists to avoid.
+  const std::vector<std::string> moved = DeviceWifi::dnsmasqArgs("10.0.7.1");
+  const std::vector<std::string> movedProven = DeviceWifi::dnsmasqProvenArgs("10.0.7.1");
+  check(hasOneArg(moved, "--dhcp-range", "--dhcp-range=10.0.7.100,10.0.7.200,1h"),
+        "a different gateway carries its pool with it");
+  check(hasOneArg(moved, "--address=", "--address=/#/10.0.7.1"),
+        "and the DNS catch-all with it too");
+  check(hasOneArg(movedProven, "--dhcp-range", "--dhcp-range=10.0.7.100,10.0.7.200,1h") &&
+            hasOneArg(movedProven, "--address=", "--address=/#/10.0.7.1"),
+        "and the fallback follows the gateway the same way");
+
+  // The three tmpfs paths dnsmasq is given, named once each so the device-side
+  // recipe and the places to look after a failure cannot drift apart.
+  check(std::string(DeviceWifi::dnsmasqPidFile()).compare(0, 5, "/tmp/") == 0 &&
+            std::string(DeviceWifi::dnsmasqLeaseFile()).compare(0, 5, "/tmp/") == 0 &&
+            std::string(DeviceWifi::dnsmasqErrFile()).compare(0, 5, "/tmp/") == 0 &&
+            std::string(DeviceWifi::dnsmasqProvenErrFile()).compare(0, 5, "/tmp/") == 0,
+        "pid, leases and both stderr captures live on tmpfs, not on the jffs2 "
+        "partition that holds the user's credentials");
+  check(std::string(DeviceWifi::dnsmasqErrFile()) !=
+            std::string(DeviceWifi::dnsmasqProvenErrFile()),
+        "and the fallback's complaint does not overwrite the one naming the "
+        "argument this build rejected");
 }
 
 }  // namespace
@@ -3546,6 +4185,8 @@ int main() {
   std::printf("  settings screen ok\n");
   checkMusicScreen();
   std::printf("  music screen ok\n");
+  checkMusicTheme();
+  std::printf("  music theme ok\n");
   checkMusicPath();
   std::printf("  music path ok\n");
   checkNavigationFlow();

@@ -1,6 +1,8 @@
 #ifndef NET_STATEDOC_H_
 #define NET_STATEDOC_H_
 
+#include <stdint.h>
+
 #include <string>
 #include <vector>
 
@@ -15,6 +17,9 @@ namespace tcos {
  *   seq\t7
  *   pinned\t1
  *   focus\tbtc
+ *   mode\tspotlight
+ *   skin\ttape
+ *   accent\tff8844
  *   menu\t3
  *   item\tchannel\tbtc\t市场轮播
  *   item\tmusic\tmusic\t音乐
@@ -26,6 +31,8 @@ namespace tcos {
  *   pos\t18400
  *   dur\t23000
  *   lyric\tHer Majesty's a pretty nice girl
+ *   lyricat\t18000
+ *   lyricend\t21500
  *
  * Parsing is total: any line it does not recognise is skipped rather than
  * failing the document. A firmware that refuses to parse a response it half
@@ -103,6 +110,40 @@ class StateDoc {
   int positionMs() const { return mPositionMs; }
   int durationMs() const { return mDurationMs; }
 
+  /**
+   * The current lyric line's window in track time, or -1 for "not sent".
+   *
+   * Every display mode animates against progress within the LINE, not the
+   * track, so these are what make the mode a mode. Optional on purpose: an
+   * older service sends neither, and a firmware that needed them would black
+   * out the music screen rather than fall back to an untimed sweep.
+   */
+  int lyricStartMs() const { return mLyricStartMs; }
+  int lyricEndMs() const { return mLyricEndMs; }
+
+  /**
+   * The console's 主题设置, as wire integers.
+   *
+   * Mapped here rather than in the screen for two reasons: it keeps string
+   * compares out of the 25 fps render path, and it puts the fallback in one
+   * place. An absent key AND an unrecognised value both yield the default
+   * (spotlight / signal) — a document from a newer service naming a mode this
+   * firmware does not have must still paint something, and "whatever was there
+   * before" would leave two devices on the same account showing different
+   * screens with no way to tell which one is stale.
+   *
+   * The integers are the index into LYRIC_MODES / LYRIC_SKINS in
+   * src/control-api.ts, which is also MusicScreen::Mode / Skin and the
+   * sideloaded player's Palette.h SkinId. All three orders are the same fact.
+   */
+  static const int kDefaultMode = 2;  // spotlight
+  static const int kDefaultSkin = 0;  // signal
+  int lyricMode() const { return mLyricMode; }
+  int lyricSkin() const { return mLyricSkin; }
+  /** Only meaningful when hasAccent(); replaces the skin's primary tier. */
+  uint32_t accentRgb() const { return mAccentRgb; }
+  bool hasAccent() const { return mHasAccent; }
+
  private:
   int mSeq;
   bool mPinned;
@@ -120,6 +161,12 @@ class StateDoc {
   std::string mTrack;
   std::string mArtist;
   std::string mLyric;
+  int mLyricStartMs;
+  int mLyricEndMs;
+  int mLyricMode;
+  int mLyricSkin;
+  uint32_t mAccentRgb;
+  bool mHasAccent;
 };
 
 }  // namespace tcos

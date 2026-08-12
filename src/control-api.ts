@@ -9,7 +9,12 @@ import {
 } from "./device-settings.ts";
 import { validateDeviceHost, type DeviceHostStatus } from "./device-host.ts";
 import type { ClockDeviceInfo } from "./clock-client.ts";
-import { OS_INPUT_ACTIONS, type OsInputAction, type OsLinkHub } from "./os-link.ts";
+import {
+  OS_INPUT_ACTIONS,
+  type OsInputAction,
+  type OsLinkHub,
+  type OsLyricTheme,
+} from "./os-link.ts";
 import { encodeFrameBundle, rgbaToRgb } from "./os-frames.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
@@ -90,6 +95,10 @@ export interface ControlApiOptions {
     reset: () => Promise<DeviceHostStatus>;
   };
   osLink?: OsLinkHub;
+  // Where the 主题设置 outlives the process. Omitted in tests, where module
+  // memory is the whole of the story; `save` is deliberately fire-and-forget so
+  // a full disk cannot fail a colour change (ADR 0007).
+  lyricThemeStore?: { save: (theme: OsLyricTheme) => void };
   pixelAssetLibrary?: {
     client: UlanziPixelAssetClient;
     store: PixelAssetStore;
@@ -164,47 +173,91 @@ export function resetDeviceMusicSelection(provider: MusicProviderId): void {
 
 // Merge a partial control patch (from /control or /report) into the state,
 // validating each field, and bump seq if anything actually changed.
+//
+// VALIDATED WHOLE, COMMITTED WHOLE. Every field lands in a candidate copy and
+// the copy replaces the state only once all of them have passed, because a throw
+// half way through used to leave a rejected request applied in part: a 400 for
+// `{mode:"cascade", accent:"nothex"}` still moved `mode`, so the sideloaded
+// lyrics player read cascade off /state while the ZOS link — republished only on
+// the success path — still said spotlight. ADR 0007 calls this one store for two
+// firmwares; the two disagreeing is the one thing it must not be able to do.
+// (The pre-existing partial application of `playing` / `trackId` / `seekMs` goes
+// with it. Not reachable from the console, which sends one field per click, but
+// /api/music/device/report reaches the same function without a same-origin
+// check.)
 function applyControlPatch(input: unknown): void {
   const patch = (input ?? {}) as Record<string, unknown>;
+  const next: DeviceMusicState = { ...sDeviceState };
   let changed = false;
   if ("playing" in patch) {
     if (typeof patch.playing !== "boolean") throw new SettingsValidationError("playing must be boolean");
-    sDeviceState.playing = patch.playing;
+    next.playing = patch.playing;
     changed = true;
   }
   if ("mode" in patch) {
     if (typeof patch.mode !== "string" || !LYRIC_MODES.includes(patch.mode as LyricMode))
       throw new SettingsValidationError("mode is invalid");
-    sDeviceState.mode = patch.mode as LyricMode;
+    next.mode = patch.mode as LyricMode;
     changed = true;
   }
   if ("skin" in patch) {
     if (typeof patch.skin !== "string" || !LYRIC_SKINS.includes(patch.skin as LyricSkin))
       throw new SettingsValidationError("skin is invalid");
-    sDeviceState.skin = patch.skin as LyricSkin;
+    next.skin = patch.skin as LyricSkin;
     changed = true;
   }
   if ("accent" in patch) {
     if (patch.accent === null) {
-      sDeviceState.accent = null;
+      next.accent = null;
     } else if (typeof patch.accent === "string" && /^[0-9a-fA-F]{6}$/.test(patch.accent)) {
-      sDeviceState.accent = patch.accent.toLowerCase();
+      next.accent = patch.accent.toLowerCase();
     } else {
       throw new SettingsValidationError("accent must be RRGGBB hex or null");
     }
     changed = true;
   }
   if ("trackId" in patch) {
-    sDeviceState.trackId = patch.trackId === null ? null : mediaId(patch.trackId, "trackId");
+    next.trackId = patch.trackId === null ? null : mediaId(patch.trackId, "trackId");
     changed = true;
   }
   if ("seekMs" in patch) {
     if (typeof patch.seekMs !== "number" || !Number.isFinite(patch.seekMs) || patch.seekMs < 0)
       throw new SettingsValidationError("seekMs must be a non-negative number");
-    sDeviceState.seekMs = Math.round(patch.seekMs);
+    next.seekMs = Math.round(patch.seekMs);
     changed = true;
   }
-  if (changed) sDeviceState.seq += 1;
+  if (!changed) return;
+  Object.assign(sDeviceState, next);
+  sDeviceState.seq += 1;
+}
+
+/**
+ * Seeds the 主题设置 from disk, before the first document is served.
+ *
+ * `sDeviceState` is module memory, so without this a restart served
+ * spotlight/signal — and because ZOS applies the document's theme
+ * unconditionally (there is no local control to fight, so no sequence to gate
+ * on), that default reached the panel AND overwrote the device's own /data copy,
+ * which is the cache that exists to survive exactly this. The user's complaint,
+ * one restart later: pick 磁带橙, restart the service, the panel is green and the
+ * device has forgotten too.
+ *
+ * Bad fields are dropped rather than thrown on: this runs at boot from a file
+ * the user never sees, and a hand-edited colour must not be the reason the
+ * service refuses to start.
+ */
+export function restoreDeviceLyricTheme(theme: unknown): void {
+  const record = (theme ?? {}) as Record<string, unknown>;
+  if (typeof record.mode === "string" && LYRIC_MODES.includes(record.mode as LyricMode)) {
+    sDeviceState.mode = record.mode as LyricMode;
+  }
+  if (typeof record.skin === "string" && LYRIC_SKINS.includes(record.skin as LyricSkin)) {
+    sDeviceState.skin = record.skin as LyricSkin;
+  }
+  if (record.accent === null) sDeviceState.accent = null;
+  else if (typeof record.accent === "string" && /^[0-9a-fA-F]{6}$/.test(record.accent)) {
+    sDeviceState.accent = record.accent.toLowerCase();
+  }
 }
 
 // The device's reported live status (from /heartbeat): what it is actually
@@ -736,6 +789,29 @@ export function createControlHandler(
   // Same token-bucket policy as /api/notify (6 per 10s), but a separate bucket:
   // a burst of webhook notifications must not lock players out of the board.
   const weatherGeocode = options.weatherGeocode ?? new GeocodeClient();
+  // ONE theme store for two firmwares (ADR 0007). sDeviceState is what the
+  // sideloaded lyrics player reads from /api/music/device/state; the ZOS link
+  // republishes the same three values in its pull document, so whichever
+  // firmware is on the device paints what the console's 主题设置 panel shows.
+  // Primed here rather than only on the next click: the console restores its
+  // theme from localStorage and the user may not touch it for days, and a hub
+  // constructed after a control write would otherwise serve the defaults.
+  //
+  // The disk write rides along for the same reason it is one store: the value
+  // has to be here on the NEXT boot too, or a restart serves the defaults, ZOS
+  // applies them unconditionally and the device's own /data cache is overwritten
+  // with them. The store no-ops when nothing moved, so priming here and
+  // republishing after every write costs one comparison, not a file.
+  const publishLyricTheme = (): void => {
+    const theme: OsLyricTheme = {
+      mode: sDeviceState.mode,
+      skin: sDeviceState.skin,
+      accent: sDeviceState.accent,
+    };
+    options.osLink?.setLyricTheme(theme);
+    options.lyricThemeStore?.save(theme);
+  };
+  publishLyricTheme();
   return async (request) => {
     const url = new URL(request.url);
     try {
@@ -1376,6 +1452,7 @@ export function createControlHandler(
         // The web UI drives the device: play/pause, lyric mode, skin, accent, track.
         assertSameOrigin(request);
         applyControlPatch(await readJson(request));
+        publishLyricTheme();
         return jsonResponse({ ok: true, seq: sDeviceState.seq });
       }
 
@@ -1390,6 +1467,10 @@ export function createControlHandler(
           await applyRemoteAction(provider, report).catch(() => null);
         }
         applyControlPatch(report);
+        // The same authority as a console click: a key press on the sideloaded
+        // player writes the shared store, so ZOS must see it too — otherwise
+        // the two firmwares disagree the moment one of them is touched locally.
+        publishLyricTheme();
         return jsonResponse({ ok: true, seq: sDeviceState.seq });
       }
 
@@ -1787,6 +1868,10 @@ export function createControlHandler(
           zosFlashed: options.osLink.zosFlashed(),
           requestedSettings: options.osLink.getDeviceSettings(),
           pendingInputs: options.osLink.pendingInputs(),
+          // What the device was actually told to paint with, without anyone
+          // having to parse the pull document to find out. This is a readback of
+          // the shared store, not a second copy of it.
+          lyricTheme: options.osLink.getLyricTheme(),
         });
       }
 
@@ -1841,6 +1926,12 @@ export function createControlHandler(
           positionMs: ms("positionMs"),
           durationMs: ms("durationMs"),
           lyric: text("lyric"),
+          // The line's window, which only the browser knows for a device-audio
+          // provider. Absent (or zeroed by a console that predates this) means
+          // "no timing", and the panel falls back to an untimed sweep rather
+          // than to a blank screen.
+          lyricStartMs: ms("lyricStartMs"),
+          lyricEndMs: ms("lyricEndMs"),
         }, "console");
         return jsonResponse({
           nowPlaying: options.osLink.getNowPlaying(),

@@ -67,6 +67,17 @@ class HttpServer {
   // A phone form post is tiny; anything larger is refused rather than buffered.
   static const int kMaxRequestBytes = 8192;
 
+  /**
+   * Deadline on one accepted connection, per read and in total.
+   *
+   * PortalService gives this class a single thread, so a connection that never
+   * says anything is not a slow request, it is the setup page going away for
+   * good. Four seconds is far longer than a form post over a two-metre WiFi link
+   * and far shorter than a user's patience.
+   */
+  static const int kSocketTimeoutMs = 4000;
+  static const int kRequestDeadlineMs = 8000;
+
  private:
   HttpServer(const HttpServer&);
   HttpServer& operator=(const HttpServer&);

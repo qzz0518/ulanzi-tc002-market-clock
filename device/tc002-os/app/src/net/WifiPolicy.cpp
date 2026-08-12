@@ -176,6 +176,9 @@ void WifiPolicy::tick(int nowMs) {
         }
         enter(kOnline, nowMs);
       } else if (inState >= kDhcpTimeoutMs) {
+        // Ask again, and keep asking. There is deliberately no escape from this
+        // state — see kDhcpTimeoutMs's comment for why a lease budget that falls
+        // back to the hotspot is a worse device than one that waits.
         mActuator->requestDhcp();
         mStateSinceMs = nowMs;  // another lease attempt, same state
       }

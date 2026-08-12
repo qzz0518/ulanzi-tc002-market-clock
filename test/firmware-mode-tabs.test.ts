@@ -428,9 +428,16 @@ describe("音乐 under ZOS", () => {
 
     // 同屏走 /api/music/mirror → live frames → Custom App,ZOS 上是 503。
     expect(html).not.toContain("设备同屏");
-    // 设备那页由 service.ts 的 publishOsNowPlaying 喂,而它要求 provider.remote
-    // —— 只有 Spotify 有。默认来源是网易云,所以要说清楚。
-    expect(html).toContain("时钟的「音乐」页只跟随 Spotify Connect");
+    // 网易云也能推上去了：本组件 PUT /api/os/now-playing 上报浏览器里正在播的
+    // 东西,所以旧的「只跟随 Spotify Connect」是假话,必须消失。默认来源是网易云,
+    // 说清楚的是「这一页得开着」——那才是这条路真正的约束。
+    expect(html).not.toContain("时钟的「音乐」页只跟随 Spotify Connect");
+    expect(html).toContain("网页就是网易云的播放器，所以这一页得开着");
+
+    // 主题设置在 ZOS 下是真的推到设备的：ZOS 从 /api/os/pull 读同一份
+    // sDeviceState（ADR 0007）。这颗芯片说「仅影响预览」正是用户报的第二个问题。
+    expect(html).toContain("实时同步到设备");
+    expect(html).not.toContain("仅影响预览");
   });
 
   test("the music jump is wired to the measured focus, not a hand-typed string", async () => {

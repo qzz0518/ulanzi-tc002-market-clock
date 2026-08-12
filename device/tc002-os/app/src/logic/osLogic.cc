@@ -20,6 +20,7 @@
 #include "platform/DeviceWifi.h"
 #include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
+#include "platform/Prefs.h"
 #include "platform/Sfx.h"
 #include "platform/Presenter.h"
 #include "core/Shell.h"
@@ -197,6 +198,10 @@ tcos::HostLink::Snapshot sLink;
 uint64_t sLinkPolledMs = 0;
 uint64_t sSettingsBuiltMs = 0;
 uint64_t sTelemetryReadMs = 0;
+// Edge detector for "the policy just entered provisioning", so the sweep it
+// gathered is handed to the setup page exactly once per hotspot rather than
+// copied out of the policy six times a second.
+bool sWasProvisioning = false;
 // The highest console sequence already acted on.
 //
 // PRIMED from the first document rather than started at zero. The service keeps
@@ -208,6 +213,66 @@ uint64_t sTelemetryReadMs = 0;
 int sAppliedSettingsSeq = 0;
 int sAppliedInputSeq = 0;
 bool sConsoleSeqPrimed = false;
+
+// The 主题设置 last written to /data, so a document that repeats it does not
+// re-stage a flash write. NOT a sequence: the theme has one writer and no local
+// control to fight (the knob is prev/next here and the side buttons stay with
+// volume), so it is applied unconditionally on every document and the only
+// thing worth remembering is what is already on disk.
+int sPersistedMode = -1;
+int sPersistedSkin = -1;
+// -1 means "no accent", which is why this cannot be a uint32_t.
+int sPersistedAccent = -2;
+
+/**
+ * Reads the last adopted 主题设置 back off /data.
+ *
+ * A warm-start cache, not a second store. The link is absent for several
+ * seconds on a cold boot — and forever on a flashed unit that was never told a
+ * host address, which is the 未配置 case the music screen already has a state
+ * for — so without this the panel repaints itself 信号绿 in front of a user who
+ * chose 磁带橙 months ago. The first document that arrives overrides it.
+ *
+ * setTheme ignores out-of-range ids, so a corrupt or hand-edited prefs file
+ * leaves the constructor's defaults rather than blanking the screen.
+ */
+void restoreLyricTheme() {
+	sPersistedMode = tcos::prefs::getInt("music.mode", tcos::MusicScreen::kModeSpotlight);
+	sPersistedSkin = tcos::prefs::getInt("music.skin", tcos::MusicScreen::kSkinSignal);
+	sPersistedAccent = tcos::prefs::getInt("music.accent", -1);
+	sMusic.setTheme(sPersistedMode, sPersistedSkin,
+	                sPersistedAccent >= 0 ? (uint32_t)sPersistedAccent : 0,
+	                sPersistedAccent >= 0);
+}
+
+/**
+ * Hands the document's theme to the music screen, and remembers it.
+ *
+ * NO SEQUENCE GATE, deliberately, and this is the one console->device channel
+ * without one. `setseq` exists because the knob can change the volume locally,
+ * so a stale console value riding in every document would spring back the
+ * instant the user let go. The theme has no local control to fight — the knob
+ * is prev/next on this screen, the press is play/pause, and the side buttons
+ * stay with volume on purpose — so re-applying it on every document is
+ * idempotent, and it is also what makes a device correct on its FIRST poll
+ * rather than on the first click after boot. A theme cycle added later must
+ * arrive with its own `themeseq` and rising-edge gating.
+ */
+void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
+	sMusic.setTheme(mode, skin, accentRgb, hasAccent);
+	const int accent = hasAccent ? (int)(accentRgb & 0xffffffu) : -1;
+	if (mode == sPersistedMode && skin == sPersistedSkin && accent == sPersistedAccent) return;
+	sPersistedMode = mode;
+	sPersistedSkin = skin;
+	sPersistedAccent = accent;
+	// STAGED, not written. /data is jffs2 on raw NAND; the commit is debounced
+	// by DeviceControls::flushIfDue, which the tick already calls once a frame.
+	// Committing here would put a flash erase on the poll path, which is the
+	// same mistake the volume knob avoids one function over.
+	tcos::prefs::setInt("music.mode", mode);
+	tcos::prefs::setInt("music.skin", skin);
+	tcos::prefs::setInt("music.accent", accent);
+}
 
 tcos::Shell& shell() {
 	static tcos::Shell instance(tcos::kPanelWidth, tcos::kPanelHeight);
@@ -464,7 +529,35 @@ void rebuildSettings(int nowMs) {
 	}
 	rows.push_back(row);
 
-	row.label = "\xE9\x85\x8D\xE7\xBD\x91";                                  // 配网
+	// 热点 / 密码, and only while the hotspot is the way in.
+	//
+	// These are the two strings a user has to type into a phone, and until now
+	// the device never showed either of them: the SSID is derived from the MAC,
+	// so it is not on the box, not in the manual, and not anywhere else. The
+	// panel asked the user to join a network it would not name. Both fit the
+	// 52 px row without a marquee by construction — see apSsidFromMac.
+	if (sWifiPolicy.isProvisioning()) {
+		row.label = "\xE7\x83\xAD\xE7\x82\xB9";                              // 热点
+		row.value = tcos::DeviceWifi::apSsidFromMac(mac);
+		rows.push_back(row);
+
+		row.label = "\xE5\xAF\x86\xE7\xA0\x81";                              // 密码
+		row.value = tcos::DeviceWifi::softApPassphrase();
+		rows.push_back(row);
+	}
+
+	// 配网, and the label carries the bad news.
+	//
+	// When the hotspot has no DHCP this row was the most misleading pixel in the
+	// whole failure: a perfectly plausible `192.168.100.1:80` that no phone could
+	// ever reach, because the phone was never handed an address in that subnet.
+	// The address itself still has to be shown — the user needs it to configure
+	// one by hand, which is the only way in — so it is the LABEL that changes.
+	// 手动配网 is four CJK cells, 48 px, the widest a label can be here.
+	const bool apNeedsManualAddress = sWifi.softApDhcpFailed();
+	row.label = apNeedsManualAddress
+	                ? "\xE6\x89\x8B\xE5\x8A\xA8\xE9\x85\x8D\xE7\xBD\x91"     // 手动配网
+	                : "\xE9\x85\x8D\xE7\xBD\x91";                            // 配网
 	if (!sPortalService.running()) {
 		row.value = "\xE6\x9C\xAA\xE5\x90\xAF\xE5\x8A\xA8";                // 未启动
 	} else if (ip.empty()) {
@@ -584,6 +677,11 @@ static void onUI_init() {
 	// output as part of coming up. Reversed, the priming burst and every effect
 	// until the first onUI_show ran at whatever level the previous firmware left.
 	tcos::DeviceControls::instance().initialize();
+	// Beside the volume and brightness restore for the same reason: these are the
+	// settings a user chose once and expects to still be there after a power cut.
+	// Prefs loads the file lazily, so the ordering here is only about running
+	// before the first frame, not about who opens what.
+	restoreLyricTheme();
 	tcos::Sfx::instance().initialize();
 	KeyManager::getInstance().start();
 	// Started here rather than in onUI_show: onUI_show runs on every return to
@@ -737,6 +835,21 @@ static bool onUI_Timer(int id) {
 				sWifiPolicy.applyCredentials(pendingSsid, pendingPsk, nowMs);
 			}
 		}
+		// ...and the verdict comes back the same way. The page has no other
+		// source: the address it can see during provisioning is the hotspot's
+		// own, so without this it reported success for every submission,
+		// including a wrong password.
+		{
+			const bool provisioning = sWifiPolicy.isProvisioning();
+			sProvisioning.noteLinkOutcome(sWifiPolicy.isOnline(), provisioning);
+			// The network list the page offers is captured on the way INTO
+			// provisioning, because raising the hotspot stops the supplicant and
+			// the radio cannot be asked again for as long as the page is up.
+			if (provisioning && !sWasProvisioning) {
+				sProvisioning.setScannedNetworks(sWifiPolicy.scanned());
+			}
+			sWasProvisioning = provisioning;
+		}
 		sLink = hostLink().snapshot();
 
 		// The first document only establishes where the sequences already are.
@@ -747,6 +860,21 @@ static bool onUI_Timer(int id) {
 			for (size_t i = 0; i < sLink.inputs.size(); ++i) {
 				if (sLink.inputs[i].seq > sAppliedInputSeq) sAppliedInputSeq = sLink.inputs[i].seq;
 			}
+		}
+
+		// The console's 主题设置. Applied outside the music screen's own branch
+		// because it must survive not being on that screen: the user picks a
+		// colour while the panel shows the launcher, and it has to be right the
+		// moment they walk into 音乐 rather than one tick later.
+		//
+		// Gated on `online`, and ONLY on that. An offline snapshot is a
+		// default-constructed one, so applying it would repaint a device that
+		// cannot reach the service back to 信号绿 and overwrite the /data value
+		// that exists precisely for that case. This is not a staleness sweeper —
+		// once adopted, a theme never expires. There is nothing for it to go
+		// stale against.
+		if (sLink.online) {
+			applyLyricTheme(sLink.lyricMode, sLink.lyricSkin, sLink.accentRgb, sLink.hasAccent);
 		}
 
 		// Settings the console asked for. Applied ONLY on a rising sequence: the
@@ -891,7 +1019,8 @@ static bool onUI_Timer(int id) {
 		sMusic.setLink(!hostLink().baseUrl().empty(), sLink.online);
 		sMusic.setNowPlaying(sLink.nowPlaying, sLink.track, sLink.artist, sLink.lyric,
 		                     sLink.playing, sLink.positionMs, sLink.durationMs,
-		                     (int)(sLink.stampMonoMs - sStartMs));
+		                     (int)(sLink.stampMonoMs - sStartMs),
+		                     sLink.lyricStartMs, sLink.lyricEndMs);
 		switch (sMusic.takeAction()) {
 		case tcos::MusicScreen::kToggle:
 			hostLink().sendMusicAction(sLink.playing ? "pause" : "play");

@@ -58,8 +58,18 @@ bool WpaCtrl::open(const std::string& iface) {
   // The supplicant replies to the address we bound, so a client socket with no
   // path of its own gets no answer at all. /tmp is tmpfs, which is also where
   // the whole sideload lives, so the stale-socket problem clears on power cycle.
+  //
+  // The counter is not decoration. Keyed on the pid alone, the two WpaCtrl
+  // instances this firmware really has — DeviceWifi's, and the one the setup
+  // page's backend opens per /scan — bound the SAME path, and open()'s unlink
+  // took the name out from under whichever got there first: its replies then
+  // went nowhere, associated() read a live supplicant as disconnected, and the
+  // policy spent a 25 s connect timeout recovering. The window is exactly the
+  // one that matters, a phone polling the page while the radio reassociates.
+  static int sInstance = 0;
+  const int instance = __sync_fetch_and_add(&sInstance, 1);
   char local[64];
-  ::snprintf(local, sizeof(local), "/tmp/zos-wpa-%d", static_cast<int>(::getpid()));
+  ::snprintf(local, sizeof(local), "/tmp/zos-wpa-%d-%d", static_cast<int>(::getpid()), instance);
   ::unlink(local);
 
   struct sockaddr_un self;

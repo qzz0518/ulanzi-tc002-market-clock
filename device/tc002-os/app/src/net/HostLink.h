@@ -54,6 +54,11 @@ class HostLink {
     int positionMs;
     int durationMs;
     uint64_t stampMonoMs;
+    // The current lyric line's window, or -1/-1 when the service does not send
+    // one. Every display mode animates within the line, so this travels with
+    // the lyric rather than being derived from pos/dur.
+    int lyricStartMs;
+    int lyricEndMs;
 
     // Console -> device. See StateDoc for why each carries a sequence.
     int settingsSeq;
@@ -61,10 +66,22 @@ class HostLink {
     int requestedBrightness;
     std::vector<StateDoc::Input> inputs;
 
+    // The console's 主题设置. A setting, not a reading: it has one writer and
+    // no source that can die, so unlike now-playing it never expires and is
+    // never gated on the link being live. Defaults match the service's, so the
+    // panel is already right before the first document lands.
+    int lyricMode;
+    int lyricSkin;
+    uint32_t accentRgb;
+    bool hasAccent;
+
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
                  consecutiveFailures(0), nowPlaying(false), playing(false),
-                 positionMs(0), durationMs(0), stampMonoMs(0), settingsSeq(0),
-                 requestedVolume(-1), requestedBrightness(-1) {}
+                 positionMs(0), durationMs(0), stampMonoMs(0),
+                 lyricStartMs(-1), lyricEndMs(-1), settingsSeq(0),
+                 requestedVolume(-1), requestedBrightness(-1),
+                 lyricMode(StateDoc::kDefaultMode), lyricSkin(StateDoc::kDefaultSkin),
+                 accentRgb(0), hasAccent(false) {}
   };
 
   HostLink();

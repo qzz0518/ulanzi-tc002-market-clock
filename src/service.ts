@@ -10,7 +10,12 @@ import {
 import { loadConfig } from "./config.ts";
 import { ClockHostStore, type DeviceHostStatus } from "./device-host.ts";
 import { OsLinkHub, type OsMenuEntry } from "./os-link.ts";
-import { createControlHandler, resetDeviceMusicSelection } from "./control-api.ts";
+import {
+  createControlHandler,
+  resetDeviceMusicSelection,
+  restoreDeviceLyricTheme,
+} from "./control-api.ts";
+import { LyricThemeStore } from "./lyric-theme-store.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
 import type { MusicLyricLine } from "./music/core.ts";
@@ -71,6 +76,13 @@ const workspaceStore = new WorkspaceStore(
   ".runtime/settings.json",
   config.appName,
 );
+// The 主题设置 the console's panel writes, kept across restarts. Loaded BEFORE
+// the handler is built, because building it primes the ZOS link with whatever
+// sDeviceState holds and the device applies that unconditionally — a restart
+// that served the defaults would repaint the panel and clobber the device's own
+// /data copy in the same poll (ADR 0007).
+const lyricThemeStore = new LyricThemeStore(".runtime/lyric-theme.json");
+restoreDeviceLyricTheme(await lyricThemeStore.load());
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
 const instrumentStore = new InstrumentStore(".runtime/market-instruments");
 const marketIconStore = new MarketIconStore(".runtime/market-icons");
@@ -275,15 +287,37 @@ let osNowLyrics: MusicLyricLine[] = [];
 let osNowTitle = "";
 let osNowArtist = "";
 
-function lyricAt(lines: readonly MusicLyricLine[], positionMs: number): string {
+interface OsLyricWindow {
+  text: string;
+  startMs: number;
+  endMs: number;
+}
+
+function lyricAt(
+  lines: readonly MusicLyricLine[],
+  positionMs: number,
+  durationMs: number,
+): OsLyricWindow {
   // Linear rather than a binary search on purpose: a song is a few hundred
   // lines and this runs twice a second.
-  let current = "";
-  for (const line of lines) {
-    if (line.startMs > positionMs) break;
-    current = line.text;
+  let index = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i]!.startMs > positionMs) break;
+    index = i;
   }
-  return current;
+  if (index < 0) return { text: "", startMs: 0, endMs: 0 };
+  const current = lines[index]!;
+  const next = lines[index + 1];
+  // The line ENDS where the next one starts; the last line runs to the end of
+  // the track, or four seconds if the duration is unknown or already past.
+  // Byte for byte the fallback in the sideloaded player's LyricsPage.cpp — the
+  // last line of every song would otherwise animate differently on the two
+  // firmwares, which is exactly the kind of near-parity this work exists to
+  // remove.
+  const endMs = next
+    ? next.startMs
+    : (durationMs > current.startMs ? durationMs : current.startMs + 4000);
+  return { text: current.text, startMs: current.startMs, endMs };
 }
 
 async function publishOsNowPlaying(): Promise<void> {
@@ -326,13 +360,16 @@ async function publishOsNowPlaying(): Promise<void> {
       // A title we cannot resolve still leaves a usable transport view.
     }
   }
+  const line = lyricAt(osNowLyrics, snapshot.positionMs, snapshot.durationMs);
   osLink.setNowPlaying({
     track: osNowTitle,
     artist: osNowArtist,
     playing: snapshot.playing,
     positionMs: snapshot.positionMs,
     durationMs: snapshot.durationMs,
-    lyric: lyricAt(osNowLyrics, snapshot.positionMs),
+    lyric: line.text,
+    lyricStartMs: line.startMs,
+    lyricEndMs: line.endMs,
   }, "remote");
 }
 
@@ -352,6 +389,7 @@ const controlHandler = createControlHandler(controller, {
     wakeSleep?.();
   },
   osLink,
+  lyricThemeStore,
   controlAccess,
   deviceGeneralSettings: {
     read: () => readClockGeneralSettings(config),

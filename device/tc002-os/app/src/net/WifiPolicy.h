@@ -117,6 +117,29 @@ class WifiPolicy {
   static const int kSupplicantStartMs = 4000;
   static const int kConnectTimeoutMs = 25000;
   static const int kDhcpTimeoutMs = 12000;
+  /**
+   * kObtainingIp deliberately has NO escape to provisioning, and that is a
+   * choice rather than an oversight.
+   *
+   * The tempting version — give up after N lease attempts and raise the hotspot
+   * — was written, reviewed and removed. Two facts kill it. First, the fallback
+   * is one-way: bringUpSoftAp() issues `ctl.stop wpa_supplicant` and /etc/init.rc
+   * declares that service `disabled` + `oneshot`, so nothing brings it back; the
+   * kProvisioning background retry below is gated on supplicantRunning() and
+   * therefore cannot fire once a hotspot is actually on the air. A device that
+   * escapes here stays a hotspot until a human submits credentials or pulls the
+   * power. Second, the condition it fires on is common and transient: a clock
+   * that boots faster than the router it is associated to sees exactly "no lease
+   * yet", and a budget short enough to help a genuinely broken DHCP server is
+   * short enough to strand a device whose router is merely mid-reboot.
+   *
+   * So this state waits, and re-asks every kDhcpTimeoutMs. A router that starts
+   * leasing is joined with nobody doing anything; a router that never leases
+   * leaves the device unreachable, which is a real gap and is written down in
+   * docs/design/tc002-os-provisioning.md rather than closed by a timer. Closing
+   * it needs a hotspot that can be torn back down and retested, which is a
+   * change with its own evidence to gather.
+   */
   // While provisioning, keep retrying the stored network: the usual cause is a
   // router that is merely slow to come back, and recovering by itself beats
   // making the user configure a network that already works.

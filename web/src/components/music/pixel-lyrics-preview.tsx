@@ -316,8 +316,15 @@ function paintSkyline(
   bitmap: PixelTextBitmap,
   input: PixelLyricsFrameInput,
 ): void {
-  const showText = input.hasLyric || !input.playing;
-  const maxLevel = showText ? 3 : 12;
+  // Three levels, always: a floor on rows 13..15, row 12 the gutter, the line on
+  // 0..11. This used to be `hasLyric || !playing ? 3 : 12` — a track without
+  // lyrics turned the whole panel into a visualizer and dropped the row. Neither
+  // firmware can reach that state (the sideloaded player only paints once a
+  // timed line exists, and ZOS always has a row: the lyric, or the title/artist
+  // rotation, or 播放中 / 已暂停), so the preview was the only one of the three
+  // that showed it — and what it showed was the user's own complaint, 频谱挡字,
+  // with the words gone entirely rather than merely covered.
+  const maxLevel = 3;
   const animated = !input.reducedMotion;
   const kick = animated
     ? beatKick(
@@ -352,7 +359,6 @@ function paintSkyline(
     }
   }
 
-  if (!showText) return;
   const focusIndex = focusGlyphIndexForProgress(
     bitmap.focusSpans.length,
     input.lyricProgress,

@@ -60,6 +60,40 @@ export interface OsDeviceSettings {
   brightness: number | null;
 }
 
+/**
+ * The console's 主题设置, carried to whichever firmware is on the device.
+ *
+ * These are the same two enums and the same accent the sideloaded lyrics player
+ * already reads from /api/music/device/state — deliberately not a second set.
+ * ZOS's music screen is a port of that firmware's renderer (ADR 0007), and the
+ * console offers exactly one theme panel for both, so a second store would only
+ * be a copy somebody has to keep equal by hand: pick 磁带橙 under ZOS, sideload
+ * the player for local audio, and get 信号绿 back.
+ *
+ * ORDER IS LOAD-BEARING. The index into these arrays is the integer that
+ * crosses the link — ticker=0, skyline=1, spotlight=2, cascade=3 and
+ * signal=0, tape=1, blueprint=2, arcade=3 — matching LYRIC_MODES / LYRIC_SKINS
+ * in src/control-api.ts, MusicScreen::Mode / Skin, and the sideloaded player's
+ * own visual/Palette.h. Renumbering any one of them repaints the panel in a
+ * colour the console is not showing, silently and with nothing to fail.
+ */
+export type OsLyricMode = "ticker" | "skyline" | "spotlight" | "cascade";
+export type OsLyricSkin = "signal" | "tape" | "blueprint" | "arcade";
+
+export const OS_LYRIC_MODES: readonly OsLyricMode[] = [
+  "ticker", "skyline", "spotlight", "cascade",
+];
+export const OS_LYRIC_SKINS: readonly OsLyricSkin[] = [
+  "signal", "tape", "blueprint", "arcade",
+];
+
+export interface OsLyricTheme {
+  mode: OsLyricMode;
+  skin: OsLyricSkin;
+  /** "rrggbb" replacing the skin's primary tier only, or null for the skin's own. */
+  accent: string | null;
+}
+
 export interface OsNowPlaying {
   track: string;
   artist: string;
@@ -69,6 +103,21 @@ export interface OsNowPlaying {
   durationMs: number;
   /** The lyric line covering `positionMs`, or "" when there are no lyrics. */
   lyric: string;
+  /**
+   * The current lyric line's window in track time.
+   *
+   * Every display mode's geometry, colouring and beat is a function of progress
+   * WITHIN the line, not of the track — the sung column, the cascade band, the
+   * skyline's kick. `positionMs`/`durationMs` describe the song and one resolved
+   * lyric string has neither a start nor an end, so without this window the
+   * device has nothing to animate against.
+   *
+   * `lyricEndMs <= lyricStartMs` means "this line has no timing": a caller that
+   * cannot answer passes zeroes and the panel falls back to a single sweep,
+   * rather than the service inventing a window it does not know.
+   */
+  lyricStartMs: number;
+  lyricEndMs: number;
 }
 
 /**
@@ -152,6 +201,9 @@ export class OsLinkHub {
   // at exactly the moment the user is reading a restore guide.
   private zosEverFlashed = false;
   private settings: OsDeviceSettings = { volume: null, brightness: null };
+  // Defaults identical to sDeviceState's in src/control-api.ts, so the two
+  // agree before the first write rather than only after one.
+  private theme: OsLyricTheme = { mode: "spotlight", skin: "signal", accent: null };
   // Every console write bumps this. The device applies a setting only when the
   // sequence is HIGHER than the last one it applied, which is what lets the
   // knob win afterwards: the document still carries the console's old value,
@@ -238,6 +290,8 @@ export class OsLinkHub {
       positionMs: Math.max(0, Math.round(now.positionMs)),
       durationMs: Math.max(0, Math.round(now.durationMs)),
       lyric: clampLabel(sanitizeField(now.lyric)),
+      lyricStartMs: Math.max(0, Math.round(now.lyricStartMs)),
+      lyricEndMs: Math.max(0, Math.round(now.lyricEndMs)),
     };
     const before = this.nowPlaying;
     const textChanged = (before === null) !== (next === null) ||
@@ -245,7 +299,13 @@ export class OsLinkHub {
         before.track !== next.track ||
         before.artist !== next.artist ||
         before.playing !== next.playing ||
-        before.lyric !== next.lyric
+        before.lyric !== next.lyric ||
+        // The window, not only the words. A chorus that repeats a line verbatim
+        // leaves `lyric` identical, so without this no bump fires, the device
+        // never sees the new document, and it keeps animating the previous
+        // line's window with progress pinned at 1 — the line sits there fully
+        // sung while the song moves on.
+        before.lyricStartMs !== next.lyricStartMs
       ));
     this.nowPlaying = next;
     this.nowPlayingStampedAt = this.now();
@@ -319,6 +379,57 @@ export class OsLinkHub {
     return { ...this.settings, seq: this.settingsSeq };
   }
 
+  /**
+   * Adopts the console's 主题设置.
+   *
+   * NO SEQUENCE, unlike setDeviceSettings, and that is a decision rather than an
+   * omission. `setseq` exists because volume has a second writer — the knob —
+   * so a console value sitting in every document would be re-applied on each
+   * poll and the user could never turn it up by hand. The theme has exactly one
+   * writer: ZOS's music screen spends its knob on prev/next, its press on
+   * play/pause, and refuses the side buttons so volume keeps working (see
+   * ui/MusicScreen.h), so there is no local control to fight. Applying it
+   * unconditionally on every document is therefore idempotent, and it is also
+   * what makes a cold-booted device correct on its first poll. If a local theme
+   * cycle is ever added it must arrive WITH a `themeseq` and rising-edge gating,
+   * or the console's stale value will snap back on the very next document.
+   *
+   * Validated here as well as in applyControlPatch — same defence in depth as
+   * sanitizeField and the clamp in setDeviceSettings. An unrecognised mode or
+   * skin is ignored rather than thrown: this is a hub, not a request handler,
+   * and dropping one bad field is better than failing a whole update.
+   */
+  setLyricTheme(next: Partial<OsLyricTheme>): void {
+    let changed = false;
+    if (typeof next.mode === "string" && OS_LYRIC_MODES.includes(next.mode)) {
+      if (this.theme.mode !== next.mode) changed = true;
+      this.theme.mode = next.mode;
+    }
+    if (typeof next.skin === "string" && OS_LYRIC_SKINS.includes(next.skin)) {
+      if (this.theme.skin !== next.skin) changed = true;
+      this.theme.skin = next.skin;
+    }
+    if ("accent" in next) {
+      let accent: string | null | undefined;
+      if (next.accent === null) accent = null;
+      else if (typeof next.accent === "string" && /^[0-9a-fA-F]{6}$/.test(next.accent)) {
+        accent = next.accent.toLowerCase();
+      }
+      if (accent !== undefined) {
+        if (this.theme.accent !== accent) changed = true;
+        this.theme.accent = accent;
+      }
+    }
+    // No-op writes must not bump: the console primes this on every handler
+    // construction and re-sends it after each poll echo, and waking every parked
+    // long poll for a value that did not move is a broadcast storm on a LAN.
+    if (changed) this.bump();
+  }
+
+  getLyricTheme(): OsLyricTheme {
+    return { ...this.theme };
+  }
+
   report(telemetry: Omit<OsTelemetry, "receivedAt">): void {
     if (telemetry.flashed) this.zosEverFlashed = true;
     // Telemetry never bumps the sequence: it flows device->console, and waking
@@ -381,6 +492,14 @@ export class OsLinkHub {
     // cheap on a LAN but not free on a device with one core and a 15 ms panel.
     lines.push(`mirror\t${this.mirrorWanted() ? 1 : 0}`);
     if (this.display.focus !== null) lines.push(`focus\t${this.display.focus}`);
+    // Emitted unconditionally, and deliberately OUTSIDE the `np` block: the
+    // panel needs a skin for its three empty states (未配置 / 离线 / 未播放)
+    // too, and a theme that lived under `if (np)` would drop back to the
+    // defaults the moment playback stopped — the user would watch their colour
+    // leave the screen when they pressed pause.
+    lines.push(`mode\t${this.theme.mode}`);
+    lines.push(`skin\t${this.theme.skin}`);
+    if (this.theme.accent !== null) lines.push(`accent\t${this.theme.accent}`);
     if (this.settingsSeq > 0) {
       lines.push(`setseq\t${this.settingsSeq}`);
       if (this.settings.volume !== null) lines.push(`setvol\t${this.settings.volume}`);
@@ -404,7 +523,18 @@ export class OsLinkHub {
         : np.positionMs + drift;
       lines.push(`pos\t${Math.round(position)}`);
       lines.push(`dur\t${np.durationMs}`);
-      if (np.lyric !== "") lines.push(`lyric\t${np.lyric}`);
+      if (np.lyric !== "") {
+        lines.push(`lyric\t${np.lyric}`);
+        // The line's own window, and only when it is real. A caller with no
+        // timing sends zeroes; emitting `lyricat 0 / lyricend 0` for that would
+        // hand the device a degenerate span it has to detect anyway, so the
+        // absence carries the meaning instead — which is also what an older
+        // service looks like to a newer firmware.
+        if (np.lyricEndMs > np.lyricStartMs) {
+          lines.push(`lyricat\t${np.lyricStartMs}`);
+          lines.push(`lyricend\t${np.lyricEndMs}`);
+        }
+      }
     }
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {

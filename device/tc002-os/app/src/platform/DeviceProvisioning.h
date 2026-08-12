@@ -54,6 +54,29 @@ class DeviceProvisioning : public SetupPortal::Backend {
   /** Last submission, for the settings screen. Empty when there was none. */
   std::string lastSubmittedSsid() const;
 
+  /**
+   * The sweep taken just before the hotspot went up.
+   *
+   * Raising the AP stops wpa_supplicant, and a stopped supplicant has no control
+   * socket — so scanResults() below, which asks the live radio, returns NOTHING
+   * for the entire time the page is actually being used. The page then sat on
+   * "正在扫描…" forever with no way to name a network at all. WifiPolicy already
+   * gathers this list before it starts the AP, exactly for this; it just had no
+   * route to the page. This is that route.
+   */
+  void setScannedNetworks(const std::vector<std::string>& ssids);
+
+  /**
+   * What the WiFi policy made of the credentials this page submitted.
+   *
+   * Without it "failed" was unreachable for the only failure a user actually
+   * hits — a wrong password — and the page reported success off nothing but the
+   * presence of an address, which during provisioning is the hotspot's own
+   * 192.168.100.1. It told every user their clock was online, in every case,
+   * about 160 ms after they pressed 连接.
+   */
+  void noteLinkOutcome(bool online, bool backToProvisioning);
+
  private:
   DeviceProvisioning(const DeviceProvisioning&);
   DeviceProvisioning& operator=(const DeviceProvisioning&);
@@ -64,7 +87,12 @@ class DeviceProvisioning : public SetupPortal::Backend {
   std::string mPendingPsk;
   bool mHasPending;
   bool mRefusedForGuard;
+  // Credentials handed to the policy and not yet judged, and the verdict once
+  // there is one. Cleared by the next submit, so a second attempt starts clean.
+  bool mApplying;
+  bool mAttemptFailed;
   std::string mLastSsid;
+  std::vector<std::string> mScanned;
 };
 
 }  // namespace tcos

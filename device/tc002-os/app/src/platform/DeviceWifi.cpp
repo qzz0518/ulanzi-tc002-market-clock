@@ -1,6 +1,7 @@
 #include "platform/DeviceWifi.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -48,18 +49,6 @@ const char* kDnsmasqBin = "/bin/dnsmasq";
 const char* kIfconfigBin = "/sbin/ifconfig";
 
 const char* kInterface = "wlan0";
-// The AP-side DHCP pool, both endpoints lifted from libzknet.so's own strings
-// (`192.168.100.100`, `192.168.100.200`, `--dhcp-range=%s,%s,1h`). Staying on
-// the stock firmware's numbers means a phone that has connected to this clock
-// before does not have to be talked out of a cached lease from the other
-// firmware.
-const char* kDhcpRangeArg =
-    "--dhcp-range=192.168.100.100,192.168.100.200,1h";
-// Answer every name with our own address. A phone with no route to the
-// internet shows a "no internet" warning and often silently drops back to
-// mobile data; resolving everything here is what makes the captive-portal
-// prompt appear instead.
-const char* kDnsCatchAllArg = "--address=/#/192.168.100.1";
 
 // How long to leave the radio alone after a hotspot bring-up failed.
 //
@@ -70,6 +59,44 @@ const char* kDnsCatchAllArg = "--address=/#/192.168.100.1";
 // Thirty seconds is longer than WifiPolicy::kConnectTimeoutMs, so the station
 // path gets one whole honest attempt between hotspot attempts.
 const int kApRetryFloorMs = 30000;
+// The same floor for dnsmasq, which fails much faster than hostapd — a rejected
+// argument is an exit inside a millisecond — and would otherwise be re-spawned
+// on every supervision round for as long as the hotspot is up.
+const int kDhcpRetryFloorMs = 30000;
+
+// How often the hotspot worker reconciles while the hotspot is wanted.
+//
+// The worker used to exit as soon as the AP was up, which meant dnsmasq got
+// exactly ONE attempt per hostapd lifetime: WifiPolicy supervises
+// softApRunning(), that predicate is hostapd alone by design, and nothing
+// anywhere watched the DHCP server. A dnsmasq that never started — or one the
+// kernel reaped an hour in — stayed dead until the next reboot. That is why the
+// missing-pid-file bug below presented as permanent rather than intermittent.
+//
+// Three seconds matches WifiPolicy::kSoftApSuperviseMs: the cost is a walk of
+// /proc, and asking more often than the policy already does buys nothing.
+const int kApSuperviseMs = 3000;
+// Granularity of that wait. stopSoftAp() only records the wish and trusts a
+// running worker to notice, so this is also the worst case between "give the
+// radio back" and the ctl.start that does it — deliberately far below the
+// supervision period.
+const int kApWantPollMs = 250;
+
+// How long a hotspot bring-up waits for an outstanding lease request to finish
+// before it takes wlan0.
+//
+// libzknet's dhcpRequestIp() runs on a detached thread that cannot be cancelled
+// and whose timeout is not published, and when it returns it WRITES wlan0 — the
+// router's address on success, 0.0.0.0 on failure. Either lands on top of the
+// hotspot's gateway if it arrives after the bring-up, and a hotspot whose
+// interface has no gateway hands out nothing while looking perfectly healthy.
+//
+// Five seconds is a courtesy rather than a guarantee: it covers the tail of a
+// negotiation that is nearly done, and refuses to hold the one way back into a
+// stranded device hostage to a library call that may never return. What makes
+// stopping safe is that the supervision round reconciles the address every three
+// seconds afterwards — see DeviceWifi::applyApAddress.
+const int kDhcpSettleMs = 5000;
 
 void sleepMs(int ms) {
   struct timespec ts;
@@ -193,9 +220,32 @@ void terminateProcess(const char* name) {
 // tables. The app is loaded into zkgui, whose address space measured ~230 MB on
 // a box with 36 MB of RAM and ~1 MB free — a plain fork() there is a real
 // allocation failure, and it would fail in the middle of a hotspot bring-up.
-bool spawnAndWait(const char* path, char* const argv[], int timeoutMs) {
+//
+// `stderrPath`, when given, is where the CHILD's own words go. That channel had
+// to be invented: posix_spawn hands the child zkgui's stderr, which lands
+// nowhere a human reads, and logcat wedges adbd on this unit so it is not an
+// option either. dnsmasq spent the life of this feature printing "failed to open
+// pidfile /var/run/dnsmasq.pid: No such file or directory" into that void while
+// the only surviving signal was a bare false. The file is on tmpfs, so it costs
+// no flash and is gone on the next power cycle — but it survives the hotspot,
+// which means it is still there to read over adb once the device is back on a
+// network, and that is the whole point.
+bool spawnAndWait(const char* path, char* const argv[], int timeoutMs,
+                  const char* stderrPath = 0) {
   pid_t pid = -1;
-  if (::posix_spawn(&pid, path, 0, 0, argv, environ) != 0) {
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_t* actionsPtr = 0;
+  if (stderrPath != 0 && ::posix_spawn_file_actions_init(&actions) == 0) {
+    if (::posix_spawn_file_actions_addopen(&actions, 2, stderrPath,
+                                           O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0) {
+      actionsPtr = &actions;
+    } else {
+      ::posix_spawn_file_actions_destroy(&actions);
+    }
+  }
+  const int spawned = ::posix_spawn(&pid, path, actionsPtr, 0, argv, environ);
+  if (actionsPtr != 0) ::posix_spawn_file_actions_destroy(actionsPtr);
+  if (spawned != 0) {
     LOGE_TRACE("wifi: cannot spawn %s", path);
     return false;
   }
@@ -206,8 +256,28 @@ bool spawnAndWait(const char* path, char* const argv[], int timeoutMs) {
   for (int waited = 0; waited < timeoutMs; waited += 20) {
     int status = 0;
     const pid_t done = ::waitpid(pid, &status, WNOHANG);
-    if (done == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    if (done < 0) return false;
+    if (done == pid) {
+      if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return true;
+      // SAY THE STATUS. This used to be one line collapsing four different
+      // failures into a bare false, and the one it hid was the most informative
+      // of them: an exit code means the binary ran and rejected its own
+      // ARGUMENTS, which is a different bug from a binary that is missing or one
+      // that hung. dnsmasq spent months exiting 3 here — "failed to open pidfile
+      // /var/run/dnsmasq.pid" — while the caller logged "would not start", which
+      // points at the wrong hypothesis entirely. The child's own explanation is
+      // unreachable (posix_spawn inherits zkgui's stderr, which lands nowhere a
+      // human reads), so this number is all there is.
+      if (WIFEXITED(status)) {
+        LOGE_TRACE("wifi: %s exited %d", path, WEXITSTATUS(status));
+      } else if (WIFSIGNALED(status)) {
+        LOGE_TRACE("wifi: %s killed by signal %d", path, WTERMSIG(status));
+      }
+      return false;
+    }
+    if (done < 0) {
+      LOGE_TRACE("wifi: waitpid on %s failed", path);
+      return false;
+    }
     sleepMs(20);
   }
   LOGE_TRACE("wifi: %s did not exit within %d ms", path, timeoutMs);
@@ -290,7 +360,9 @@ DeviceWifi::DeviceWifi()
       mSoftApWanted(false),
       mSoftApWorking(false),
       mPersistInFlight(false),
+      mApDhcpFailed(false),
       mApFailedAtMs(-1),
+      mDhcpFailedAtMs(-1),
       mNetworkId(-1) {
   ::pthread_mutex_init(&mCtrlLock, 0);
   ::pthread_mutex_init(&mLock, 0);
@@ -673,45 +745,235 @@ void* DeviceWifi::softApMain(void* self) {
   // Reconcile until the wanted state stops moving. A user can submit
   // credentials while the AP is still coming up, and leaving hostapd holding
   // wlan0 after that would strand the device with a hotspot nobody is on.
+  //
+  // And then STAY, for as long as the hotspot is wanted. Only a teardown ends
+  // this thread. The reason is dnsmasq: hostapd has a supervisor (WifiPolicy
+  // watches softApRunning() every kSoftApSuperviseMs) and the DHCP server has
+  // never had one, so a single failed spawn was permanent for the boot. See
+  // kApSuperviseMs.
   for (;;) {
     ::pthread_mutex_lock(&me->mLock);
     const bool wanted = me->mSoftApWanted;
     ::pthread_mutex_unlock(&me->mLock);
 
+    bool up = false;
     if (wanted) {
-      me->bringUpSoftAp();
+      up = me->bringUpSoftAp();
     } else {
       me->tearDownSoftAp();
     }
 
     ::pthread_mutex_lock(&me->mLock);
     const bool changed = me->mSoftApWanted != wanted;
-    if (!changed) me->mSoftApWorking = false;
+    // Stay only while there is a hotspot to watch. A bring-up that was refused
+    // or failed ends this thread exactly as it always did, so the retry floor
+    // and the policy's own supervision keep driving it — a resident worker
+    // looping on a guard file that is never going to appear would be a thread
+    // held for the life of a sideloaded install.
+    const bool done = !changed && !(wanted && up);
+    if (done) me->mSoftApWorking = false;
     ::pthread_mutex_unlock(&me->mLock);
-    if (!changed) return 0;
+    if (done) return 0;
+    if (changed) continue;  // someone moved the goalposts; reconcile at once
+
+    // Hotspot up and still wanted. Sleep out the supervision period in slices,
+    // so a stopSoftAp() that arrives mid-wait gets the radio back promptly
+    // rather than after a full period.
+    for (int waited = 0; waited < kApSuperviseMs; waited += kApWantPollMs) {
+      ::pthread_mutex_lock(&me->mLock);
+      const bool stillWanted = me->mSoftApWanted;
+      ::pthread_mutex_unlock(&me->mLock);
+      if (!stillWanted) break;
+      sleepMs(kApWantPollMs);
+    }
   }
 }
 
-void DeviceWifi::bringUpSoftAp() {
+// Puts the AP-side address back on wlan0.
+//
+// 192.168.100.1 is the stock firmware's gateway for this mode (libzknet.so calls
+// ifc_set_addr with it), so a phone that has configured one of these clocks
+// before finds the page where it expects. ifconfig rather than
+// NetUtils::configure: ADR 0006 keeps this firmware down to a single libzknet
+// symbol, and configure() would be a second one.
+bool DeviceWifi::applyApAddress() {
+  char* argv[6];
+  argv[0] = const_cast<char*>(kIfconfigBin);
+  argv[1] = const_cast<char*>(kInterface);
+  argv[2] = const_cast<char*>(kSoftApAddress);
+  argv[3] = const_cast<char*>("netmask");
+  argv[4] = const_cast<char*>("255.255.255.0");
+  argv[5] = 0;
+  if (spawnAndWait(kIfconfigBin, argv, 4000)) return true;
+  LOGE_TRACE("wifi: could not address %s as %s", kInterface, kSoftApAddress);
+  return false;
+}
+
+void DeviceWifi::awaitDhcpQuiet(int timeoutMs) {
+  bool announced = false;
+  for (int waited = 0; waited < timeoutMs; waited += 100) {
+    ::pthread_mutex_lock(&mLock);
+    const bool busy = mDhcpInFlight;
+    ::pthread_mutex_unlock(&mLock);
+    if (!busy) return;
+    if (!announced) {
+      announced = true;
+      LOGD("wifi: hotspot waiting out a lease request still in flight on %s", kInterface);
+    }
+    sleepMs(100);
+  }
+  ::pthread_mutex_lock(&mLock);
+  const bool stillBusy = mDhcpInFlight;
+  ::pthread_mutex_unlock(&mLock);
+  if (stillBusy) {
+    LOGE_TRACE("wifi: lease request still in flight after %d ms; raising the hotspot anyway, "
+               "the address will be reconciled",
+               timeoutMs);
+  }
+}
+
+// Spawns dnsmasq with one argument list and reports whether a daemon is actually
+// there afterwards.
+//
+// The second half is not paranoia. dnsmasq daemonises, so this call returns as
+// soon as the PARENT exits; a build that got past option parsing and then died
+// on something else exits 0 here and is gone by the time anything looks. That
+// reads as a healthy spawn followed, three seconds later, by a process check
+// that finds nothing and spawns another one — forever, on a device with ~1 MB
+// free. Confirming the daemon exists is what lets the retry floor apply.
+bool DeviceWifi::spawnDnsmasq(const std::vector<std::string>& args, const char* errPath) {
+  std::vector<char*> argv;
+  argv.push_back(const_cast<char*>(kDnsmasqBin));
+  for (size_t i = 0; i < args.size(); ++i) {
+    // The strings outlive the spawn because `args` does.
+    argv.push_back(const_cast<char*>(args[i].c_str()));
+  }
+  argv.push_back(0);
+
+  if (!spawnAndWait(kDnsmasqBin, &argv[0], 4000, errPath)) return false;
+  for (int waited = 0; waited < 1000; waited += 50) {
+    if (processRunning("dnsmasq")) return true;
+    sleepMs(50);
+  }
+  LOGE_TRACE("wifi: dnsmasq exited 0 and is not running; see %s", errPath);
+  return false;
+}
+
+// Keeps the hotspot's DHCP server alive, and records whether the hotspot can
+// hand out an address at all.
+//
+// Split out of the bring-up because it is the only step that has to be repeated:
+// hostapd is watched by the policy, and this is the process that can die — or
+// never start — without anything noticing.
+void DeviceWifi::superviseDhcp() {
+  // BOTH HALVES, or neither. A DHCP context only matches when it covers the
+  // address the request arrived on, so a running dnsmasq on a wlan0 that has
+  // lost its gateway is not a working DHCP server — it is the shipped bug
+  // wearing a healthy process check. Read once per round; the caller has already
+  // reconciled the address by the time this runs.
+  const bool addressed = netinfo::ipAddress() == kSoftApAddress;
+
+  if (processRunning("dnsmasq")) {
+    mApDhcpFailed = !addressed;
+    if (addressed) mDhcpFailedAtMs = -1;
+    return;
+  }
+  if (mDhcpFailedAtMs >= 0 && (monotonicMs() - mDhcpFailedAtMs) < kDhcpRetryFloorMs) {
+    mApDhcpFailed = true;
+    return;
+  }
+
+  // PREFERRED LIST FIRST, MEASURED LIST SECOND. dnsmasq exits EC_BADCONF on any
+  // argument it does not accept, and only one line in the preferred list has
+  // ever been executed on this device's build — so a single rejected flag would
+  // otherwise reproduce, exactly, the bug this whole path exists to fix. The
+  // fallback is the invocation measured working on the unit, with the vendor's
+  // /etc/dnsmasq.conf left in place to supply what it supplied then. See
+  // DeviceWifi::dnsmasqArgs for which flags are measured and which are reasoned.
+  bool up = spawnDnsmasq(dnsmasqArgs(kSoftApAddress), dnsmasqErrFile());
+  if (!up) {
+    LOGE_TRACE("wifi: dnsmasq refused the preferred arguments (see %s); trying the "
+               "invocation measured on this device",
+               dnsmasqErrFile());
+    up = spawnDnsmasq(dnsmasqProvenArgs(kSoftApAddress), dnsmasqProvenErrFile());
+    if (up) LOGD("wifi: dnsmasq up on the fallback argument list");
+  }
+  if (up) {
+    mApDhcpFailed = !addressed;
+    if (addressed) mDhcpFailedAtMs = -1;
+    return;
+  }
+
+  // Not fatal, and deliberately still not a reason to abandon the hotspot: the
+  // supplicant is stopped by then, so giving up here would leave the device with
+  // no station link AND no hotspot. An SSID on the air that a user can reach by
+  // setting a static address is better than no SSID.
+  //
+  // But only if they are TOLD to. "Non-fatal" was read as "not worth mentioning"
+  // and that is how a hotspot with no DHCP shipped: the SSID appears, the phone
+  // associates, the lease never comes, and every visible surface — including the
+  // panel's own 配网 row — kept showing a plausible address nobody could reach.
+  // The flag below is what the settings screen turns into an instruction.
+  mApDhcpFailed = true;
+  mDhcpFailedAtMs = monotonicMs();
+  LOGE_TRACE("wifi: dnsmasq did not start on either argument list; the hotspot has no DHCP "
+             "(see %s and %s)",
+             dnsmasqErrFile(), dnsmasqProvenErrFile());
+}
+
+bool DeviceWifi::bringUpSoftAp() {
   // Re-checked on the worker, not just at the call: the guard file is meant to
   // be created and removed by hand between experiments, and this thread can
   // outlive the tick that started it.
-  if (!linkChangesAllowed()) return;
+  if (!linkChangesAllowed()) return false;
+
+  // ALREADY ON THE AIR. This is the path every supervision round after the
+  // first takes, and it must not touch the RADIO: re-running the sequence below
+  // would ctl.stop a supplicant that is already stopped and restart hostapd on
+  // top of itself, three seconds at a time, for as long as a stranded device
+  // sits in provisioning. What still needs reconciling is the address and the
+  // DHCP server — neither of which touches the radio.
+  if (processRunning("hostapd")) {
+    // THE ADDRESS, not just the process. Step 5 below runs once per hostapd
+    // lifetime and nothing used to check it again, but wlan0 can lose
+    // kSoftApAddress after it: libzknet's dhcpRequestIp() runs on a detached
+    // thread this class cannot cancel, and whenever it finally returns it writes
+    // that same interface — the router's address on success, 0.0.0.0 on failure.
+    // Either one stops every DHCP context matching, and dnsmasq answers nothing
+    // while staying in /proc, which is the shipped bug with a healthy-looking
+    // process check on top of it. A getifaddrs against the /proc walk this round
+    // has already paid for is free.
+    if (netinfo::ipAddress() != kSoftApAddress) {
+      LOGE_TRACE("wifi: %s lost %s while the hotspot was up; re-applying", kInterface,
+                 kSoftApAddress);
+      applyApAddress();
+    }
+    superviseDhcp();
+    return true;
+  }
 
   // Only ever touched from softApMain's thread, and there is at most one of
   // those (mSoftApWorking), so this needs no lock.
-  if (mApFailedAtMs >= 0 && (monotonicMs() - mApFailedAtMs) < kApRetryFloorMs) return;
+  if (mApFailedAtMs >= 0 && (monotonicMs() - mApFailedAtMs) < kApRetryFloorMs) return false;
 
   // 1. THE CONFIG FIRST, while the device is still on the network and still
   //    reachable over adb. Nothing here touches the radio, so a failed backup
   //    or a full /data ends the attempt with the link intact and something in
   //    the log to read. Doing it after `ctl.stop` would mean discovering it
   //    with no way in.
-  if (!backupOnce(kHostapdConf, kHostapdConfBackup)) return;
+  if (!backupOnce(kHostapdConf, kHostapdConfBackup)) return false;
   const std::string ssid = softApSsid();
-  if (!writeFileIfChanged(kHostapdConf, hostapdConf(ssid, softApPassphrase()))) return;
+  if (!writeFileIfChanged(kHostapdConf, hostapdConf(ssid, softApPassphrase()))) return false;
 
-  // 2. The radio cannot be a station and an access point at once, and this
+  // 2. LET ANY LEASE NEGOTIATION FINISH FIRST. A DHCP request outstanding on
+  //    wlan0 ends by writing that interface, and if it lands after step 5 the
+  //    hotspot is left with no gateway and no way to hand out an address. This
+  //    is a bounded courtesy, not a guarantee — see kDhcpSettleMs and the
+  //    reconciliation in the resident round above, which is what covers the case
+  //    where the library never comes back at all.
+  awaitDhcpQuiet(kDhcpSettleMs);
+
+  // 3. The radio cannot be a station and an access point at once, and this
   //    driver has no concurrent mode. wpa_supplicant is `oneshot` in
   //    /etc/init.rc, so init will not bring it back on its own — that is
   //    exactly why the teardown below has to.
@@ -722,10 +984,10 @@ void DeviceWifi::bringUpSoftAp() {
   ::pthread_mutex_unlock(&mCtrlLock);
   for (int waited = 0; waited < 3000 && supplicantRunning(); waited += 100) sleepMs(100);
 
-  // 3. hostapd. -B daemonises, so the process spawned here forks and exits;
+  // 4. hostapd. -B daemonises, so the process spawned here forks and exits;
   //    what survives is supervised by name (see softApRunning), because init
   //    has no service entry for it and nothing else would notice it dying.
-  if (!processRunning("hostapd")) {
+  {
     char* argv[4];
     argv[0] = const_cast<char*>(kHostapdBin);
     argv[1] = const_cast<char*>("-B");
@@ -738,59 +1000,39 @@ void DeviceWifi::bringUpSoftAp() {
       // brick this file exists to prevent, and it is reachable by nothing worse
       // than a hostapd that will not take this driver.
       mApFailedAtMs = monotonicMs();
+      // "No hotspot" is not "a hotspot with no DHCP", and the panel says
+      // different things about them. Leaving the flag set here would put 手动配网
+      // on a device that has no access point to configure anything over.
+      mApDhcpFailed = false;
+      mDhcpFailedAtMs = -1;
       SystemProperties::setString("ctl.start", "wpa_supplicant");
       LOGE_TRACE("wifi: hostapd would not start; no hotspot, supplicant restored");
-      return;
+      return false;
     }
     // The interface is torn out of station mode and rebuilt as an AP; giving it
     // an address before that settles loses the address.
     sleepMs(300);
   }
 
-  // 4. The AP-side address. 192.168.100.1 is the stock firmware's gateway for
-  //    this mode (libzknet.so calls ifc_set_addr with it), so a phone that has
-  //    configured one of these clocks before finds the page where it expects.
-  //    ifconfig rather than NetUtils::configure: ADR 0006 keeps this firmware
-  //    down to a single libzknet symbol, and configure() would be a second one.
-  {
-    char* argv[6];
-    argv[0] = const_cast<char*>(kIfconfigBin);
-    argv[1] = const_cast<char*>(kInterface);
-    argv[2] = const_cast<char*>(kSoftApAddress);
-    argv[3] = const_cast<char*>("netmask");
-    argv[4] = const_cast<char*>("255.255.255.0");
-    argv[5] = 0;
-    if (!spawnAndWait(kIfconfigBin, argv, 4000)) {
-      LOGE_TRACE("wifi: could not address wlan0 as %s", kSoftApAddress);
-    }
-  }
+  // 5. The AP-side address. Re-asserted on every supervision round from here
+  //    on, because it is what every DHCP context is matched against.
+  applyApAddress();
 
-  // 5. dnsmasq, for the lease and for the captive-portal prompt. The vendor's
+  // 6. dnsmasq, for the lease and for the captive-portal prompt. The vendor's
   //    own docs say a phone joining U-Clock gets an address, so something on
   //    the device hands them out; this is that something, with the same pool
-  //    the stock firmware uses.
-  if (!processRunning("dnsmasq")) {
-    char* argv[7];
-    argv[0] = const_cast<char*>(kDnsmasqBin);
-    argv[1] = const_cast<char*>("--interface=wlan0");
-    argv[2] = const_cast<char*>(kDhcpRangeArg);
-    argv[3] = const_cast<char*>(kDnsCatchAllArg);
-    // --no-resolv / --no-poll are in libzknet's own argument list. They matter
-    // here for a reason the stock app did not have: there is no upstream to
-    // forward to while the hotspot is up, and without them dnsmasq wants
-    // /etc/resolv.conf and re-reads it on a timer.
-    argv[4] = const_cast<char*>("--no-resolv");
-    argv[5] = const_cast<char*>("--no-poll");
-    argv[6] = 0;
-    if (!spawnAndWait(kDnsmasqBin, argv, 4000)) {
-      // Not fatal, and deliberately not a reason to abandon the hotspot: a user
-      // who sets a static address on their phone can still reach the page, and
-      // an SSID on the air with no DHCP is strictly better than no SSID.
-      LOGE_TRACE("wifi: dnsmasq would not start; the hotspot has no DHCP");
-    }
-  }
+  //    the stock firmware uses. Every argument it takes, why, and which of them
+  //    have actually been executed on this device's build, is in
+  //    DeviceWifi::dnsmasqArgs — this step is where one missing argument made
+  //    the whole hotspot useless.
+  superviseDhcp();
+
   mApFailedAtMs = -1;
-  LOGD("wifi: hotspot %s up on %s", ssid.c_str(), kSoftApAddress);
+  // Say what actually happened. This line used to claim success unconditionally
+  // and was the last word on a hotspot that could not hand out a single address.
+  LOGD("wifi: hotspot %s up on %s, DHCP %s", ssid.c_str(), kSoftApAddress,
+       mApDhcpFailed ? "DOWN" : "up");
+  return true;
 }
 
 void DeviceWifi::tearDownSoftAp() {
@@ -799,6 +1041,12 @@ void DeviceWifi::tearDownSoftAp() {
   // Reverse order. dnsmasq first so no phone is handed a lease on a network
   // that is about to disappear.
   terminateProcess("dnsmasq");
+  // The hotspot is going away, so "this hotspot has no DHCP" stops being true.
+  // Cleared here rather than only on the next bring-up, because the panel reads
+  // it and a stale warning on a device that has since joined a network is its
+  // own kind of lie.
+  mApDhcpFailed = false;
+  mDhcpFailedAtMs = -1;
 
   // Drop the AP address before the supplicant comes back, or wlan0 keeps
   // 192.168.100.1 alongside whatever DHCP hands it and the routing table has

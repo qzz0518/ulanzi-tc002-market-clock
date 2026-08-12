@@ -1,6 +1,8 @@
 #ifndef UI_MUSICSCREEN_H_
 #define UI_MUSICSCREEN_H_
 
+#include <stdint.h>
+
 #include <string>
 
 #include "ui/Screen.h"
@@ -10,10 +12,20 @@ namespace tcos {
 /**
  * Now playing, and the transport for it.
  *
- * The dedicated lyrics-player firmware renders lyrics from a track it streams
- * itself. This screen is the opposite arrangement and much cheaper: the service
- * already knows what the Connect player is doing, resolves the id to a title and
- * picks the lyric line, so the panel only has to draw text and a playhead.
+ * The lyric surface is NOT this firmware's own take on the sideloaded lyrics
+ * player's — it is the same renderer, driven from a different source. The two
+ * firmwares are mutually exclusive (ADR 0004) but the same user, same song and
+ * same panel cross between them, and the console offers exactly one 主题设置
+ * panel for both; a screen that merely resembled the other one would make that
+ * panel a lie. So the four 显示形式 (ticker / skyline / spotlight / cascade),
+ * the four 像素配色 and the accent override come from the lyrics player's own
+ * visual/LyricModes.h and visual/Palette.h via visual/LyricVisuals.h, and the
+ * painters here are ports of LyricsPage's, geometry and rounding included.
+ *
+ * What this screen owns on top of that surface, because the reference has no
+ * opinion about any of it: the three distinct empty states, the optimistic
+ * transport flip, the locally advanced playhead, the press flash, and the
+ * title/artist rotation for a track whose lyrics never arrived.
  *
  * Controls are chosen around what is free. The knob has no list to scroll here,
  * so it becomes previous/next; the middle button toggles play; hold still means
@@ -25,16 +37,62 @@ class MusicScreen : public Screen {
  public:
   enum Action { kNone, kToggle, kNext, kPrevious };
 
+  /**
+   * Wire ids for 显示形式 and 像素配色.
+   *
+   * The integers cross the link, not the names: these orders are the index into
+   * LYRIC_MODES / LYRIC_SKINS in src/control-api.ts, the same mapping
+   * logic/lyricsLogic.cc applies for the sideloaded player, and the same order
+   * as visual/Palette.h's SkinId. Renumbering any one of the three silently
+   * repaints the panel in a colour the console is not showing.
+   */
+  enum Mode {
+    kModeTicker = 0,     // 走带
+    kModeSkyline = 1,    // 天际
+    kModeSpotlight = 2,  // 聚光
+    kModeCascade = 3,    // 升降
+    kModeCount = 4
+  };
+  enum Skin {
+    kSkinSignal = 0,     // 信号绿
+    kSkinTape = 1,       // 磁带橙
+    kSkinBlueprint = 2,  // 蓝晒
+    kSkinArcade = 3,     // 街机红
+    kSkinCount = 4
+  };
+
   MusicScreen();
 
   /**
    * `positionMs` is true as of `stampMs`; the screen advances it locally rather
    * than waiting for the next document, which is what makes the playhead move
    * at 25 fps over a link that updates a few times a minute.
+   *
+   * `lyricStartMs` / `lyricEndMs` are the current lyric line's window in track
+   * time. Every mode's geometry, colouring and beat is a function of progress
+   * WITHIN the line, not of the track, so without this window there is nothing
+   * to animate: `pos` and `dur` describe the song, and one resolved lyric string
+   * has neither a start nor an end. They are optional so a service that does not
+   * send them yet still renders — see lineProgress() for what happens then — but
+   * an untimed line only ever sweeps once, which is not the same screen.
    */
   void setNowPlaying(bool present, const std::string& track, const std::string& artist,
                      const std::string& lyric, bool playing, int positionMs,
-                     int durationMs, int stampMs);
+                     int durationMs, int stampMs, int lyricStartMs = -1,
+                     int lyricEndMs = -1);
+
+  /**
+   * The console's 主题设置, applied unconditionally on every document.
+   *
+   * A theme is a setting, not a reading: it has one writer, no external source
+   * that can go stale, and it outlives every track — so unlike the now-playing
+   * block it is never expired and never gated on the link being live. Out of
+   * range ids are ignored rather than clamped, matching LyricsPage::setMode /
+   * setSkin, so a document from a newer service cannot blank the screen.
+   * `accentRgb` replaces the palette's primary tier ONLY; the skin keeps the
+   * other three, which is what makes an accent a focus colour and not a repaint.
+   */
+  void setTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent);
 
   /**
    * What the console link is doing, so the empty state can say which emptiness
@@ -72,6 +130,7 @@ class MusicScreen : public Screen {
 
  private:
   int playheadMs(int nowMs) const;
+  float lineProgress(int nowMs) const;
 
   bool mPresent;
   bool mLinkConfigured;
@@ -83,10 +142,19 @@ class MusicScreen : public Screen {
   int mPositionMs;
   int mDurationMs;
   int mStampMs;
+  int mLyricStartMs;
+  int mLyricEndMs;
   int mEnteredMs;
   int mLyricChangedMs;
   int mFlashMs;
   Action mAction;
+  // The console's 主题设置. Defaults match sDeviceState's in src/control-api.ts
+  // (spotlight / signal / no accent) so the panel is already correct before the
+  // first document arrives — including on a cold boot with no link at all.
+  int mMode;
+  int mSkin;
+  uint32_t mAccentRgb;
+  bool mHasAccent;
   // Optimistic transport state: the panel flips the moment the button is
   // pressed rather than a round trip later, because a play button that takes
   // 300 ms to look pressed reads as a dropped input.

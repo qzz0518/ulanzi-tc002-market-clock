@@ -16,9 +16,26 @@
 >   执行器（`platform/DeviceWifi.h`）的可变一半，以及配网页的提交
 >   （`platform/DeviceProvisioning.h`），文件不存在就拒绝并回报 `link-locked`。
 >   安装器不创建它，所以正常安装下这段路径物理上不做事。
-> - **未实现**：热点（SoftAP）。下文的四屏翻页序列、`TC002-OS-<MAC 后四位>`、
->   `192.168.100.1` 全部尚未落地；`startSoftAp()` / `stopSoftAp()` 目前只写一行日志就返回。
->   **一台没有存储凭据的设备现在还不能由 ZOS 自己配网。**
+> - **已实现**：热点（SoftAP）。`bringUpSoftAp()` 走完整序列——停 supplicant、写
+>   `hostapd.conf`、起 hostapd、`ifconfig wlan0 192.168.100.1`、起 dnsmasq。热点名是
+>   `ZOS-<MAC 后四位>`（不是下文的 `TC002-OS-*`，那个 13 个 ASCII 一定要跑马灯），
+>   密码 `12345678`。设置页在配网期间多出「热点 / 密码」两行，把这两个字符串告诉用户。
+> - **未实现**：下文的四屏翻页序列。热点名、密码、地址目前只出现在设置菜单里。
+> - **已修复（2026-08-13）**：dnsmasq 从来没有起来过。它的 pid 文件默认在
+>   `/var/run/dnsmasq.pid`，而本机没有 `/var`，所以每次都退出 3——SSID 上了天线，
+>   手机连得上，永远拿不到地址。参数表已挪进 `DeviceWifi::dnsmasqArgs` 并被 host check
+>   钉住；同时热点 worker 常驻，dnsmasq 死了会被重新拉起。
+>   参数表是**两层**：首选表加了 `--conf-file=/dev/null`、`--user=root` 等几个
+>   本机没执行过的开关，一旦这个 dnsmasq 构建不认（`EC_BADCONF`，退出即原样复现本 bug），
+>   `superviseDhcp()` 立刻回落到 `dnsmasqProvenArgs()`——真机上实测退出 0 并常驻的那一条
+>   （原来的四个参数 + `--pid-file=/tmp/zos-dnsmasq.pid`，不动 `/etc/dnsmasq.conf`）。
+>   子进程的 stderr 现在重定向到 `/tmp/zos-dnsmasq.err` / `-proven.err`：设备回到网络后
+>   `adb pull` 就能看见 dnsmasq 自己说了什么，这正是当年缺的那条线索。
+> - **已修复（同上）**：`wlan0` 上的 `192.168.100.1` 原来只在起热点时设一次。libzknet 的
+>   `dhcpRequestIp()` 跑在无法取消的分离线程上，返回时会写同一个网卡（成功写路由器地址、
+>   失败清 `0.0.0.0`）；地址一没，所有 DHCP context 都不匹配，dnsmasq 活着却一言不发，
+>   而进程检查照样报健康——就是本 bug 换了个入口。现在每轮监督都对账地址，
+>   并且 `softApDhcpFailed()`（面板上的「手动配网」）把「没有网关地址」也算进去。
 > - **偏离**：下文引用 `WifiManager` / `SoftApManager` 的地方已被 ADR 0006 否决——那两个类
 >   掌管无线电源路径，链接它们本身就是本设计要避免的那种不可恢复故障。
 
@@ -142,4 +159,38 @@ GET  /status          → 当前状态，供页面轮询
 - 配网页面的四屏文案排版：像素断言，确保 `TC002-OS-A772` 这类字符串在 52px 内
   的表现符合预期（11 个 ASCII × 6px = 66px > 52px，必然走跑马灯）
 
-只有 SoftAP 起停、DHCP 是否真给手机发地址、以及 2.4G 关联本身需要真机。
+- dnsmasq 的参数表（`DeviceWifi::dnsmasqArgs` / `dnsmasqProvenArgs`）：pid/租约文件必须
+  落在可写路径、地址池必须落在网关同一个 /24、回落表必须**逐字**等于真机上实测过的那条。
+  这条原本写在「只有真机能回答」那一栏里，然后就真的没人去真机上问过——热点上线一年多，
+  dnsmasq 每次都因为默认 pid 路径 `/var/run/dnsmasq.pid`（本机根本没有 `/var`）退出 3，
+  一个地址都没发出去过。参数表现在是纯函数，host check 直接钉住。
+
+只有 SoftAP 起停、dnsmasq 是否真的握住 67 端口、以及 2.4G 关联本身需要真机。
+
+## 还欠真机的两件事（都不碰无线电）
+
+1. **`/bin/dnsmasq <首选表的 11 个参数> --test; echo $?`**，要求 0。`--test` 在选项解析
+   完就退出，不 fork、不 bind、不碰 wlan0/hostapd/wpa_supplicant，因此不影响 adb。
+   它只证明这个构建**接受**这些参数，不证明 `/tmp` 可写（那个已经实测过）。
+   跑不了也不阻塞发布：回落表就是为这种情况存在的，但跑了就能把回落从「保险」降级成
+   「用不上的保险」。顺手 `cat /etc/passwd /etc/group`，可以确认 `--user=root` 是必需
+   还是仅仅稳妥。
+2. **`cat /proc/net/tcp`**，找本地端口 `0050`（80）的 `st 0A` 监听行，settle 配网页到底
+   在 80 还是回落到了 8080。面板的「配网」行渲染的是 `<ip>:<port>`，也能直接读。
+
+## 明知没关、故意没关的一个口子
+
+`WifiPolicy::kObtainingIp` 没有出口：关联上了但路由器一直不发租约，设备就一直等。
+写过一版「三次拿不到就回落热点」，评审后撤了——`bringUpSoftAp()` 会
+`ctl.stop wpa_supplicant`，而 `/etc/init.rc` 把这个服务标成 `disabled` + `oneshot`，
+所以 `kProvisioning` 里那条「后台继续重试」的分支（它 gate 在 `supplicantRunning()` 上）
+在热点真上天线之后根本不会触发：**这个回落是单向的**，除非有人在配网页提交凭据或者拔电。
+而它触发的条件——断电恢复后时钟比路由器的 DHCP 先起来——常见且短暂。
+用一个 36 秒的定时器把这种设备永久推进热点，比让它继续等更糟。
+真要关这个口子，需要热点能被拆掉再重测存储的网络，那是另一件要单独取证的事。
+
+顺带说清楚：**`kConnecting` 那条 25 秒超时进热点的老路，单向性完全一样**——
+`stopSoftAp()` 只有 `applyCredentials()`（用户在配网页提交）会调，
+`kProvisioning` 里那条能调它的分支同样 gate 在 `supplicantRunning()` 上。
+所以热点一旦真上天线，出路只有「有人配网」或「拔电」两条。这是既有行为，本次没动，
+但它和上面那个未关的口子是同一件事的两半，要修就一起修。

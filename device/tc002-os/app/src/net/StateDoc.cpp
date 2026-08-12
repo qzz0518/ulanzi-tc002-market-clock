@@ -23,6 +23,40 @@ int splitTabs(const std::string& line, std::string* out, int maxFields) {
   return n;
 }
 
+// The wire order for 显示形式 and 像素配色. These arrays ARE the protocol: index
+// 0..3 is what MusicScreen::Mode / Skin, LYRIC_MODES / LYRIC_SKINS in
+// src/control-api.ts and the sideloaded player's Palette.h all agree on.
+// Returns the fallback for anything else, so a mode this build has never heard
+// of paints spotlight rather than nothing.
+int indexOfName(const std::string& name, const char* const* table, int count, int fallback) {
+  for (int i = 0; i < count; ++i) {
+    if (name == table[i]) return i;
+  }
+  return fallback;
+}
+
+const char* const kModeNames[4] = {"ticker", "skyline", "spotlight", "cascade"};
+const char* const kSkinNames[4] = {"signal", "tape", "blueprint", "arcade"};
+
+// Exactly six hex digits, or nothing. A half-parsed colour is worse than none:
+// strtoul would happily read "ff" out of "ff88zz" and repaint the panel a
+// colour nobody chose, and the same rule already governs malformed inputs.
+bool parseAccent(const std::string& text, uint32_t* out) {
+  if (text.size() != 6) return false;
+  uint32_t value = 0;
+  for (size_t i = 0; i < 6; ++i) {
+    const char c = text[i];
+    int digit;
+    if (c >= '0' && c <= '9') digit = c - '0';
+    else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+    else return false;
+    value = (value << 4) | (uint32_t)digit;
+  }
+  *out = value;
+  return true;
+}
+
 bool kindFromName(const std::string& name, StateDoc::Kind* out) {
   if (name == "channel") { *out = StateDoc::kChannel; return true; }
   if (name == "music") { *out = StateDoc::kMusic; return true; }
@@ -36,7 +70,9 @@ bool kindFromName(const std::string& name, StateDoc::Kind* out) {
 StateDoc::StateDoc()
     : mSeq(-1), mPinned(false), mMirror(false), mSettingsSeq(0),
       mRequestedVolume(-1), mRequestedBrightness(-1), mHasNowPlaying(false),
-      mPlaying(false), mPositionMs(0), mDurationMs(0) {}
+      mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
+      mLyricEndMs(-1), mLyricMode(kDefaultMode), mLyricSkin(kDefaultSkin),
+      mAccentRgb(0), mHasAccent(false) {}
 
 bool StateDoc::parse(const std::string& body) {
   mSeq = -1;
@@ -55,6 +91,16 @@ bool StateDoc::parse(const std::string& body) {
   mTrack.clear();
   mArtist.clear();
   mLyric.clear();
+  mLyricStartMs = -1;
+  mLyricEndMs = -1;
+  // Reset to the defaults rather than to "keep the last": a document is a whole
+  // picture, and a service that stopped sending a theme (an older build, or a
+  // rollback) must land the panel somewhere predictable instead of on whatever
+  // the previous document happened to say.
+  mLyricMode = kDefaultMode;
+  mLyricSkin = kDefaultSkin;
+  mAccentRgb = 0;
+  mHasAccent = false;
 
   size_t start = 0;
   while (start <= body.size()) {
@@ -106,6 +152,17 @@ bool StateDoc::parse(const std::string& body) {
       mDurationMs = atoi(fields[1].c_str());
     } else if (fields[0] == "lyric") {
       mLyric = fields[1];
+    } else if (fields[0] == "lyricat") {
+      mLyricStartMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "lyricend") {
+      mLyricEndMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "mode") {
+      mLyricMode = indexOfName(fields[1], kModeNames, 4, kDefaultMode);
+    } else if (fields[0] == "skin") {
+      mLyricSkin = indexOfName(fields[1], kSkinNames, 4, kDefaultSkin);
+    } else if (fields[0] == "accent") {
+      mHasAccent = parseAccent(fields[1], &mAccentRgb);
+      if (!mHasAccent) mAccentRgb = 0;
     } else if (fields[0] == "item" && n == 4) {
       Item item;
       // An unknown kind is skipped rather than guessed: rendering a settings

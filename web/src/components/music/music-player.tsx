@@ -247,11 +247,21 @@ export function MusicPlayer({
     lookup: SpectrumLookup;
   } | null>(null);
   const trackProgressRef = useRef(0);
+  // Defaults must match sDeviceState's in src/control-api.ts, which is also what
+  // the two firmwares start on. This one used to be "ticker" — invisible while
+  // only the sideloaded player read the theme, but under ZOS it means the
+  // preview and the panel disagree from first paint, before anyone has clicked.
   const [skin, setSkin] = useState<MusicSkin>("signal");
-  const [mode, setMode] = useState<MusicMode>("ticker");
+  const [mode, setMode] = useState<MusicMode>("spotlight");
   const [accent, setAccent] = useState<string | null>(null);
   const lastLocalSeqRef = useRef(0);
   const lastSeenSeqRef = useRef(0);
+  // Whether the served theme has been adopted yet. The service persists
+  // sDeviceState now (ADR 0007), so IT is the store and localStorage is only a
+  // paint cache for the 0–2.5 s before the first poll answers. The first poll
+  // usually does not advance the sequence at all, so the echo below never fires
+  // on it and this flag is what makes that one poll count.
+  const themeAdoptedRef = useRef(false);
   const [deviceOnline, setDeviceOnline] = useState(false);
   const deviceOnlineRef = useRef(false);
   const deviceClockRef = useRef<{
@@ -295,20 +305,26 @@ export function MusicPlayer({
   const activeProviderIdRef = useRef<MusicProviderId>("netease");
   activeProviderIdRef.current = activeProviderId;
 
+  // 真 FFT 只在「这个浏览器就是播放器、且屏幕只归预览管」的时候才取。两个排除
+  // 项是同一条规则的两半：`deviceOnline` 是侧载歌词固件的心跳，`zos` 是时钟上跑
+  // 着 ZOS——两种固件画的都是 LyricModes.h 那套确定性伪频谱，谁也不做 FFT。预览
+  // 里跳着真频谱、面板上跳着 hash 频谱，下面还挂一句「此音源为模拟律动」，就是
+  // 三端各讲一个故事，而用户正是照着预览挑的主题。
   useEffect(() => {
     let cancelled = false;
     setSpectrum(null);
     const trackId = selected?.track.id;
-    if (!trackId || activeProviderId !== "netease" || deviceOnline) return;
+    if (!trackId || activeProviderId !== "netease" || deviceOnline || zos) return;
     void spectrumForTrack(trackId).then((lookup) => {
       if (!cancelled && lookup) setSpectrum({ trackId, lookup });
     });
     return () => {
       cancelled = true;
     };
-  }, [activeProviderId, deviceOnline, selected?.track.id]);
+  }, [activeProviderId, deviceOnline, selected?.track.id, zos]);
   const activeSpectrum = activeProviderId === "netease"
     && !deviceOnline
+    && !zos
     && spectrum !== null
     && spectrum.trackId === selected?.track.id
     ? spectrum.lookup
@@ -354,6 +370,12 @@ export function MusicPlayer({
     void loadSpotifyApp();
   }, [loadSession, loadSpotifyApp]);
 
+  // First paint only. The service holds the theme across restarts, so this is
+  // not a restore — it is the value to show for the fraction of a second before
+  // /state answers, and the first poll overwrites it. Reading it back the other
+  // way (pushing localStorage at the service) would make whichever browser
+  // loaded last the authority, so opening the console on a phone that has not
+  // seen the theme panel in a month would repaint the clock from memory.
   useEffect(() => {
     try {
       const storedSkin = window.localStorage.getItem(MUSIC_SKIN_STORAGE_KEY);
@@ -470,6 +492,20 @@ export function MusicPlayer({
           }
           setPlaying(devicePlaying);
           setDeviceTrackId(heartbeatTrackId);
+        }
+
+        // The theme the SERVICE holds wins, and the first poll is where it lands.
+        // The echo below is gated on the sequence advancing, and the first poll
+        // of a freshly started service usually carries seq 0 — the same value the
+        // page starts on — so without this the panel and the preview would sit on
+        // whatever this browser happened to remember until the next click. The
+        // service persists the theme (ADR 0007), so this is adopting a store, not
+        // guessing at one.
+        if (!themeAdoptedRef.current) {
+          themeAdoptedRef.current = true;
+          if (isMusicSkin(fields.SKIN ?? null)) setSkin(fields.SKIN as MusicSkin);
+          if (isMusicMode(fields.MODE ?? null)) setMode(fields.MODE as MusicMode);
+          setAccent(fields.ACCENT && fields.ACCENT !== "-" ? fields.ACCENT : null);
         }
 
         // Control echo — only when seq advances and it wasn't our own change.
@@ -677,6 +713,12 @@ export function MusicPlayer({
           positionMs: Math.round(currentMs),
           durationMs: selected.track.durationMs,
           lyric: activeLyric?.text ?? "",
+          // The line's window, not just its words. Every 显示形式 animates
+          // against progress WITHIN the line, so a panel given only the text
+          // has nothing to sweep — and this component is the only thing in the
+          // system that knows it for a device-audio provider.
+          lyricStartMs: activeLyric?.startMs ?? 0,
+          lyricEndMs: activeLyric?.endMs ?? 0,
         }
         : null);
       return;
@@ -688,6 +730,8 @@ export function MusicPlayer({
       positionMs: Math.round(currentMs),
       durationMs: selected.track.durationMs,
       lyric: activeLyric?.text ?? "",
+      lyricStartMs: activeLyric?.startMs ?? 0,
+      lyricEndMs: activeLyric?.endMs ?? 0,
     });
     send();
     const timer = window.setInterval(send, 4_000);
@@ -1901,14 +1945,17 @@ export function MusicPlayer({
               )}
 
               {zos && (
-                // 设备侧的音乐页只由 service.ts 的 publishOsNowPlaying 喂：它要求
-                // provider.remote，而只有 Spotify 有——网易云在这台设备上不会显示。
+                // 两条喂法，取决于播放器在哪儿：Spotify 在 Connect 设备上，
+                // service.ts 的 publishOsNowPlaying 轮询得到；网易云的播放器就是
+                // 这个浏览器，只有它知道音箱里出来的是什么，所以由本组件 PUT
+                // /api/os/now-playing 上报。旧文案说「只跟随 Spotify Connect」，
+                // 在网易云也能推上去之后就成了假话。
                 <div className="music-sync-hint" role="status">
                   <span aria-hidden="true"><MonitorCog /></span>
                   <span>
-                    {spotifySignedIn
-                      ? "时钟的「音乐」页会跟随 Spotify Connect 正在播放的歌曲，逐句显示歌词。"
-                      : "时钟的「音乐」页只跟随 Spotify Connect：换到 Spotify 并登录后，歌词才会出现在时钟上；当前来源只影响这里的预览。"}
+                    {remoteMode
+                      ? "时钟的「音乐」页会跟随 Spotify Connect 正在播放的歌曲逐句显示歌词，由服务端轮询，关掉这个页面也不影响。"
+                      : "时钟的「音乐」页会跟随这里正在播放的歌曲逐句显示歌词——网页就是网易云的播放器，所以这一页得开着。"}
                   </span>
                 </div>
               )}
@@ -1971,8 +2018,14 @@ export function MusicPlayer({
             onModeChange={chooseMode}
             onSkinChange={chooseSkin}
             onAccentChange={chooseAccent}
-            syncsToDevice={deviceOnline}
-            simulatedSpectrum={remoteMode || deviceOnline}
+            // `deviceOnline` is the SIDELOADED music firmware's heartbeat, so on
+            // a ZOS device it is false and this panel used to say「仅影响预览」—
+            // which was true, and was the complaint. ZOS reads the same three
+            // values out of its pull document now (ADR 0007).
+            syncsToDevice={deviceOnline || zos}
+            // ZOS paints the same deterministic pseudo-spectrum the sideloaded
+            // player does; neither runs an FFT, so the preview must not either.
+            simulatedSpectrum={remoteMode || deviceOnline || zos}
           />
         </div>
       </div>

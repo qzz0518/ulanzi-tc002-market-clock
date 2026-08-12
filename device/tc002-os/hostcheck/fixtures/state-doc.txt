@@ -2,6 +2,8 @@ seq	3
 pinned	1
 mirror	0
 focus	notice
+mode	spotlight
+skin	signal
 menu	6
 item	channel	btc	市场轮播
 item	channel	matrixclock	数字雨时钟

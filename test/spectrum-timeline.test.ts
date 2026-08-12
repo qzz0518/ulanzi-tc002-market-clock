@@ -105,4 +105,21 @@ describe("offline spectrum timeline", () => {
     expect(player).toMatch(/renderMirrorFrames\(\{[\s\S]*?spectrum: activeSpectrum,[\s\S]*?\}\)/);
     expect(preview).toContain("Math.floor(smoothTimeMs / SPECTRUM_HOP_MS)");
   });
+
+  // 真 FFT 只在「网页自己就是播放器、且这块 52×16 只归预览管」时才取。两个排除项
+  // 是同一条规则的两半：deviceOnline 是侧载歌词固件的心跳，zos 是时钟上跑着 ZOS
+  // —— 两套固件画的都是 LyricModes.h 那套确定性伪频谱，谁也不做 FFT。漏掉 zos，
+  // 用户就会在预览里看到真频谱、在面板上看到 hash 频谱，下面还挂着一句「此音源为
+  // 模拟律动」；而主题正是照着预览挑的。
+  test("a ZOS device falls through to the deterministic bars its firmware draws", async () => {
+    const player = await Bun.file(
+      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
+    ).text();
+    const guard = player.match(/if \(!trackId \|\| activeProviderId !== "netease"[^\n]*\) return;/);
+    expect(guard?.[0]).toContain("zos");
+    const derived = player.match(/const activeSpectrum = [\s\S]*?: undefined;/);
+    expect(derived?.[0]).toContain("!zos");
+    // 而这颗芯片说的是实话：simulatedSpectrum 只负责那句文案，它切换不了任何东西。
+    expect(player).toContain("simulatedSpectrum={remoteMode || deviceOnline || zos}");
+  });
 });

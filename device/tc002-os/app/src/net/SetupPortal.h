@@ -20,6 +20,14 @@ namespace tcos {
  * type an SSID. On a phone keyboard one wrong character in an SSID looks
  * exactly like a wrong password, and the user has no way to tell which they got
  * wrong.
+ *
+ * It also carries a free-text SSID box, and that is not a convenience. Raising
+ * the hotspot stops wpa_supplicant, so the device cannot scan while this page is
+ * open — the list can legitimately be empty for the whole session. Without a
+ * typed fallback the page was then a dead end: a select with nothing selectable,
+ * a 连接 button that submitted the placeholder's own label, and no way at all to
+ * name a network. Whatever the list does, there is always one control that
+ * works.
  */
 class SetupPortal : public HttpServer::Handler {
  public:
