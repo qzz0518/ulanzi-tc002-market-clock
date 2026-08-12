@@ -1816,6 +1816,38 @@ export function createControlHandler(
         return jsonResponse({ display: options.osLink.getDisplay(), seq: options.osLink.currentSeq() });
       }
 
+      if (request.method === "PUT" && url.pathname === "/api/os/now-playing") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as Record<string, unknown> | null;
+        // The console is the ONLY thing that knows what a device-audio provider
+        // is playing — the browser is the player, and nothing else can see it.
+        // Spotify's Connect poll cannot answer for NetEase and vice versa, which
+        // is why the hub arbitrates two writers instead of picking one.
+        if (input === null || input.playing === undefined) {
+          options.osLink.setNowPlaying(null, "console");
+          return jsonResponse({ nowPlaying: null, owner: options.osLink.nowPlayingOwner() });
+        }
+        const text = (key: string): string =>
+          typeof input[key] === "string" ? (input[key] as string).slice(0, 200) : "";
+        const ms = (key: string): number =>
+          typeof input[key] === "number" && Number.isFinite(input[key] as number)
+            ? Math.max(0, Math.round(input[key] as number))
+            : 0;
+        options.osLink.setNowPlaying({
+          track: text("track"),
+          artist: text("artist"),
+          playing: input.playing === true,
+          positionMs: ms("positionMs"),
+          durationMs: ms("durationMs"),
+          lyric: text("lyric"),
+        }, "console");
+        return jsonResponse({
+          nowPlaying: options.osLink.getNowPlaying(),
+          owner: options.osLink.nowPlayingOwner(),
+        });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/os/input") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
         assertSameOrigin(request);

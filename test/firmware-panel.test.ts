@@ -74,8 +74,11 @@ describe("shared firmware panel", () => {
     expect(html).toContain("我知道如何回到官方固件");
     expect(html).toContain("恢复官方固件");
     expect(html).toContain("按住 USB-C 旁的复位按钮");
-    expect(html).toContain('class="fw-deploy"');
+    // fw-deploy--flow 是抽屉正文的纵向节奏开关：容器出 gap，子块一律不带
+    // margin（含宿主页面塞进来的 cladd Surface）。掉了它整块间距会散架。
+    expect(html).toContain('class="fw-deploy fw-deploy--flow"');
     expect(html).toContain("fw-deploy-steps");
+    expect(html).toContain("fw-deploy-decision");
     expect(html).toContain("fw-recovery-guide");
     // 固件包就绪但未探测：第 1 步完成、第 2 步进行中，侧载按钮仍然禁用
     // （按钮的 disabled 属性在文案之前，窗口按 cladd 按钮的标记长度放宽）。

@@ -644,6 +644,78 @@ export function MusicPlayer({
 
   const activeLyric = activeLyricIndex >= 0 ? selected?.lyrics[activeLyricIndex] : undefined;
 
+  // Tell the clock what is playing HERE.
+  //
+  // On ZOS the panel is a lyric display, not a speaker: audio stays in this
+  // browser (NetEase) or on the Connect device (Spotify), and the clock only
+  // shows the line. The service can poll Spotify for that, but nothing can poll
+  // a browser — so for a device-audio provider this component is the only thing
+  // in the system that knows what is coming out of the speakers, and it has to
+  // say so.
+  //
+  // Every 4 s while playing, and immediately whenever the line changes. Four
+  // seconds sits well inside the hub's 15 s staleness window, so a tab that
+  // dies without firing pagehide releases the panel on its own rather than
+  // pinning the last lyric there forever.
+  useEffect(() => {
+    if (!zos) return;
+    const report = (body: unknown) => {
+      void fetch("/api/os/now-playing", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    };
+    if (!selected || !playing) {
+      // Paused is still "this song", so the clock keeps the title and stops the
+      // playhead; only losing the track entirely clears the panel.
+      report(selected
+        ? {
+          track: selected.track.title,
+          artist: selected.track.artists.join(" / "),
+          playing: false,
+          positionMs: Math.round(currentMs),
+          durationMs: selected.track.durationMs,
+          lyric: activeLyric?.text ?? "",
+        }
+        : null);
+      return;
+    }
+    const send = () => report({
+      track: selected.track.title,
+      artist: selected.track.artists.join(" / "),
+      playing: true,
+      positionMs: Math.round(currentMs),
+      durationMs: selected.track.durationMs,
+      lyric: activeLyric?.text ?? "",
+    });
+    send();
+    const timer = window.setInterval(send, 4_000);
+    return () => window.clearInterval(timer);
+    // currentMs ticks every frame; activeLyric is what actually changes the
+    // panel, so the effect is keyed on the line rather than on the playhead.
+  }, [zos, selected, playing, activeLyric]);
+
+  // A closed tab must not leave the last lyric on the clock. keepalive, because
+  // a normal fetch is cancelled the moment the page goes away — the same reason
+  // lib/live-screen.ts uses it for its own teardown.
+  useEffect(() => {
+    if (!zos) return;
+    const release = () => {
+      void fetch("/api/os/now-playing", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: "null",
+        keepalive: true,
+      }).catch(() => {});
+    };
+    window.addEventListener("pagehide", release);
+    return () => {
+      window.removeEventListener("pagehide", release);
+      release();
+    };
+  }, [zos]);
+
   useEffect(() => {
     // ZOS never gets mirror frames: the endpoint answers 503 (measured), and the
     // device draws its own music page from the now-playing the service publishes.

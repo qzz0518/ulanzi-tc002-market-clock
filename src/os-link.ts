@@ -71,6 +71,28 @@ export interface OsNowPlaying {
   lyric: string;
 }
 
+/**
+ * Who reported a now-playing.
+ *
+ * Two writers exist because the two providers put the audio in different
+ * places. Spotify plays on a Connect device, so the service polls it and is the
+ * only one who can see it (`remote`). NetEase is `device-audio`: the browser
+ * IS the player, and nothing but that browser knows what came out of the
+ * speakers (`console`). Neither can answer for the other, so both write.
+ */
+export type OsNowPlayingSource = "remote" | "console";
+
+/**
+ * How long a report keeps the panel after its source stops talking.
+ *
+ * Both writers refresh well inside this — the Connect poll every 2 s, the
+ * console every 4 s — so it only ever fires on a source that actually went
+ * away: a browser tab killed without firing `pagehide`, a laptop lid closed
+ * mid-song. Holding the last lyric on the clock forever after that would be a
+ * lie the user cannot correct without restarting the service.
+ */
+const NOW_PLAYING_STALE_MS = 15_000;
+
 export interface OsTelemetry {
   screen: string;
   focus: string;
@@ -145,6 +167,7 @@ export class OsLinkHub {
   private inputSeq = 0;
   private nowPlaying: OsNowPlaying | null = null;
   private nowPlayingStampedAt = 0;
+  private nowPlayingSource: OsNowPlayingSource | null = null;
   private readonly waiters = new Set<Waiter>();
 
   constructor(private readonly now: () => number = () => Date.now()) {}
@@ -191,8 +214,23 @@ export class OsLinkHub {
    * times a second and every bump releases every parked long poll; the firmware
    * gets a position plus the moment it was true and advances it locally, which
    * is both cheaper and smoother than any poll rate could be.
+   *
+   * ARBITRATION, because there are two writers (see OsNowPlayingSource):
+   * whoever last wrote owns the field, and another source may only take it by
+   * actually playing something. Silence never evicts sound. Concretely, the
+   * Connect poll runs every 2 s and reports "nothing is playing" whenever
+   * Spotify is signed in but idle — which is the normal state while the user
+   * listens on NetEase through the browser — so without this rule it would
+   * blank the console's track twice a second and the panel would never settle.
+   * Staleness is the only other way to lose the field, so a source that dies
+   * mid-song cannot hold it hostage.
+   *
+   * Two sources both claiming to play (two tabs, or Spotify left running) is
+   * genuinely ambiguous; the incumbent keeps it, because the alternative is the
+   * panel flapping between two songs every two seconds.
    */
-  setNowPlaying(now: OsNowPlaying | null): void {
+  setNowPlaying(now: OsNowPlaying | null, source: OsNowPlayingSource = "remote"): void {
+    if (!this.mayWriteNowPlaying(now, source)) return;
     const next = now === null ? null : {
       track: clampLabel(sanitizeField(now.track)),
       artist: clampLabel(sanitizeField(now.artist)),
@@ -211,11 +249,25 @@ export class OsLinkHub {
       ));
     this.nowPlaying = next;
     this.nowPlayingStampedAt = this.now();
+    this.nowPlayingSource = next === null ? null : source;
     if (textChanged) this.bump();
+  }
+
+  private mayWriteNowPlaying(next: OsNowPlaying | null, source: OsNowPlayingSource): boolean {
+    const owner = this.nowPlayingSource;
+    if (owner === null || owner === source) return true;
+    if (this.now() - this.nowPlayingStampedAt >= NOW_PLAYING_STALE_MS) return true;
+    // A different source, still fresh: only actual playback takes the panel.
+    return next !== null && next.playing && this.nowPlaying?.playing !== true;
   }
 
   getNowPlaying(): OsNowPlaying | null {
     return this.nowPlaying === null ? null : { ...this.nowPlaying };
+  }
+
+  /** Which writer currently owns the panel, or null when nothing is playing. */
+  nowPlayingOwner(): OsNowPlayingSource | null {
+    return this.nowPlayingSource;
   }
 
   /** True once a flashed ZOS has ever reported. Never unset by a later absence. */

@@ -181,6 +181,50 @@
 .firmware-status { display: inline-flex; align-items: center; gap: 0.35rem; }
 .firmware-chip { white-space: nowrap; }
 
+/* 侧载抽屉正文的纵向节奏（<FirmwarePanelBody>，音乐页与游戏页共用）。
+   Every section used to carry its own margin-top, so the rhythm was whatever
+   each piece happened to bring: measured on the live console at 1440×2 the
+   top-level gaps ran 16 / 0 / 16 / 12 / 12 / 12 / 16 px. The 0 is the bug —
+   the ZOS caution card the host page injects as <children> is a cladd Surface,
+   and a cladd Surface deliberately carries no outer margin (its container is
+   supposed to own the gap), so it butted straight against step 3's divider and
+   read as part of that step rather than as a separate warning. The 12s are
+   drift, and between the error and the reconnect hint the two margins silently
+   collapsed (0.75 + 0.65 → 0.75) — nobody chose any of those numbers.
+
+   So the container owns the rhythm now: one gap between sections, one tighter
+   gap inside .fw-deploy-decision (consent → actions → whatever the probe
+   answers back), which is one unit and should read as one. A card added later
+   lands at the right distance without a margin of its own.
+
+   align-content:start matters: .fw-deploy is height:100%, and a grid would
+   otherwise stretch the rows apart whenever the content is shorter than the
+   drawer. minmax(0, 1fr) keeps the long monospace device facts from widening
+   the single implicit column past the drawer.
+
+   Two classes on the container, and the reset only under them, on purpose: the
+   per-section margins live unlayered in music-player.css, which main.tsx
+   imports after this file, so a one-class reset would lose the specificity tie
+   and leave every old margin standing. Nothing outside this drawer renders
+   .fw-deploy, so the reset reaches no other consumer. */
+.fw-deploy.fw-deploy--flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 1rem;
+}
+
+.fw-deploy.fw-deploy--flow .fw-deploy-decision {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+.fw-deploy.fw-deploy--flow > *,
+.fw-deploy.fw-deploy--flow .fw-deploy-decision > * {
+  margin-block: 0;
+}
+
 .device-status {
   display: inline-flex;
   align-items: center;

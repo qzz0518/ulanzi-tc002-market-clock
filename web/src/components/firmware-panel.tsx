@@ -243,7 +243,10 @@ export function FirmwarePanelBody({
   const restoreActionLabel = restoresToZos ? "结束侧载" : `恢复${restoresTo}`;
 
   return (
-    <section className="fw-deploy" aria-labelledby={headingId}>
+    // fw-deploy--flow: the drawer body owns its vertical rhythm through the
+    // container gap (globals.css), so nothing below adds a margin of its own —
+    // including the cladd Surface the host page injects as {children}.
+    <section className="fw-deploy fw-deploy--flow" aria-labelledby={headingId}>
         <div className="music-section-heading">
           <span>SIDELOAD FIRMWARE</span>
           <h2 id={headingId}>{heading}</h2>
@@ -273,34 +276,39 @@ export function FirmwarePanelBody({
 
         {children}
 
-        <label className="fw-recovery-acknowledgement">
-          <Checkbox
-            as="span"
-            className="fw-recovery-checkbox"
-            input
-            size="md"
-            color="brand"
-            checked={recoveryAcknowledged}
-            onChange={setRecoveryAcknowledged}
-          />
-          {/* One string per node on purpose: React SSR splits adjacent text
-              children with comment markers, which breaks copy assertions. */}
-          <span>
-            <strong>{`我知道如何回到${restoresTo}`}</strong>
-            {`点「${restoreActionLabel}」立即回到${restoresTo}；断电重启同样自动恢复到${restoresTo}。仍异常时断电后按住 USB-C 旁的复位按钮再上电。`}
-          </span>
-        </label>
+        {/* Consent, the two buttons it gates, and whatever the probe answers
+            back are one decision — grouped so they sit at the tighter gap and
+            the group as a whole keeps the section gap from its neighbours. */}
+        <div className="fw-deploy-decision">
+          <label className="fw-recovery-acknowledgement">
+            <Checkbox
+              as="span"
+              className="fw-recovery-checkbox"
+              input
+              size="md"
+              color="brand"
+              checked={recoveryAcknowledged}
+              onChange={setRecoveryAcknowledged}
+            />
+            {/* One string per node on purpose: React SSR splits adjacent text
+                children with comment markers, which breaks copy assertions. */}
+            <span>
+              <strong>{`我知道如何回到${restoresTo}`}</strong>
+              {`点「${restoreActionLabel}」立即回到${restoresTo}；断电重启同样自动恢复到${restoresTo}。仍异常时断电后按住 USB-C 旁的复位按钮再上电。`}
+            </span>
+          </label>
 
-        <div className="fw-deploy-actions">
-          <Button type="button" variant="transparent" outline loading={busy} disabled={busy} onClick={() => void controller.probeDevice()}><Wifi />检测 TC002</Button>
-          {sessionActive ? (
-            <Button type="button" color="brand" loading={busy} disabled={busy} onClick={() => void controller.stopSession()}><Power />{restoreActionLabel}</Button>
-          ) : (
-            <Button type="button" color="brand" loading={busy} disabled={!canStartSession || !recoveryAcknowledged || busy} onClick={() => void controller.startSession()}><Play />侧载固件</Button>
-          )}
+          <div className="fw-deploy-actions">
+            <Button type="button" variant="transparent" outline loading={busy} disabled={busy} onClick={() => void controller.probeDevice()}><Wifi />检测 TC002</Button>
+            {sessionActive ? (
+              <Button type="button" color="brand" loading={busy} disabled={busy} onClick={() => void controller.stopSession()}><Power />{restoreActionLabel}</Button>
+            ) : (
+              <Button type="button" color="brand" loading={busy} disabled={!canStartSession || !recoveryAcknowledged || busy} onClick={() => void controller.startSession()}><Play />侧载固件</Button>
+            )}
+          </div>
+          {error && <p className="music-inline-error" role="alert">{error}</p>}
+          {(error || deviceProbe?.connected === false) && <DeviceReconnectGuidance />}
         </div>
-        {error && <p className="music-inline-error" role="alert">{error}</p>}
-        {(error || deviceProbe?.connected === false) && <DeviceReconnectGuidance />}
 
         {/* 服务端也发一份恢复指南，但它是照官方固件写死的：刷过 ZOS 的机器上
             那份是错的（断电重启回到的是 ZOS），所以这时用本地这份，不用它的。 */}

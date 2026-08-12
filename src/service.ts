@@ -289,7 +289,13 @@ function lyricAt(lines: readonly MusicLyricLine[], positionMs: number): string {
 async function publishOsNowPlaying(): Promise<void> {
   const provider = music.activeProvider();
   if (!provider.remote || !provider.status().loggedIn) {
-    osLink.setNowPlaying(null);
+    // Every write here is tagged "remote", and the hub refuses a silent write
+    // over a source that is playing. That is what makes this null safe to send
+    // twice a second while NetEase is active: it clears a stale Connect reading
+    // without touching the browser's report, and it is also the sweeper that
+    // eventually drops a console report whose tab died without saying goodbye
+    // (the hub frees the field once that report goes stale).
+    osLink.setNowPlaying(null, "remote");
     return;
   }
   let snapshot;
@@ -303,7 +309,7 @@ async function publishOsNowPlaying(): Promise<void> {
     return;
   }
   if (!snapshot.trackId) {
-    osLink.setNowPlaying(null);
+    osLink.setNowPlaying(null, "remote");
     return;
   }
   if (snapshot.trackId !== osNowTrackId) {
@@ -327,7 +333,7 @@ async function publishOsNowPlaying(): Promise<void> {
     positionMs: snapshot.positionMs,
     durationMs: snapshot.durationMs,
     lyric: lyricAt(osNowLyrics, snapshot.positionMs),
-  });
+  }, "remote");
 }
 
 // Gated on the device actually being attached: this reaches out to Spotify, and
