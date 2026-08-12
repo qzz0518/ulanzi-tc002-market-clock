@@ -19,6 +19,11 @@ import {
   type VisualEffectId,
 } from "./visual-effects.ts";
 import {
+  SIGN_DEFAULT_TEXT,
+  SIGN_PALETTES,
+  SIGN_PALETTE_IDS,
+} from "./visual/sign.ts";
+import {
   WeatherNotConfiguredError,
   parseCoordinate,
   type WeatherObservation,
@@ -236,6 +241,7 @@ const RUNTIME_MARKET_DEFINITION: ContentDefinition = {
 const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description: string }>> = {
   ant: { title: "兰顿蚂蚁", description: "简单转向规则演化出的元胞自动机轨迹。" },
   aquarium: { title: "鱼缸", description: "小鱼、水草和气泡组成的陪伴型像素动画。" },
+  boldclock: { title: "大字天气钟", description: "纯黑底上的特大白字时间，右侧天气图标与气温，冒号每秒闪烁。" },
   fire: { title: "火焰", description: "经典 demoscene 热量扩散火焰。" },
   fireworks: { title: "烟花", description: "升空尾迹、随机色相爆散与重力衰减。" },
   flipclock: { title: "翻页钟", description: "深色卡片、闪烁冒号与翻页扫光。" },
@@ -245,8 +251,10 @@ const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description
   maze: { title: "走迷宫", description: "随机生成迷宫并演示最短路径。" },
   pet: { title: "像素宠物", description: "橘猫的待机、散步、奔跑与攻击动画。" },
   sand: { title: "落沙", description: "彩色沙粒受重力下落并逐渐堆积。" },
+  sign: { title: "灯牌", description: "整屏亚克力灯箱底色配黑字文案，超过一屏自动分屏轮显。" },
   starfield: { title: "星空穿梭", description: "星点从中心加速飞出的曲速效果。" },
   suncolor: { title: "日出日落色温钟", description: "按太阳高度角把整屏染成夜蓝、晨橙、日白或暮红。" },
+  viewfinder: { title: "取景框钟", description: "米色底、橄榄墨色大字时间，取景框角标配温度与日期角签；整屏常亮，亮度偏高。" },
   weather: { title: "天气粒子", description: "按 Open-Meteo 实况自动切换晴、云、雨、雪粒子。" },
 };
 
@@ -278,13 +286,43 @@ const LOCATION_OPTIONS: readonly ContentOptionField[] = [
   { key: "longitude", label: "经度", type: "hidden", default: "121.4737" },
 ];
 
-// The flip clock, flux clock, matrix clock and sun-colour clock all re-render
-// on the wall clock rather than on an animation seed, so they share a cadence.
-const TIME_DRIVEN_VISUALS: readonly VisualEffectId[] = ["flipclock", "flux", "matrixclock", "suncolor"];
+// Every clock face re-renders on the wall clock rather than on an animation
+// seed, so they share a cadence. boldclock and viewfinder are listed here for
+// the record even though their bespoke definitions below set the same 10 s
+// cadence themselves.
+const TIME_DRIVEN_VISUALS: readonly VisualEffectId[] = [
+  "boldclock",
+  "flipclock",
+  "flux",
+  "matrixclock",
+  "suncolor",
+  "viewfinder",
+];
 
 function visualOptionFields(effectId: VisualEffectId): ContentOptionField[] {
   if (effectId === "flipclock" || effectId === "matrixclock") return [];
   if (effectId === "suncolor") return [...LOCATION_OPTIONS];
+  if (effectId === "sign") {
+    // A static sign has nothing to speed up, so no SPEED_OPTION. The width
+    // limit lives in the help text because 52 px holds exactly four 12 px
+    // hanzi — the user must know that before typing, not after.
+    return [
+      {
+        key: "signText",
+        label: "文案",
+        type: "text",
+        default: SIGN_DEFAULT_TEXT,
+        help: "汉字每屏最多 4 个，字母数字算半个；超宽自动分屏轮显，也可用 / 手动分屏。",
+      },
+      {
+        key: "signPalette",
+        label: "灯色",
+        type: "select",
+        default: "green",
+        choices: SIGN_PALETTE_IDS.map((id) => ({ value: id, label: SIGN_PALETTES[id].label })),
+      },
+    ];
+  }
   const fields: ContentOptionField[] = [SPEED_OPTION];
   if (effectId === "pet") {
     fields.push({
@@ -385,6 +423,8 @@ function visualDefinition(effectId: VisualEffectId): ContentDefinition {
         fireworkDensity: valueNumber(item.options.density, 2, 1, 3),
         latitude: valueNumber(item.options.latitude, 0, -90, 90),
         longitude: valueNumber(item.options.longitude, 0, -180, 180),
+        signText: typeof item.options.signText === "string" ? item.options.signText : undefined,
+        signPalette: typeof item.options.signPalette === "string" ? item.options.signPalette : undefined,
       });
       return animation;
     },
@@ -425,6 +465,89 @@ const WEATHER_DEFINITION: ContentDefinition = {
     return renderVisualEffect("weather", item.durationMs, context.nowMs, {
       speed,
       weatherPlace: typeof item.options.place === "string" ? item.options.place : "",
+      weather: {
+        condition: weather.condition,
+        temperatureC: weather.temperatureC,
+        precipitationMm: weather.precipitationMm,
+        cloudCoverPercent: weather.cloudCoverPercent,
+      },
+    });
+  },
+};
+
+// The two photo-derived clock faces consume the weather client, and the
+// generic visual factory is deliberately synchronous and data-free (renderers
+// stay pure per ADR 0001). So, like WEATHER_DEFINITION, each is a bespoke
+// definition that resolves the observation first and hands plain values to
+// renderVisualEffect — same options, same failure states, same seam.
+const BOLDCLOCK_DEFINITION: ContentDefinition = {
+  id: "visual:boldclock",
+  title: VISUAL_NAMES.boldclock.title,
+  category: "visual",
+  description: VISUAL_NAMES.boldclock.description,
+  defaultDurationMs: 10_000,
+  // The minute display must stay current, so the cadence is time-driven; the
+  // weather client's own 10-minute cache floor absorbs the fetch rate.
+  preferredRefreshIntervalMs: 10_000,
+  options: [...LOCATION_OPTIONS],
+  async render(context, item) {
+    // Configuration states keep the full-size clock and mark only the weather
+    // column; the clock never dies with its corner.
+    const notice = (weatherNotice: string) =>
+      renderVisualEffect("boldclock", item.durationMs, context.nowMs, { weatherNotice });
+    let latitude: number;
+    let longitude: number;
+    try {
+      latitude = parseCoordinate(item.options.latitude, 90, "latitude");
+      longitude = parseCoordinate(item.options.longitude, 180, "longitude");
+    } catch {
+      return notice("坐标错误");
+    }
+    let weather: WeatherObservation;
+    try {
+      weather = await context.getWeather(latitude, longitude, context.forceRefresh);
+    } catch (error) {
+      if (!(error instanceof WeatherNotConfiguredError)) throw error;
+      return notice("未配置");
+    }
+    return renderVisualEffect("boldclock", item.durationMs, context.nowMs, {
+      weather: {
+        condition: weather.condition,
+        temperatureC: weather.temperatureC,
+        precipitationMm: weather.precipitationMm,
+        cloudCoverPercent: weather.cloudCoverPercent,
+      },
+    });
+  },
+};
+
+const VIEWFINDER_DEFINITION: ContentDefinition = {
+  id: "visual:viewfinder",
+  title: VISUAL_NAMES.viewfinder.title,
+  category: "visual",
+  description: VISUAL_NAMES.viewfinder.description,
+  defaultDurationMs: 10_000,
+  preferredRefreshIntervalMs: 10_000,
+  options: [...LOCATION_OPTIONS],
+  async render(context, item) {
+    const notice = (weatherNotice: string) =>
+      renderVisualEffect("viewfinder", item.durationMs, context.nowMs, { weatherNotice });
+    let latitude: number;
+    let longitude: number;
+    try {
+      latitude = parseCoordinate(item.options.latitude, 90, "latitude");
+      longitude = parseCoordinate(item.options.longitude, 180, "longitude");
+    } catch {
+      return notice("坐标错误");
+    }
+    let weather: WeatherObservation;
+    try {
+      weather = await context.getWeather(latitude, longitude, context.forceRefresh);
+    } catch (error) {
+      if (!(error instanceof WeatherNotConfiguredError)) throw error;
+      return notice("未配置");
+    }
+    return renderVisualEffect("viewfinder", item.durationMs, context.nowMs, {
       weather: {
         condition: weather.condition,
         temperatureC: weather.temperatureC,
@@ -575,9 +698,14 @@ export const CONTENT_DEFINITIONS: readonly ContentDefinition[] = [
   TIMER_DEFINITION,
   POMODORO_DEFINITION,
   COUNTDOWN_DEFINITION,
-  // Weather carries its own coordinate options and data dependency, so it is
-  // registered explicitly instead of through the generic visual factory.
-  ...VISUAL_EFFECT_IDS.filter((effectId) => effectId !== "weather").map(visualDefinition),
+  // Weather and the two weather-consuming clock faces carry their own
+  // coordinate options and data dependency, so they are registered explicitly
+  // instead of through the generic visual factory.
+  ...VISUAL_EFFECT_IDS
+    .filter((effectId) => effectId !== "weather" && effectId !== "boldclock" && effectId !== "viewfinder")
+    .map(visualDefinition),
+  BOLDCLOCK_DEFINITION,
+  VIEWFINDER_DEFINITION,
   WEATHER_DEFINITION,
   CANVAS_DEFINITION,
   PIXEL_ASSET_DEFINITION,

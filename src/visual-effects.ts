@@ -9,10 +9,18 @@ import { cjkTextWidth, drawCjkText } from "./pixel-cjk.ts";
 import { GLYPH_HEIGHT } from "../web/src/lib/pixel-glyphs.ts";
 import { drawBigClockText } from "./tool-renderers.ts";
 import type { WeatherCondition } from "./weather/client.ts";
+// The three photo-derived faces live in src/visual/ as standalone modules
+// rather than inline here — the split is deliberate: each carries its own
+// hand-authored glyph/icon data and pixel-exact tests, and this file is
+// already at the size where one more 200-line face stops being readable.
+import { renderSign } from "./visual/sign.ts";
+import { renderBoldClock } from "./visual/boldclock.ts";
+import { renderViewfinderClock } from "./visual/viewfinder.ts";
 
 export const VISUAL_EFFECT_IDS = [
   "ant",
   "aquarium",
+  "boldclock",
   "fire",
   "fireworks",
   "flipclock",
@@ -22,8 +30,10 @@ export const VISUAL_EFFECT_IDS = [
   "maze",
   "pet",
   "sand",
+  "sign",
   "starfield",
   "suncolor",
+  "viewfinder",
   "weather",
 ] as const;
 
@@ -57,6 +67,10 @@ export interface VisualEffectOptions {
   weatherPlace?: string;
   latitude?: number;
   longitude?: number;
+  /** Sign message; empty falls back to the module's default line. */
+  signText?: string;
+  /** Sign field colour id; unknown values fall back to green. */
+  signPalette?: string;
 }
 
 type Random = () => number;
@@ -1383,6 +1397,11 @@ export function renderVisualEffect(
   const random = seededRandom(seed);
   if (effectId === "ant") return renderAnt(durationMs, random, speed);
   if (effectId === "aquarium") return renderAquarium(durationMs, random, speed);
+  if (effectId === "boldclock") {
+    // BoldClockWeather is a structural subset of WeatherVisualInput, so the
+    // registry's observation passes straight through.
+    return renderBoldClock(durationMs, nowMs, options.weather, options.weatherNotice);
+  }
   if (effectId === "fire") return renderFire(durationMs, random, speed);
   if (effectId === "fireworks") {
     return renderFireworks(durationMs, random, speed, options.fireworkDensity ?? 2);
@@ -1405,8 +1424,15 @@ export function renderVisualEffect(
   if (effectId === "maze") return renderMaze(durationMs, random, speed);
   if (effectId === "pet") return renderPet(durationMs, random, speed, options.petAction);
   if (effectId === "sand") return renderSand(durationMs, random, speed);
+  if (effectId === "sign") return renderSign(durationMs, options.signText, options.signPalette);
   if (effectId === "suncolor") {
     return renderSunColor(durationMs, nowMs, options.latitude ?? 0, options.longitude ?? 0);
+  }
+  if (effectId === "viewfinder") {
+    return renderViewfinderClock(durationMs, nowMs, {
+      temperatureC: options.weather?.temperatureC,
+      weatherNotice: options.weatherNotice,
+    });
   }
   if (effectId === "weather") {
     return renderWeather(
