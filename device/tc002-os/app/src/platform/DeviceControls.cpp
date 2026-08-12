@@ -1,7 +1,5 @@
 #include "platform/DeviceControls.h"
 
-#include <utils/BrightnessHelper.h>
-
 #include "audio_manager.h"
 
 #include "base/log.h"
@@ -36,24 +34,15 @@ void DeviceControls::initialize() {
   // hands the device back to another firmware, so "my volume resets every time"
   // is a real complaint and was one.
   //
-  // The panel's current level is the fallback, not the source of truth. Reading
-  // it was the original design and it was pure sideload reasoning — it assumed
-  // the stock app had already applied the user's setting, which is exactly the
-  // inheritance this firmware keeps getting caught by.
-  const int max = BRIGHTNESSHELPER->getMaxBrightness();
-  const int current = BRIGHTNESSHELPER->getBrightness();
-  int adopted = mBrightnessStep;
-  if (max > 0) {
-    adopted = clampInt((current * kBrightnessSteps + max / 2) / max, 1, kBrightnessSteps);
-  }
-  mBrightnessStep = clampInt(prefs::getInt("brightness", adopted), 1, kBrightnessSteps);
+  // Prefs are now the only source for brightness. The old code seeded it from
+  // BRIGHTNESSHELPER->getBrightness() and then pushed it back with
+  // setBrightness(); both were removed because they do nothing on this product
+  // — see the header. Nothing needs to replace the push: Presenter reads
+  // brightness() on every frame, so the restored step is applied by the first
+  // frame drawn after this returns.
+  mBrightnessStep = clampInt(prefs::getInt("brightness", mBrightnessStep), 1, kBrightnessSteps);
   mVolume = clampInt(prefs::getInt("volume", mVolume), 0, kVolumeMax);
-  if (max > 0) {
-    // Apply it, rather than merely remembering it: on a flashed boot nothing
-    // else has ever written this node.
-    BRIGHTNESSHELPER->setBrightness((mBrightnessStep * max) / kBrightnessSteps);
-  }
-  LOGD("tcos controls: brightness %d/%d -> step %d", current, max, mBrightnessStep);
+  LOGD("tcos controls: restored volume %d, brightness step %d", mVolume, mBrightnessStep);
   base::AudioManager::instance().setVolume((mVolume * kMixerMax) / kVolumeMax);
   // Paired with the setVolume above: without it a mute inherited from the
   // previous firmware would silence a session that never touches the volume
@@ -73,14 +62,13 @@ int DeviceControls::nudgeVolume(int delta) {
 }
 
 int DeviceControls::nudgeBrightness(int delta) {
+  // Floor at one step: zero would black the panel out with no way to see the
+  // bar that would let the user turn it back up.
   mBrightnessStep = clampInt(mBrightnessStep + delta, 1, kBrightnessSteps);
   prefs::setInt("brightness", mBrightnessStep);
-  const int max = BRIGHTNESSHELPER->getMaxBrightness();
-  if (max > 0) {
-    // Floor at one step: zero would black the panel out with no way to see the
-    // bar that would let the user turn it back up.
-    BRIGHTNESSHELPER->setBrightness((mBrightnessStep * max) / kBrightnessSteps);
-  }
+  // No hardware call, on purpose. There is no register to write — Presenter
+  // scales the RGB bytes with this value on the next frame, i.e. within one
+  // 40 ms tick, which is faster than a key repeat.
   return mBrightnessStep;
 }
 

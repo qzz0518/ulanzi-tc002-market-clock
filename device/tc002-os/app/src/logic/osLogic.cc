@@ -13,6 +13,7 @@
 #include "net/PortalService.h"
 #include "net/WifiPolicy.h"
 #include "net/SetupPortal.h"
+#include "net/TimeSync.h"
 #include "platform/DeviceControls.h"
 #include "platform/BatteryMonitor.h"
 #include "platform/DeviceProvisioning.h"
@@ -108,6 +109,13 @@ tcos::HostLink& hostLink() {
 	return instance;
 }
 
+// The wall clock. A function-local static for the same reason as the link: its
+// thread must not start before the framework is up.
+tcos::TimeSync& timeSync() {
+	static tcos::TimeSync instance;
+	return instance;
+}
+
 // The provisioning page, served on the device's NORMAL address rather than only
 // while a hotspot is up. Everything about the flow — the page, the routes, the
 // network list, the submit round trip, the status poll — is then reachable from
@@ -129,10 +137,16 @@ tcos::WifiPolicy sWifiPolicy(&sWifi);
 tcos::DeviceProvisioning sProvisioning;
 tcos::SetupPortal sPortal(&sProvisioning);
 tcos::PortalService sPortalService;
-// 8080, not 80: binding a privileged port would need us to still be root at
-// that point, and nothing here needs the well-known one while the device has a
-// normal address. The hotspot's captive-portal mode is a later, guarded step.
-const int kPortalPort = 8080;
+// 80 first, 8080 as the fallback.
+//
+// Port 80 is not a nicety once the hotspot exists: dnsmasq answers every name
+// with our address, and a phone's captive-portal probe then asks port 80 — on
+// 8080 the sheet never opens and the user has to be told a URL. /etc/init.rc
+// runs zkswe as `user root`, so the privileged bind is available; the fallback
+// is kept because a firmware that refuses to serve its own setup page because
+// a port was taken would be the worst possible failure of this feature.
+const int kPortalPreferredPort = 80;
+const int kPortalFallbackPort = 8080;
 
 // Engines are created once and kept: re-creating one on every visit would
 // churn the heap on a device with ~1 MB free, and GameScreen::onEnter already
@@ -456,6 +470,24 @@ void rebuildSettings(int nowMs) {
 
 	// 电量 sits above MCU because it is the row a user actually looks for, and
 	// because a pending shutdown has to be visible somewhere.
+	// 时间: the row that proves this device is a clock again. Read off the wall
+	// clock rather than the sync instant, because what a user checks here is
+	// whether the time is right now. UTC+8 by hand: settimeofday sets UTC and
+	// this rootfs carries no tzdata, so localtime() would silently return UTC
+	// and look correct in the +0 timezone alone.
+	row.label = "\xE6\x97\xB6\xE9\x97\xB4";                                  // 时间
+	if (!timeSync().synced()) {
+		row.value = "\xE6\x9C\xAA\xE5\x90\x8C\xE6\xAD\xA5";                // 未同步
+	} else {
+		char clock[32];
+		const time_t local = (time_t)(time(NULL) + 8 * 3600);
+		struct tm parts;
+		gmtime_r(&local, &parts);
+		snprintf(clock, sizeof(clock), "%02d:%02d", parts.tm_hour, parts.tm_min);
+		row.value = clock;
+	}
+	rows.push_back(row);
+
 	row.label = "\xE7\x94\xB5\xE9\x87\x8F";                                  // 电量
 	{
 		const int pct = tcos::BatteryMonitor::instance().percent();
@@ -545,7 +577,16 @@ static void onUI_init() {
 	// Started here rather than in onUI_show: onUI_show runs on every return to
 	// this activity, and the link's threads must be created exactly once.
 	hostLink().start(readHostAddress());
-	sPortalService.start(kPortalPort, &sPortal);
+	// Nothing else in this firmware has ever called settimeofday. Sideloaded that
+	// was invisible: the stock app NTP-synced at startup and the kernel keeps the
+	// time across a framework restart, so ZOS inherited a correct clock it never
+	// asked for. Flashed, ZOS is the only app that has ever run and this SoC has
+	// no battery-backed RTC — the device was measured sitting at 1970 with this
+	// line absent. Its own thread; resolution and the round trip both block.
+	timeSync().start();
+	if (sPortalService.start(kPortalPreferredPort, &sPortal) < 0) {
+		sPortalService.start(kPortalFallbackPort, &sPortal);
+	}
 	sWifiPolicy.begin(0);
 }
 
@@ -696,8 +737,20 @@ static bool onUI_Timer(int id) {
 		// from a pinned channel without it yanking them back every tick.
 		if (sLink.pinned && !sLink.focus.empty() && sLink.focus != sPinnedFocus) {
 			sPinnedFocus = sLink.focus;
-			if (sChannelRing.selectApp(sLink.focus, nowMs) &&
-			    shell().top() != &sChannelRing) {
+			// The console can name any menu entry, not just a channel. Routing
+			// only channels meant pinning 音乐 or 游戏 succeeded in the console,
+			// looked plausible, and moved nothing on the device — the same silent
+			// no-op the display endpoint was hardened against on the host side.
+			// The ids are the ones service.ts publishes in publishOsMenu.
+			if (sLink.focus == "music") {
+				if (shell().top() != &sMusic) shell().push(&sMusic, nowMs);
+			} else if (sLink.focus == "game") {
+				if (shell().top() != &sGameList) shell().push(&sGameList, nowMs);
+			} else if (sLink.focus == "settings") {
+				rebuildSettings(nowMs);
+				if (shell().top() != &sSettings) shell().push(&sSettings, nowMs);
+			} else if (sChannelRing.selectApp(sLink.focus, nowMs) &&
+			           shell().top() != &sChannelRing) {
 				shell().push(&sChannelRing, nowMs);
 			}
 		} else if (!sLink.pinned) {
@@ -832,7 +885,9 @@ static bool onUI_Timer(int id) {
 		// a policy stuck retrying a refused startSupplicant climbs every tick.
 		hostLink().setTelemetry(screenName, sChannelRing.currentApp(), tcos::netinfo::ssid(),
 		                        tcos::netinfo::ipAddress(),
-		                        sWifiPolicy.supplicantRestarts());
+		                        sWifiPolicy.supplicantRestarts() + sWifiPolicy.softApRestarts(),
+		                        tcos::BatteryMonitor::instance().percent(),
+		                        tcos::BatteryMonitor::instance().charging());
 	}
 	return true;
 }

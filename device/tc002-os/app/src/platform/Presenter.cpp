@@ -6,6 +6,7 @@
 #include <utils/GpioHelper.h>
 
 #include "base/log.h"
+#include "platform/DeviceControls.h"
 
 namespace tcos {
 
@@ -43,12 +44,28 @@ void Presenter::present(const Surface& surface) {
   surface.extractRGB(mRgb);
   const int visibleBytes = kVisibleWidth * 3;
   const int strideBytes = kStrideWidth * 3;
+
+  // Software dimming. This panel has no backlight to turn down, so the only
+  // lever is the byte values themselves — see Presenter::scaleByte. Read once
+  // per frame, not once per pixel: the user changes it at button speed.
+  //
+  // The branch is hoisted out of the loop so the brightest step is provably the
+  // same copy the firmware has always done, rather than a scale that happens to
+  // be a no-op. Nothing may sit between here and spi.write() that touches the
+  // bytes again.
+  const int step = DeviceControls::instance().brightness();
+  const bool unscaled = step >= kBrightnessSteps;
+
   // mPadded keeps its zeroed tail across frames, so only the visible run is
   // copied; the off-panel columns were zeroed once in the constructor.
   for (int y = 0; y < kHeight; ++y) {
     const uint8_t* src = &mRgb[y * visibleBytes];
     uint8_t* dst = &mPadded[y * strideBytes];
-    for (int i = 0; i < visibleBytes; ++i) dst[i] = src[i];
+    if (unscaled) {
+      for (int i = 0; i < visibleBytes; ++i) dst[i] = src[i];
+    } else {
+      for (int i = 0; i < visibleBytes; ++i) dst[i] = scaleByte(src[i], step);
+    }
   }
 
   // The MCU samples this line to frame the transfer; it needs a settle window

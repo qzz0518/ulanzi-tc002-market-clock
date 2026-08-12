@@ -25,8 +25,12 @@
 #include "net/HttpServer.h"
 #include "net/SetupPortal.h"
 #include "net/StateDoc.h"
+#include "net/TimeSync.h"
 #include "net/WpaCtrl.h"
+#include "platform/DeviceWifi.h"
+#include "platform/DeviceControls.h"
 #include "platform/InstallMode.h"
+#include "platform/Presenter.h"
 #include "net/WifiPolicy.h"
 #include "games/breakout.h"
 #include "games/flappy.h"
@@ -2025,7 +2029,7 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
   FakeWifi()
       : running(false), stored(false), assoc(false), address(false),
         connectOk(true), apUp(false), starts(0), connects(0), dhcpCalls(0),
-        apStarts(0), apStops(0) {}
+        apStarts(0), apStops(0), persists(0), apChecks(0) {}
 
   void startSupplicant() {
     ++starts;
@@ -2049,6 +2053,7 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
     return true;
   }
   bool hasAddress() { return address; }
+  void persistCredentials() { ++persists; }
   void startSoftAp() {
     apUp = true;
     ++apStarts;
@@ -2057,7 +2062,13 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
     apUp = false;
     ++apStops;
   }
-  bool softApRunning() { return apUp && !apDies; }
+  bool softApRunning() {
+    // Counted, not just answered. On the device this call walks the whole of
+    // /proc, and the state it is asked from is the one a stranded device never
+    // leaves — so HOW OFTEN it is asked is itself a property worth pinning.
+    ++apChecks;
+    return apUp && !apDies;
+  }
   void startScan() {
     ++scans;
     scanDone = autoScan;
@@ -2070,8 +2081,11 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
 
   // Every call that CHANGES the device, as opposed to reading it. The adopt
   // path's whole promise is that this stays zero, so it is counted rather than
-  // asserted one flag at a time.
-  int mutations() const { return starts + connects + dhcpCalls + apStarts + apStops + scans; }
+  // asserted one flag at a time. persists belongs here above all: it is the
+  // only one that writes /data, which a power cycle does not clear.
+  int mutations() const {
+    return starts + connects + dhcpCalls + apStarts + apStops + scans + persists;
+  }
 
   bool autoStart = true;
   bool autoScan = true;
@@ -2092,6 +2106,8 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
   int dhcpCalls;
   int apStarts;
   int apStops;
+  int persists;
+  int apChecks;
 };
 
 // A bundle the FrameBundle decoder accepts, built here rather than loaded from
@@ -2467,6 +2483,202 @@ void checkMusicScreen() {
   check(differs, "a lyric displaces the title rather than being dropped");
 }
 
+// A server's reply, assembled by hand. Everything a real one carries that this
+// client reads is a parameter, so each rule can be broken one at a time.
+std::string makeNtpReply(uint64_t nonce, uint32_t seconds, uint32_t fraction) {
+  std::string p(tcos::TimeSync::kPacketBytes, '\0');
+  p[0] = (char)((0 << 6) | (4 << 3) | 4);  // LI 0, version 4, mode 4 (server)
+  p[1] = (char)2;                          // stratum 2
+  for (int i = 0; i < 8; ++i) {
+    p[24 + i] = (char)((nonce >> (56 - 8 * i)) & 0xFFu);  // originate: the echo
+  }
+  for (int i = 0; i < 4; ++i) {
+    p[40 + i] = (char)((seconds >> (24 - 8 * i)) & 0xFFu);
+    p[44 + i] = (char)((fraction >> (24 - 8 * i)) & 0xFFu);
+  }
+  return p;
+}
+
+const uint8_t* bytesOf(const std::string& p) {
+  return reinterpret_cast<const uint8_t*>(p.data());
+}
+
+void checkTimeSync() {
+  // 2024-01-01T00:00:00Z, the instant every case below is anchored to.
+  const int64_t kUnix2024 = 1704067200;
+  const uint32_t kNtp2024 = 3913056000u;  // + the 1900..1970 offset
+
+  const std::vector<std::string> servers = tcos::TimeSync::defaultServers();
+  check(servers.size() >= 2, "there is more than one server to fall through to");
+  bool otherOperator = false;
+  for (size_t i = 0; i < servers.size(); ++i) {
+    if (servers[i].find("aliyun") == std::string::npos) otherOperator = true;
+  }
+  check(otherOperator, "and not every fallback shares an operator with it");
+
+  uint8_t request[tcos::TimeSync::kPacketBytes];
+  tcos::TimeSync::buildRequest(request, 0x0123456789ABCDEFull);
+  check(request[0] == 0x23, "the request is LI 0, version 4, mode 3 (client)");
+  check(request[40] == 0x01 && request[47] == 0xEF,
+        "the nonce goes in the transmit timestamp, big-endian");
+  bool restZero = true;
+  for (int i = 1; i < 40; ++i) {
+    if (request[i] != 0) restZero = false;
+  }
+  check(restZero, "a client with no clock sends nothing else it cannot know");
+
+  check(tcos::TimeSync::ntpToUnix(kNtp2024) == kUnix2024,
+        "an NTP timestamp converts to Unix seconds");
+  check(tcos::TimeSync::ntpToUnix(2208988800u) == 0,
+        "the Unix epoch round-trips through the 1900 offset");
+  // The high bit selects the era; getting this backwards is how a junk reply
+  // becomes a device set to 2106.
+  check(tcos::TimeSync::ntpToUnix(0x80000000u) < 0,
+        "the era-0 floor is 1968, which is before the Unix epoch and stays negative");
+  check(tcos::TimeSync::ntpToUnix(0u) == 2085978496ll,
+        "an era-1 timestamp lands in 2036, not 1900");
+
+  check(tcos::TimeSync::plausible(kUnix2024), "a 2024 time is believable");
+  check(!tcos::TimeSync::plausible(0), "1970 is not — that is the boot value this replaces");
+  check(!tcos::TimeSync::plausible(tcos::TimeSync::kFloorUnix - 1),
+        "nor is one second before this firmware existed");
+  check(tcos::TimeSync::plausible(tcos::TimeSync::kFloorUnix), "the floor itself is in");
+  check(tcos::TimeSync::plausible(tcos::TimeSync::kCeilingUnix), "so is the ceiling");
+  // The ceiling is this device's 32-bit time_t, not a taste judgement: past it
+  // the value cannot be stored, only misstored as 1901.
+  check(!tcos::TimeSync::plausible(tcos::TimeSync::kCeilingUnix + 1),
+        "one second past a 32-bit time_t is refused rather than wrapped");
+  check(tcos::TimeSync::plausible(tcos::TimeSync::ntpToUnix(0u)),
+        "the 2036 rollover instant is still storable — the wall is 2038, not 2036");
+
+  check(tcos::TimeSync::shouldApply(kUnix2024, 0),
+        "the boot case: any believable time beats a kernel's 1970");
+  check(tcos::TimeSync::shouldApply(kUnix2024, kUnix2024 - 1),
+        "a forward correction is applied");
+  check(!tcos::TimeSync::shouldApply(kUnix2024 - 1, kUnix2024),
+        "a backward step is refused — anything on the LAN could otherwise rewind the panel");
+  check(!tcos::TimeSync::shouldApply(kUnix2024, kUnix2024),
+        "and a clock that is already right is left alone");
+  check(!tcos::TimeSync::shouldApply(0, kUnix2024),
+        "a reply from 1970 cannot pull a synced clock back");
+  check(tcos::TimeSync::shouldApply(kUnix2024, 4102444800ll),
+        "but a clock already outside the window may step back into it");
+
+  const uint64_t nonce = 0xA5A5F00D12345678ull;
+  int64_t when = 0;
+  int micros = -1;
+  const std::string good = makeNtpReply(nonce, kNtp2024, 0x80000000u);
+  check(tcos::TimeSync::parseReply(bytesOf(good), (int)good.size(), nonce, &when, &micros),
+        "a well-formed server reply decodes");
+  check(when == kUnix2024, "and carries the time the server sent");
+  check(micros == 500000, "the fixed-point fraction becomes microseconds");
+
+  check(!tcos::TimeSync::parseReply(bytesOf(good), tcos::TimeSync::kPacketBytes - 1,
+                                    nonce, &when, &micros),
+        "a short datagram is not an SNTP reply");
+  const std::string padded = good + std::string(20, '\0');
+  check(tcos::TimeSync::parseReply(bytesOf(padded), (int)padded.size(), nonce, &when,
+                                   &micros),
+        "an authenticator appended after the 48 bytes is ignored, not rejected");
+
+  // The echo is the whole defence of a UDP exchange made without a clock.
+  check(!tcos::TimeSync::parseReply(bytesOf(good), (int)good.size(), nonce + 1, &when,
+                                    &micros),
+        "a reply that does not echo this request's nonce is stale or forged");
+
+  std::string wrongMode = makeNtpReply(nonce, kNtp2024, 0);
+  wrongMode[0] = (char)((0 << 6) | (4 << 3) | 3);
+  check(!tcos::TimeSync::parseReply(bytesOf(wrongMode), (int)wrongMode.size(), nonce,
+                                    &when, &micros),
+        "mode 3 is another client's packet, not an answer");
+
+  std::string alarm = makeNtpReply(nonce, kNtp2024, 0);
+  alarm[0] = (char)((3 << 6) | (4 << 3) | 4);
+  check(!tcos::TimeSync::parseReply(bytesOf(alarm), (int)alarm.size(), nonce, &when,
+                                    &micros),
+        "leap indicator 3 means the server has never synced and is saying so");
+
+  std::string kod = makeNtpReply(nonce, kNtp2024, 0);
+  kod[1] = (char)0;
+  check(!tcos::TimeSync::parseReply(bytesOf(kod), (int)kod.size(), nonce, &when, &micros),
+        "stratum 0 is a kiss-of-death packet, not a time");
+  std::string unsynced = makeNtpReply(nonce, kNtp2024, 0);
+  unsynced[1] = (char)16;
+  check(!tcos::TimeSync::parseReply(bytesOf(unsynced), (int)unsynced.size(), nonce, &when,
+                                    &micros),
+        "stratum 16 is an unsynchronised server");
+
+  const std::string blank = makeNtpReply(nonce, 0, 0);
+  check(!tcos::TimeSync::parseReply(bytesOf(blank), (int)blank.size(), nonce, &when,
+                                    &micros),
+        "an unfilled transmit timestamp would decode to 1900 and passes nothing");
+
+  // Protocol and policy are separate on purpose: this packet is perfectly legal
+  // and its time is still not one this device may adopt.
+  const std::string legalLie = makeNtpReply(nonce, 2208988800u, 0);  // 1970-01-01
+  check(tcos::TimeSync::parseReply(bytesOf(legalLie), (int)legalLie.size(), nonce, &when,
+                                   &micros),
+        "a legal packet carrying an absurd time parses");
+  check(when == 0 && !tcos::TimeSync::shouldApply(when, kUnix2024),
+        "and is stopped by the policy rather than by the parser");
+}
+
+void checkBrightness() {
+  using tcos::Presenter;
+
+  check(tcos::DeviceControls::kBrightnessSteps == Presenter::kBrightnessSteps,
+        "the control and the renderer count brightness steps the same way");
+
+  // Step 10 is the identity. Every byte, not a sample: the brightest setting
+  // must be the buffer the renderer produced, not a scale that rounds well.
+  bool identity = true;
+  for (int v = 0; v <= 255; ++v) {
+    if (Presenter::scaleByte((uint8_t)v, Presenter::kBrightnessSteps) != (uint8_t)v) identity = false;
+  }
+  check(identity, "step 10 returns every byte unchanged");
+
+  check(Presenter::scaleByte(0, 1) == 0, "black stays black at the dimmest step");
+  check(Presenter::scaleByte(0, 5) == 0, "black stays black mid-scale");
+
+  // Dimming must not delete content: at step 1 a byte of 9 truncates to 0.
+  bool neverBlack = true;
+  for (int step = 1; step <= Presenter::kBrightnessSteps; ++step) {
+    for (int v = 1; v <= 255; ++v) {
+      if (Presenter::scaleByte((uint8_t)v, step) == 0) neverBlack = false;
+    }
+  }
+  check(neverBlack, "no lit byte is ever scaled to zero");
+
+  check(Presenter::scaleByte(255, 1) == 25, "255 at step 1 is 25");
+  check(Presenter::scaleByte(255, 5) == 127, "255 at step 5 is 127");
+  check(Presenter::scaleByte(9, 1) == 1, "a byte that would truncate away is floored at 1");
+  check(Presenter::scaleByte(200, 3) == 60, "the ramp is plain v*step/10");
+
+  // Monotonic in both arguments, so the bar and the panel agree.
+  bool monotonicStep = true;
+  for (int v = 0; v <= 255; ++v) {
+    for (int step = 1; step < Presenter::kBrightnessSteps; ++step) {
+      if (Presenter::scaleByte((uint8_t)v, step) > Presenter::scaleByte((uint8_t)v, step + 1))
+        monotonicStep = false;
+    }
+  }
+  check(monotonicStep, "raising the step never darkens a byte");
+
+  bool monotonicValue = true;
+  for (int step = 1; step <= Presenter::kBrightnessSteps; ++step) {
+    for (int v = 0; v < 255; ++v) {
+      if (Presenter::scaleByte((uint8_t)v, step) > Presenter::scaleByte((uint8_t)(v + 1), step))
+        monotonicValue = false;
+    }
+  }
+  check(monotonicValue, "a brighter byte never scales darker than a dimmer one");
+
+  // Out-of-range steps clamp rather than wrapping the panel to black.
+  check(Presenter::scaleByte(255, 0) == 25, "step 0 is treated as step 1");
+  check(Presenter::scaleByte(255, -3) == 25, "a negative step is treated as step 1");
+  check(Presenter::scaleByte(200, 99) == 200, "a step past the top is the identity");
+}
+
 void checkInstallMode() {
   using tcos::install::decide;
 
@@ -2674,11 +2886,78 @@ void checkWifiPolicy() {
     policy.tick(WifiPolicy::kAdoptGraceMs + 20);
     policy.tick(WifiPolicy::kAdoptGraceMs + 30);
     check(policy.state() == WifiPolicy::kProvisioning, "provisioning");
+    const int entered = WifiPolicy::kAdoptGraceMs + 30;
     const int before = w.apStarts;
     w.apDies = true;
-    policy.tick(WifiPolicy::kAdoptGraceMs + 100);
+    policy.tick(entered + WifiPolicy::kSoftApSuperviseMs);
     check(w.apStarts == before + 1, "a dead hotspot is revived");
     check(policy.softApRestarts() == 1, "and the fact is counted, not hidden");
+  }
+
+  // ...but NOT on every tick. softApRunning() walks the whole of /proc on the
+  // device, tick() is driven from the UI thread, and kProvisioning is the state
+  // a device whose network moved sits in forever. This is the check that stops
+  // "supervise the hotspot" from quietly becoming a permanent process-table
+  // scan six times a second.
+  {
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
+    check(policy.state() == WifiPolicy::kProvisioning, "provisioning");
+    const int entered = WifiPolicy::kAdoptGraceMs + 30;
+
+    w.apChecks = 0;
+    // The hotspot was asked for on the way into this state and hostapd is
+    // started with -B, so it is not in /proc yet. Checking before the period is
+    // up would read a starting hotspot as a dead one.
+    policy.tick(entered + WifiPolicy::kSoftApSuperviseMs - 1);
+    check(w.apChecks == 0, "the hotspot is not checked before its period is up");
+    policy.tick(entered + WifiPolicy::kSoftApSuperviseMs);
+    check(w.apChecks == 1, "and exactly once when it is");
+
+    // The real cadence: osLogic polls the link every 160 ms. Ten seconds of
+    // that is 62 ticks, and the old code ran a /proc walk on every one of them.
+    w.apChecks = 0;
+    const int base = entered + WifiPolicy::kSoftApSuperviseMs;
+    int ticks = 0;
+    for (int t = base + 160; t <= base + 10000; t += 160) {
+      policy.tick(t);
+      ++ticks;
+    }
+    check(ticks >= 60, "the sample really is a UI-cadence burst");
+    check(w.apChecks <= 10000 / WifiPolicy::kSoftApSuperviseMs + 1,
+          "ten seconds of ticks cost at most four /proc walks, not sixty-two");
+    check(w.apChecks >= 3, "but the hotspot is still genuinely supervised");
+    check(policy.softApRestarts() == 0, "and a healthy hotspot is never restarted");
+  }
+
+  // With a real hotspot on the air the supplicant is stopped — this radio has
+  // no concurrent AP+station mode — so the background retry cannot run. Pinned
+  // because the fake's `running` flag is independent of `apUp` and would
+  // otherwise let the policy promise something the hardware cannot do.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);                                  // -> starting
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);                                  // -> connecting
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs);  // -> scanning
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40 + WifiPolicy::kConnectTimeoutMs);  // -> provisioning
+    check(policy.state() == WifiPolicy::kProvisioning && w.apUp, "hotspot up");
+
+    const int t0 = WifiPolicy::kAdoptGraceMs + 40 + WifiPolicy::kConnectTimeoutMs;
+    w.running = false;  // what bringUpSoftAp's `ctl.stop wpa_supplicant` leaves
+    w.assoc = true;     // and the router is back, but nothing can hear it
+    const int connectsBefore = w.connects;
+    policy.tick(t0 + WifiPolicy::kBackgroundRetryMs + 10);
+    check(w.connects == connectsBefore,
+          "no connect is attempted at a supplicant the hotspot has stopped");
+    check(w.apUp && policy.state() == WifiPolicy::kProvisioning,
+          "and the hotspot stands rather than being cycled off to go looking");
   }
 
   // THE case this class exists for: valid-looking credentials, network gone.
@@ -2744,6 +3023,91 @@ void checkWifiPolicy() {
     check(policy.state() == WifiPolicy::kConnecting, "submitted credentials are tried at once");
     check(w.lastSsid == "newnet", "the submitted network is the one attempted");
     check(!w.apUp, "the hotspot drops as soon as the user has submitted");
+  }
+
+  // PERSISTENCE. Credentials typed into the setup page exist nowhere but RAM
+  // until this happens, so without it a flashed device forgets its network on
+  // every power cycle — and a flashed device that cannot reach a network cannot
+  // be reached at all: no WiFi, no adb, and adb over TCP is the only channel
+  // this unit has.
+  {
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
+    check(policy.isProvisioning(), "provisioning");
+
+    policy.applyCredentials("newnet", "secret", WifiPolicy::kAdoptGraceMs + 100);
+    check(w.persists == 0, "submitting credentials does not write them");
+    w.assoc = true;
+    policy.tick(WifiPolicy::kAdoptGraceMs + 200);
+    check(policy.state() == WifiPolicy::kObtainingIp, "association leads to a lease request");
+    // Association only proves the password. The write lands on /data, which a
+    // power cycle does not clear, so it waits for proof the network is usable.
+    check(w.persists == 0, "nor does associating — an address is the proof");
+    w.address = true;
+    policy.tick(WifiPolicy::kAdoptGraceMs + 300);
+    check(policy.isOnline(), "online");
+    check(w.persists == 1, "a proven network is written to flash exactly once");
+
+    // Once. Not once a tick, and not again when the same link is re-checked:
+    // this is a jffs2 write on the one partition the universal rescue cannot
+    // undo.
+    for (int t = WifiPolicy::kAdoptGraceMs + 400; t < WifiPolicy::kAdoptGraceMs + 20000;
+         t += 160) {
+      policy.tick(t);
+    }
+    check(w.persists == 1, "and never again while it keeps working");
+  }
+
+  // Credentials that came OUT of the file are never written back to it.
+  {
+    FakeWifi w;
+    w.stored = true;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    w.assoc = true;
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
+    w.address = true;
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40);
+    check(policy.isOnline(), "the stored network comes up");
+    check(w.persists == 0,
+          "a network read from the file is never saved back — that is a /data write per boot");
+  }
+
+  // Credentials that never worked are never written. A wrong password that
+  // reached flash would survive the power cycle that is this device's only
+  // rescue, and it would do so while looking exactly like a right one.
+  {
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
+    policy.applyCredentials("typo", "wrong", WifiPolicy::kAdoptGraceMs + 100);
+    check(policy.state() == WifiPolicy::kConnecting, "it tries them");
+    const int t0 = WifiPolicy::kAdoptGraceMs + 100;
+    policy.tick(t0 + WifiPolicy::kConnectTimeoutMs + 10);
+    check(policy.state() == WifiPolicy::kScanning, "and gives up on time");
+    policy.tick(t0 + WifiPolicy::kConnectTimeoutMs + 20);
+    check(policy.state() == WifiPolicy::kProvisioning, "back to offering a way in");
+    check(w.persists == 0, "with nothing written to flash");
+
+    // ...and if the same credentials later turn out to work — a router that was
+    // merely slow — the intent to save them is still standing.
+    w.running = true;
+    w.assoc = true;
+    policy.tick(t0 + WifiPolicy::kConnectTimeoutMs + 20 + WifiPolicy::kBackgroundRetryMs + 10);
+    check(policy.state() == WifiPolicy::kObtainingIp, "the retry lands");
+    w.address = true;
+    policy.tick(t0 + WifiPolicy::kConnectTimeoutMs + 20 + WifiPolicy::kBackgroundRetryMs + 20);
+    check(policy.isOnline() && w.persists == 1,
+          "credentials proven late are still persisted");
   }
 
   // Supervision: init will not respawn a oneshot service, so we must.
@@ -2814,6 +3178,60 @@ void checkWifiPolicy() {
   }
 }
 
+// The two halves of the hotspot recipe that do not need a radio.
+//
+// Everything else about the SoftAP — whether hostapd actually claims wlan0,
+// whether dnsmasq hands a phone an address, whether 2.4 GHz association works
+// at all — is only answerable on hardware. These two are answerable here, and
+// they are the two that a user reads off the panel and types into a phone.
+void checkSoftApRecipe() {
+  using tcos::DeviceWifi;
+
+  // The name carries the MAC because the stock firmware calls every unit
+  // U-Clock: two clocks in one room are then indistinguishable, and a hotspot
+  // sharing the stock name leaves the user unsure which system they are
+  // configuring.
+  check(DeviceWifi::apSsidFromMac("CC:C4:B2:77:A7:72") == "ZOS-A772",
+        "the hotspot takes the last four hex digits of the MAC");
+  check(DeviceWifi::apSsidFromMac("cc:c4:b2:77:a7:72") == "ZOS-A772",
+        "a lower-case MAC gives the same name — the panel must not depend on ioctl casing");
+  check(DeviceWifi::apSsidFromMac("") == "ZOS-0000",
+        "an unreadable MAC still yields a name, rather than a bare prefix");
+
+  // THE measurement the name is chosen for. 8 ASCII cells x 6 px = 48 px, and
+  // the panel is 52 px: this is the widest hotspot name that does not have to
+  // scroll, and a name the user has to read off a moving line gets mistyped —
+  // which on the phone side is indistinguishable from a wrong password.
+  check(tcos::text::measure("ZOS-A772") == 48,
+        "the hotspot name is 48 px — it fits the panel without a marquee");
+  check(tcos::text::measure("ZOS-0000") == 48, "and so does the fallback");
+  check(tcos::text::measure("TC002-OS-A772") > 52,
+        "the name the design doc first proposed would have had to scroll");
+
+  // The config is not invented: every key below is a literal inside the
+  // device's own libzknet.so, so this is the configuration the stock hotspot
+  // ran with on this exact radio.
+  const std::string conf = DeviceWifi::hostapdConf("ZOS-A772", "12345678");
+  check(conf.find("interface=wlan0\n") == 0, "the interface comes first, as hostapd wants");
+  check(conf.find("\ndriver=nl80211\n") != std::string::npos, "nl80211, as libzknet writes");
+  check(conf.find("\nssid=ZOS-A772\n") != std::string::npos, "the SSID is the derived one");
+  check(conf.find("\nhw_mode=g\n") != std::string::npos,
+        "2.4 GHz only — the vendor's own docs say the radio has no 5 GHz");
+  check(conf.find("\nchannel=6\n") != std::string::npos, "channel 6, as the stock config picks");
+  check(conf.find("\nignore_broadcast_ssid=0\n") != std::string::npos,
+        "the hotspot is broadcast: a hidden rescue network is not a rescue");
+  check(conf.find("\nwpa=2\n") != std::string::npos && conf.find("\nrsn_pairwise=CCMP\n") != std::string::npos,
+        "WPA2 with CCMP, the pair libzknet writes together");
+  check(conf.find("\nwpa_passphrase=12345678\n") != std::string::npos,
+        "the passphrase goes in as plaintext");
+  // The stock path writes wpa_psk=<64 hex> and derives it with PBKDF2 out of
+  // libssl. hostapd derives the identical key from the passphrase itself, and
+  // this firmware has a 1.2 MB link budget to protect.
+  check(conf.find("wpa_psk=") == std::string::npos,
+        "and never as a PBKDF2 hash, which would mean linking libssl");
+  check(conf[conf.size() - 1] == '\n', "the file ends with a newline");
+}
+
 }  // namespace
 
 int main() {
@@ -2856,12 +3274,18 @@ int main() {
   std::printf("  navigation flow ok\n");
   checkLevelOverlay();
   std::printf("  level overlay ok\n");
+  checkTimeSync();
+  std::printf("  time sync ok\n");
+  checkBrightness();
+  std::printf("  brightness ok\n");
   checkInstallMode();
   std::printf("  install mode ok\n");
   checkWpaCtrl();
   std::printf("  wpa ctrl ok\n");
   checkWifiPolicy();
   std::printf("  wifi policy ok\n");
+  checkSoftApRecipe();
+  std::printf("  soft ap recipe ok\n");
   checkZosLogo();
   std::printf("  zos logo ok\n");
   checkBootScreen();

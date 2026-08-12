@@ -63,6 +63,25 @@ class WifiPolicy {
      */
     virtual bool requestDhcp() = 0;
     virtual bool hasAddress() = 0;
+    /**
+     * Write the credentials now in use to the device's persistent config.
+     *
+     * Called exactly once per set of credentials, and only for credentials the
+     * user supplied that have since been PROVEN by an address. Two reasons for
+     * both halves of that rule, and they are the reason this is its own call
+     * rather than something connect() does on the way past:
+     *
+     *   - The target is /data, the one partition a power cycle does not clear.
+     *     A bad write there outlives the rescue that recovers everything else,
+     *     so it happens as rarely as it possibly can and only after a backup.
+     *   - The provisioning state retries the stored network every
+     *     kBackgroundRetryMs for as long as the device stays stranded. Saving
+     *     inside connect() would therefore write flash every twenty seconds,
+     *     forever, on precisely the device that is already in trouble.
+     *
+     * MUST NOT BLOCK, for the same reason requestDhcp must not.
+     */
+    virtual void persistCredentials() = 0;
     virtual void startSoftAp() = 0;
     virtual void stopSoftAp() = 0;
     /**
@@ -71,8 +90,12 @@ class WifiPolicy {
      * Without this the policy cannot tell "hotspot serving" from "hostapd
      * failed to start" — and the second case is a brick: no home network, no
      * hotspot, no adb, and a panel cheerfully showing setup instructions for an
-     * access point that does not exist. Supervised every tick, exactly like the
-     * supplicant.
+     * access point that does not exist.
+     *
+     * EXPENSIVE, unlike every other predicate here. The real implementation
+     * walks /proc, because init has no service entry for hostapd and there is
+     * therefore no property to read; that is a file open and read per process
+     * on the box. Supervised on kSoftApSuperviseMs rather than every tick.
      */
     virtual bool softApRunning() = 0;
     /**
@@ -102,6 +125,23 @@ class WifiPolicy {
   // budget is generous because the alternative is a provisioning page with an
   // empty network list, which sends the user straight to typing an SSID by hand.
   static const int kScanTimeoutMs = 5000;
+  /**
+   * How often the hotspot is checked, while provisioning, for still being up.
+   *
+   * A period rather than every tick, and this is the one state where that
+   * matters: a device whose stored network is gone sits in kProvisioning
+   * FOREVER, and Actuator::softApRunning() walks the whole of /proc because
+   * hostapd has no init service entry to read a property from. tick() is driven
+   * from the UI thread's link poll at roughly 6 Hz, so the old unconditional
+   * check was a full process-table scan six times a second for the entire life
+   * of a stranded device.
+   *
+   * Three seconds is bounded below by the bring-up, not by taste: hostapd is
+   * started with -B, so it forks and the daemon takes a moment to appear under
+   * /proc. A shorter period would read a hotspot that is still starting as one
+   * that has died and start a second one on top of it.
+   */
+  static const int kSoftApSuperviseMs = 3000;
   /**
    * How long to wait for a link to appear before doing anything about it.
    *
@@ -158,12 +198,18 @@ class WifiPolicy {
   State mState;
   int mStateSinceMs;
   int mLastRetryMs;
+  int mLastSoftApCheckMs;
   int mSupplicantRestarts;
   int mSoftApRestarts;
   std::string mSsid;
   std::string mPsk;
   bool mHaveCredentials;
   bool mAdopted;
+  // True while credentials that came from the user are still unproven. Set by
+  // applyCredentials and cleared the moment an address lands, which is the only
+  // point at which they are worth writing to flash. Credentials that came out
+  // of storedCredentials() never set it: they are already in the file.
+  bool mPendingPersist;
   std::vector<std::string> mScanned;
 };
 

@@ -82,7 +82,9 @@ HostLink::HostLink()
       mFetchFailed(false),
       mPendingReady(false),
       mMirrorDirty(false),
-      mTelRestarts(0) {
+      mTelRestarts(0),
+      mTelBattery(-1),
+      mTelCharging(false) {
   ::pthread_mutex_init(&mLock, 0);
 }
 
@@ -269,15 +271,21 @@ void HostLink::runWorker() {
       const std::string wifi = mTelWifi;
       const std::string ip = mTelIp;
       const int restarts = mTelRestarts;
+      const int battery = mTelBattery;
+      const bool charging = mTelCharging;
       ::pthread_mutex_unlock(&mLock);
 
       char body[512];
       ::snprintf(body, sizeof(body),
                  "{\"screen\":\"%s\",\"focus\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
-                 "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d}",
+                 "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d,"
+                 // -1 until the first successful MCU reading; the console shows
+                 // nothing rather than a plausible-looking zero.
+                 "\"batteryPercent\":%d,\"charging\":%s}",
                  jsonEscape(screen).c_str(), jsonEscape(focus).c_str(),
                  jsonEscape(wifi).c_str(), jsonEscape(ip).c_str(),
-                 static_cast<unsigned long long>(now - startedMs), freeKb(), restarts);
+                 static_cast<unsigned long long>(now - startedMs), freeKb(), restarts,
+                 battery, charging ? "true" : "false");
       HttpClient::Response response;
       HttpClient::perform(mBaseUrl + "/api/os/report", "POST", "application/json",
                           body, &response, 4000);
@@ -355,13 +363,15 @@ void HostLink::sendMusicAction(const char* action) {
 
 void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
                             const std::string& wifi, const std::string& ip,
-                            int supplicantRestarts) {
+                            int supplicantRestarts, int batteryPercent, bool charging) {
   ::pthread_mutex_lock(&mLock);
   mTelScreen = screen;
   mTelFocus = focus;
   mTelWifi = wifi;
   mTelIp = ip;
   mTelRestarts = supplicantRestarts;
+  mTelBattery = batteryPercent;
+  mTelCharging = charging;
   ::pthread_mutex_unlock(&mLock);
 }
 
