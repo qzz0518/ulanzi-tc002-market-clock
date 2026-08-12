@@ -21,6 +21,7 @@
 #include "core/Shell.h"
 #include "core/Surface.h"
 #include "managers/KeyManager.h"
+#include "managers/McuManager.h"
 #include "games/breakout.h"
 #include "games/flappy.h"
 #include "games/pong.h"
@@ -470,6 +471,20 @@ static void onUI_init() {
 	// as hung and can restart zkswe under us.
 	SystemProperties::setString("sys.zkapp.state", "running");
 	sStartMs = monoMs();
+
+	// Bring the MCU up. This is not optional, and the reason it looked optional
+	// for so long is a trap worth recording: while ZOS was SIDELOADED the stock
+	// app had already run and initialised the MCU, so the panel was already in
+	// the state where Presenter's SPI writes land. Flashed, ZOS is the only app
+	// there has ever been — nothing initialises the MCU, every SPI write goes
+	// nowhere, and the panel sits on the boot logo while the rest of the
+	// firmware (input, audio, network, the whole render loop) runs perfectly.
+	// That failure looks like a display bug and is not one.
+	//
+	// 1.5 Mbaud on ttyS1, matching the arcade firmware, which is the only other
+	// code here proven to drive this panel from a cold start.
+	McuManager::getInstance().initialize(
+		new PixelMcuProto::McuParse("/dev/ttyS1", 1500000));
 	// Before Sfx: initialize() sets the mixer level, and Sfx primes the audio
 	// output as part of coming up. Reversed, the priming burst and every effect
 	// until the first onUI_show ran at whatever level the previous firmware left.
