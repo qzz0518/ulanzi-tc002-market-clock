@@ -13,6 +13,7 @@ import {
   Gamepad2,
   Grid2x2,
   HardDrive,
+  MonitorCog,
   Pause,
   Play,
   QrCode,
@@ -59,6 +60,7 @@ import { createLiveScreen, type LiveScreen } from "@/lib/live-screen";
 import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
 import { InviteQrDialog } from "@/components/game/invite-qr-dialog";
 import { errorMessage } from "@/lib/utils";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 import type { ArcadeStatus, FirmwareKind } from "@/types";
 
 // How long the engine-rendered settlement screen keeps streaming to the device
@@ -151,13 +153,25 @@ interface GameShellProps {
   // 任一侧载固件（音乐或游戏）直连中：官方固件的上屏通道此时不存在。
   firmwareOnline: boolean;
   firmwareKind?: FirmwareKind | null;
+  // 时钟当前跑的固件。ZOS 与两套侧载固件互斥，所以 zos 时 firmwareOnline 必为
+  // false——但上屏同样不可能：ZOS 没有官方的 Custom App 接收端。
+  firmwareMode?: FirmwareMode;
   // 游戏页挂载期间轮询 /api/arcade/status，把在线状态上报给工作台归一。
   onArcadeOnlineChange?: (online: boolean) => void;
 }
 
 const ARCADE_STATUS_POLL_MS = 10_000;
 
-export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineChange }: GameShellProps) {
+export function GameShell({
+  firmwareOnline,
+  firmwareKind = null,
+  firmwareMode = "official",
+  onArcadeOnlineChange,
+}: GameShellProps) {
+  const zos = firmwareMode === "zos";
+  // 上屏走 /api/live/frames → 官方 Custom App。两种情况下这条路都不存在：
+  // 侧载固件顶掉了官方 app，ZOS 则整套换掉了固件（真机实测 503）。
+  const liveBlocked = zos || firmwareOnline;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
   if (!engineRef.current) engineRef.current = GAME_REGISTRY[0]!.create();
@@ -166,8 +180,8 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
   const pausedRef = useRef(false);
   // 上屏默认关闭:进游戏页先在浏览器里玩,想投到时钟再手动打开。
   const screenOnRef = useRef(false);
-  const firmwareOnlineRef = useRef(firmwareOnline);
-  firmwareOnlineRef.current = firmwareOnline;
+  const liveBlockedRef = useRef(liveBlocked);
+  liveBlockedRef.current = liveBlocked;
   const gameOverAtRef = useRef<number | null>(null);
   const gameOverClearedRef = useRef(false);
   const highScoreRef = useRef(0);
@@ -195,6 +209,7 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
     apiPrefix: "/api/arcade",
     confirmation: "START_TC002_ARCADE_SESSION",
     firmwareLabel: "游戏固件",
+    firmwareMode,
   });
 
   pausedRef.current = paused;
@@ -274,8 +289,8 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
   }, [clearLive]);
 
   useEffect(() => {
-    if (firmwareOnline) clearLive();
-  }, [clearLive, firmwareOnline]);
+    if (liveBlocked) clearLive();
+  }, [clearLive, liveBlocked]);
 
   // 游戏固件在线检测（调研方案 A）：挂载期间 10 秒一轮询，纯内存读零成本；
   // 卸载时上报离线，避免锁死其他视图。
@@ -394,7 +409,7 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
 
       const canPush = screenOnRef.current
         && !pausedRef.current
-        && !firmwareOnlineRef.current
+        && !liveBlockedRef.current
         && !gameOverClearedRef.current;
       if (canPush) liveScreen.capture(context, now);
       animationFrame = window.requestAnimationFrame(frame);
@@ -499,7 +514,7 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
   };
 
   const toggleScreen = (checked: boolean) => {
-    if (firmwareOnline) return;
+    if (liveBlocked) return;
     screenOnRef.current = checked;
     setScreenOn(checked);
     if (!checked) clearLive();
@@ -511,7 +526,9 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
     if (engine instanceof BreakoutEngine) engine.setPaddleWidth(width);
   };
 
-  const liveChip = firmwareOnline
+  const liveChip = zos
+    ? { color: "neutral" as const, icon: MonitorCog, label: "ZOS 运行中" }
+    : firmwareOnline
     ? { color: "neutral" as const, icon: WifiOff, label: "固件直连" }
     : pushError
       ? { color: "red" as const, icon: TriangleAlert, label: "上屏异常" }
@@ -572,8 +589,8 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
             <Switch
               as="span"
               input
-              checked={screenOn && !firmwareOnline}
-              disabled={firmwareOnline}
+              checked={screenOn && !liveBlocked}
+              disabled={liveBlocked}
               onChange={toggleScreen}
             />
           </label>
@@ -681,7 +698,16 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
             )}
           </Surface>
 
-          {firmwareOnline && (
+          {zos ? (
+            // ZOS 上七款游戏是设备自己在跑（与这里同一套引擎），所以这不是"功能
+            // 没了"，是入口换了地方。控制台没有能把设备切到游戏页的指令：
+            // PUT /api/os/display 只认频道，固件那侧 focus 走的是 channel ring。
+            <p className="game-note game-note--warning" role="status">
+              <MonitorCog aria-hidden="true" />
+              时钟正在运行 ZOS，官方固件的上屏通道已经不存在，这局只在浏览器里跑。
+              时钟自带同样七款游戏：在设备上用旋钮进「游戏」即可直接玩。
+            </p>
+          ) : firmwareOnline && (
             <p className="game-note game-note--warning" role="status">
               <WifiOff aria-hidden="true" />
               {firmwareKind === "arcade"
@@ -690,11 +716,14 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
             </p>
           )}
           {paused && (
-            <p className="game-note" role="status">游戏已暂停，设备画面已清除。</p>
+            <p className="game-note" role="status">
+              {liveBlocked ? "游戏已暂停。" : "游戏已暂停，设备画面已清除。"}
+            </p>
           )}
           {hud.phase === "game-over" && (
             <p className="game-note" role="status">
-              <Gamepad2 aria-hidden="true" />游戏结束，结算画面几秒后自动从设备清除。
+              <Gamepad2 aria-hidden="true" />
+              {liveBlocked ? "游戏结束。" : "游戏结束，结算画面几秒后自动从设备清除。"}
             </p>
           )}
           {pushError && (
@@ -706,9 +735,28 @@ export function GameShell({ firmwareOnline, firmwareKind = null, onArcadeOnlineC
       <FirmwarePanel
         controller={firmwarePanel}
         heading="侧载游戏固件"
-        description="把游戏固件推进时钟内存临时运行，用旋钮和按键玩七款像素小游戏；官方固件原封不动，断电重启即自动恢复。"
+        description={zos
+          ? "把游戏固件推进时钟内存临时运行，用旋钮和按键玩七款像素小游戏；它与 ZOS 互斥，侧载期间 ZOS 会被顶下去。"
+          : "把游戏固件推进时钟内存临时运行，用旋钮和按键玩七款像素小游戏；官方固件原封不动，断电重启即自动恢复。"}
         dialogClassName="arcade-firmware-dialog"
       >
+        {zos && (
+          // 恢复承诺本身已经交给面板正文按 restoresTo 说（ZOS 刷在 mtd3 res 上，
+          // 断电重启回到的是 ZOS）。这里只留侧载期间会中断什么——那是正文没有的。
+          <Surface
+            color="orange"
+            variant="solid"
+            outline
+            className="rounded-lg"
+            contentClassName="flex flex-col gap-1 px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
+          >
+            <strong className="text-cladd-fg">时钟当前运行 ZOS，两套固件不能同时跑。</strong>
+            <span>
+              侧载会把 ZOS 顶下去，控制台的频道拉取、画面镜像与固定旋钮在这期间都会中断；
+              结束侧载或断电重启后回到的是 ZOS，不是 Ulanzi 官方固件。
+            </span>
+          </Surface>
+        )}
         {arcadeStatus?.online && (
           <dl className="fw-device-facts" aria-label="游戏固件实时状态">
             <div><dt>当前游戏</dt><dd>{arcadeStatus.game || "—"}</dd></div>

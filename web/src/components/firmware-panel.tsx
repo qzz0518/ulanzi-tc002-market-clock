@@ -2,6 +2,7 @@ import { Play, Power, ShieldCheck, Wifi, X } from "lucide-react";
 import { Button, Checkbox, Dialog } from "@cladd-ui/react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { jsonApi } from "@/lib/api";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 import { errorMessage } from "@/lib/utils";
 import type { MusicDeviceAppStatus, MusicDeviceProbe } from "@/types";
 
@@ -9,8 +10,30 @@ import type { MusicDeviceAppStatus, MusicDeviceProbe } from "@/types";
 // 指南，只有 API 前缀、确认口令和文案不同。状态与动作放在 hook 里，宿主页面
 // 因此能用 statusLabel 渲染自己的触发按钮；<FirmwarePanel> 只负责抽屉本身。
 
+// 侧载只占内存，所以「结束侧载 / 断电重启」之后回到的是**闪存里那一套**，
+// 不一定是官方固件：本机的 ZOS 是刷进 res 分区的，断电重启回到的是 ZOS。
+// 面板通篇的恢复承诺都用这个标签，别再写死「官方固件」。
+const OFFICIAL_RESTORE_LABEL = "官方固件";
+const ZOS_RESTORE_LABEL = "ZOS";
+
+// 服务端的 restore 指南（src/tc002-music-installer.ts）是照官方固件写死的——它
+// 不知道这台设备刷过 ZOS。所以刷过 ZOS 的机器上必须用这一份，而不是服务端那份。
+const ZOS_RESTORE_GUIDE: MusicDeviceAppStatus["restore"] = {
+  title: "回到 ZOS",
+  steps: [
+    "点「结束侧载」，时钟系统框架会重新拉起闪存里的 ZOS",
+    "或直接断电重启 TC002——侧载固件只在内存里，重启后回到闪存里的 ZOS",
+    "ZOS 起来后控制台「系统」页会重新收到设备上报，频道拉取与画面镜像随之恢复",
+    "如需回到 Ulanzi 官方固件，得重新刷写 res 分区；断电重启做不到这件事",
+  ],
+};
+
 export interface FirmwarePanelController {
   firmwareLabel: string;
+  /** 结束侧载 / 断电重启之后回到的那套固件的名字。 */
+  restoresTo: string;
+  /** 闪存里是 ZOS：恢复路径与服务端写死的官方固件版本不一样。 */
+  restoresToZos: boolean;
   open: boolean;
   /** Busy-guarded: ignored while a device operation is in flight. */
   setOpen: (open: boolean) => void;
@@ -48,8 +71,17 @@ export function useFirmwarePanel(options: {
   apiPrefix: string;      // "/api/music" | "/api/arcade"
   confirmation: string;   // the exact phrase the server demands
   firmwareLabel: string;  // "音乐固件" | "游戏固件"
+  /** 侧载前时钟在跑什么。ZOS 意味着闪存里是 ZOS，恢复承诺得跟着改。 */
+  firmwareMode?: FirmwareMode;
 }): FirmwarePanelController {
-  const { apiPrefix, confirmation, firmwareLabel } = options;
+  const { apiPrefix, confirmation, firmwareLabel, firmwareMode = "official" } = options;
+  // Latched, not read live: starting the sideload flips firmwareMode to
+  // music/arcade, and forgetting that ZOS was underneath would put the panel
+  // back to promising the official firmware exactly while it is most wrong.
+  const [restoresToZos, setRestoresToZos] = useState(firmwareMode === "zos");
+  useEffect(() => {
+    if (firmwareMode === "zos") setRestoresToZos(true);
+  }, [firmwareMode]);
   const [open, setOpenState] = useState(false);
   const [deviceApp, setDeviceApp] = useState<MusicDeviceAppStatus | null>(null);
   const [deviceProbe, setDeviceProbe] = useState<MusicDeviceProbe | null>(null);
@@ -140,6 +172,8 @@ export function useFirmwarePanel(options: {
 
   return {
     firmwareLabel,
+    restoresTo: restoresToZos ? ZOS_RESTORE_LABEL : OFFICIAL_RESTORE_LABEL,
+    restoresToZos,
     open,
     setOpen: (next) => {
       if (!busy) setOpenState(next);
@@ -201,7 +235,12 @@ export function FirmwarePanelBody({
     sessionActive,
     canStartSession,
     firmwareLabel,
+    restoresTo,
+    restoresToZos,
   } = controller;
+  // 「恢复官方固件」在刷过 ZOS 的机器上是句假话——这个按钮做的事只有一件：
+  // 结束侧载，把面板交还给闪存里的那套固件。
+  const restoreActionLabel = restoresToZos ? "结束侧载" : `恢复${restoresTo}`;
 
   return (
     <section className="fw-deploy" aria-labelledby={headingId}>
@@ -219,7 +258,7 @@ export function FirmwarePanelBody({
             <span>2</span><div><strong>检测 TC002</strong><small>{deviceProbe?.message ?? (deviceApp?.adb === "missing" ? "后台服务尚未识别 adb；请重新运行安装脚本" : "通过 HTTP 与 Wi-Fi ADB 双重确认")}</small></div>
           </li>
           <li className={sessionActive ? "is-done" : canStartSession ? "is-current" : undefined}>
-            <span>3</span><div><strong>侧载固件</strong><small>{sessionMessage ?? (sessionActive ? `${firmwareLabel}运行中；点「恢复官方固件」或断电重启即可回到原样` : "固件包校验通过后解锁；由时钟系统框架从内存加载，不写入官方固件")}</small></div>
+            <span>3</span><div><strong>侧载固件</strong><small>{sessionMessage ?? (sessionActive ? `${firmwareLabel}运行中；点「${restoreActionLabel}」或断电重启即可回到${restoresTo}` : `固件包校验通过后解锁；由时钟系统框架从内存加载，不写入闪存，${restoresTo}原封不动`)}</small></div>
           </li>
         </ol>
 
@@ -244,13 +283,18 @@ export function FirmwarePanelBody({
             checked={recoveryAcknowledged}
             onChange={setRecoveryAcknowledged}
           />
-          <span><strong>我知道如何回到官方固件</strong>点「恢复官方固件」立即回到官方界面；断电重启同样自动恢复。仍异常时断电后按住 USB-C 旁的复位按钮再上电。</span>
+          {/* One string per node on purpose: React SSR splits adjacent text
+              children with comment markers, which breaks copy assertions. */}
+          <span>
+            <strong>{`我知道如何回到${restoresTo}`}</strong>
+            {`点「${restoreActionLabel}」立即回到${restoresTo}；断电重启同样自动恢复到${restoresTo}。仍异常时断电后按住 USB-C 旁的复位按钮再上电。`}
+          </span>
         </label>
 
         <div className="fw-deploy-actions">
           <Button type="button" variant="transparent" outline loading={busy} disabled={busy} onClick={() => void controller.probeDevice()}><Wifi />检测 TC002</Button>
           {sessionActive ? (
-            <Button type="button" color="brand" loading={busy} disabled={busy} onClick={() => void controller.stopSession()}><Power />恢复官方固件</Button>
+            <Button type="button" color="brand" loading={busy} disabled={busy} onClick={() => void controller.stopSession()}><Power />{restoreActionLabel}</Button>
           ) : (
             <Button type="button" color="brand" loading={busy} disabled={!canStartSession || !recoveryAcknowledged || busy} onClick={() => void controller.startSession()}><Play />侧载固件</Button>
           )}
@@ -258,11 +302,13 @@ export function FirmwarePanelBody({
         {error && <p className="music-inline-error" role="alert">{error}</p>}
         {(error || deviceProbe?.connected === false) && <DeviceReconnectGuidance />}
 
+        {/* 服务端也发一份恢复指南，但它是照官方固件写死的：刷过 ZOS 的机器上
+            那份是错的（断电重启回到的是 ZOS），所以这时用本地这份，不用它的。 */}
         <div className="fw-recovery-guide">
           <span><ShieldCheck /> 非持久化设计</span>
-          <h3>{deviceApp?.restore?.title ?? "回到 Ulanzi 官方固件"}</h3>
+          <h3>{(restoresToZos ? ZOS_RESTORE_GUIDE : deviceApp?.restore)?.title ?? "回到 Ulanzi 官方固件"}</h3>
           <ol>
-            {(deviceApp?.restore?.steps ?? [
+            {((restoresToZos ? ZOS_RESTORE_GUIDE : deviceApp?.restore)?.steps ?? [
               "点「恢复官方固件」，官方界面立即恢复",
               "或直接断电重启 TC002——固件只在内存里，重启后自动回到官方固件",
               "如界面仍异常，断电后按住 USB-C 旁的复位按钮再上电（官方恢复方式）",

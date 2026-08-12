@@ -175,6 +175,9 @@ const musicInstaller = new Tc002SideloadInstaller({
   ),
   verifyClock: verifySideloadClock,
   serviceOrigin: sideloadServiceOrigin,
+  // Deferred read: osLink is constructed below, and what a power cycle brings
+  // back is a fact only the device reports.
+  zosFlashed: () => osLink.zosFlashed(),
 });
 const arcadeInstaller = new Tc002SideloadInstaller({
   get clockHost() { return config.clockHost; },
@@ -186,6 +189,9 @@ const arcadeInstaller = new Tc002SideloadInstaller({
   ),
   verifyClock: verifySideloadClock,
   serviceOrigin: sideloadServiceOrigin,
+  // Deferred read: osLink is constructed below, and what a power cycle brings
+  // back is a fact only the device reports.
+  zosFlashed: () => osLink.zosFlashed(),
 });
 
 const osInstaller = new Tc002SideloadInstaller({
@@ -198,6 +204,9 @@ const osInstaller = new Tc002SideloadInstaller({
   ),
   verifyClock: verifySideloadClock,
   serviceOrigin: sideloadServiceOrigin,
+  // Deferred read: osLink is constructed below, and what a power cycle brings
+  // back is a fact only the device reports.
+  zosFlashed: () => osLink.zosFlashed(),
 });
 
 const NOTIFY_APP = "notify";

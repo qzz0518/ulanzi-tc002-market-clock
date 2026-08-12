@@ -175,12 +175,48 @@ const SCREEN_LABELS: Record<string, string> = {
   launcher: "启动器",
   channel: "频道",
   music: "音乐",
-  game: "游戏",
+  // The firmware reports the game list and a running game as two screens; both
+  // are reachable from the one 游戏 menu entry, and the readout says which.
+  games: "游戏列表",
+  game: "游戏中",
   settings: "设置",
+  boot: "开机中",
 };
 
 export function screenLabel(screen: string): string {
   return SCREEN_LABELS[screen] ?? (screen || "—");
+}
+
+/**
+ * The screens a menu entry can legitimately be showing, as the firmware names
+ * them in its telemetry (`osLogic.cc`, screenName block).
+ *
+ * Measured on the device at 192.168.8.108: pinning `music` / `game` / `settings`
+ * moved `telemetry.screen` to `music` / `games` / `settings`, and pinning a
+ * channel moved it to `channel`.
+ */
+const KIND_SCREENS: Record<ZosMenuEntry["kind"], readonly string[]> = {
+  channel: ["channel"],
+  music: ["music"],
+  game: ["games", "game"],
+  settings: ["settings"],
+};
+
+/**
+ * Whether the device's last report says this menu entry is what is on the panel.
+ *
+ * `telemetry.focus` is the *channel ring's* current app and keeps its value
+ * while another screen is on top — pinned to 音乐, the device reported
+ * `screen: "music"` with `focus: "btc"` throughout. So only a channel row may be
+ * matched by focus, and it must also be the screen on top; the other three kinds
+ * are matched by screen name alone, because no field ever names them in `focus`.
+ * Matching every kind on `focus` (what the panel used to do) meant 音乐/游戏/设置
+ * could never be confirmed, no matter what the device did.
+ */
+export function entryOnScreen(entry: ZosMenuEntry, telemetry: ZosTelemetry | null): boolean {
+  if (!telemetry) return false;
+  if (!KIND_SCREENS[entry.kind].includes(telemetry.screen)) return false;
+  return entry.kind !== "channel" || telemetry.focus === entry.id;
 }
 
 export function formatUptime(uptimeMs: number): string {
@@ -282,7 +318,10 @@ export function describeDriver(
   }
   const entry = menu.find((candidate) => candidate.id === display.focus);
   const name = entry?.label ?? display.focus;
-  const confirmed = live && telemetry?.focus === display.focus;
+  // Confirmation has to read the same field the firmware moves for this kind of
+  // entry — see entryOnScreen. An unknown id (menu not loaded yet) stays
+  // unconfirmed rather than being guessed at.
+  const confirmed = live && entry !== undefined && entryOnScreen(entry, telemetry);
   return {
     pinned: true,
     label: "控制台接管",

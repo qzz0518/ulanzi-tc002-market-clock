@@ -18,6 +18,7 @@
 #include "platform/BatteryMonitor.h"
 #include "platform/DeviceProvisioning.h"
 #include "platform/DeviceWifi.h"
+#include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
 #include "platform/Sfx.h"
 #include "platform/Presenter.h"
@@ -887,7 +888,8 @@ static bool onUI_Timer(int id) {
 		                        tcos::netinfo::ipAddress(),
 		                        sWifiPolicy.supplicantRestarts() + sWifiPolicy.softApRestarts(),
 		                        tcos::BatteryMonitor::instance().percent(),
-		                        tcos::BatteryMonitor::instance().charging());
+		                        tcos::BatteryMonitor::instance().charging(),
+		                        !tcos::install::isSideloaded());
 	}
 	return true;
 }

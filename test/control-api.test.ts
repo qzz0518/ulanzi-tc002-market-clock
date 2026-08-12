@@ -1104,6 +1104,9 @@ describe("tc002-os console routes", () => {
       uptimeMs: 1_000,
       freeKb: 16_000,
       supplicantRestarts: 0,
+      batteryPercent: 87,
+      charging: false,
+      flashed: false,
     });
     const state = await handler(new Request("http://127.0.0.1/api/os/state"));
     const body = await state.json() as {

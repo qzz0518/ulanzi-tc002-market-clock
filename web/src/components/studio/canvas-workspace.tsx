@@ -30,6 +30,7 @@ import {
 import { renderPixelText } from "@/lib/pixel-font";
 import { cn, errorMessage } from "@/lib/utils";
 import { useAppToast } from "@/lib/use-app-toast";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 import type { BusyAction, ContentItemConfig } from "@/types";
 import { InviteQrDialog } from "@/components/game/invite-qr-dialog";
 import { WorkspaceActions } from "./workspace-actions";
@@ -79,12 +80,22 @@ type PointerAction =
 interface CanvasWorkspaceProps {
   targetItem: ContentItemConfig | null;
   targetChannelName: string;
+  /**
+   * 频道的旋钮项名。ZOS 固定设备画面认的是它，不是显示名——拿不到就只能显示
+   * 状态、给不出「在时钟上显示」这个按钮。
+   */
+  targetChannelAppName?: string;
+  /** 未启用的频道不在设备菜单里，固定它在固件那侧会静默失败。 */
+  targetChannelEnabled?: boolean;
   busy: BusyAction;
   dirty: boolean;
   saving: boolean;
   lastSavedAt: number | null;
   deviceOutOfDate: boolean;
   lastPushAt?: string;
+  // ZOS 下 /api/live/frames 那条即时上屏链路不存在（官方 Custom App 接收端随
+  // 固件一起没了），但涂鸦墙本身是控制台内部的协作，照常可用。
+  firmwareMode?: FirmwareMode;
   onCreateTarget: () => void;
   onApply: (pixels: number[]) => void;
   onPreview: () => void;
@@ -115,17 +126,21 @@ function boundedOrigin(value: number, extent: number, limit: number): number {
 export function CanvasWorkspace({
   targetItem,
   targetChannelName,
+  targetChannelAppName,
+  targetChannelEnabled = true,
   busy,
   dirty,
   saving,
   lastSavedAt,
   deviceOutOfDate,
   lastPushAt,
+  firmwareMode = "official",
   onCreateTarget,
   onApply,
   onPreview,
   onPush,
 }: CanvasWorkspaceProps) {
+  const zos = firmwareMode === "zos";
   const toast = useAppToast();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointerActionRef = useRef<PointerAction | null>(null);
@@ -172,8 +187,14 @@ export function CanvasWorkspace({
     setFuture([]);
     setSelection(null);
     pointerActionRef.current = null;
-    setStatus(targetItem ? "已载入所选频道中的画板内容。" : "当前频道还没有画板内容，编辑后写入即可创建。");
-  }, [targetItem?.id]);
+    const loaded = targetItem
+      ? "已载入所选频道中的画板内容。"
+      : "当前频道还没有画板内容，编辑后写入即可创建。";
+    // Under ZOS the canvas' route to the panel changed shape rather than closing:
+    // a written channel still reaches the device, the device just fetches it
+    // itself — there is no "push once and it lights up" step to promise.
+    setStatus(zos ? `${loaded}写入频道后由时钟自己拉取上屏。` : loaded);
+  }, [targetItem?.id, zos]);
 
   useEffect(() => () => {
     if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
@@ -364,9 +385,12 @@ export function CanvasWorkspace({
   };
 
   // Live mode: one screen recorder for the device, one host socket for guests.
+  // The two halves are independent, and only the first one depends on the stock
+  // firmware — so under ZOS the doodle wall still opens, without a recorder that
+  // could only ever answer 503. pushLiveFrame no-ops on a null recorder.
   useEffect(() => {
     if (!live) return;
-    const screen = createLiveScreen("draw", {
+    const screen = zos ? null : createLiveScreen("draw", {
       onError: (error) => setStatus(`直播上屏失败：${errorMessage(error)}`),
     });
     liveScreenRef.current = screen;
@@ -390,16 +414,18 @@ export function CanvasWorkspace({
       livePendingRef.current = false;
       lastSyncedRef.current = null;
       // dispose() wipes the live_draw app from the device.
-      screen.dispose();
+      screen?.dispose();
       liveScreenRef.current = null;
     };
-  }, [live]);
+  }, [live, zos]);
 
   // While live: every board change refreshes the device frame (throttled) and
   // mirrors to the wall — strokes for small diffs, one snapshot for bulk edits.
   useEffect(() => {
     if (!live) return;
-    scheduleLivePush();
+    // No recorder under ZOS, so no throttle window to open either — the wall
+    // sync below is the whole job there.
+    if (!zos) scheduleLivePush();
     const synced = lastSyncedRef.current;
     const socket = liveSocketRef.current;
     if (!synced || !socket) return;
@@ -422,13 +448,17 @@ export function CanvasWorkspace({
       socket.send({ type: "snapshot", pixels });
     }
     lastSyncedRef.current = pixels.slice();
-  }, [live, pixels, scheduleLivePush]);
+  }, [live, pixels, scheduleLivePush, zos]);
 
   const toggleLive = (checked: boolean) => {
     setLive(checked);
     setStatus(checked
-      ? "直播已开启：画布实时上屏，扫码邀请朋友一起涂鸦。"
-      : "直播已关闭，设备上的涂鸦画面已清除。");
+      ? zos
+        ? "涂鸦墙已开启：扫码邀请朋友一起画。ZOS 下画面不会实时上屏，写入频道后由时钟自己拉取。"
+        : "直播已开启：画布实时上屏，扫码邀请朋友一起涂鸦。"
+      : zos
+        ? "涂鸦墙已关闭。"
+        : "直播已关闭，设备上的涂鸦画面已清除。");
   };
 
   const canvasPoint = useCallback((event: ReactPointerEvent<HTMLCanvasElement>): [number, number] => {
@@ -727,7 +757,13 @@ export function CanvasWorkspace({
         <div className="canvas-toolbar">
           <div className="preview-copy">
             <h2>画布编辑</h2>
-            <span>所选频道：{targetChannelName} · 52×16</span>
+            {/* The route to the panel is a standing fact about this page, so it
+                lives here rather than in the status line, which any tool change
+                overwrites a second later. */}
+            <span>
+              所选频道：{targetChannelName} · 52×16
+              {zos ? " · 写入后由时钟自己拉取" : null}
+            </span>
           </div>
           <Button type="button" size="sm" onClick={onCreateTarget}>新建画板内容</Button>
           <WorkspaceActions
@@ -738,6 +774,9 @@ export function CanvasWorkspace({
             deviceOutOfDate={deviceOutOfDate}
             lastPushAt={lastPushAt}
             disabled={!targetItem}
+            firmwareMode={firmwareMode}
+            channelAppName={targetChannelAppName}
+            channelEnabled={targetChannelEnabled}
             onPreview={onPreview}
             onPush={onPush}
           />
@@ -817,7 +856,7 @@ export function CanvasWorkspace({
           </label>
           <label className="grid-toggle">
             <Switch as="span" input checked={live} onChange={toggleLive} />
-            直播上屏
+            {zos ? "涂鸦墙" : "直播上屏"}
           </label>
           {live && (
             <Button type="button" size="sm" variant="transparent" onClick={() => setLiveInviteOpen(true)}>
@@ -956,7 +995,9 @@ export function CanvasWorkspace({
         open={liveInviteOpen}
         onOpenChange={setLiveInviteOpen}
         title="邀请朋友来涂鸦"
-        description="手机连到同一 Wi-Fi，扫码打开涂鸦墙访客页，笔画会实时出现在画板和时钟屏幕上。"
+        description={zos
+          ? "手机连到同一 Wi-Fi，扫码打开涂鸦墙访客页，笔画会实时出现在这块画板上；ZOS 下不会同时投到时钟屏幕。"
+          : "手机连到同一 Wi-Fi，扫码打开涂鸦墙访客页，笔画会实时出现在画板和时钟屏幕上。"}
         path="draw"
       />
     </>

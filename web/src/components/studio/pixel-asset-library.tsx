@@ -14,6 +14,7 @@ import {
 import { Button, Input, Select } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
 import { useAppToast } from "@/lib/use-app-toast";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 
 const CLASSIFICATIONS = [
   { value: "0", label: "全部" },
@@ -67,6 +68,10 @@ export interface ImportedPixelAsset {
 interface PixelAssetLibraryProps {
   addedOfficialIds: readonly string[];
   targetChannelName: string;
+  // Nothing on this page writes to the device — import lands in the workspace
+  // and travels with the channel — so the mode only changes how the last line
+  // describes the route, not what any button does.
+  firmwareMode?: FirmwareMode;
   onAdd: (asset: ImportedPixelAsset) => void;
   onStandalone: (asset: ImportedPixelAsset) => void;
 }
@@ -112,6 +117,7 @@ function uploadVideo(
 export function PixelAssetLibrary({
   addedOfficialIds,
   targetChannelName,
+  firmwareMode = "official",
   onAdd,
   onStandalone,
 }: PixelAssetLibraryProps) {
@@ -380,7 +386,12 @@ export function PixelAssetLibrary({
         <span>{page} / {pageCount}</span>
         <Button type="button" size="sm" square disabled={page >= pageCount || loading} onClick={() => setPage((value) => value + 1)} aria-label="下一页"><ChevronRight /></Button>
       </div>
-      <p className="pixel-library-note">作品由官方社区用户上传；导入会保留作者和来源，不会绕过现有频道链路直接写设备。</p>
+      <p className="pixel-library-note">
+        作品由官方社区用户上传；导入会保留作者和来源，不会绕过现有频道链路直接写设备。
+        {firmwareMode === "zos"
+          ? "时钟正在运行 ZOS：导入的素材随频道保存在本机，设备下次显示该频道时自己拉取，无需推送。"
+          : null}
+      </p>
     </section>
   );
 }

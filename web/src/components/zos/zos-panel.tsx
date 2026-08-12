@@ -29,6 +29,7 @@ import {
   describeDriver,
   describeMirror,
   describeTelemetry,
+  entryOnScreen,
   type ZosLink,
   type ZosMenuEntry,
   type ZosMirrorFrame,
@@ -88,7 +89,12 @@ export function ZosPanel() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const applyDisplay = useCallback(async (focus: string | null, pinned: boolean, label: string) => {
+  const applyDisplay = useCallback(async (
+    focus: string | null,
+    pinned: boolean,
+    label: string,
+    description?: string,
+  ) => {
     const link = linkRef.current;
     if (!link) return;
     setBusyId(focus ?? "__release__");
@@ -97,7 +103,7 @@ export function ZosPanel() {
       // Echo the service's own answer instead of the click's intent: it is the
       // sanitized command the firmware will actually pull.
       setState((current) => current === null ? current : { ...current, display });
-      toast.success(label);
+      toast.success(label, description === undefined ? undefined : { description });
       await link.refreshState();
     } catch (error) {
       toast.error("设备控制失败", { description: errorMessage(error) });
@@ -117,7 +123,8 @@ export function ZosPanel() {
   });
   const readout = describeTelemetry(state, now);
   const driver = describeDriver(display, menu, state?.telemetry ?? null, live);
-  const deviceFocus = live ? state?.telemetry?.focus ?? null : null;
+  // Offline means we know nothing about the panel, so no row may claim it.
+  const deviceTelemetry = live ? state?.telemetry ?? null : null;
 
   const deviceChip = linkError
     ? { color: "red" as const, icon: TriangleAlert, label: "链路异常" }
@@ -197,7 +204,8 @@ export function ZosPanel() {
         <aside className="zos-side">
           <Surface className="zos-card" variant="solid" outline>
             <List>
-              <ListTitle>设备频道</ListTitle>
+              {/* 频道之外还有音乐 / 游戏 / 设置三项，都是设备菜单里的真实条目。 */}
+              <ListTitle>设备菜单</ListTitle>
               {menu.length === 0 && (
                 <ListItem>
                   <span className="text-cladd-fg-soft">
@@ -216,7 +224,7 @@ export function ZosPanel() {
                     selected={pinnedHere}
                     disabled={busyId !== null}
                     icon={<Icon aria-hidden="true" />}
-                    footer={deviceFocus === entry.id ? "设备正在显示" : undefined}
+                    footer={entryOnScreen(entry, deviceTelemetry) ? "设备正在显示" : undefined}
                     after={pinnedHere
                       ? <Chip size="sm" color="brand" icon={Pin} iconProps={{ "aria-hidden": true }}>已固定</Chip>
                       : <Chip size="sm" color="neutral" variant="transparent">{KIND_LABELS[entry.kind]}</Chip>}
@@ -226,7 +234,15 @@ export function ZosPanel() {
                         void applyDisplay(null, false, "已交还旋钮");
                         return;
                       }
-                      void applyDisplay(entry.id, true, `设备已固定在「${entry.label}」`);
+                      // 「设备已固定在…」说早了：PUT 只到服务，设备要等自己下一次
+                      // 拉取状态才切（真机实测 2–7 秒）。上面的「控制台接管」一行
+                      // 会在心跳确认后改口，这里只承诺已经发生的事。
+                      void applyDisplay(
+                        entry.id,
+                        true,
+                        `已固定「${entry.label}」`,
+                        "时钟下次拉取状态时切过去，通常几秒内。",
+                      );
                     }}
                   >
                     {entry.label}

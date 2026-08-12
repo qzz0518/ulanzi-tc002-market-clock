@@ -8,6 +8,7 @@ import {
   KeyRound,
   ListMusic,
   LogOut,
+  MonitorCog,
   Music2,
   Pause,
   Play,
@@ -29,6 +30,7 @@ import {
   Select,
   Slider,
   Spinner,
+  Surface,
 } from "@cladd-ui/react";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -55,6 +57,7 @@ import { clampPlaybackPositionMs } from "@/lib/music-playback";
 import { renderMirrorFrames, type MirrorFrame } from "@/lib/music-mirror";
 import { spectrumForTrack, type SpectrumLookup } from "@/lib/spectrum-timeline";
 import { errorMessage } from "@/lib/utils";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 import type {
   MusicOverview,
   MusicPlaylist,
@@ -172,9 +175,21 @@ function MusicCoverArt({ track, fallback, className }: {
   );
 }
 
-export function MusicPlayer({ onFirmwareOnlineChange }: {
+interface MusicPlayerProps {
   onFirmwareOnlineChange?: (online: boolean) => void;
-} = {}) {
+  // 时钟当前跑的固件。ZOS 下 /api/music/mirror 那条同屏链路不存在（它写的是
+  // 官方 Custom App），但设备自带音乐页——由服务把 Connect 的播放信息喂过去。
+  firmwareMode?: FirmwareMode;
+}
+
+// A named props object rather than an inline type with a `= {}` default: the
+// default made the parameter optional, which collapsed the inferred props type
+// to `{}` under createElement and blocked passing any prop from a test.
+export function MusicPlayer({
+  onFirmwareOnlineChange,
+  firmwareMode = "official",
+}: MusicPlayerProps) {
+  const zos = firmwareMode === "zos";
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeekMsRef = useRef<number | null>(null);
   const [overview, setOverview] = useState<MusicOverview | null>(null);
@@ -215,6 +230,7 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
     apiPrefix: "/api/music",
     confirmation: SESSION_CONFIRMATION,
     firmwareLabel: "音乐固件",
+    firmwareMode,
   });
   const [mirrorOn, setMirrorOn] = useState(false);
   const [mirrorError, setMirrorError] = useState<string | null>(null);
@@ -622,7 +638,9 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
   const activeLyric = activeLyricIndex >= 0 ? selected?.lyrics[activeLyricIndex] : undefined;
 
   useEffect(() => {
-    if (!mirrorOn || !selected || deviceOnline) return;
+    // ZOS never gets mirror frames: the endpoint answers 503 (measured), and the
+    // device draws its own music page from the now-playing the service publishes.
+    if (!mirrorOn || !selected || deviceOnline || zos) return;
     const durationMs = activeLyric ? activeLyric.endMs - activeLyric.startMs : 4_000;
     const frames = renderMirrorFrames({
       text: activeLyric?.text ?? selected.track.title,
@@ -636,7 +654,7 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
       spectrum: activeSpectrum,
     });
     if (frames.length > 0) void mirrorRunnerRef.current?.enqueue({ frames });
-  }, [activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin]);
+  }, [activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin, zos]);
   const effectiveDurationMs = durationMs > 0 ? durationMs : selected?.track.durationMs ?? 0;
   durationRef.current = effectiveDurationMs;
   const timelineDisplayMs = Math.min(dragMs ?? currentMs, effectiveDurationMs);
@@ -1704,7 +1722,23 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
                   <h2 id="music-preview-title">52 × 16 像素屏</h2>
                 </div>
                 <div className="music-stage__header-actions">
-                  {deviceOnline ? (
+                  {zos ? (
+                    // 与 deviceOnline 分支同一个写法：这个位置留一个说明状态的按钮，
+                    // 而不是一个按下去会 503 的开关。
+                    <Button
+                      type="button"
+                      className="music-mirror-toggle"
+                      size="sm"
+                      color="neutral"
+                      variant="transparent"
+                      outline
+                      tightFocusRing
+                      aria-disabled="true"
+                      title="时钟运行 ZOS：官方固件的同屏通道不存在，歌词由设备自己的音乐页显示"
+                    >
+                      <MonitorCog aria-hidden="true" />ZOS 音乐页
+                    </Button>
+                  ) : deviceOnline ? (
                     <Button
                       type="button"
                       className="music-mirror-toggle"
@@ -1776,6 +1810,19 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
                 </div>
               )}
 
+              {zos && (
+                // 设备侧的音乐页只由 service.ts 的 publishOsNowPlaying 喂：它要求
+                // provider.remote，而只有 Spotify 有——网易云在这台设备上不会显示。
+                <div className="music-sync-hint" role="status">
+                  <span aria-hidden="true"><MonitorCog /></span>
+                  <span>
+                    {spotifySignedIn
+                      ? "时钟的「音乐」页会跟随 Spotify Connect 正在播放的歌曲，逐句显示歌词。"
+                      : "时钟的「音乐」页只跟随 Spotify Connect：换到 Spotify 并登录后，歌词才会出现在时钟上；当前来源只影响这里的预览。"}
+                  </span>
+                </div>
+              )}
+
               {mirrorError && <p className="music-inline-error" role="alert">同屏推送失败：{mirrorError}</p>}
 
             </section>
@@ -1839,9 +1886,29 @@ export function MusicPlayer({ onFirmwareOnlineChange }: {
       <FirmwarePanel
         controller={firmwarePanel}
         heading="侧载音乐固件"
-        description="把音乐固件推进时钟内存临时运行，绝不写入存储芯片；官方固件原封不动，断电重启即自动恢复。"
+        description={zos
+          ? "把音乐固件推进时钟内存临时运行，绝不写入存储芯片；它与 ZOS 互斥，侧载期间 ZOS 会被顶下去。"
+          : "把音乐固件推进时钟内存临时运行，绝不写入存储芯片；官方固件原封不动，断电重启即自动恢复。"}
         dialogClassName="music-firmware-dialog"
-      />
+      >
+        {zos && (
+          // 与游戏页同一段事实；恢复承诺归面板正文的 restoresTo 说，这里只讲
+          // 侧载期间会中断什么。
+          <Surface
+            color="orange"
+            variant="solid"
+            outline
+            className="rounded-lg"
+            contentClassName="flex flex-col gap-1 px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
+          >
+            <strong className="text-cladd-fg">时钟当前运行 ZOS，两套固件不能同时跑。</strong>
+            <span>
+              侧载会把 ZOS 顶下去，控制台的频道拉取、画面镜像与固定旋钮在这期间都会中断；
+              结束侧载或断电重启后回到的是 ZOS，不是 Ulanzi 官方固件。
+            </span>
+          </Surface>
+        )}
+      </FirmwarePanel>
     </div>
   );
 }

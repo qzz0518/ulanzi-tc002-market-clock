@@ -9,8 +9,10 @@ import {
   describeDriver,
   describeMirror,
   describeTelemetry,
+  entryOnScreen,
   formatUptime,
   nextPollDelayMs,
+  screenLabel,
   type ZosMenuEntry,
   type ZosState,
   type ZosTelemetry,
@@ -171,6 +173,48 @@ describe("zos telemetry readout", () => {
   });
 });
 
+// 每条断言都对着 192.168.8.108 上跑 ZOS 的真机核过:分别固定 music / game /
+// settings / btc,telemetry.screen 依次变成 music / games / settings / channel,
+// 而 telemetry.focus 全程停在 btc(频道环的当前项)。
+describe("which menu entry the device is actually showing", () => {
+  const entry = (id: string): ZosMenuEntry => MENU.find((row) => row.id === id)!;
+
+  test("a channel needs both the ring and the screen", () => {
+    expect(entryOnScreen(entry("qqq"), telemetry({ focus: "qqq", screen: "channel" }))).toBe(true);
+    expect(entryOnScreen(entry("qqq"), telemetry({ focus: "qqq", screen: "launcher" }))).toBe(false);
+    expect(entryOnScreen(entry("qqq"), telemetry({ focus: "btc", screen: "channel" }))).toBe(false);
+  });
+
+  test("音乐 is matched by the screen, never by focus", () => {
+    expect(entryOnScreen(entry("music"), telemetry({ focus: "btc", screen: "music" }))).toBe(true);
+    expect(entryOnScreen(entry("music"), telemetry({ focus: "music", screen: "channel" }))).toBe(false);
+  });
+
+  test("游戏 covers both the list and a running game", () => {
+    const games: ZosMenuEntry = { id: "game", label: "游戏", kind: "game" };
+    expect(entryOnScreen(games, telemetry({ screen: "games" }))).toBe(true);
+    expect(entryOnScreen(games, telemetry({ screen: "game" }))).toBe(true);
+    expect(entryOnScreen(games, telemetry({ screen: "settings" }))).toBe(false);
+  });
+
+  test("设置 matches its own screen only", () => {
+    const settings: ZosMenuEntry = { id: "settings", label: "设置", kind: "settings" };
+    expect(entryOnScreen(settings, telemetry({ screen: "settings" }))).toBe(true);
+    expect(entryOnScreen(settings, telemetry({ screen: "launcher" }))).toBe(false);
+  });
+
+  test("no telemetry means no claim", () => {
+    expect(entryOnScreen(entry("music"), null)).toBe(false);
+  });
+
+  test("every screen the firmware reports has a label", () => {
+    // osLogic.cc 的 screenName 分支穷举;漏一个就会把 games 这种原样打到界面上。
+    for (const screen of ["launcher", "channel", "music", "settings", "game", "games", "boot"]) {
+      expect(screenLabel(screen)).not.toBe(screen);
+    }
+  });
+});
+
 describe("zos driver status", () => {
   test("an unpinned display hands the knob back to the device", () => {
     const driver = describeDriver({ focus: null, pinned: false }, MENU, telemetry(), true);
@@ -191,10 +235,36 @@ describe("zos driver status", () => {
     const driver = describeDriver(
       { focus: "qqq", pinned: true },
       MENU,
-      telemetry({ focus: "qqq" }),
+      // 频道要两项都对上:频道环停在 qqq，且频道页确实在最上层。
+      telemetry({ focus: "qqq", screen: "channel" }),
       true,
     );
     expect(driver.detail).toContain("已锁定");
+  });
+
+  test("the channel ring pointing at a channel is not the channel being shown", () => {
+    // 真机实测:telemetry.focus 是频道环的当前项,别的界面压在上面时它照旧不变。
+    // 只按 focus 判断,就会在启动器上宣布「设备已锁定在 QQQ」。
+    const driver = describeDriver(
+      { focus: "qqq", pinned: true },
+      MENU,
+      telemetry({ focus: "qqq", screen: "launcher" }),
+      true,
+    );
+    expect(driver.detail).toContain("等下一次心跳确认");
+  });
+
+  test("a non-channel pin is confirmed by the screen, since focus never names it", () => {
+    // 192.168.8.108 实测:固定「音乐」后 telemetry.screen 变成 music,而
+    // telemetry.focus 一直是 btc。只按 focus 判断,音乐/游戏/设置永远确认不了。
+    const driver = describeDriver(
+      { focus: "music", pinned: true },
+      MENU,
+      telemetry({ focus: "btc", screen: "music" }),
+      true,
+    );
+    expect(driver.detail).toContain("已锁定");
+    expect(driver.detail).toContain("音乐");
   });
 
   test("an id missing from the menu still names something", () => {

@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GameShell } from "../web/src/components/game/game-shell";
 import { StudioHeader } from "../web/src/components/studio/studio-header";
+import { describeFirmware } from "../web/src/lib/firmware-mode.ts";
 
 describe("game shell", () => {
   test("renders the stage: picker, screen with HUD, console", () => {
@@ -40,6 +41,11 @@ describe("game shell", () => {
       view: "game",
       onViewChange: () => {},
       runtime: null,
+      firmwareStatus: describeFirmware({
+        osState: null,
+        musicFirmwareOnline: true,
+        arcadeOnline: false,
+      }),
       firmwareLocked: true,
       firmwareKind: "music",
     }));
@@ -47,7 +53,7 @@ describe("game shell", () => {
     expect(game).toContain("音乐固件直连中，恢复官方固件后才能上屏");
     expect(game).toContain("固件直连");
     expect(game).toMatch(/上屏[\s\S]*?disabled/);
-    expect(header).toContain("音乐固件直连");
+    expect(header).toContain("音乐固件");
     expect(header).toContain("游戏");
     expect(header).toMatch(/>内容<[\s\S]*?disabled/);
   });
@@ -61,13 +67,18 @@ describe("game shell", () => {
       view: "game",
       onViewChange: () => {},
       runtime: null,
+      firmwareStatus: describeFirmware({
+        osState: null,
+        musicFirmwareOnline: false,
+        arcadeOnline: true,
+      }),
       firmwareLocked: true,
       firmwareKind: "arcade",
     }));
 
     expect(game).toContain("游戏固件直连中");
     expect(game).not.toContain("音乐固件直连中");
-    expect(header).toContain("游戏固件直连");
+    expect(header).toContain("游戏固件");
   });
 
   test("wires input capture and batched live streaming", async () => {

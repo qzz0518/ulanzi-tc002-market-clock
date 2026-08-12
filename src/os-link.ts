@@ -53,6 +53,19 @@ export interface OsTelemetry {
   uptimeMs: number;
   freeKb: number;
   supplicantRestarts: number;
+  /** 0..100, or -1 before the device has a reading. */
+  batteryPercent: number;
+  charging: boolean;
+  /**
+   * True when ZOS is running from flash rather than from a sideload.
+   *
+   * Only the device can answer this, and the console needs it to say what a
+   * power cycle brings back. On a sideload the answer is the stock firmware; on
+   * a flashed unit it is ZOS, and telling a user the former when the latter is
+   * true is the failure that matters — they power-cycle expecting their clock
+   * back and get the thing they were trying to leave.
+   */
+  flashed: boolean;
   receivedAt: number;
 }
 
@@ -85,6 +98,11 @@ export class OsLinkHub {
   private telemetry: OsTelemetry | null = null;
   private mirror: OsMirrorFrame | null = null;
   private mirrorRequestedAt = 0;
+  // Sticky, because the fact outlives the report. Sideloading music or arcade
+  // over a flashed ZOS takes ZOS off the air, so telemetry stops and the console
+  // would fall back to promising the stock firmware — the dangerous direction,
+  // at exactly the moment the user is reading a restore guide.
+  private zosEverFlashed = false;
   private nowPlaying: OsNowPlaying | null = null;
   private nowPlayingStampedAt = 0;
   private readonly waiters = new Set<Waiter>();
@@ -160,7 +178,13 @@ export class OsLinkHub {
     return this.nowPlaying === null ? null : { ...this.nowPlaying };
   }
 
+  /** True once a flashed ZOS has ever reported. Never unset by a later absence. */
+  zosFlashed(): boolean {
+    return this.zosEverFlashed;
+  }
+
   report(telemetry: Omit<OsTelemetry, "receivedAt">): void {
+    if (telemetry.flashed) this.zosEverFlashed = true;
     // Telemetry never bumps the sequence: it flows device->console, and waking
     // every long poll on it would turn a status heartbeat into a broadcast storm.
     this.telemetry = { ...telemetry, receivedAt: this.now() };

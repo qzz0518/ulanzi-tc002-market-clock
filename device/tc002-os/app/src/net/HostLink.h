@@ -108,7 +108,8 @@ class HostLink {
   /** What the device reports about itself; sent on the worker's own cadence. */
   void setTelemetry(const std::string& screen, const std::string& focus,
                     const std::string& wifi, const std::string& ip,
-                    int supplicantRestarts, int batteryPercent, bool charging);
+                    int supplicantRestarts, int batteryPercent, bool charging,
+                    bool flashed);
 
   // 10 fps rather than the panel's 25: the console preview is a monitor, not a
   // video feed, and each frame is a separate HTTP exchange on a device whose
@@ -162,6 +163,7 @@ class HostLink {
   int mTelRestarts;
   int mTelBattery;
   bool mTelCharging;
+  bool mTelFlashed;
 };
 
 }  // namespace tcos

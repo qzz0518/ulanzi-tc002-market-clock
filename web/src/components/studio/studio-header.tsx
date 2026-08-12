@@ -1,6 +1,28 @@
 import { useState } from "react";
-import { Circle, Gamepad2, Images, LayoutGrid, MonitorCog, Music2, Palette, Settings2 } from "lucide-react";
-import { Button, Tab, Tabs, TabsList, Tooltip } from "@cladd-ui/react";
+import {
+  Battery,
+  BatteryCharging,
+  BatteryLow,
+  BatteryMedium,
+  Circle,
+  Cpu,
+  Gamepad2,
+  Images,
+  LayoutGrid,
+  MonitorCog,
+  Music2,
+  Palette,
+  Settings2,
+  type LucideIcon,
+} from "lucide-react";
+import { Button, Chip, Tab, Tabs, TabsList, Tooltip } from "@cladd-ui/react";
+import {
+  LOW_BATTERY_PERCENT,
+  describeFirmware,
+  type FirmwareBattery,
+  type FirmwareMode,
+  type FirmwareStatus,
+} from "@/lib/firmware-mode";
 import type { FirmwareKind, RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
 
@@ -8,10 +30,43 @@ interface StudioHeaderProps {
   view: StudioView;
   onViewChange: (view: StudioView) => void;
   runtime: RuntimeState | null;
+  // 时钟此刻在跑哪套固件，以及（只有 ZOS 会上报的）电量读数。
+  firmwareStatus?: FirmwareStatus;
   // 侧载固件直连中：其他视图与常规设置都走官方固件通道，此时全部禁用。
   firmwareLocked?: boolean;
-  // 哪种固件在直连（音乐/游戏），决定状态 Chip 与 tooltip 的文案。
+  // 哪种固件在直连（音乐/游戏），决定设置按钮 tooltip 的文案。
   firmwareKind?: FirmwareKind | null;
+}
+
+// 还没人告诉过我们时钟在跑什么，就等于「没有任何固件在上报」——这正是控制台
+// 拿到第一份 /api/os/state 之前的真实处境，不是一个「连接中」的假状态。
+const UNREPORTED_FIRMWARE = describeFirmware({
+  osState: null,
+  musicFirmwareOnline: false,
+  arcadeOnline: false,
+});
+
+const MODE_ICONS: Record<FirmwareMode, LucideIcon> = {
+  official: Cpu,
+  music: Music2,
+  arcade: Gamepad2,
+  // 与「系统」标签同一个图标：Chip 说的就是那一页在讲的固件。
+  zos: MonitorCog,
+};
+
+const MODE_COLORS: Record<FirmwareMode, "neutral" | "cyan" | "brand"> = {
+  official: "neutral",
+  music: "cyan",
+  arcade: "cyan",
+  zos: "brand",
+};
+
+// 手机那套读法：充电看闪电，其余按格数掉档，百分比另有文字。
+function batteryIcon(battery: FirmwareBattery): LucideIcon {
+  if (battery.charging) return BatteryCharging;
+  if (battery.percent !== null && battery.percent <= LOW_BATTERY_PERCENT) return BatteryLow;
+  if (battery.percent !== null && battery.percent <= 60) return BatteryMedium;
+  return Battery;
 }
 
 function runtimeLabel(runtime: RuntimeState | null): string {
@@ -26,15 +81,21 @@ export function StudioHeader({
   view,
   onViewChange,
   runtime,
+  firmwareStatus = UNREPORTED_FIRMWARE,
   firmwareLocked = false,
   firmwareKind = null,
 }: StudioHeaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const kindLabel = firmwareKind === "arcade" ? "游戏固件" : "音乐固件";
-  const tone = firmwareLocked
+  const tone = runtime?.healthy
     ? "is-good"
-    : runtime?.healthy ? "is-good" : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
-  const statusLabel = firmwareLocked ? `${kindLabel}直连` : runtimeLabel(runtime);
+    : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
+  const { battery } = firmwareStatus;
+  const BatteryIcon = batteryIcon(battery);
+  // 这盏灯说的是「官方 Custom App 推送链路健不健康」。跑侧载或 ZOS 时那条通道
+  // 根本不存在，再报「设备离线」就是在说一台正在上报的设备掉线了——固件身份
+  // 交给 Chip，这里只在官方固件下发言。
+  const showRuntimeStatus = firmwareStatus.mode === "official";
   return (
     <header className="studio-header">
       <div className="brand-lockup" aria-label="Pixel Market，Ulanzi TC002">
@@ -59,10 +120,43 @@ export function StudioHeader({
       </Tabs>
 
       <div className="header-actions">
-        <div className={`device-status ${tone}`} role="status" aria-live="polite">
-          <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
-          <span>{statusLabel}</span>
+        <div className="firmware-status" role="status" aria-live="polite">
+          <Chip
+            className="firmware-chip"
+            size="sm"
+            color={MODE_COLORS[firmwareStatus.mode]}
+            variant="transparent"
+            icon={MODE_ICONS[firmwareStatus.mode]}
+            iconProps={{ "aria-hidden": true }}
+            title={firmwareStatus.description}
+            aria-label={`当前固件：${firmwareStatus.label}`}
+          >
+            {/* 窄屏只留图标，标签仍留在 aria-label 里。 */}
+            <span className="firmware-chip__label">{firmwareStatus.label}</span>
+          </Chip>
+          {/* 电量只有 ZOS 会上报；设备不在线或还没读到数就整块消失，
+              绝不把上一次的读数当成现在的。 */}
+          {battery.text !== null && (
+            <Chip
+              className="firmware-chip"
+              size="sm"
+              color={battery.charging ? "green" : battery.low ? "red" : "neutral"}
+              variant="transparent"
+              icon={BatteryIcon}
+              iconProps={{ "aria-hidden": true }}
+              title={`电量 ${battery.text}`}
+              aria-label={`电量 ${battery.text}`}
+            >
+              {battery.percent}%
+            </Chip>
+          )}
         </div>
+        {showRuntimeStatus && (
+          <div className={`device-status ${tone}`} role="status" aria-live="polite">
+            <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
+            <span>{runtimeLabel(runtime)}</span>
+          </div>
+        )}
         <Tooltip tooltip={firmwareLocked ? `${kindLabel}运行中，恢复官方固件后可用` : "常规设置"}>
           <Button
             type="button"
@@ -80,7 +174,12 @@ export function StudioHeader({
           </Button>
         </Tooltip>
       </div>
-      <DeviceSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      {/* 常规设置读写的是官方固件的设备接口，所以它必须知道时钟在跑什么。 */}
+      <DeviceSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        firmwareMode={firmwareStatus.mode}
+      />
     </header>
   );
 }

@@ -106,10 +106,12 @@ describe("music player UI", () => {
     expect(source).not.toContain("刷入");
     expect(source).not.toContain("update.img");
 
-    expect(panelSource).toContain("我知道如何回到官方固件");
+    // 恢复承诺按 restoresTo 说,不再写死「官方固件」——刷过 ZOS 的机器上断电
+    // 重启回到的是 ZOS。渲染结果在 firmware-panel.test.ts 里逐句核对。
+    expect(panelSource).toContain("我知道如何回到${restoresTo}");
     expect(panelSource).toContain("按住 USB-C 旁的复位按钮");
     expect(panelSource).toContain("侧载固件");
-    expect(panelSource).toContain("恢复官方固件");
+    expect(panelSource).toContain("restoreActionLabel");
     expect(panelSource).not.toContain("刷入");
     expect(panelSource).not.toContain("update.img");
     expect(panelSource.indexOf('className="fw-recovery-acknowledgement"')).toBeLessThan(

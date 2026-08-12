@@ -84,7 +84,8 @@ HostLink::HostLink()
       mMirrorDirty(false),
       mTelRestarts(0),
       mTelBattery(-1),
-      mTelCharging(false) {
+      mTelCharging(false),
+      mTelFlashed(false) {
   ::pthread_mutex_init(&mLock, 0);
 }
 
@@ -273,6 +274,7 @@ void HostLink::runWorker() {
       const int restarts = mTelRestarts;
       const int battery = mTelBattery;
       const bool charging = mTelCharging;
+      const bool flashed = mTelFlashed;
       ::pthread_mutex_unlock(&mLock);
 
       char body[512];
@@ -281,11 +283,16 @@ void HostLink::runWorker() {
                  "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d,"
                  // -1 until the first successful MCU reading; the console shows
                  // nothing rather than a plausible-looking zero.
-                 "\"batteryPercent\":%d,\"charging\":%s}",
+                 "\"batteryPercent\":%d,\"charging\":%s,"
+                 // Only the device knows this, and the console needs it to say
+                 // what a power cycle will bring back. Getting it wrong is the
+                 // dangerous direction: promising the official firmware to
+                 // someone whose flash holds ZOS.
+                 "\"flashed\":%s}",
                  jsonEscape(screen).c_str(), jsonEscape(focus).c_str(),
                  jsonEscape(wifi).c_str(), jsonEscape(ip).c_str(),
                  static_cast<unsigned long long>(now - startedMs), freeKb(), restarts,
-                 battery, charging ? "true" : "false");
+                 battery, charging ? "true" : "false", flashed ? "true" : "false");
       HttpClient::Response response;
       HttpClient::perform(mBaseUrl + "/api/os/report", "POST", "application/json",
                           body, &response, 4000);
@@ -363,7 +370,8 @@ void HostLink::sendMusicAction(const char* action) {
 
 void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
                             const std::string& wifi, const std::string& ip,
-                            int supplicantRestarts, int batteryPercent, bool charging) {
+                            int supplicantRestarts, int batteryPercent, bool charging,
+                            bool flashed) {
   ::pthread_mutex_lock(&mLock);
   mTelScreen = screen;
   mTelFocus = focus;
@@ -372,6 +380,7 @@ void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
   mTelRestarts = supplicantRestarts;
   mTelBattery = batteryPercent;
   mTelCharging = charging;
+  mTelFlashed = flashed;
   ::pthread_mutex_unlock(&mLock);
 }
 

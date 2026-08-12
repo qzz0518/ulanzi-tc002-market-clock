@@ -126,6 +126,9 @@ describe("tc002-os host link", () => {
       uptimeMs: 1000,
       freeKb: 900,
       supplicantRestarts: 0,
+      batteryPercent: 87,
+      charging: false,
+      flashed: false,
     });
     expect(hub.pendingWaiters()).toBe(1);
     await pending;
@@ -199,6 +202,9 @@ describe("tc002-os host link", () => {
       uptimeMs: 1,
       freeKb: 900,
       supplicantRestarts: 2,
+      batteryPercent: 87,
+      charging: false,
+      flashed: false,
     });
     expect(hub.isDeviceLive()).toBe(true);
     expect(hub.getTelemetry()?.supplicantRestarts).toBe(2);

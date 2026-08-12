@@ -24,6 +24,7 @@ import {
   ListButton,
   NumberScrubber,
   Select,
+  Surface,
   SurfaceCut,
   Switch,
   Tab,
@@ -35,6 +36,7 @@ import {
 import { jsonApi } from "@/lib/api";
 import { useAppToast } from "@/lib/use-app-toast";
 import { cn, errorMessage, seconds } from "@/lib/utils";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 import type {
   BusyAction,
   ChannelConfig,
@@ -92,6 +94,8 @@ interface WorkspaceEditorProps {
   lastSavedAt: number | null;
   deviceOutOfDate: boolean;
   lastPushAt?: string;
+  // 时钟当前跑的固件；决定"推送"这个动作是否还存在（ZOS 下由设备自己拉取）。
+  firmwareMode?: FirmwareMode;
   onChannelChange: (patch: Partial<ChannelConfig>) => void;
   onSelectItem: (itemId: string) => void;
   onPreviewScopeChange: (scope: PreviewScope) => void;
@@ -110,6 +114,7 @@ interface OptionEditorProps {
   item: ContentItemConfig;
   definition: ContentCatalogEntry;
   instrument?: MarketInstrument;
+  firmwareMode: FirmwareMode;
   onChange: (key: string, value: JsonValue) => void;
   onTimerStart: () => void;
   onTimerPause: () => void;
@@ -179,9 +184,15 @@ export function placeSelectionPatches(place: GeocodePlace): Array<[string, JsonV
 // sibling — one POST from any LAN device puts a message on the clock right
 // away and it cleans itself up. A single button opens a dialog that explains
 // it; nothing extra sits in the option panel.
-function NoticeWebhookHint() {
+function NoticeWebhookHint({ firmwareMode }: { firmwareMode: FirmwareMode }) {
   const toast = useAppToast();
   const [open, setOpen] = useState(false);
+  // The webhook is the one feature here that has no ZOS route at all: it writes
+  // a Custom App straight at the stock firmware's receiver, and that receiver
+  // left with the firmware. Measured on the real device: POST /api/notify comes
+  // back "clock returned HTTP 503". The dialog still shows the command — it
+  // works again the moment the official firmware is back — but it says so.
+  const zos = firmwareMode === "zos";
   const origin = typeof window === "undefined" ? "http://<服务地址>:43820" : window.location.origin;
   const command = `curl -X POST ${origin}/api/notify -H 'Content-Type: application/json' -d '{"message":"你好像素","holdSeconds":45}'`;
   const copy = async () => {
@@ -206,6 +217,19 @@ function NoticeWebhookHint() {
         onConfirm={() => void copy()}
       >
         <div className="flex min-w-0 flex-col gap-2 text-sm">
+          {zos && (
+            <Surface
+              color="orange"
+              variant="solid"
+              outline
+              className="rounded-lg"
+              contentClassName="px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
+            >
+              <strong className="text-cladd-fg">时钟正在运行 ZOS，这条 Webhook 暂时不会上屏。</strong>
+              它写的是官方固件的 Custom App 接收端，ZOS 上没有这个接口，服务会返回
+              「clock returned HTTP 503」。恢复官方固件后即刻恢复。
+            </Surface>
+          )}
           <p className="m-0">
             与频道里的通知板内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的
             地址 POST 一条消息即可立刻上屏，显示 holdSeconds 秒后自动消失，支持中文。
@@ -337,6 +361,7 @@ function OptionEditor({
   item,
   definition,
   instrument,
+  firmwareMode,
   onChange,
   onTimerStart,
   onTimerPause,
@@ -466,7 +491,7 @@ function OptionEditor({
           )}
         </div>
       )}
-      {item.contentId === "tools:notice" && <NoticeWebhookHint />}
+      {item.contentId === "tools:notice" && <NoticeWebhookHint firmwareMode={firmwareMode} />}
       {item.contentId === "creative:pixel-asset" && (
         <div className="pixel-asset-metadata">
           <span>作者：{typeof item.options.author === "string" ? item.options.author : "未署名"}</span>
@@ -507,6 +532,7 @@ export function WorkspaceEditor({
   lastSavedAt,
   deviceOutOfDate,
   lastPushAt,
+  firmwareMode = "official",
   onChannelChange,
   onSelectItem,
   onPreviewScopeChange,
@@ -648,6 +674,9 @@ export function WorkspaceEditor({
             lastSavedAt={lastSavedAt}
             deviceOutOfDate={deviceOutOfDate}
             lastPushAt={lastPushAt}
+            firmwareMode={firmwareMode}
+            channelAppName={channel.appName}
+            channelEnabled={channel.enabled}
             onPush={onPush}
           />
         </div>
@@ -834,6 +863,7 @@ export function WorkspaceEditor({
                     item={item}
                     definition={definition}
                     instrument={instrument}
+                    firmwareMode={firmwareMode}
                     onChange={(key, value) => onOptionChange(item.id, key, value)}
                     onTimerStart={() => onTimerStart(item.id)}
                     onTimerPause={() => onTimerPause(item.id)}

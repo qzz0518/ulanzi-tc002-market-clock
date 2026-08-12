@@ -25,7 +25,8 @@ describe("zos panel", () => {
     expect(html).toContain("正在读取设备菜单…");
     // 接管状态与读数区。
     expect(html).toContain("旋钮自由");
-    expect(html).toContain("设备频道");
+    // 频道之外还有音乐/游戏/设置三项,「设备频道」不覆盖它们。
+    expect(html).toContain("设备菜单");
     expect(html).toContain("设备状态");
     expect(html).toContain("交还旋钮");
     expect(html).toContain("立即刷新");
@@ -96,6 +97,8 @@ describe("zos panel", () => {
 
     // 页面接线:独立视图 + 主导航入口,且不被侧载固件锁死。
     expect(appSource).toContain('view === "zos"');
+    // 系统页不接 firmwareMode:它自己长轮询 /api/os/state,再喂一个推导值只会
+    // 多一个可能与它自己读数打架的真相来源。
     expect(appSource).toContain("<ZosPanel />");
     expect(appSource).toContain('nextView !== "zos"');
     expect(headerSource).toContain('value="zos"><MonitorCog />系统</Tab>');

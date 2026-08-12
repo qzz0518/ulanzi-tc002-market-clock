@@ -317,6 +317,17 @@ export class Tc002SideloadInstaller {
     serviceOrigin?: () => Promise<string | null>;
     settleDelayMs?: number;
     now?: () => Date;
+    /**
+     * True when the device's flash holds ZOS rather than the stock firmware.
+     *
+     * It changes what "restore" means, and in the direction that matters: a
+     * power cycle on a flashed unit brings ZOS back, not Ulanzi's app. Telling
+     * a user otherwise sends them to pull the plug expecting their clock and
+     * hand them the thing they were trying to leave. Injected rather than
+     * detected here because only the device knows, and it says so in its
+     * telemetry.
+     */
+    zosFlashed?: () => boolean;
   }) {
     if (!isSafeHost(options.clockHost)) throw new Error("TC002 host is invalid for ADB");
     const adbPath = options.adbPath?.trim();
@@ -336,7 +347,7 @@ export class Tc002SideloadInstaller {
       adb: this.adb ? "ready" : "missing",
       busy: this.busy,
       session: { ...this.session },
-      restore: restoreGuide(),
+      restore: restoreGuide(this.options.zosFlashed?.() === true),
     };
   }
 
@@ -512,7 +523,7 @@ export class Tc002SideloadInstaller {
       return {
         state: "running",
         message: this.profile.copy.started,
-        restore: restoreGuide(),
+        restore: restoreGuide(this.options.zosFlashed?.() === true),
       };
     } finally {
       this.busy = false;
@@ -557,7 +568,7 @@ export class Tc002SideloadInstaller {
       return {
         state: "official",
         message: "官方界面已恢复；如显示异常，直接断电重启即可",
-        restore: restoreGuide(),
+        restore: restoreGuide(this.options.zosFlashed?.() === true),
       };
     } finally {
       this.busy = false;
@@ -692,7 +703,20 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-function restoreGuide(): MusicDeviceAppStatus["restore"] {
+function restoreGuide(zosFlashed = false): MusicDeviceAppStatus["restore"] {
+  // Sideloading only ever lives in tmpfs, so a power cycle always ends it. What
+  // differs is what is underneath: the stock app, or a flashed ZOS.
+  if (zosFlashed) {
+    return {
+      title: "回到闪存里的 ZOS",
+      steps: [
+        "点「结束侧载」，ZOS 立即恢复",
+        "或直接断电重启 TC002——侧载固件只在内存里，重启后回到闪存里的 ZOS",
+        "这台设备的 res 分区已写入 ZOS，断电重启不会回到 Ulanzi 官方固件",
+        "要回官方固件需要重新刷写：mise run os-restore-image 打包，再走升级流程",
+      ],
+    };
+  }
   return {
     title: "回到 Ulanzi 官方固件",
     steps: [

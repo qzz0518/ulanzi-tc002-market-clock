@@ -1720,6 +1720,13 @@ export function createControlHandler(
           uptimeMs: num("uptimeMs"),
           freeKb: num("freeKb"),
           supplicantRestarts: num("supplicantRestarts"),
+          // -1 rather than 0 when the device has no reading yet: a console that
+          // showed 0% would be reporting a flat battery on a charged device.
+          batteryPercent: typeof input.batteryPercent === "number"
+            ? input.batteryPercent
+            : -1,
+          charging: input.charging === true,
+          flashed: input.flashed === true,
         });
         return new Response(null, { status: 204 });
       }
@@ -1775,6 +1782,9 @@ export function createControlHandler(
             : { ...telemetry, ageMs: Date.now() - telemetry.receivedAt },
           live: options.osLink.isDeviceLive(),
           mirrorWanted: options.osLink.mirrorWanted(),
+          // Sticky and independent of `live`: what a power cycle restores does
+          // not stop being true because the device stopped reporting.
+          zosFlashed: options.osLink.zosFlashed(),
         });
       }
 

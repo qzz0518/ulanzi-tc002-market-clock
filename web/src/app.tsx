@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListOrdered, Plus, RefreshCw, RotateCw } from "lucide-react";
 import { Button, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
 import { api, jsonApi } from "@/lib/api";
+import { describeFirmware, type FirmwareOsState } from "@/lib/firmware-mode";
 import { createLatestTaskRunner } from "@/lib/latest-task-runner";
 import {
   channelForPreview,
   channelRuntime,
   deviceIsBehind,
 } from "@/lib/studio-state";
+import { ZOS_STATE_POLL_MS, nextPollDelayMs } from "@/lib/zos-link";
 import { useAppToast } from "@/lib/use-app-toast";
 import { clone, errorMessage, uid } from "@/lib/utils";
 import type {
@@ -151,6 +153,7 @@ export function App() {
   const [view, setView] = useState<StudioView>("console");
   const [musicFirmwareOnline, setMusicFirmwareOnline] = useState(false);
   const [arcadeOnline, setArcadeOnline] = useState(false);
+  const [osState, setOsState] = useState<FirmwareOsState | null>(null);
   const [mobileConsolePane, setMobileConsolePane] = useState<MobileConsolePane>("compose");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -304,6 +307,40 @@ export function App() {
       void jsonApi<RuntimeState>("/api/state").then(setRuntime).catch(() => undefined);
     }, 5_000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  // 固件指示灯要在每个标签页都成立，所以这条轮询归 App，不归任何一页。
+  //
+  // Deliberately a plain read of /api/os/state rather than createZosLink: the
+  // link also drives /api/os/mirror, and every mirror request renews a 10s
+  // streaming lease on the device. The header wants a state document, not a
+  // video stream — a shared link would make all six tabs pay for the ZOS
+  // panel's frame rate. Cadence and backoff are still the link's, so the two
+  // never drift apart.
+  useEffect(() => {
+    let cancelled = false;
+    let timer = 0;
+    let failures = 0;
+    const tick = async () => {
+      try {
+        const next = await jsonApi<FirmwareOsState>("/api/os/state");
+        if (cancelled) return;
+        setOsState(next);
+        failures = 0;
+      } catch {
+        // 读不到就当没有 ZOS：宁可显示官方固件，也不能拿上一份状态冒充在线。
+        if (cancelled) return;
+        setOsState(null);
+        failures += 1;
+      }
+      if (cancelled) return;
+      timer = window.setTimeout(() => void tick(), nextPollDelayMs(ZOS_STATE_POLL_MS, failures));
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -689,7 +726,12 @@ export function App() {
         body: JSON.stringify({ channelId: selectedChannel.id }),
       });
       setRuntime(response.state);
-      toast.success(`已推送到旋钮项 ${selectedChannel.appName}`);
+      // ZOS 下这条 /api/channels/push 只会 503（官方 Custom App 接收端随固件一起
+      // 没了），所以这句几乎只在官方固件下出现；仍按模式说话，免得哪天多出一个
+      // 调用方就把「推送」这个不存在的动作说了出去。
+      toast.success(firmwareMode === "zos"
+        ? `「${selectedChannel.name}」已保存 · 时钟下次进入该频道即为最新`
+        : `已推送到旋钮项 ${selectedChannel.appName}`);
     } catch (error) {
       toast.error("推送失败", { description: errorMessage(error) });
     } finally {
@@ -721,6 +763,11 @@ export function App() {
   // 固件的推送与设置通道都不存在，内容/画板/素材库视图一律锁定。
   const firmwareOnline = musicFirmwareOnline || arcadeOnline;
   const firmwareKind = musicFirmwareOnline ? "music" as const : arcadeOnline ? "arcade" as const : null;
+
+  // 时钟究竟在跑哪套固件：ZOS 的实时上报 > 侧载固件的心跳 > 官方固件（推导规则
+  // 见 lib/firmware-mode.ts）。整份控制台只有这一处判定。
+  const firmwareStatus = describeFirmware({ osState, musicFirmwareOnline, arcadeOnline });
+  const firmwareMode = firmwareStatus.mode;
 
   const changeView = (nextView: StudioView) => {
     // 系统固件页与音乐/游戏页一样不受侧载锁定影响：它读的是 tc002-os 自己的
@@ -782,13 +829,18 @@ export function App() {
         setSelectedItemId(item.id);
       }
     }
-    toast.success(`已写入到“${selectedChannel.name}”`, { description: "更改会自动保存，推送后显示在时钟上。" });
+    // ZOS 是设备主动拉：没有「推送」这一步，存下来就等着时钟自己来取。
+    toast.success(`已写入到“${selectedChannel.name}”`, {
+      description: firmwareMode === "zos"
+        ? "更改会自动保存，时钟下次进入该频道即为最新。"
+        : "更改会自动保存，推送后显示在时钟上。",
+    });
   };
 
   if (loading) {
     return (
       <div className="studio-page">
-        <StudioHeader view={view} onViewChange={setView} runtime={runtime} />
+        <StudioHeader view={view} onViewChange={setView} runtime={runtime} firmwareStatus={firmwareStatus} />
         <div className="loading-state" role="status">
           <span className="loading-mark" aria-hidden="true" />
           <strong>正在载入内容工作台</strong>
@@ -801,7 +853,7 @@ export function App() {
   if (loadError || !workspace || !selectedChannel) {
     return (
       <div className="studio-page">
-        <StudioHeader view={view} onViewChange={setView} runtime={runtime} />
+        <StudioHeader view={view} onViewChange={setView} runtime={runtime} firmwareStatus={firmwareStatus} />
         <div className="load-error" role="alert">
           <h1>控制台载入失败</h1>
           <p>{loadError ?? "没有可用频道。"}</p>
@@ -877,6 +929,7 @@ export function App() {
         view={view}
         onViewChange={changeView}
         runtime={runtime}
+        firmwareStatus={firmwareStatus}
         firmwareLocked={firmwareOnline}
         firmwareKind={firmwareKind}
       />
@@ -945,6 +998,7 @@ export function App() {
         {view === "console" ? (
           <>
             <WorkspaceEditor
+              firmwareMode={firmwareMode}
               channel={selectedChannel}
               selectedItemId={selectedItem?.id ?? null}
               catalog={catalog}
@@ -973,7 +1027,11 @@ export function App() {
                   item.options.running = true;
                   item.options.startedAtMs = Date.now();
                 });
-                toast.success("计时器已从头开始", { description: "保存并推送后生效。" });
+                toast.success("计时器已从头开始", {
+                  description: firmwareMode === "zos"
+                    ? "保存后生效，时钟下次进入该频道即为最新。"
+                    : "保存并推送后生效。",
+                });
               }}
               onTimerPause={(itemId) => {
                 updateItem(itemId, (item) => { item.options.running = false; });
@@ -982,6 +1040,8 @@ export function App() {
               onOpenCatalog={() => showMobileConsolePane("catalog")}
               onPush={() => void push()}
             />
+            {/* 内容市场不接 firmwareMode：它只往频道里加内容，没有任何关于
+                设备输出的说法，跑哪套固件都一样成立。 */}
             <ContentMarket
               categories={categories}
               catalog={catalog}
@@ -1002,8 +1062,11 @@ export function App() {
           </>
         ) : view === "canvas" ? (
           <CanvasWorkspace
+            firmwareMode={firmwareMode}
             targetItem={canvasItem}
             targetChannelName={selectedChannel.name}
+            targetChannelAppName={selectedChannel.appName}
+            targetChannelEnabled={selectedChannel.enabled}
             busy={busy}
             dirty={dirty}
             saving={saving}
@@ -1017,6 +1080,7 @@ export function App() {
           />
         ) : view === "library" ? (
           <PixelAssetLibrary
+            firmwareMode={firmwareMode}
             targetChannelName={selectedChannel.name}
             addedOfficialIds={selectedChannel.items.flatMap((item) =>
               item.contentId === "creative:pixel-asset" && typeof item.options.officialId === "string"
@@ -1028,14 +1092,18 @@ export function App() {
           />
         ) : view === "game" ? (
           <GameShell
+            firmwareMode={firmwareMode}
             firmwareOnline={firmwareOnline}
             firmwareKind={firmwareKind}
             onArcadeOnlineChange={setArcadeOnline}
           />
         ) : view === "zos" ? (
+          // 系统页同样不接 firmwareMode：它自己持有 /api/os/state 长轮询，
+          // 手上的 live 比这里推导出来的更新一拍，再喂一个会凭空多出一个可能
+          // 与它自己读数打架的真相来源。
           <ZosPanel />
         ) : (
-          <MusicPlayer onFirmwareOnlineChange={setMusicFirmwareOnline} />
+          <MusicPlayer firmwareMode={firmwareMode} onFirmwareOnlineChange={setMusicFirmwareOnline} />
         )}
       </div>
     </div>

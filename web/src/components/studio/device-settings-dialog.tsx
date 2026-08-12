@@ -29,6 +29,7 @@ import {
   TabsList,
 } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
+import type { FirmwareMode } from "@/lib/firmware-mode";
 import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
 import type {
@@ -44,6 +45,12 @@ import type {
 interface DeviceSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * 这个对话框读写的是官方固件自带的设备接口（/getConfig、/setConfig，服务经
+   * CLOCK_HOST 转发）。ZOS 把整套固件换掉了，两端在真机上都只回
+   * `clock returned HTTP 503`——所以这里必须知道时钟在跑什么。
+   */
+  firmwareMode?: FirmwareMode;
 }
 
 interface DeviceSettingsResponse {
@@ -211,6 +218,8 @@ interface DeviceHostPanelProps {
   host: DeviceHostStatus | null;
   hostDraft: string;
   savingHost: boolean;
+  /** ZOS 不提供官方固件的 /getDeviceInfo，读不到不是网络问题。 */
+  zos?: boolean;
   onHostDraftChange: (value: string) => void;
   onSaveHost: () => void;
   onResetHost: () => void;
@@ -226,6 +235,7 @@ export function DeviceHostPanel({
   host,
   hostDraft,
   savingHost,
+  zos = false,
   onHostDraftChange,
   onSaveHost,
   onResetHost,
@@ -267,6 +277,14 @@ export function DeviceHostPanel({
               );
             })}
           </dl>
+        ) : zos ? (
+          // 不是错误，是这套固件没有这个接口——重试一百次也一样。地址表单还在
+          // 下面，因为服务确实用它去找时钟（ZOS 的拉取端也在同一台设备上）。
+          <div className="device-settings-state" role="status">
+            <strong>ZOS 不提供官方固件的设备信息接口</strong>
+            <span>时钟正在跑 ZOS，这些字段来自官方固件的 /getDeviceInfo，读取只会返回 503。</span>
+            <span>Wi-Fi、IP、运行时长与电量请看「系统」标签页的设备状态。</span>
+          </div>
         ) : (
           <div className="device-settings-state is-error" role="alert">
             <strong>无法读取设备信息</strong>
@@ -338,7 +356,12 @@ export function DeviceHostPanel({
   );
 }
 
-export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialogProps) {
+export function DeviceSettingsDialog({
+  open,
+  onOpenChange,
+  firmwareMode = "official",
+}: DeviceSettingsDialogProps) {
+  const zos = firmwareMode === "zos";
   const toast = useAppToast();
   const [saved, setSaved] = useState<DeviceGeneralSettings | null>(null);
   const [draft, setDraft] = useState<DeviceGeneralSettings | null>(null);
@@ -472,9 +495,11 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
     }
   };
 
+  // ZOS 下这条读取只会拿回 503。不发它，是为了别把一次注定的失败包装成
+  // 「无法读取设备设置」——那句话会让人去查网络，而网络没有任何问题。
   useEffect(() => {
-    if (open) void loadSettings();
-  }, [loadSettings, open]);
+    if (open && !zos) void loadSettings();
+  }, [loadSettings, open, zos]);
 
   useEffect(() => {
     if (open && tab === "device") void loadDeviceTab();
@@ -536,7 +561,7 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
   };
 
   const save = async () => {
-    if (!draft || saving) return;
+    if (!draft || saving || zos) return;
     setSaving(true);
     try {
       const response = await jsonApi<DeviceSettingsResponse>("/api/device/settings/general", {
@@ -650,7 +675,9 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
           </PopoverRoot>
         </div>
       )}
-      text="直接读取并修改时钟本机配置。保存后会立即写入设备。"
+      text={zos
+        ? "这里读写的是 Ulanzi 官方固件的设备接口；时钟正在跑 ZOS，它不提供这套接口。"
+        : "直接读取并修改时钟本机配置。保存后会立即写入设备。"}
       className="device-settings-dialog"
       contentClassName="device-settings-dialog__content"
       closeOnBackdropClick={!dirty && !saving}
@@ -664,7 +691,7 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
             color="neutral"
             variant="transparent"
             outline={false}
-            disabled={tab === "general" ? loading || saving : infoLoading || savingHost}
+            disabled={tab === "general" ? zos || loading || saving : infoLoading || savingHost}
             onClick={() => void (tab === "general" ? loadSettings() : loadDeviceTab())}
           >
             <RefreshCw />重新读取
@@ -672,12 +699,12 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
           <span className="device-settings-actions__spacer" />
           {tab === "general" ? (
             <>
-              <Button type="button" color="neutral" onClick={cancel} disabled={saving}>取消</Button>
+              <Button type="button" color="neutral" onClick={cancel} disabled={saving}>{zos ? "关闭" : "取消"}</Button>
               <Button
                 type="button"
                 color="brand"
                 loading={saving}
-                disabled={!dirty || loading || saving}
+                disabled={zos || !dirty || loading || saving}
                 onClick={() => void save()}
               >
                 <Save />保存设置
@@ -710,7 +737,21 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
         </SurfaceCut>
 
         <TabPanel value="general" className="device-settings-panel" keepMounted>
-      {loading && !draft ? (
+      {zos ? (
+        // 不渲染表单本身：一份填得好好的、保存却必然 503 的表单，比一句说明更
+        // 误导人。亮度/音量 ZOS 自己有设置页，用旋钮进；轮播与时区归频道编排。
+        <div className="device-settings-state" role="status">
+          <strong>常规设置在 ZOS 上不可用</strong>
+          <span>
+            这一页读写的是 Ulanzi 官方固件的设备接口。时钟正在跑 ZOS，官方接口已随固件一起换掉，
+            读和写都只会返回 503。
+          </span>
+          <span>
+            亮度与音量在时钟自带的「设置」界面里调（用旋钮进，或到「系统」标签页把设备固定到设置项）；
+            轮播与时区跟着频道编排走。
+          </span>
+        </div>
+      ) : loading && !draft ? (
         <div className="device-settings-state" role="status">
           <span className="loading-mark" aria-hidden="true" />
           <strong>正在读取设备设置</strong>
@@ -956,6 +997,7 @@ export function DeviceSettingsDialog({ open, onOpenChange }: DeviceSettingsDialo
               host={host}
               hostDraft={hostDraft}
               savingHost={savingHost}
+              zos={zos}
               onHostDraftChange={setHostDraft}
               onSaveHost={() => void saveHost()}
               onResetHost={() => void resetHost()}

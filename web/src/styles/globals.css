@@ -177,6 +177,10 @@
   gap: 0.55rem;
 }
 
+/* 固件身份 + 电量：只排版，颜色和尺度全在 cladd Chip 自己身上。 */
+.firmware-status { display: inline-flex; align-items: center; gap: 0.35rem; }
+.firmware-chip { white-space: nowrap; }
+
 .device-status {
   display: inline-flex;
   align-items: center;
@@ -1170,6 +1174,9 @@
 
 @media (max-width: 34rem) {
   .device-status span { display: none; }
+  /* 顶栏放不下两段文字了：固件名收成图标（aria-label 仍在），电量百分比留着
+     ——「像手机一样」的那个数字正是这块要显示的东西。 */
+  .firmware-chip__label { display: none; }
   .device-setting-field { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 0.9rem; }
   .device-settings-section__heading { padding-inline: 0.9rem; }
   .device-settings-actions { padding-inline: 0.9rem; }
