@@ -7,6 +7,7 @@ import {
   Circle,
   Cpu,
   Gamepad2,
+  Gauge,
   Images,
   LayoutGrid,
   MonitorCog,
@@ -125,6 +126,9 @@ export function StudioHeader({
           <Tab contentClassName="main-tab__content" value="library" disabled={firmwareLocked}><Images />素材库</Tab>
           <Tab contentClassName="main-tab__content" value="music"><Music2 />音乐</Tab>
           <Tab contentClassName="main-tab__content" value="game"><Gamepad2 />游戏</Tab>
+          {/* VIBE 页会改写 workspace 并按官方 Custom App 布置频道，侧载固件
+              在线时那条通道不存在——和内容/画板/素材库一样锁。 */}
+          <Tab contentClassName="main-tab__content" value="vibe" disabled={firmwareLocked}><Gauge />VIBE</Tab>
           {/* 系统固件页不随侧载固件锁定：它自己会如实显示「设备离线」，
               而且接管指令保存在服务端，固件上线后第一次拉取即生效。 */}
           <Tab contentClassName="main-tab__content" value="zos"><MonitorCog />系统</Tab>

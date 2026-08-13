@@ -796,12 +796,12 @@ export function DeviceSettingsDialog({
         </div>
       )}
       text={zos
-        // Online, the rows speak for themselves and a sentence saying "these are
-        // the ones ZOS provides" is us describing our own scoping decision.
-        // Offline it earns its place: it explains why the values are missing and
-        // that provisioning still works, which is the one thing the user needs.
+        // Online ZOS gets no subtitle at all: the header chip already names the
+        // firmware, and "时钟正在跑 ZOS" restated it. Offline earns its sentence
+        // — it explains why values are missing and that provisioning still
+        // works, which is the one thing the user needs then.
         ? zosLive
-          ? "时钟正在跑 ZOS。"
+          ? undefined
           : "时钟刷的是 ZOS，此刻没有在上报。配网走蓝牙，不需要它在网上。"
         : surface === "sideload"
           ? "这里读写的是 Ulanzi 官方固件的设备接口；侧载固件正占着时钟。"
@@ -1173,7 +1173,6 @@ function AboutSection({ index }: { index: string }) {
         <span>{index}</span>
         <div>
           <h3 id="settings-about-title">关于</h3>
-          <p>开源项目，欢迎关注。</p>
         </div>
       </div>
       <div className="device-settings-fields">
@@ -1290,16 +1289,12 @@ export function ZosGeneralPanel({
           <span>01</span>
           <div>
             <h3 id="zos-output-title">显示与声音</h3>
-            <p>松手即下发，没有保存这一步。</p>
           </div>
         </div>
         <div className="device-settings-fields">
+          {/* 读不回来的诚实表达在行内：未下发的读数与压暗（zos-send-row）。
+              曾有一段话在这里解释序列号协议 —— 系统页上同一段已经删过一次。 */}
           <ZosSendRows requested={requested} onSend={onSend} />
-          {/* 读不回来不是缺陷，是序列号让设备旋钮和侧键压过控制台的代价。 */}
-          <p className="device-settings-note">
-            这两个值只下发、读不回来：时钟的旋钮和侧键随时可以改，而且它们说了算，
-            所以这里只能显示这台控制台发过什么。
-          </p>
         </div>
       </section>
 
@@ -1308,7 +1303,6 @@ export function ZosGeneralPanel({
           <span>02</span>
           <div>
             <h3 id="zos-sleep-title">夜间息屏</h3>
-            <p>时段内没人动它就熄屏；旋钮、按键或控制台任何操作立刻点亮。</p>
           </div>
         </div>
         <div className="device-settings-fields">
@@ -1349,7 +1343,7 @@ export function ZosGeneralPanel({
               {sleepMinuteLabel(sleepView.endMin)}
             </Select>
           </SettingField>
-          <SettingField id="zos-sleep-idle" label="息屏等待" help="时段内无操作多久后熄屏。">
+          <SettingField id="zos-sleep-idle" label="息屏等待">
             <Select
               id="zos-sleep-idle"
               aria-labelledby="zos-sleep-idle-label"

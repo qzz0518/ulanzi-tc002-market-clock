@@ -302,6 +302,6 @@ export type FirmwareKind = "music" | "arcade";
 // 真源，这里只是转出类型，好让习惯从 @/types 取类型的组件拿到同一个定义。
 export type { FirmwareMode } from "@/lib/firmware-mode";
 
-export type StudioView = "console" | "canvas" | "library" | "music" | "game" | "zos";
+export type StudioView = "console" | "canvas" | "library" | "music" | "game" | "zos" | "vibe";
 export type PreviewScope = "item" | "channel";
 export type BusyAction = "preview" | "push" | null;
