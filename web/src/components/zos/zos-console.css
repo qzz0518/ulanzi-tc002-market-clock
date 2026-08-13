@@ -325,45 +325,6 @@
   text-align: right;
 }
 
-/* --- 诊断抽屉 -------------------------------------------------------------- */
-
-.zc-diag { border-top: 1px solid var(--border); }
-.zc-diag__trigger { width: 100%; border-radius: 0; padding-inline: 1.1rem; }
-.zc-diag__hint { color: var(--color-cladd-fg-softer); font-weight: 400; font-size: 0.62rem; }
-.zc-diag__inner { display: grid; gap: 0.6rem; padding: 0.15rem 1.1rem 1rem; }
-.zc-facts { border-radius: 0.55rem; }
-.zc-facts__grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* 列间距要大到一列的值和下一列的标签不会读成一句话。 */
-  gap: 0 1.4rem;
-  padding: 0.25rem 0.35rem;
-}
-.zc-fact {
-  display: flex;
-  align-items: center;
-  gap: 0.8rem;
-  min-height: 1.75rem;
-  padding: 0 0.55rem;
-  font-size: 0.72rem;
-}
-.zc-fact > span:first-child { color: var(--color-cladd-fg-soft); white-space: nowrap; }
-.zc-fact > span:last-child {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 0.66rem;
-  font-variant-numeric: tabular-nums;
-}
-.zc-diag__foot { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
-.zc-diag__note {
-  flex: 1 1 16rem;
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 0.62rem;
-  line-height: 1.5;
-  text-wrap: pretty;
-}
-
 /* --- 其它 ------------------------------------------------------------------ */
 
 .zc-note {
@@ -389,7 +350,6 @@
   .zc-shell { padding-top: 0.65rem; }
   .zc-body { grid-template-columns: minmax(0, 1fr); }
   .zc-strip__vitals { margin-left: 0; }
-  .zc-facts__grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 36rem) {
   .zc-knob { width: 7rem; }
@@ -408,6 +368,4 @@
   }
   .zc-strip { padding-inline: 0.8rem; }
   .zc-body { padding-inline: 0.8rem; }
-  .zc-diag__trigger { padding-inline: 0.8rem; }
-  .zc-diag__inner { padding-inline: 0.8rem; }
 }

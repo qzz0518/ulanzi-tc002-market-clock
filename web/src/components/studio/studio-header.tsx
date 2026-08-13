@@ -174,11 +174,14 @@ export function StudioHeader({
           </Button>
         </Tooltip>
       </div>
-      {/* 常规设置读写的是官方固件的设备接口，所以它必须知道时钟在跑什么。 */}
+      {/* 常规设置读写的是官方固件的设备接口，所以它必须知道时钟在跑什么。
+          两个都要给：mode 说的是「谁在上报」，zosFlashed 说的是「闪存里是什么」——
+          掉线的 ZOS 两者不一致，而那正是这个对话框最该按 ZOS 招待它的时候。 */}
       <DeviceSettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         firmwareMode={firmwareStatus.mode}
+        zosFlashed={firmwareStatus.zosFlashed}
       />
     </header>
   );

@@ -33,6 +33,13 @@ export interface FirmwareOsState {
   /** The service's verdict: ZOS is running and its report is fresh. */
   live: boolean;
   telemetry: FirmwareTelemetry | null;
+  /**
+   * ZOS lives in this clock's flash. Sticky on the service (`zosEverFlashed` in
+   * src/os-link.ts): what is in flash does not change because the device went
+   * quiet, so this stays true across a drop-off — unlike `live`, which is
+   * exactly the report that stopped.
+   */
+  zosFlashed?: boolean;
 }
 
 export interface FirmwareModeInput {
@@ -99,6 +106,16 @@ export interface FirmwareStatus {
   /** One honest sentence; the chip carries it as its tooltip. */
   description: string;
   battery: FirmwareBattery;
+  /**
+   * ZOS is in this clock's flash — a separate question from `mode`.
+   *
+   * `mode` is about who is reporting *now*, and it has to be: the chip, the
+   * mirror and every "the device is running X" sentence would otherwise claim a
+   * silent device is live. What a power cycle restores is a different fact, and
+   * it survives the silence — a flashed ZOS that fell off the Wi-Fi is still a
+   * ZOS clock, and the stock firmware's endpoints will answer 503 on it forever.
+   */
+  zosFlashed: boolean;
 }
 
 const MODE_LABELS: Record<FirmwareMode, string> = {
@@ -131,5 +148,11 @@ export function describeFirmware(input: FirmwareModeInput): FirmwareStatus {
   const description = mode === "zos"
     ? `${MODE_DESCRIPTIONS.zos}${battery.text === null ? "电量尚未读到。" : `电量 ${battery.text}。`}`
     : MODE_DESCRIPTIONS[mode];
-  return { mode, label: MODE_LABELS[mode], description, battery };
+  return {
+    mode,
+    label: MODE_LABELS[mode],
+    description,
+    battery,
+    zosFlashed: input.osState?.zosFlashed === true,
+  };
 }

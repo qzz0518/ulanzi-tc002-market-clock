@@ -8,7 +8,8 @@ import { CanvasWorkspace } from "../web/src/components/studio/canvas-workspace";
 import { PixelAssetLibrary } from "../web/src/components/studio/pixel-asset-library";
 import { GameShell } from "../web/src/components/game/game-shell";
 import { MusicPlayer } from "../web/src/components/music/music-player";
-import { DeviceHostPanel } from "../web/src/components/studio/device-settings-dialog";
+import { DeviceHostPanel, ZosGeneralPanel } from "../web/src/components/studio/device-settings-dialog";
+import { describeZosDeviceFacts } from "../web/src/lib/device-settings-fields";
 import { getContentCatalog } from "../src/content-registry.ts";
 import type { ChannelConfig } from "../src/workspace.ts";
 
@@ -556,35 +557,101 @@ describe("app.tsx 的固件模式接线", () => {
 });
 
 describe("常规设置 under ZOS", () => {
-  test("the header hands the dialog the firmware mode", async () => {
+  test("the header hands the dialog both facts: who is reporting, and what is in flash", async () => {
     const header = await Bun.file(
       new URL("../web/src/components/studio/studio-header.tsx", import.meta.url),
     ).text();
     expect(header).toContain("firmwareMode={firmwareStatus.mode}");
+    // 掉线的 ZOS 两者不一致,而那正是这个对话框最该按 ZOS 招待它的时候——
+    // 只给 mode 的话,一台掉线的钟会收到官方固件那张按不动的表单。
+    expect(header).toContain("zosFlashed={firmwareStatus.zosFlashed}");
   });
 
-  test("the device tab explains the dead probe instead of blaming the network", () => {
+  test("Escape 关的是配网向导,不是连设置一起清场", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/studio/device-settings-dialog.tsx", import.meta.url),
+    ).text();
+    // cladd 自己有一套判断(Popup.js:111「下一个兄弟节点是不是对话框」),但 overlays
+    // root 里常驻着标题栏那颗按钮的 .cladd-tooltip,正好插在两个对话框之间,于是它
+    // 永远不生效——一次 Escape 会把正在配网的人连设置一起清场。这一层自己知道有没有
+    // 子对话框,不必去猜 DOM 的顺序。
+    expect(source).toContain("closeOnEscape={!dirty && !saving && !provisionOpen}");
+  });
+
+  test("the device tab shows what ZOS reports, not blanks where the stock fields were", () => {
     const html = markup(createElement(DeviceHostPanel, {
       info: null,
       infoLoading: false,
+      // 服务确实回了 503——这一页不该因此显示任何错误:它根本没问那个端点。
       infoError: "clock returned HTTP 503",
       host: null,
       hostDraft: "192.168.8.108",
       savingHost: false,
       zos: true,
+      zosFacts: describeZosDeviceFacts({
+        seq: 9,
+        menu: [],
+        display: { focus: null, pinned: false },
+        live: true,
+        zosFlashed: true,
+        telemetry: {
+          screen: "channel",
+          focus: "btc",
+          wifi: "xiaoya-2.4G",
+          ip: "192.168.8.108",
+          uptimeMs: 7_400_000,
+          freeKb: 16_568,
+          supplicantRestarts: 0,
+          batteryPercent: 82,
+          receivedAt: 1_000_000,
+          ageMs: 3_000,
+        },
+      }, 1_003_000),
       onHostDraftChange: noop,
       onSaveHost: noop,
       onResetHost: noop,
       onRetry: noop,
     }));
 
-    expect(html).toContain("ZOS 不提供官方固件的设备信息接口");
-    // 不是错误,重试一百次也一样;也不能让人去查网线。
+    // 能读到的都摆出来。
+    expect(html).toContain("设备状态");
+    expect(html).toContain("xiaoya-2.4G");
+    expect(html).toContain("192.168.8.108");
+    expect(html).toContain("82%");
+    expect(html).toContain("2 小时 3 分");
+    expect(html).toContain("16568 KB");
+    expect(html).toContain("已刷入闪存");
+    // 官方固件才有的字段一个都不出现——空行比没有更糟。
+    for (const label of ["设备 SN", "MAC 地址", "MCU 固件版本", "SOC 固件版本"]) {
+      expect(html).not.toContain(label);
+    }
+    // 也不再有那段「读不到,因为 ZOS 没这个接口」的死路文案。
+    expect(html).not.toContain("ZOS 不提供官方固件的设备信息接口");
     expect(html).not.toContain("无法读取设备信息");
+    expect(html).not.toContain("clock returned HTTP 503");
     expect(html).not.toContain("请在下方确认它的局域网地址");
-    expect(html).not.toContain("重试");
-    // 地址表单是服务端的,照常留着。
+    // 地址表单是服务端的,照常留着——只是说清 ZOS 不走它。
     expect(html).toContain("时钟地址");
+    expect(html).toContain("ZOS 由时钟主动来拉内容");
+  });
+
+  test("before the first report it says so, instead of painting a row of 离线", () => {
+    const html = markup(createElement(DeviceHostPanel, {
+      info: null,
+      infoLoading: false,
+      infoError: null,
+      host: null,
+      hostDraft: "192.168.8.108",
+      savingHost: false,
+      zos: true,
+      zosFacts: null,
+      onHostDraftChange: noop,
+      onSaveHost: noop,
+      onResetHost: noop,
+      onRetry: noop,
+    }));
+    expect(html).toContain("正在读取设备状态");
+    expect(html).not.toContain("离线");
   });
 
   test("keeps the stock probe error exactly as it was", () => {
@@ -604,16 +671,79 @@ describe("常规设置 under ZOS", () => {
     expect(html).not.toContain("ZOS 不提供");
   });
 
-  test("the general tab is not offered as a live form on ZOS", async () => {
+  test("the general tab offers exactly what ZOS can be told to do", () => {
+    const html = markup(createElement(ZosGeneralPanel, {
+      requested: { volume: 4, brightness: 7, seq: 2 },
+      live: true,
+      bleSupport: {
+        code: "ok",
+        ok: true,
+        title: "可用",
+        detail: "这台浏览器支持网页蓝牙。",
+        offerPortal: false,
+      },
+      onSend: noop,
+      onProvision: noop,
+    }));
+
+    // 两条下发 + 配网。滑块是系统面板那一对的本体,读数用的是同一套措辞。
+    expect(html.match(/type="range"/g)?.length ?? 0).toBe(2);
+    expect(html).toContain("4 级");
+    expect(html).toContain("7 / 10");
+    expect(html).toContain("蓝牙配网");
+    expect(html).toContain("开始配网");
+    // 官方固件那几节一个都不在:它们读的是 ZOS 没有的端点。
+    for (const label of ["自动翻页速度", "滚动速度", "时区设置", "低电量自动休眠", "显示星期"]) {
+      expect(html).not.toContain(label);
+    }
+    // 也不再有那段「常规设置在 ZOS 上不可用」的死路文案。
+    expect(html).not.toContain("常规设置在 ZOS 上不可用");
+    expect(html).not.toContain("503");
+  });
+
+  test("a browser without Web Bluetooth is told why, instead of getting a dead button", () => {
+    const html = markup(createElement(ZosGeneralPanel, {
+      requested: null,
+      live: true,
+      bleSupport: {
+        code: "insecure-context",
+        ok: false,
+        title: "这个页面不能用蓝牙",
+        detail: "浏览器只允许安全上下文使用网页蓝牙。",
+        offerPortal: true,
+      },
+      onSend: noop,
+      onProvision: noop,
+    }));
+    expect(html).not.toContain("开始配网");
+    expect(html).toContain("这个页面不能用蓝牙");
+    // 音量亮度还在:配网不可用不代表这一页没有内容。
+    expect(html.match(/type="range"/g)?.length ?? 0).toBe(2);
+  });
+
+  test("ZOS never reaches the stock firmware's endpoints, and never offers a 保存", async () => {
     const source = await Bun.file(
       new URL("../web/src/components/studio/device-settings-dialog.tsx", import.meta.url),
     ).text();
-    // 表单本身不渲染:一份填得好好的、保存必然 503 的表单比一句说明更误导人。
-    expect(source).toContain("常规设置在 ZOS 上不可用");
-    expect(source).toContain("if (open && !zos) void loadSettings();");
-    expect(source).toContain("if (!draft || saving || zos) return;");
-    expect(source).toContain("disabled={zos || !dirty || loading || saving}");
-    expect(source).toContain("时钟正在跑 ZOS，它不提供这套接口。");
+    // 注定 503 的三个读写,一条都不发:发出去只会把一次必然的失败包装成
+    // 「无法读取设备设置」,让人去查一个没有问题的网络。
+    expect(source).toContain('if (open && surface === "official") void loadSettings();');
+    expect(source).toContain('if (!draft || saving || surface !== "official") return;');
+    expect(source).toContain("if (zos) {");
+    // 下发是即时的,没有草稿可保存 —— 页脚在 ZOS 下只有「关闭」。
+    expect(source).toContain('{tab === "general" && surface === "official" ? (');
+    // 镜像不订阅:这个对话框不画那块屏,问一帧就等于让固件白白开始推流。
+    expect(source).toContain("createZosLink({ mirror: false");
+  });
+
+  test("侧载固件保留原来那条死路,ZOS 不再和它混为一谈", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/studio/device-settings-dialog.tsx", import.meta.url),
+    ).text();
+    expect(source).toContain("常规设置在侧载固件下不可用");
+    expect(source).toContain("断电重启即可恢复");
+    // 「ZOS 上不可用」这句话不该再存在:那是另一台设备的处境。
+    expect(source).not.toContain("常规设置在 ZOS 上不可用");
   });
 });
 

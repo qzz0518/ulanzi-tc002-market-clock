@@ -25,20 +25,16 @@ export type ZosSectionId = "music" | "games" | "carousel" | "settings";
 /** The ring's own order, as the firmware pushes the four entries. */
 export const ZOS_SECTION_ORDER: readonly ZosSectionId[] = ["music", "games", "carousel", "settings"];
 
-/**
- * What a row does when clicked. `focus` is a device destination — the same
- * string the firmware matches against; `provision` is console-only (the BLE
- * wizard has no counterpart in the pull document, but it is a setting, so this
- * is where a person looks for it).
- */
-export type ZosSectionAction =
-  | { type: "focus"; focus: string }
-  | { type: "provision" };
-
 export interface ZosSectionRow {
   key: string;
   label: string;
-  action: ZosSectionAction;
+  /**
+   * The device destination this row pins to — the same string the firmware
+   * matches against. Every row in this menu is a place on the panel; the one
+   * row that was not (蓝牙配网, a wizard in this browser) now lives in 常规设置
+   * next to the other things a person sets.
+   */
+  focus: string;
   /** The console's last accepted command pinned the device here. */
   pinned: boolean;
   /** The device's own report says this is what is on the panel. */
@@ -81,8 +77,6 @@ export interface ZosSectionInput {
   telemetry: ZosTelemetry | null;
   /** The service's liveness verdict; offline, nothing may claim to be on screen. */
   live: boolean;
-  /** Whether this browser can run the BLE wizard at all. */
-  bleAvailable: boolean;
 }
 
 /**
@@ -133,7 +127,7 @@ export function describeSections(input: ZosSectionInput): ZosSection[] {
         {
           key: "games:list",
           label: "游戏列表",
-          action: { type: "focus", focus: entry.id },
+          focus: entry.id,
           pinned: pinnedOn(entry.id),
           onScreen: telemetry?.screen === "games",
           footer: "停在选游戏的那一环",
@@ -143,7 +137,7 @@ export function describeSections(input: ZosSectionInput): ZosSection[] {
           return {
             key: focus,
             label: game.label,
-            action: { type: "focus", focus },
+            focus,
             pinned: pinnedOn(focus),
             // The firmware reports `screen: "game"` without naming the engine,
             // so no row may claim to be the one running.
@@ -174,7 +168,7 @@ export function describeSections(input: ZosSectionInput): ZosSection[] {
       const rows = channels.map((entry): ZosSectionRow => ({
         key: entry.id,
         label: entry.label,
-        action: { type: "focus", focus: entry.id },
+        focus: entry.id,
         pinned: pinnedOn(entry.id),
         onScreen: entryOnScreen(entry, telemetry),
         footer: null,
@@ -198,36 +192,19 @@ export function describeSections(input: ZosSectionInput): ZosSection[] {
 
     const entry = byKind("settings");
     if (!entry) continue;
-    const onScreen = entryOnScreen(entry, telemetry);
-    const rows: ZosSectionRow[] = [
-      {
-        key: "settings:device",
-        label: "设备设置页",
-        action: { type: "focus", focus: entry.id },
-        pinned: pinnedOn(entry.id),
-        onScreen,
-        footer: "亮度、音量与网络信息，显示在时钟面板上",
-      },
-    ];
-    if (input.bleAvailable) {
-      rows.push({
-        key: "settings:provision",
-        label: "蓝牙配网",
-        action: { type: "provision" },
-        pinned: false,
-        onScreen: false,
-        footer: "换了路由器或密码时，用蓝牙重新连一次",
-      });
-    }
     sections.push({
       id,
       label: entry.label,
-      leaf: false,
-      focus: null,
-      pinned: rows.some((row) => row.pinned),
-      onScreen,
-      footer: null,
-      rows,
+      // A leaf, like 音乐: the one thing that used to live under it — 蓝牙配网 —
+      // is not a place on the panel, and it now sits in 常规设置 with the rest
+      // of what a person sets. An accordion holding a single row is a level of
+      // hierarchy that only costs a click.
+      leaf: true,
+      focus: entry.id,
+      pinned: pinnedOn(entry.id),
+      onScreen: entryOnScreen(entry, telemetry),
+      footer: "把时钟切到它自带的设置页",
+      rows: [],
     });
   }
 

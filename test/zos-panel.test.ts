@@ -51,20 +51,29 @@ describe("zos panel", () => {
     expect(html).not.toContain("交还旋钮");
   });
 
-  test("the read-only facts sit behind a disclosure, not in the first screen", () => {
+  test("the read-only facts left this page entirely — they live in 常规设置 now", () => {
     const html = markup(createElement(ZosPanel));
-    // 抽屉标题说清里面有什么,内容默认不占版面——排障才看的事实不该和
-    // 「现在能按什么」抢同一块地方。
-    expect(html).toContain("诊断");
-    expect(html).toContain("IP · 内存 · 心跳 · 固件驻留");
-    for (const label of ["IP 地址", "空闲内存", "Wi-Fi 重连", "最近心跳"]) {
+    // 排障才看的事实搬进了设置对话框(设备信息标签页),这一页只留「现在能按
+    // 什么」:镜像、遥控、菜单、下发。连那个抽屉一起搬走,不是收起来。
+    expect(html).not.toContain("诊断");
+    expect(html).not.toContain("IP · 内存 · 心跳 · 固件驻留");
+    for (const label of ["IP 地址", "空闲内存", "Wi-Fi 重连", "最近心跳", "固件驻留"]) {
       expect(html).not.toContain(label);
     }
-    // 固件驻留在抽屉里的取值(离线时是「未知」)同样不该出现在第一屏。
     expect(html).not.toContain("未知");
     // 概况条（电量 / Wi-Fi / 运行时长）离线时整条消失,而不是展示旧数字。
     expect(html).not.toContain("zc-strip__vitals");
     expect(html).not.toContain("已运行");
+  });
+
+  test("蓝牙配网 moved into 常规设置, except where the dialog cannot help", () => {
+    const html = markup(createElement(ZosPanel));
+    // 设备在线时配网是设置里的一行(菜单里不再有它)。离线时它必须留在这里:
+    // deriveFirmwareMode 只认活着的上报,所以一台掉线的 ZOS 在对话框眼里是
+    // 「官方固件」,那边迎接它的是原厂固件那张读不出东西的表。
+    expect(html).toContain("蓝牙配网");
+    const menu = html.slice(html.indexOf("设备菜单"));
+    expect(menu).not.toContain("蓝牙配网");
   });
 
   test("volume and brightness are one control twice — both are sends, not readouts", () => {
@@ -251,12 +260,13 @@ describe("zos panel", () => {
     ]);
 
     // 防抖用组件自带的,不再手搓 setTimeout——旧版那个 250ms debounce 加两个
-    // ref 就是这么长出来的。
-    expect(panelSource).toContain("throttle={SETTINGS_THROTTLE_MS}");
+    // ref 就是这么长出来的。现在连滑块本体都在 zos-send-row.tsx,两处共用。
+    const sendRowSource = await Bun.file(
+      new URL("../web/src/components/zos/zos-send-row.tsx", import.meta.url),
+    ).text();
+    expect(sendRowSource).toContain("throttle={SETTINGS_THROTTLE_MS}");
     expect(panelSource).not.toContain("setTimeout");
-    // 只读事实是「刻进去」的槽,不是又一张卡片。抽屉默认收起,渲染不出来,
-    // 所以这一条只能在源码上盯。
-    expect(panelSource).toContain("<SurfaceCut");
+    expect(panelSource).toContain("<ZosSendRows");
     // multiple 不传:一次开一个,与设备一次只显示一环同构。
     expect(menuSource).not.toContain("multiple");
     // 独立 Chip 不下探到 xs/2xs——那两档是给嵌套用的,单独站一行读不出来。

@@ -689,6 +689,17 @@ export function describeDriver(
 }
 
 export interface ZosLinkOptions {
+  /**
+   * Whether to drive the mirror loop. Default true.
+   *
+   * Asking for a frame IS the subscription — every GET /api/os/mirror renews a
+   * 10 s streaming lease on the device — so a consumer that never paints the
+   * picture must not ask for it, or it makes the firmware tee frames for nobody.
+   * A state-only consumer (the settings dialog) still wants this module's
+   * cadence, backoff and write semantics, which is why it is a flag here rather
+   * than a second hand-rolled poll somewhere else.
+   */
+  mirror?: boolean;
   /** Injectable transport for tests; defaults to the page's fetch. */
   fetcher?: (input: string, init?: RequestInit) => Promise<Response>;
   /** Injectable timers so the loops are drivable from a test without real time. */
@@ -737,6 +748,7 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
   const setTimer = options.setTimer
     ?? ((callback: () => void, ms: number) => window.setTimeout(callback, ms));
   const clearTimer = options.clearTimer ?? ((handle: number) => window.clearTimeout(handle));
+  const wantsMirror = options.mirror !== false;
   let running = false;
   // The mirror loop needs to know whether the device is live to pick its
   // cadence, and only the state loop learns that.
@@ -805,7 +817,7 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
       if (running) return;
       running = true;
       stateLoop.start();
-      mirrorLoop.start();
+      if (wantsMirror) mirrorLoop.start();
     },
     stop() {
       running = false;

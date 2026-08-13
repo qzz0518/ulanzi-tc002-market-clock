@@ -156,6 +156,22 @@ describe("firmware status copy", () => {
     // 官方固件没有电量通道，别让它看起来像是「读数丢了」。
     expect(official.battery.percent).toBeNull();
   });
+
+  test("闪存里是什么和谁在上报是两件事，掉线只影响后者", () => {
+    // mode 说的是「此刻谁在上报」——它必须这么说，否则镜像和指示灯都会宣称一台
+    // 沉默的设备正在运行。断电后回到什么是另一件事，而它挺得过这段沉默。
+    const offline = describeFirmware(input({
+      osState: osState({ live: false, zosFlashed: true }),
+    }));
+    expect(offline.mode).toBe("official");
+    expect(offline.zosFlashed).toBe(true);
+
+    expect(describeFirmware(input({ osState: osState({ zosFlashed: true }) })).zosFlashed)
+      .toBe(true);
+    // 服务没提这台钟刷没刷过，就不许替它断言。
+    expect(describeFirmware(input({ osState: osState() })).zosFlashed).toBe(false);
+    expect(describeFirmware(input()).zosFlashed).toBe(false);
+  });
 });
 
 describe("studio header indicator", () => {

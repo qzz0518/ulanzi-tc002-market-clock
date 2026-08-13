@@ -24,8 +24,10 @@ multiple items in one channel are composed into an ordered carousel.
 The top-right settings dialog reads and writes the clock's brightness, volume, timezone, and
 other general settings directly. Its device tab shows the SN, SSID, IP, MAC, and firmware
 versions, and lets you repoint the clock when its IP moves — applied immediately, kept across
-restarts, no reinstall. Phone browsers get a dedicated touch layout with add-to-home-screen
-support.
+restarts, no reinstall. Under ZOS the same dialog becomes what ZOS actually offers: volume,
+brightness and Bluetooth provisioning to set, and Wi-Fi, IP, battery, uptime, free memory and
+firmware residency to read — the stock-only fields are absent rather than blank. Phone
+browsers get a dedicated touch layout with add-to-home-screen support.
 
 <p align="center">
   <img src="docs/images/tc002-mobile-content.png" width="390" alt="Ulanzi TC002 Pixel Studio mobile channel composition">

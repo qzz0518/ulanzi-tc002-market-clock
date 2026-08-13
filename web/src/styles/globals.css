@@ -291,6 +291,9 @@
   scrollbar-gutter: stable;
   border-top: 1px solid var(--border);
 }
+/* 掉线时压在分节之上的那张卡。分节是整宽带边框的行，卡片按字段栏的 1.25rem
+   内缩，读起来是「这一页现在的处境」，而不是又一节设置。 */
+.device-settings-banner { margin: 0.85rem 1.25rem; }
 .device-settings-section {
   display: grid;
   grid-template-columns: 11rem minmax(0, 1fr);
@@ -429,9 +432,19 @@
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
+/* ZOS 的音量/亮度就是系统面板那一对「下发」行本体（zos-send-row.tsx），不是照着
+   重画的第二份。放进对话框只需要补齐这一栏的内缩与簇宽——行高、字号、压暗规则
+   本来就和 .device-setting-field 同源。 */
+.device-settings-fields .zc-out__row { padding-inline: 1.25rem; }
+.device-settings-fields .zc-out__control { width: min(15rem, 52vw); }
 .device-setting-control--host { width: min(23rem, 66vw); align-items: start; gap: 0.5rem; }
 .device-host-input { flex: 1; min-width: 0; }
-.device-host-note { margin: 0 1.25rem; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+/* 一段贴在字段栏里的说明。地址表单先有了这条，ZOS 那两节也要说同样体量的话，
+   所以名字改成不带「host」的那个，两处共用一份排版。 */
+.device-host-note,
+.device-settings-note { margin: 0 1.25rem; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+/* 字段栏本身不带内边距，说明落在分节线上会显得挤——只有这条需要留白。 */
+.device-settings-note { padding-bottom: 0.85rem; }
 .device-host-note code { font-family: var(--mono); font-size: 0.68rem; }
 .device-host-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.35rem 1.25rem 0.2rem; }
 
@@ -1122,6 +1135,7 @@
   .device-settings-section { display: block; }
   .device-settings-section__heading { border-right: 0; border-bottom: 1px solid var(--border); }
   .device-setting-field { min-height: 4.25rem; }
+  .device-settings-fields .zc-out__row { min-height: 4.25rem; }
   .device-settings-switch { min-height: 2.5rem; }
   .device-settings-actions { padding-bottom: max(0.9rem, env(safe-area-inset-bottom)); background: var(--background); }
   .color-swatch { width: 2.75rem; height: 2.75rem; }
@@ -1133,6 +1147,7 @@
      ——「像手机一样」的那个数字正是这块要显示的东西。 */
   .firmware-chip__label { display: none; }
   .device-setting-field { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 0.9rem; }
+  .device-settings-fields .zc-out__row { padding-inline: 0.9rem; }
   .device-settings-section__heading { padding-inline: 0.9rem; }
   .device-settings-actions { padding-inline: 0.9rem; }
   .device-settings-actions > button:first-child span { font-size: 0; }

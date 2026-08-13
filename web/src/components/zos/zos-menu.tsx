@@ -1,10 +1,8 @@
 import type { ReactNode } from "react";
 import {
-  Bluetooth,
   ChevronRight,
   Gamepad2,
   LayoutGrid,
-  MonitorCog,
   Music2,
   Pin,
   Radio,
@@ -38,17 +36,6 @@ const SECTION_ICONS: Record<ZosSectionId, LucideIcon> = {
   settings: Settings2,
 };
 
-/**
- * Icons for sub-rows, and only where a section mixes kinds: under 设置 one row
- * goes to the device and the other opens a wizard in this browser, so each says
- * which. Channels and games are all the same kind of thing, so they carry no
- * glyphs — a half-iconned list is a list whose labels do not line up.
- */
-const ROW_ICONS: Record<string, LucideIcon> = {
-  "settings:device": MonitorCog,
-  "settings:provision": Bluetooth,
-};
-
 export interface ZosPinTarget {
   label: string;
   focus: string;
@@ -65,10 +52,7 @@ export interface ZosMenuProps {
   busy: boolean;
   /** Why the menu is empty, when it is. */
   emptyLabel: string;
-  /** Rendered inside 设置 when this browser cannot run the BLE wizard. */
-  bleNote?: ReactNode;
   onPin: (target: ZosPinTarget) => void;
-  onProvision: () => void;
 }
 
 /**
@@ -85,9 +69,7 @@ export function ZosMenu({
   onOpenChange,
   busy,
   emptyLabel,
-  bleNote,
   onPin,
-  onProvision,
 }: ZosMenuProps) {
   return (
     <List className="zc-menu__list">
@@ -149,15 +131,8 @@ export function ZosMenu({
                     「点按固定」对 设置 里的配网那一行还是错的。 */}
                 <div className="zc-sub">
                   {section.rows.map((row) => (
-                    <ZosMenuRow
-                      key={row.key}
-                      row={row}
-                      busy={busy}
-                      onPin={onPin}
-                      onProvision={onProvision}
-                    />
+                    <ZosMenuRow key={row.key} row={row} busy={busy} onPin={onPin} />
                   ))}
-                  {section.id === "settings" && bleNote}
                 </div>
               </AccordionPanel>
             </AccordionItem>
@@ -172,31 +147,21 @@ interface ZosMenuRowProps {
   row: ZosSectionRow;
   busy: boolean;
   onPin: (target: ZosPinTarget) => void;
-  onProvision: () => void;
 }
 
-function ZosMenuRow({ row, busy, onPin, onProvision }: ZosMenuRowProps) {
-  const RowIcon = ROW_ICONS[row.key];
-  // 配网行不是开关，也不发指令给设备：它打开这台浏览器里的向导，所以既没有
-  // aria-pressed，也不该被设备写入的 busy 挡住。
-  const provision = row.action.type === "provision";
+// 每一行都是设备上的一个去处，所以都是开关、都发指令、都被设备写入的 busy 挡住。
+// 唯一的例外（蓝牙配网，开的是这台浏览器里的向导）已经搬进常规设置。
+function ZosMenuRow({ row, busy, onPin }: ZosMenuRowProps) {
   return (
     <ListButton
       size="sm"
       color="brand"
       selected={row.pinned}
-      disabled={busy && !provision}
-      icon={RowIcon ? <RowIcon aria-hidden="true" /> : undefined}
+      disabled={busy}
       footer={row.footer ?? undefined}
       after={markerChip(rowMarker(row))}
-      aria-pressed={provision ? undefined : row.pinned}
-      onClick={() => {
-        if (row.action.type === "provision") {
-          onProvision();
-          return;
-        }
-        onPin({ label: row.label, focus: row.action.focus, pinned: row.pinned });
-      }}
+      aria-pressed={row.pinned}
+      onClick={() => onPin({ label: row.label, focus: row.focus, pinned: row.pinned })}
     >
       {row.label}
     </ListButton>

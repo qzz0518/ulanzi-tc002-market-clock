@@ -5,8 +5,8 @@ import {
   clockHostError,
   DeviceHostPanel,
   DeviceSettingSwitch,
-  formatMacAddress,
 } from "../web/src/components/studio/device-settings-dialog";
+import { formatMacAddress } from "../web/src/lib/device-settings-fields";
 import type { DeviceInfo } from "../web/src/types";
 
 const FULL_INFO: DeviceInfo = {

@@ -43,7 +43,6 @@ function render(
     display: { focus: null, pinned: false },
     telemetry: telemetry(),
     live: true,
-    bleAvailable: true,
     ...input,
   });
   return renderToStaticMarkup(createElement(CladdProvider, null, createElement(ZosMenu, {
@@ -53,7 +52,6 @@ function render(
     busy: false,
     emptyLabel: "正在读取设备菜单…",
     onPin: () => {},
-    onProvision: () => {},
     ...props,
   })));
 }
@@ -77,7 +75,9 @@ describe("zos menu structure", () => {
     expect(button(html, "音乐")).not.toContain("aria-expanded");
     expect(button(html, "游戏")).toContain('aria-expanded="false"');
     expect(button(html, "轮播")).toContain('aria-expanded="true"');
-    expect(button(html, "设置")).toContain('aria-expanded="false"');
+    // 设置 became a leaf when 蓝牙配网 moved into 常规设置: one row left, and a
+    // disclosure around one row is a click that buys nothing.
+    expect(button(html, "设置")).not.toContain("aria-expanded");
     // 单开:一次只有一个面板存在,与设备一次只显示一环同构。
     expect(count(html, 'aria-expanded="true"')).toBe(1);
     expect(count(html, 'role="region"')).toBe(1);
@@ -116,7 +116,6 @@ describe("zos menu structure", () => {
       busy: false,
       emptyLabel: "正在读取设备菜单…",
       onPin: () => {},
-      onProvision: () => {},
     })));
     expect(html).toContain("正在读取设备菜单…");
     expect(html).not.toContain("<button");
@@ -209,25 +208,20 @@ describe("zos menu accessibility", () => {
     expect(button(html, "大字天气钟")).toContain("已固定");
   });
 
-  test("配网不是开关,也不发指令给设备", () => {
-    const html = render({ open: "settings", busy: true });
-    // 它打开的是这台浏览器里的向导,所以没有按下状态,也不被设备写入挡住。
-    expect(button(html, "蓝牙配网")).not.toContain("aria-pressed");
-    expect(button(html, "蓝牙配网")).not.toContain("disabled");
-    // 同一时刻,发指令的那些行是禁用的:服务只保留一个 focus,第二次点击只会
-    // 和第一次赛跑。
-    expect(button(html, "设备设置页")).toContain("disabled");
+  test("每一行都在发指令,所以写入在飞的时候整张菜单都停手", () => {
+    const html = render({ open: "carousel", busy: true });
+    // 服务只保留一个 focus,第二次点击只会和第一次赛跑。
+    expect(button(html, "比特币")).toContain("disabled");
+    expect(button(html, "设置")).toContain("disabled");
     expect(button(html, "音乐")).toContain("disabled");
   });
 
-  test("a browser without Web Bluetooth is told why, in place of the row", () => {
-    const html = render(
-      { open: "settings", bleNote: createElement("p", null, "这台浏览器不支持蓝牙") },
-      { bleAvailable: false },
-    );
-    expect(html).not.toContain("蓝牙配网");
-    expect(html).toContain("这台浏览器不支持蓝牙");
-    // 设备自己的设置页还在:配网不可用不代表这一节没有内容。
-    expect(html).toContain("设备设置页");
+  test("菜单里再没有「打开这台浏览器里的向导」那种行", () => {
+    // 蓝牙配网 搬去了常规设置:它不是设备上的一个去处,混在四个目的地里就得为它
+    // 破例(不是开关、不受 busy 管),而破例正是这份菜单一致性的裂口。
+    for (const open of ["carousel", "games", "settings", undefined]) {
+      const html = render({ open });
+      expect(html).not.toContain("蓝牙配网");
+    }
   });
 });

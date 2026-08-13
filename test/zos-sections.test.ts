@@ -40,7 +40,6 @@ function build(overrides: Partial<Parameters<typeof describeSections>[0]> = {}):
     display: { focus: null, pinned: false },
     telemetry: telemetry(),
     live: true,
-    bleAvailable: true,
     ...overrides,
   });
 }
@@ -73,9 +72,9 @@ describe("zos device sections", () => {
     const games = byId(build(), "games");
     expect(games.rows[0]?.label).toBe("游戏列表");
     // Plain `game` only pushes the ring; `game:<id>` enters the engine.
-    expect(games.rows[0]?.action).toEqual({ type: "focus", focus: "game" });
+    expect(games.rows[0]?.focus).toBe("game");
     expect(games.rows).toHaveLength(ZOS_GAME_SHORTCUTS.length + 1);
-    expect(games.rows[1]?.action).toEqual({ type: "focus", focus: "game:breakout" });
+    expect(games.rows[1]?.focus).toBe("game:breakout");
   });
 
   test("音乐 is a leaf because the device has nothing under it", () => {
@@ -85,17 +84,19 @@ describe("zos device sections", () => {
     expect(music.rows).toEqual([]);
   });
 
-  test("the BLE wizard lands under 设置, next to the device's own settings page", () => {
+  test("设置 is a leaf: the wizard that used to live under it moved to 常规设置", () => {
+    // 蓝牙配网 is not a place on the panel — it is a setting, and it now sits in
+    // the settings dialog with the rest of them. What is left under 设置 is the
+    // device's own settings screen, and an accordion around a single row is a
+    // click that buys nothing.
     const settings = byId(build(), "settings");
-    expect(settings.leaf).toBe(false);
-    expect(settings.rows.map((row) => row.label)).toEqual(["设备设置页", "蓝牙配网"]);
-    expect(settings.rows[0]?.action).toEqual({ type: "focus", focus: "settings" });
-    expect(settings.rows[1]?.action).toEqual({ type: "provision" });
-  });
-
-  test("a browser that cannot do Web Bluetooth is never offered the row", () => {
-    const settings = byId(build({ bleAvailable: false }), "settings");
-    expect(settings.rows.map((row) => row.label)).toEqual(["设备设置页"]);
+    expect(settings.leaf).toBe(true);
+    expect(settings.focus).toBe("settings");
+    expect(settings.rows).toEqual([]);
+    // 菜单里再没有任何一行是「打开这台浏览器里的向导」——每一行都是设备上的去处。
+    for (const section of build()) {
+      for (const row of section.rows) expect(typeof row.focus).toBe("string");
+    }
   });
 
   test("a pinned channel marks both the row and the collapsed section", () => {
@@ -182,7 +183,6 @@ describe("zos device sections", () => {
       display: { focus: null, pinned: false },
       telemetry: null,
       live: false,
-      bleAvailable: true,
     });
     expect(sections.map((section) => section.id)).toEqual(["carousel"]);
   });
@@ -193,7 +193,6 @@ describe("zos device sections", () => {
       display: { focus: null, pinned: false },
       telemetry: null,
       live: false,
-      bleAvailable: false,
     })).toEqual([]);
   });
 });

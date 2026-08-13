@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bluetooth,
   Check,
   Copy,
   RefreshCw,
@@ -8,6 +9,7 @@ import {
   Smartphone,
   SlidersHorizontal,
   Wifi,
+  WifiOff,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -21,6 +23,7 @@ import {
   SegmentedButton,
   Select,
   Slider,
+  Surface,
   SurfaceCut,
   Switch,
   Tab,
@@ -29,7 +32,23 @@ import {
   TabsList,
 } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
+import {
+  DEVICE_INFO_ROWS,
+  describeZosDeviceFacts,
+  deviceSettingsSurface,
+} from "@/lib/device-settings-fields";
 import type { FirmwareMode } from "@/lib/firmware-mode";
+import type { BleSupport } from "@/lib/ble-provisioning";
+import {
+  createZosLink,
+  type ZosLink,
+  type ZosReadoutRow,
+  type ZosRequestedSettings,
+  type ZosState,
+} from "@/lib/zos-link";
+import { ZosSendRows, type ZosSendSettingsPatch } from "@/components/zos/zos-send-row";
+import { BleUnavailableNote } from "@/components/zos/zos-ble-note";
+import { ZosProvisionDialog, useBleSupport } from "@/components/zos/zos-provision-dialog";
 import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
 import type {
@@ -46,12 +65,20 @@ interface DeviceSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /**
-   * 这个对话框读写的是官方固件自带的设备接口（/getConfig、/setConfig，服务经
-   * CLOCK_HOST 转发）。ZOS 把整套固件换掉了，两端在真机上都只回
-   * `clock returned HTTP 503`——所以这里必须知道时钟在跑什么。
+   * 这个对话框有三副面孔，取决于时钟此刻在跑什么（见 lib/device-settings-fields）：
+   * 官方固件读写 /getConfig、/setConfig 与 /getDeviceInfo；ZOS 把整套固件换掉了，
+   * 那三个端点只会回 503，但它自己有一套能设的和能读的；侧载固件则两样都没有。
    */
   firmwareMode?: FirmwareMode;
+  /**
+   * ZOS 在这台钟的闪存里（服务端记的黏性事实）。掉线的 ZOS 仍然是 ZOS，
+   * 而那正是最需要这个对话框的时候——蓝牙配网就在里面。
+   */
+  zosFlashed?: boolean;
 }
+
+/** 心跳「多少秒前」要自己走秒，别的都只在设备上报时才变。 */
+const FACT_TICK_MS = 1_000;
 
 interface DeviceSettingsResponse {
   settings: DeviceGeneralSettings;
@@ -86,27 +113,6 @@ export function clockHostError(value: string): string | null {
   if (/[\s/?#@]/.test(host)) return "地址不能包含空格或 / ? # @";
   return null;
 }
-
-// The clock reports the MAC unseparated (ccc4b277a772); show it the way every
-// other tool on the network does. Anything that is not 12 hex digits passes
-// through untouched rather than being mangled into a plausible-looking address.
-export function formatMacAddress(value: string): string {
-  if (!/^[0-9a-f]{12}$/i.test(value)) return value;
-  return (value.match(/.{2}/g) ?? []).join(":").toUpperCase();
-}
-
-const DEVICE_INFO_ROWS: Array<{
-  key: keyof DeviceInfo;
-  label: string;
-  format?: (value: string) => string;
-}> = [
-  { key: "serialNumber", label: "设备 SN" },
-  { key: "ssid", label: "WiFi 名称" },
-  { key: "ip", label: "IP 地址" },
-  { key: "mac", label: "MAC 地址", format: formatMacAddress },
-  { key: "mcuVersion", label: "MCU 固件版本" },
-  { key: "appVersion", label: "SOC 固件版本" },
-];
 
 const CAROUSEL_SPEEDS: Array<{ value: DeviceCarouselSpeed; label: string }> = [
   { value: 0, label: "不翻页" },
@@ -220,6 +226,12 @@ interface DeviceHostPanelProps {
   savingHost: boolean;
   /** ZOS 不提供官方固件的 /getDeviceInfo，读不到不是网络问题。 */
   zos?: boolean;
+  /**
+   * ZOS 的遥测块，已经解析成文字（describeZosDeviceFacts）。null = 还没拿到第一份
+   * 状态；空数组不会出现。官方固件那一列的字段这里一个都没有，反过来也一样，所以
+   * 这不是「同一张表填不满」，是两张不同的表。
+   */
+  zosFacts?: ZosReadoutRow[] | null;
   onHostDraftChange: (value: string) => void;
   onSaveHost: () => void;
   onResetHost: () => void;
@@ -236,6 +248,7 @@ export function DeviceHostPanel({
   hostDraft,
   savingHost,
   zos = false,
+  zosFacts = null,
   onHostDraftChange,
   onSaveHost,
   onResetHost,
@@ -251,11 +264,37 @@ export function DeviceHostPanel({
         <div className="device-settings-section__heading">
           <span>01</span>
           <div>
-            <h3 id="settings-info-title">设备信息</h3>
-            <p>与时钟本机的「设备信息」页一致。</p>
+            <h3 id="settings-info-title">{zos ? "设备状态" : "设备信息"}</h3>
+            <p>
+              {zos
+                ? "时钟每 10 秒上报一次；掉线后这里不留旧数字。"
+                : "与时钟本机的「设备信息」页一致。"}
+            </p>
           </div>
         </div>
-        {infoLoading && !hasAnyField ? (
+        {zos ? (
+          zosFacts === null ? (
+            <div className="device-settings-state" role="status">
+              <span className="loading-mark" aria-hidden="true" />
+              <strong>正在读取设备状态</strong>
+              <span>等时钟的下一次上报。</span>
+            </div>
+          ) : (
+            // 同一套只读行的排版（见下面官方固件那份），行里的每一句话都来自
+            // 系统面板用的那几个 helper——两处说的必须是同一台设备。
+            <dl className="device-settings-fields device-info-list">
+              {zosFacts.map((row) => (
+                <div key={row.key} className="device-setting-field">
+                  <div className="device-setting-copy">
+                    <dt>{row.label}</dt>
+                    {row.note && <p>{row.note}</p>}
+                  </div>
+                  <dd className="device-setting-control device-info-value">{row.value}</dd>
+                </div>
+              ))}
+            </dl>
+          )
+        ) : infoLoading && !hasAnyField ? (
           <div className="device-settings-state" role="status">
             <span className="loading-mark" aria-hidden="true" />
             <strong>正在读取设备信息</strong>
@@ -277,14 +316,6 @@ export function DeviceHostPanel({
               );
             })}
           </dl>
-        ) : zos ? (
-          // 不是错误，是这套固件没有这个接口——重试一百次也一样。地址表单还在
-          // 下面，因为服务确实用它去找时钟（ZOS 的拉取端也在同一台设备上）。
-          <div className="device-settings-state" role="status">
-            <strong>ZOS 不提供官方固件的设备信息接口</strong>
-            <span>时钟正在跑 ZOS，这些字段来自官方固件的 /getDeviceInfo，读取只会返回 503。</span>
-            <span>Wi-Fi、IP、运行时长与电量请看「系统」标签页的设备状态。</span>
-          </div>
         ) : (
           <div className="device-settings-state is-error" role="alert">
             <strong>无法读取设备信息</strong>
@@ -299,7 +330,13 @@ export function DeviceHostPanel({
           <span>02</span>
           <div>
             <h3 id="settings-host-title">时钟地址</h3>
-            <p>时钟换了 IP 就在这里改，立即生效，重启后仍然有效。</p>
+            <p>
+              {zos
+                // 服务不靠这个地址找 ZOS：设备自己来拉（src/os-link.ts 的开头就是
+                // 这么设计的）。留着它是因为它仍然是服务的配置，换回官方固件立刻用得上。
+                ? "ZOS 由时钟主动来拉内容，不走这个地址；它留给官方固件的推送通道。"
+                : "时钟换了 IP 就在这里改，立即生效，重启后仍然有效。"}
+            </p>
           </div>
         </div>
         <div className="device-settings-fields">
@@ -360,8 +397,10 @@ export function DeviceSettingsDialog({
   open,
   onOpenChange,
   firmwareMode = "official",
+  zosFlashed = false,
 }: DeviceSettingsDialogProps) {
-  const zos = firmwareMode === "zos";
+  const surface = deviceSettingsSurface(firmwareMode, zosFlashed);
+  const zos = surface === "zos";
   const toast = useAppToast();
   const [saved, setSaved] = useState<DeviceGeneralSettings | null>(null);
   const [draft, setDraft] = useState<DeviceGeneralSettings | null>(null);
@@ -380,6 +419,15 @@ export function DeviceSettingsDialog({
   const [host, setHost] = useState<DeviceHostStatus | null>(null);
   const [hostDraft, setHostDraft] = useState("");
   const [savingHost, setSavingHost] = useState(false);
+  // ZOS 这一路的全部真相都在状态文档里；镜像不订阅（见 createZosLink 的 mirror），
+  // 这个对话框不画那块屏，问一帧就等于让固件白白开始推流。
+  const [zosState, setZosState] = useState<ZosState | null>(null);
+  const [zosNow, setZosNow] = useState(() => Date.now());
+  const [provisionOpen, setProvisionOpen] = useState(false);
+  const zosLinkRef = useRef<ZosLink | null>(null);
+  // 不能渲染一个按下去必然失败的按钮，所以配网入口的有无和向导的第一屏由同一个
+  // 判断决定。只在对话框打开时探，省掉常驻的适配器查询。
+  const bleSupport = useBleSupport(open && zos);
   const infoRevisionRef = useRef(0);
   const loadRevisionRef = useRef(0);
   // 已经有草稿时，重读失败不该顶掉正在编辑的表单——走 toast，和同对话框的保存失败一致。
@@ -438,6 +486,16 @@ export function DeviceSettingsDialog({
     } catch {
       // A missing host adapter is not worth a toast; the info error below says enough.
     }
+    // ZOS 下这一条注定 503，而且这一页根本不显示它的字段：发出去只会在网络面板里
+    // 留一条红色的失败，让人去查一个没有问题的网络。
+    if (zos) {
+      if (revision === infoRevisionRef.current) {
+        setInfo(null);
+        setInfoError(null);
+        setInfoLoading(false);
+      }
+      return;
+    }
     try {
       const response = await jsonApi<DeviceInfoResponse>("/api/device/info", { cache: "no-store" });
       if (revision !== infoRevisionRef.current) return;
@@ -450,7 +508,7 @@ export function DeviceSettingsDialog({
     } finally {
       if (revision === infoRevisionRef.current) setInfoLoading(false);
     }
-  }, []);
+  }, [zos]);
 
   const saveHost = async () => {
     const next = hostDraft.trim();
@@ -464,6 +522,12 @@ export function DeviceSettingsDialog({
       });
       setHost(response.host);
       setHostDraft(response.host.host);
+      if (zos) {
+        // 服务的探针走的是官方固件的 /getDeviceInfo，在 ZOS 上永远失败。把这个
+        // 必然的结果报成「仍读不到设备」，是让人去修一件本来就不该发生的事。
+        toast.success("时钟地址已更新", { description: "ZOS 不走这个地址，改动只影响官方固件通道。" });
+        return;
+      }
       setInfo(response.probe.info ?? null);
       setInfoError(response.probe.ok ? null : response.probe.error ?? "时钟没有响应");
       if (response.probe.ok) {
@@ -498,8 +562,31 @@ export function DeviceSettingsDialog({
   // ZOS 下这条读取只会拿回 503。不发它，是为了别把一次注定的失败包装成
   // 「无法读取设备设置」——那句话会让人去查网络，而网络没有任何问题。
   useEffect(() => {
-    if (open && !zos) void loadSettings();
-  }, [loadSettings, open, zos]);
+    if (open && surface === "official") void loadSettings();
+  }, [loadSettings, open, surface]);
+
+  // 只在对话框开着的时候连：ZOS 的状态是设备十秒一次的上报，关掉的窗口没有理由
+  // 继续替它计时。链路用的是系统面板同一份实现（节奏、退避、写入语义都在那里），
+  // 只是关掉了镜像。
+  useEffect(() => {
+    if (!open || !zos) return;
+    const link = createZosLink({ mirror: false, onState: setZosState });
+    zosLinkRef.current = link;
+    link.start();
+    return () => {
+      link.stop();
+      zosLinkRef.current = null;
+      // 下次打开先显示「正在读取」，而不是上一次的读数——设备可能已经掉线了。
+      setZosState(null);
+    };
+  }, [open, zos]);
+
+  useEffect(() => {
+    if (!open || !zos) return;
+    setZosNow(Date.now());
+    const timer = window.setInterval(() => setZosNow(Date.now()), FACT_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [open, zos]);
 
   useEffect(() => {
     if (open && tab === "device") void loadDeviceTab();
@@ -560,8 +647,21 @@ export function DeviceSettingsDialog({
     }
   };
 
+  // 没有草稿，也没有保存按钮：PUT /api/os/settings 是即时的，滑块松手就是下发。
+  // 服务回的是它接下来会向设备请求的值，原样收下——设备旋钮随时会再压过去。
+  const sendZosSettings = async (patch: ZosSendSettingsPatch) => {
+    const link = zosLinkRef.current;
+    if (!link) return;
+    try {
+      const requested = await link.setSettings(patch);
+      setZosState((current) => current === null ? current : { ...current, requestedSettings: requested });
+    } catch (error) {
+      toast.error("设置下发失败", { description: errorMessage(error) });
+    }
+  };
+
   const save = async () => {
-    if (!draft || saving || zos) return;
+    if (!draft || saving || surface !== "official") return;
     setSaving(true);
     try {
       const response = await jsonApi<DeviceSettingsResponse>("/api/device/settings/general", {
@@ -580,17 +680,13 @@ export function DeviceSettingsDialog({
     }
   };
 
-  // The clock's /setConfig still wants level + three tier percentages. Writing the
-  // slider value into every tier makes the physical level button a no-op, so one
-  // number fully describes brightness regardless of which tier the device is on.
-  const setBrightness = (value: number) => {
-    setDraft((current) => current ? {
-      ...current,
-      brightness: { ...current.brightness, low: value, mid: value, high: value },
-    } : current);
-  };
+  const zosFacts = zos && zosState !== null ? describeZosDeviceFacts(zosState, zosNow) : null;
+  // 拿到自己的第一份状态之前，就先用 App 那条轮询已经给出的判断（firmwareMode 只有
+  // 在设备正在上报时才是 zos）——总比在一台掉线的钟上先画一屏在线的样子好。
+  const zosLive = zosState !== null ? zosState.live === true : firmwareMode === "zos";
 
   return (
+    <>
     <Dialog
       open={open}
       onOpenChange={requestOpenChange}
@@ -676,35 +772,50 @@ export function DeviceSettingsDialog({
         </div>
       )}
       text={zos
-        ? "这里读写的是 Ulanzi 官方固件的设备接口；时钟正在跑 ZOS，它不提供这套接口。"
-        : "直接读取并修改时钟本机配置。保存后会立即写入设备。"}
+        ? zosLive
+          ? "时钟正在跑 ZOS。这里能设的、能看的，都是 ZOS 自己提供的那些。"
+          : "时钟刷的是 ZOS，此刻没有在上报。配网走蓝牙，不需要它在网上。"
+        : surface === "sideload"
+          ? "这里读写的是 Ulanzi 官方固件的设备接口；侧载固件正占着时钟。"
+          : "直接读取并修改时钟本机配置。保存后会立即写入设备。"}
       className="device-settings-dialog"
       contentClassName="device-settings-dialog__content"
       closeOnBackdropClick={!dirty && !saving}
-      closeOnEscape={!dirty && !saving}
+      // 配网向导开着时这一层不吃 Escape，否则一次按键会把向导和它下面的设置一起关掉，
+      // 而正在配网的人恰恰是最不该被清场的那个。cladd 自己有一套判断（Popup.js:111）
+      // 「下一个兄弟节点是不是对话框」，但它只在子对话框紧挨着时成立：overlays root
+      // 里常驻着标题栏那颗按钮的 .cladd-tooltip，正好插在两个对话框中间。这一层自己
+      // 知道有没有子对话框，不必去猜 DOM 的顺序。
+      closeOnEscape={!dirty && !saving && !provisionOpen}
       buttons={(
         // The device tab saves through its own button, so the footer's write action
         // would be a no-op there — it offers a re-probe and a plain close instead.
+        // ZOS 两个标签页都一样：下发是即时的，没有草稿可保存，「重新读取」问的是
+        // 同一份状态文档。
         <div className="device-settings-actions">
           <Button
             type="button"
             color="neutral"
             variant="transparent"
             outline={false}
-            disabled={tab === "general" ? zos || loading || saving : infoLoading || savingHost}
-            onClick={() => void (tab === "general" ? loadSettings() : loadDeviceTab())}
+            disabled={zos
+              ? zosState === null
+              : tab === "general" ? loading || saving : infoLoading || savingHost}
+            onClick={() => void (zos
+              ? zosLinkRef.current?.refreshState()
+              : tab === "general" ? loadSettings() : loadDeviceTab())}
           >
             <RefreshCw />重新读取
           </Button>
           <span className="device-settings-actions__spacer" />
-          {tab === "general" ? (
+          {tab === "general" && surface === "official" ? (
             <>
-              <Button type="button" color="neutral" onClick={cancel} disabled={saving}>{zos ? "关闭" : "取消"}</Button>
+              <Button type="button" color="neutral" onClick={cancel} disabled={saving}>取消</Button>
               <Button
                 type="button"
                 color="brand"
                 loading={saving}
-                disabled={zos || !dirty || loading || saving}
+                disabled={!dirty || loading || saving}
                 onClick={() => void save()}
               >
                 <Save />保存设置
@@ -738,18 +849,19 @@ export function DeviceSettingsDialog({
 
         <TabPanel value="general" className="device-settings-panel" keepMounted>
       {zos ? (
-        // 不渲染表单本身：一份填得好好的、保存却必然 503 的表单，比一句说明更
-        // 误导人。亮度/音量 ZOS 自己有设置页，用旋钮进；轮播与时区归频道编排。
+        <ZosGeneralPanel
+          requested={zosState?.requestedSettings ?? null}
+          live={zosLive}
+          bleSupport={bleSupport}
+          onSend={(patch) => void sendZosSettings(patch)}
+          onProvision={() => setProvisionOpen(true)}
+        />
+      ) : surface === "sideload" ? (
+        // 侧载固件占着设备，官方接口没了、也没有替代品——这一页是真的空的。
+        // 一句话说清，不铺开一整段解释一个没有内容的页面。
         <div className="device-settings-state" role="status">
-          <strong>常规设置在 ZOS 上不可用</strong>
-          <span>
-            这一页读写的是 Ulanzi 官方固件的设备接口。时钟正在跑 ZOS，官方接口已随固件一起换掉，
-            读和写都只会返回 503。
-          </span>
-          <span>
-            亮度与音量在时钟自带的「设置」界面里调（用旋钮进，或到「系统」标签页把设备固定到设置项）；
-            轮播与时区跟着频道编排走。
-          </span>
+          <strong>常规设置在侧载固件下不可用</strong>
+          <span>侧载固件正直连时钟，官方固件的设备接口不会响应；断电重启即可恢复。</span>
         </div>
       ) : loading && !draft ? (
         <div className="device-settings-state" role="status">
@@ -764,6 +876,68 @@ export function DeviceSettingsDialog({
           <Button type="button" onClick={() => void loadSettings()}><RefreshCw />重试</Button>
         </div>
       ) : draft ? (
+        <DeviceGeneralPanel draft={draft} onChange={setDraft} />
+      ) : null}
+        </TabPanel>
+
+        <TabPanel value="device" className="device-settings-panel" keepMounted>
+          <div className="device-settings-form">
+            <DeviceHostPanel
+              info={info}
+              infoLoading={infoLoading}
+              infoError={infoError}
+              host={host}
+              hostDraft={hostDraft}
+              savingHost={savingHost}
+              zos={zos}
+              zosFacts={zosFacts}
+              onHostDraftChange={setHostDraft}
+              onSaveHost={() => void saveHost()}
+              onResetHost={() => void resetHost()}
+              onRetry={() => void loadDeviceTab()}
+            />
+          </div>
+        </TabPanel>
+      </Tabs>
+    </Dialog>
+
+    {/* 配网向导开在这个对话框之上，而不是取代它：改完 Wi-Fi 回到的还是刚才那一页。
+        让路的是上面那个 closeOnEscape，不是 cladd 的自动判断——见那里的注释。 */}
+    <ZosProvisionDialog
+      open={provisionOpen}
+      onOpenChange={setProvisionOpen}
+      // 设备回到局域网比 2 秒一次的状态轮询快，立刻问一次，免得这一页还写着掉线。
+      onProvisioned={() => void zosLinkRef.current?.refreshState()}
+    />
+    </>
+  );
+}
+
+interface DeviceGeneralPanelProps {
+  draft: DeviceGeneralSettings;
+  onChange: (next: DeviceGeneralSettings) => void;
+}
+
+/**
+ * 官方固件的「常规」：/getConfig 读出来、/setConfig 写回去的那一整套。
+ *
+ * 单独拆成组件，是为了让它能被渲染着断言——cladd 的 Dialog 走 portal，服务端渲染
+ * 出来是空串，面板本体是唯一能测的接缝（ZosGeneralPanel、DeviceHostPanel 同理）。
+ * 刷着原厂固件的人看到的必须和以前一模一样，而「一模一样」只有把表单真的渲染出来
+ * 才算钉住了；一份写在别处的字段清单钉住的是那份清单自己。
+ */
+export function DeviceGeneralPanel({ draft, onChange }: DeviceGeneralPanelProps) {
+  // The clock's /setConfig still wants level + three tier percentages. Writing the
+  // slider value into every tier makes the physical level button a no-op, so one
+  // number fully describes brightness regardless of which tier the device is on.
+  const setBrightness = (value: number) => {
+    onChange({
+      ...draft,
+      brightness: { ...draft.brightness, low: value, mid: value, high: value },
+    });
+  };
+
+  return (
         <div className="device-settings-form">
           <section className="device-settings-section" aria-labelledby="settings-display-title">
             <div className="device-settings-section__heading">
@@ -808,7 +982,7 @@ export function DeviceSettingsDialog({
                     max={6}
                     step={1}
                     color="brand"
-                    onChange={(value) => setDraft({ ...draft, volume: value })}
+                    onChange={(value) => onChange({ ...draft, volume: value })}
                   />
                 </label>
                 <span className="device-setting-slider-value">
@@ -840,7 +1014,7 @@ export function DeviceSettingsDialog({
                     max={60}
                     step={10}
                     color="brand"
-                    onChange={(value) => setDraft({
+                    onChange={(value) => onChange({
                       ...draft,
                       carouselSpeed: value as DeviceCarouselSpeed,
                     })}
@@ -863,7 +1037,7 @@ export function DeviceSettingsDialog({
                     max={10}
                     step={1}
                     color="brand"
-                    onChange={(value) => setDraft({ ...draft, scrollSpeed: value })}
+                    onChange={(value) => onChange({ ...draft, scrollSpeed: value })}
                   />
                 </label>
                 <span className="device-setting-slider-value">
@@ -889,7 +1063,7 @@ export function DeviceSettingsDialog({
                   value={draft.timezone}
                   options={TIMEZONES}
                   popoverClassName="device-settings-timezone-options"
-                  onChange={(value) => setDraft({ ...draft, timezone: value })}
+                  onChange={(value) => onChange({ ...draft, timezone: value })}
                 >
                   {draft.timezone}
                 </Select>
@@ -901,7 +1075,7 @@ export function DeviceSettingsDialog({
                       key={format}
                       type="button"
                       active={draft.dateFormat === format}
-                      onClick={() => setDraft({ ...draft, dateFormat: format })}
+                      onClick={() => onChange({ ...draft, dateFormat: format })}
                     >
                       {format}
                     </SegmentedButton>
@@ -912,7 +1086,7 @@ export function DeviceSettingsDialog({
                 <DeviceSettingSwitch
                   label="显示星期"
                   checked={draft.showWeek}
-                  onChange={(checked) => setDraft({ ...draft, showWeek: checked })}
+                  onChange={(checked) => onChange({ ...draft, showWeek: checked })}
                 />
               </SettingField>
               <SettingField id="device-week-start" label="一周第一天">
@@ -922,7 +1096,7 @@ export function DeviceSettingsDialog({
                       key={day.value}
                       type="button"
                       active={draft.weekStart === day.value}
-                      onClick={() => setDraft({ ...draft, weekStart: day.value })}
+                      onClick={() => onChange({ ...draft, weekStart: day.value })}
                     >
                       {day.label}
                     </SegmentedButton>
@@ -945,67 +1119,159 @@ export function DeviceSettingsDialog({
                 <DeviceSettingSwitch
                   label="低电量自动休眠"
                   checked={draft.lowBatteryAutoSleep}
-                  onChange={(checked) => setDraft({ ...draft, lowBatteryAutoSleep: checked })}
+                  onChange={(checked) => onChange({ ...draft, lowBatteryAutoSleep: checked })}
                 />
               </SettingField>
             </div>
           </section>
 
-          <section className="device-settings-section" aria-labelledby="settings-about-title">
-            <div className="device-settings-section__heading">
-              <span>05</span>
-              <div>
-                <h3 id="settings-about-title">关于</h3>
-                <p>开源项目，欢迎关注。</p>
-              </div>
-            </div>
-            <div className="device-settings-fields">
-              <div className="device-settings-links">
-                <Button
-                  as="a"
-                  href="https://github.com/qzz0518/ulanzi-tc002-market-clock"
-                  target="_blank"
-                  rel="noreferrer"
-                  color="neutral"
-                  title="qzz0518/ulanzi-tc002-market-clock"
-                >
-                  <GithubIcon />GitHub
-                </Button>
-                <Button
-                  as="a"
-                  href="https://x.com/zerah_eth"
-                  target="_blank"
-                  rel="noreferrer"
-                  color="neutral"
-                  title="在 X 上关注 @zerah_eth"
-                >
-                  <XIcon />@zerah_eth
-                </Button>
-              </div>
-            </div>
-          </section>
+          <AboutSection index="05" />
         </div>
-      ) : null}
-        </TabPanel>
+  );
+}
 
-        <TabPanel value="device" className="device-settings-panel" keepMounted>
-          <div className="device-settings-form">
-            <DeviceHostPanel
-              info={info}
-              infoLoading={infoLoading}
-              infoError={infoError}
-              host={host}
-              hostDraft={hostDraft}
-              savingHost={savingHost}
-              zos={zos}
-              onHostDraftChange={setHostDraft}
-              onSaveHost={() => void saveHost()}
-              onResetHost={() => void resetHost()}
-              onRetry={() => void loadDeviceTab()}
-            />
+/**
+ * 关于：两块「常规」共用的最后一节。
+ *
+ * 两页的字段各不相同，但这一节讲的是控制台自己，与时钟在跑什么无关——所以它是一份，
+ * 不是各抄一份。序号不同是因为上面的节数不同，其余完全一致。
+ */
+function AboutSection({ index }: { index: string }) {
+  return (
+    <section className="device-settings-section" aria-labelledby="settings-about-title">
+      <div className="device-settings-section__heading">
+        <span>{index}</span>
+        <div>
+          <h3 id="settings-about-title">关于</h3>
+          <p>开源项目，欢迎关注。</p>
+        </div>
+      </div>
+      <div className="device-settings-fields">
+        <div className="device-settings-links">
+          <Button
+            as="a"
+            href="https://github.com/qzz0518/ulanzi-tc002-market-clock"
+            target="_blank"
+            rel="noreferrer"
+            color="neutral"
+            title="qzz0518/ulanzi-tc002-market-clock"
+          >
+            <GithubIcon />GitHub
+          </Button>
+          <Button
+            as="a"
+            href="https://x.com/zerah_eth"
+            target="_blank"
+            rel="noreferrer"
+            color="neutral"
+            title="在 X 上关注 @zerah_eth"
+          >
+            <XIcon />@zerah_eth
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+interface ZosGeneralPanelProps {
+  /** 服务接下来会向设备请求的值；null = 还没读到，或从没下发过。 */
+  requested: ZosRequestedSettings | null;
+  /** 设备此刻有没有在上报。false 时这一页不是死的，只是慢一拍。 */
+  live: boolean;
+  bleSupport: BleSupport;
+  onSend: (patch: ZosSendSettingsPatch) => void;
+  onProvision: () => void;
+}
+
+/**
+ * ZOS 的「常规」：能设的就这些。
+ *
+ * 官方固件那一页的翻页速度、时区、日期顺序、低电量休眠都不在这里——它们是官方固件
+ * 从 /getConfig 读出来的概念，ZOS 没有对应的东西。留一排读不到也写不了的空行，比
+ * 不列出来更糟。
+ *
+ * 两条滑块是系统面板那一对的本体（zos-send-row.tsx），连「未下发」的措辞和压暗都
+ * 是同一份；一台设备不该在两个页面上有两种说法。
+ *
+ * 掉线时这一页照常打开，因为掉线恰恰是它最有用的时候：配网走蓝牙，不需要时钟在网上；
+ * 音量亮度是写给服务的，固件回来第一次拉取就生效。所以少的只是「立刻」，不是功能。
+ */
+export function ZosGeneralPanel({
+  requested,
+  live,
+  bleSupport,
+  onSend,
+  onProvision,
+}: ZosGeneralPanelProps) {
+  return (
+    <div className="device-settings-form">
+      {!live && (
+        <Surface
+          variant="solid"
+          outline
+          color="brand"
+          role="status"
+          className="device-settings-banner"
+          contentClassName="flex flex-col gap-1.5 p-4"
+        >
+          <span className="flex items-center gap-2 text-cladd-fg text-cladd-sm">
+            <WifiOff aria-hidden="true" className="size-4" />
+            <strong>时钟掉线了</strong>
+          </span>
+          <span className="text-cladd-fg-soft text-cladd-xs leading-relaxed">
+            ZOS 已经刷进闪存，所以它还在跑，只是没有在网上。最常见的原因是换了路由器或改了 Wi-Fi
+            密码——用下面的蓝牙配网重连一次就行，不用拆机也不用接线。
+            这期间下发的音量和亮度会先存在服务里，等它回来第一次拉取时生效。
+          </span>
+        </Surface>
+      )}
+
+      <section className="device-settings-section" aria-labelledby="zos-output-title">
+        <div className="device-settings-section__heading">
+          <span>01</span>
+          <div>
+            <h3 id="zos-output-title">显示与声音</h3>
+            <p>松手即下发，没有保存这一步。</p>
           </div>
-        </TabPanel>
-      </Tabs>
-    </Dialog>
+        </div>
+        <div className="device-settings-fields">
+          <ZosSendRows requested={requested} onSend={onSend} />
+          {/* 读不回来不是缺陷，是序列号让设备旋钮和侧键压过控制台的代价。 */}
+          <p className="device-settings-note">
+            这两个值只下发、读不回来：时钟的旋钮和侧键随时可以改，而且它们说了算，
+            所以这里只能显示这台控制台发过什么。
+          </p>
+        </div>
+      </section>
+
+      <section className="device-settings-section" aria-labelledby="zos-network-title">
+        <div className="device-settings-section__heading">
+          <span>02</span>
+          <div>
+            <h3 id="zos-network-title">网络</h3>
+            <p>换了路由器或改了密码时，用蓝牙重新连一次。</p>
+          </div>
+        </div>
+        <div className="device-settings-fields">
+          {bleSupport.ok ? (
+            <SettingField
+              id="zos-provision"
+              label="蓝牙配网"
+              help="不用拆机也不用接线；时钟掉线时也能配。"
+            >
+              <Button type="button" size="md" color="brand" onClick={onProvision}>
+                <Bluetooth />开始配网
+              </Button>
+            </SettingField>
+          ) : (
+            // 按不动的按钮不如没有按钮：这里给的是同一个向导会给的理由。
+            <div className="device-settings-note"><BleUnavailableNote support={bleSupport} /></div>
+          )}
+        </div>
+      </section>
+
+      <AboutSection index="03" />
+    </div>
   );
 }
