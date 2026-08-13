@@ -214,17 +214,21 @@
   min-width: 0;
   flex: none;
   overflow: hidden;
-  /* Squared to the same radius as the buttons on the page. cladd's rounded={false}
-     drops its own pill, and this pins the result rather than inheriting whatever
-     the toolbar would otherwise choose. */
+  /* Squared to the same radius as the buttons on the page. cladd's
+     rounded={false} drops its own pill; this pins the result. */
   border-radius: 10px;
-  /* The scrim, not the tint: a flat wash over the blurred sleeve so type keeps
-     its contrast whatever the artwork does. --mini-tint is the cover's dominant
-     colour as a bare "r, g, b", set inline once an image has been sampled. */
+  /* The scrim ALWAYS leans dark, and the type is always white.
+     The first cut switched type between dark and light depending on the cover's
+     luma, which meant the widget had two looks and a mid-grey sleeve sat right
+     on the boundary flickering between them. The references do not do that: they
+     darken whatever the artwork is until one text colour always works. So the
+     cover's own colour survives as the hue and the border, and the scrim's job
+     is to guarantee contrast rather than to be pretty. */
   background:
-    linear-gradient(rgb(var(--mini-tint, 128, 128, 128) / 0.3), rgb(var(--mini-tint, 128, 128, 128) / 0.3)),
-    var(--background);
-  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.35);
+    linear-gradient(rgb(0 0 0 / 0.34), rgb(0 0 0 / 0.34)),
+    linear-gradient(rgb(var(--mini-tint, 90, 100, 120) / 0.55), rgb(var(--mini-tint, 90, 100, 120) / 0.55)),
+    #4a5568;
+  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.55);
   transition: background 320ms ease, box-shadow 320ms ease;
 }
 
@@ -243,24 +247,27 @@
   height: 100%;
   object-fit: cover;
   filter: blur(16px) saturate(1.7);
-  opacity: 0.85;
+  opacity: 0.9;
 }
 /* Everything cladd renders inside the toolbar has to sit above the artwork. */
 .mini-player__content { position: relative; z-index: 1; min-width: 0; gap: 0.15rem; }
 
-/* A light sleeve leaves the theme's dark type readable; a dark one does not, so
-   the panel says which it is and the type follows. Without this a black cover
-   turns the title into dark-on-dark, which is the failure mode of every
-   cover-tinted widget that only ever tested on bright artwork. */
-.mini-player.is-dark {
-  background:
-    linear-gradient(rgb(var(--mini-tint, 128, 128, 128) / 0.45), rgb(var(--mini-tint, 128, 128, 128) / 0.45)),
-    var(--background);
-  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.5);
-}
-.mini-player.is-dark .mini-player__title,
-.mini-player.is-dark .mini-player__artist { color: #fff; }
-.mini-player.is-dark .cladd-button { color: rgb(255 255 255 / 0.92); }
+/* One colour for the whole control set, over a ground we now guarantee is dark.
+   The transport was inheriting the app's brand green, which on a photographic
+   backdrop read as three status lights rather than as buttons. */
+.mini-player__title { color: #fff; }
+.mini-player__artist { color: rgb(255 255 255 / 0.72); }
+.mini-player .cladd-button { color: rgb(255 255 255 / 0.92); }
+.mini-player .cladd-button:disabled { color: rgb(255 255 255 / 0.38); }
+.mini-player__rule { background: rgb(255 255 255 / 0.28); }
+
+/* cladd's own hover/press surfaces are theme-light, which over the artwork
+   showed up as an opaque white slab behind the title. Glass highlights are
+   white AND translucent — the artwork has to stay visible through them or the
+   panel stops being one material. */
+.mini-player .cladd-surface-hover\:bg-cladd-surface-hover:hover,
+.mini-player [class*="cladd-surface-hover"]:hover { background: rgb(255 255 255 / 0.16) !important; }
+.mini-player [class*="cladd-surface-press"]:active { background: rgb(255 255 255 / 0.24) !important; }
 
 @media (prefers-reduced-transparency: reduce) {
   .mini-player__art { display: none; }
@@ -319,12 +326,24 @@
   width: 2px;
   height: 18%;
   border-radius: 1px;
-  background: currentColor;
-  opacity: 0.5;
+  opacity: 0.55;
 }
+/* Multi-colour, low to high — the convention every hardware analyser uses, so
+   the eye reads the row as a spectrum rather than as eight blinking dots. The
+   hues are fixed rather than taken from the cover: the panel behind them is
+   already the cover, and tinting these to match it would make them disappear
+   into it exactly when they are supposed to be the one moving thing. */
+.mini-player__spectrum i:nth-child(1) { background: #34d399; }
+.mini-player__spectrum i:nth-child(2) { background: #4ade80; }
+.mini-player__spectrum i:nth-child(3) { background: #a3e635; }
+.mini-player__spectrum i:nth-child(4) { background: #facc15; }
+.mini-player__spectrum i:nth-child(5) { background: #fb923c; }
+.mini-player__spectrum i:nth-child(6) { background: #f87171; }
+.mini-player__spectrum i:nth-child(7) { background: #f472b6; }
+.mini-player__spectrum i:nth-child(8) { background: #c084fc; }
 .mini-player__spectrum.is-live i {
   animation: mini-spectrum 900ms ease-in-out infinite alternate;
-  opacity: 0.85;
+  opacity: 1;
 }
 /* 每根条错开相位和周期，否则八根一起跳就是一个方块在缩放，不是频谱。 */
 .mini-player__spectrum.is-live i:nth-child(1) { animation-duration: 760ms; animation-delay: -120ms; }
