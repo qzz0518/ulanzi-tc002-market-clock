@@ -262,7 +262,17 @@
 .mini-player.is-dark .mini-player__art::after { background: rgb(0 0 0 / 0.34); }
 
 /* Everything cladd renders inside the toolbar has to sit above the artwork. */
-.mini-player__content { position: relative; z-index: 1; min-width: 0; gap: 0.15rem; }
+.mini-player__content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  gap: 0.15rem;
+  /* The sleeve-to-border distance IS this padding plus the button's. Two
+     pixels here, none there: any more and the artwork floats in the frame
+     instead of sitting against it. Asymmetric because the right edge ends in
+     the spectrum, which wants a little air. */
+  padding: 0.13rem 0.5rem 0.13rem 0.13rem;
+}
 
 /* One ink for type and controls. The buttons need `inherit` rather than a
    colour: cladd sets its own on the element, and a competing declaration is a
@@ -286,16 +296,16 @@
 
 .mini-player__content > * { flex: none; }
 .mini-player__track { min-width: 0; flex: 0 1 auto; }
-.mini-player__track-content { min-width: 0; gap: 0.5rem; }
+.mini-player__track-content { min-width: 0; gap: 0.5rem; padding-block: 0; padding-left: 0; }
 
 .mini-player__cover {
   display: grid;
   overflow: hidden;
-  /* The reference sizes the sleeve to the widget, not to the text: it spans
-     both lines and defines the panel's height, so it reads as artwork rather
-     than as a favicon next to a label. 2.6rem is both lines plus their air. */
-  width: 2.6rem;
-  height: 2.6rem;
+  /* Fills the frame it already had, rather than growing the frame: the panel
+     keeps its height and the sleeve eats the padding inside it, sitting ~2px
+     off the border the way the reference does. */
+  width: 2.4rem;
+  height: 2.4rem;
   flex: none;
   place-items: center;
   border-radius: 6px;
