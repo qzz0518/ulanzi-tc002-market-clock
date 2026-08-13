@@ -61,24 +61,18 @@ export function sleepIdleLabel(seconds: number): string {
 }
 
 /**
- * The one status sentence under the controls. Priority order is what a person
- * needs first: an unsynced clock explains why nothing will happen, 已息屏 is
- * live state worth knowing, and only then the summary of what is configured.
+ * The switch's help line. There is no summary sentence: the three controls ARE
+ * the summary, and a row restating them was a row of noise. This line exists
+ * for the two states the controls cannot show — the firmware refusing to sleep
+ * on an unsynced clock, and the panel being asleep right now. Offline is not
+ * handled here either: the page-level banner already owns that story.
  */
-export function describeSleepStatus(sleep: ZosSleepReport | null, live: boolean): string {
-  if (!live || sleep === null) {
-    return "时钟掉线中，下面显示的是它最后上报的配置；改动会在它回来后生效。";
+export function sleepSwitchHelp(sleep: ZosSleepReport | null, live: boolean): string {
+  if (live && sleep?.on && !sleep.clockSynced) {
+    return "时钟还没对上网络时间，在对时成功前不会息屏。";
   }
-  if (sleep.on && !sleep.clockSynced) {
-    return "时钟还没对上网络时间，在对时成功前不会息屏——避免按错误的时间黑屏。";
-  }
-  if (sleep.asleep) return "屏幕现在处于息屏状态，转一下旋钮或任何操作都会点亮。";
-  if (!sleep.on) return "已关闭。时段和等待时间会保留，打开即恢复。";
-  if (sleepWindowIsAllDay(sleep.startMin, sleep.endMin)) {
-    return `全天生效：无操作 ${sleepIdleLabel(sleep.idleSec)} 后息屏。`;
-  }
-  return `${sleepMinuteLabel(sleep.startMin)} – ${sleepMinuteLabel(sleep.endMin)} 内，` +
-    `无操作 ${sleepIdleLabel(sleep.idleSec)} 后息屏。`;
+  if (live && sleep?.asleep) return "屏幕此刻已息屏，任何操作都会点亮。";
+  return "关闭后时段和等待时间都会保留。";
 }
 
 /** A partial edit; only named fields travel, matching PUT /api/os/sleep. */

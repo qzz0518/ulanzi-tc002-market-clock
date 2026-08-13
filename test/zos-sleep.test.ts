@@ -3,11 +3,11 @@ import type { ZosSleepReport } from "../web/src/lib/zos-link";
 import {
   SLEEP_IDLE_OPTIONS,
   SLEEP_WINDOW_MINUTES,
-  describeSleepStatus,
   effectiveSleepView,
   reconcileSleepPending,
   sleepIdleLabel,
   sleepMinuteLabel,
+  sleepSwitchHelp,
   sleepWindowIsAllDay,
 } from "../web/src/lib/zos-sleep";
 
@@ -49,17 +49,18 @@ describe("夜间息屏 console helpers", () => {
     expect(sleepIdleLabel(90)).toBe("90 秒");
   });
 
-  test("the status sentence puts the unsynced clock first — it explains the refusal", () => {
-    // An enabled window on an unsynced clock will never fire; saying anything
-    // else first would make the feature look broken while it is being careful.
-    expect(describeSleepStatus(report({ clockSynced: false }), true)).toContain("对时");
-    expect(describeSleepStatus(report({ asleep: true }), true)).toContain("息屏状态");
-    expect(describeSleepStatus(report({ on: false }), true)).toContain("已关闭");
-    expect(describeSleepStatus(report(), true)).toContain("23:00 – 07:00");
-    expect(describeSleepStatus(report({ startMin: 0, endMin: 0 }), true)).toContain("全天");
-    expect(describeSleepStatus(null, false)).toContain("掉线");
-    // Offline outranks everything else: the report is history, not state.
-    expect(describeSleepStatus(report({ asleep: true }), false)).toContain("掉线");
+  test("the switch help speaks only when the controls cannot", () => {
+    // There is no summary sentence by design: the three controls are the
+    // summary. The help line covers the two states they cannot show.
+    expect(sleepSwitchHelp(report({ clockSynced: false }), true)).toContain("对时");
+    expect(sleepSwitchHelp(report({ asleep: true }), true)).toContain("已息屏");
+    // The ordinary case is the static line about what switching off keeps.
+    expect(sleepSwitchHelp(report(), true)).toContain("保留");
+    expect(sleepSwitchHelp(report({ on: false }), true)).toContain("保留");
+    // Offline: the page banner owns that story; no special line here. And a
+    // stale asleep/unsynced report must not masquerade as live state.
+    expect(sleepSwitchHelp(report({ asleep: true }), false)).toContain("保留");
+    expect(sleepSwitchHelp(null, true)).toContain("保留");
   });
 
   test("a pending edit stays until the device's report agrees, then retires", () => {

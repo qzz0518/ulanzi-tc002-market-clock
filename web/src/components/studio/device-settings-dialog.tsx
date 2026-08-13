@@ -51,11 +51,11 @@ import { ZosSendRows, type ZosSendSettingsPatch } from "@/components/zos/zos-sen
 import {
   SLEEP_IDLE_OPTIONS,
   SLEEP_WINDOW_MINUTES,
-  describeSleepStatus,
   effectiveSleepView,
   reconcileSleepPending,
   sleepIdleLabel,
   sleepMinuteLabel,
+  sleepSwitchHelp,
   type SleepPatch,
 } from "@/lib/zos-sleep";
 import { BleUnavailableNote } from "@/components/zos/zos-ble-note";
@@ -1312,7 +1312,7 @@ export function ZosGeneralPanel({
           </div>
         </div>
         <div className="device-settings-fields">
-          <SettingField id="zos-sleep-on" label="自动息屏" help="关闭后时段和等待时间都会保留。">
+          <SettingField id="zos-sleep-on" label="自动息屏" help={sleepSwitchHelp(sleep, live)}>
             <DeviceSettingSwitch
               label="自动息屏"
               checked={sleepView.enabled}
@@ -1362,8 +1362,6 @@ export function ZosGeneralPanel({
               {sleepIdleLabel(sleepView.idleSec)}
             </Select>
           </SettingField>
-          {/* 设备实况——不是这台控制台发过什么，而是固件此刻按什么在跑。 */}
-          <p className="device-settings-note">{describeSleepStatus(sleep, live)}</p>
         </div>
       </section>
 
