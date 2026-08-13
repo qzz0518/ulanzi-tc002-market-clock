@@ -52,10 +52,34 @@ namespace {
 
 #define TIMER_TICK 1
 
-// 25 fps. The panel enforces its own 15 ms floor inside Presenter::present, so
-// a 40 ms tick leaves ~25 ms of slack for the render itself — comfortable for a
-// procedural 832-pixel frame, which measures in microseconds.
-const int TICK_MS = 40;
+// 50 fps, set by the most demanding thing this firmware draws rather than by a
+// general judgement about frames.
+//
+// This was 40 ms (25 fps), chosen for "a procedural 832-pixel frame, which
+// measures in microseconds" — true, and beside the point once ui/MusicScreen
+// became a port of the dedicated lyrics player. That firmware runs at 30 ms and
+// says why (LyricsPage.h): spotlight sweeps the sung line pixel by pixel and
+// wants ~50 fps over a 200 px line, cascade walks 18 px inside 0.14 of a line,
+// about 32 fps. Ticker and skyline do not care — their text jumps in whole 12 px
+// cells and their spectrum is quantised to 8 fps. At 25 fps the two
+// motion-sensitive modes stepped, and spotlight is the default mode.
+//
+// Porting the renderer without its timebase is what left the two mismatched.
+// 20 ms rather than the lyrics player's 30 ms because spotlight's own stated
+// requirement is 50 fps, and the budget turns out to be there: measured on the
+// device beforehand, zkgui took 2.2% of one CPU at 25 fps while drawing the
+// digital-rain clock, the most expensive frame here, so 50 fps costs about 4.4%.
+//
+// The floor below this is the panel's, not the loop's: Presenter::kFramePaceUs
+// paces at 15 ms, so a tick shorter than that would only queue against hardware
+// that cannot take it. 20 ms leaves 5 ms of headroom over that floor — thinner
+// than the old 25 ms, and the reason this constant now carries a measurement
+// instead of an adjective.
+//
+// Safe to change at all because nothing here counts frames: every screen
+// animates against nowMs, and the arcade engines take tick(dtMs) into an
+// accumulator, so a faster tick makes them smoother rather than faster.
+const int TICK_MS = 20;
 
 uint64_t monoMs() {
 	struct timespec ts;
