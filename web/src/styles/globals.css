@@ -210,33 +210,62 @@
    artwork is last out: it is identity and the way back at once. Worst measured
    gap after all of it is 17px, at 880–960px on official firmware. */
 .mini-player {
+  position: relative;
   min-width: 0;
   flex: none;
-  /* Squared off, at the same radius as the buttons it shares the page with. */
-  border-radius: var(--cladd-radius);
-  /* The frosted panel. --mini-tint is the cover's dominant colour as a bare
-     "r, g, b" triple, set inline by the component and absent until an image has
-     actually been sampled — so the untinted state is the plain surface rather
-     than a guess at one. The blur is what makes a translucent colour read as
-     material instead of as a wash; where it is unsupported the colour alone
-     still reads, which is why the alpha is high enough to stand on its own. */
-  background: rgb(var(--mini-tint, 128, 128, 128) / 0.16);
-  backdrop-filter: blur(14px) saturate(1.5);
-  -webkit-backdrop-filter: blur(14px) saturate(1.5);
-  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.22);
+  overflow: hidden;
+  /* Squared to the same radius as the buttons on the page. cladd's rounded={false}
+     drops its own pill, and this pins the result rather than inheriting whatever
+     the toolbar would otherwise choose. */
+  border-radius: 10px;
+  /* The scrim, not the tint: a flat wash over the blurred sleeve so type keeps
+     its contrast whatever the artwork does. --mini-tint is the cover's dominant
+     colour as a bare "r, g, b", set inline once an image has been sampled. */
+  background:
+    linear-gradient(rgb(var(--mini-tint, 128, 128, 128) / 0.3), rgb(var(--mini-tint, 128, 128, 128) / 0.3)),
+    var(--background);
+  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.35);
   transition: background 320ms ease, box-shadow 320ms ease;
 }
-/* A dark sleeve tints towards black, where the theme's own text is already
-   readable — so the panel leans on its border instead of pushing more colour. */
-.mini-player.is-dark {
-  background: rgb(var(--mini-tint, 128, 128, 128) / 0.22);
-  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.3);
+
+/* The blurred sleeve. Oversized and pushed past every edge because a blur
+   samples beyond its own box: at inset 0 the corners go transparent and the
+   panel gets a pale halo exactly where the border is. */
+.mini-player__art {
+  position: absolute;
+  z-index: 0;
+  inset: -35%;
+  overflow: hidden;
+  pointer-events: none;
 }
+.mini-player__art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(16px) saturate(1.7);
+  opacity: 0.85;
+}
+/* Everything cladd renders inside the toolbar has to sit above the artwork. */
+.mini-player__content { position: relative; z-index: 1; min-width: 0; gap: 0.15rem; }
+
+/* A light sleeve leaves the theme's dark type readable; a dark one does not, so
+   the panel says which it is and the type follows. Without this a black cover
+   turns the title into dark-on-dark, which is the failure mode of every
+   cover-tinted widget that only ever tested on bright artwork. */
+.mini-player.is-dark {
+  background:
+    linear-gradient(rgb(var(--mini-tint, 128, 128, 128) / 0.45), rgb(var(--mini-tint, 128, 128, 128) / 0.45)),
+    var(--background);
+  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.5);
+}
+.mini-player.is-dark .mini-player__title,
+.mini-player.is-dark .mini-player__artist { color: #fff; }
+.mini-player.is-dark .cladd-button { color: rgb(255 255 255 / 0.92); }
+
 @media (prefers-reduced-transparency: reduce) {
-  .mini-player { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .mini-player__art { display: none; }
 }
 
-.mini-player__content { min-width: 0; gap: 0.15rem; }
 .mini-player__content > * { flex: none; }
 .mini-player__track { min-width: 0; flex: 0 1 auto; }
 .mini-player__track-content { min-width: 0; gap: 0.5rem; }
@@ -248,8 +277,7 @@
   height: 1.9rem;
   flex: none;
   place-items: center;
-  /* Squarer than the shell, the way a sleeve sits inside a control. */
-  border-radius: calc(var(--cladd-radius) - 3px);
+  border-radius: 6px;
   background: var(--muted);
   color: var(--muted-foreground);
   font-family: var(--mono);
@@ -278,49 +306,50 @@
 .mini-player__artist { color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.25; }
 .mini-player__rule { flex: none; }
 
+/* 右端八根条。纯 CSS 动画，不接 Web Audio —— 见组件里的说明。 */
+.mini-player__spectrum {
+  display: flex;
+  height: 1rem;
+  flex: none;
+  align-items: flex-end;
+  padding-inline: 0.3rem 0.1rem;
+  gap: 2px;
+}
+.mini-player__spectrum i {
+  width: 2px;
+  height: 18%;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.5;
+}
+.mini-player__spectrum.is-live i {
+  animation: mini-spectrum 900ms ease-in-out infinite alternate;
+  opacity: 0.85;
+}
+/* 每根条错开相位和周期，否则八根一起跳就是一个方块在缩放，不是频谱。 */
+.mini-player__spectrum.is-live i:nth-child(1) { animation-duration: 760ms; animation-delay: -120ms; }
+.mini-player__spectrum.is-live i:nth-child(2) { animation-duration: 1040ms; animation-delay: -420ms; }
+.mini-player__spectrum.is-live i:nth-child(3) { animation-duration: 640ms; animation-delay: -260ms; }
+.mini-player__spectrum.is-live i:nth-child(4) { animation-duration: 920ms; animation-delay: -680ms; }
+.mini-player__spectrum.is-live i:nth-child(5) { animation-duration: 700ms; animation-delay: -80ms; }
+.mini-player__spectrum.is-live i:nth-child(6) { animation-duration: 1120ms; animation-delay: -540ms; }
+.mini-player__spectrum.is-live i:nth-child(7) { animation-duration: 820ms; animation-delay: -300ms; }
+.mini-player__spectrum.is-live i:nth-child(8) { animation-duration: 980ms; animation-delay: -760ms; }
+@keyframes mini-spectrum {
+  from { height: 15%; }
+  to { height: 100%; }
+}
+/* 一个装饰性的循环动画正是这条媒体查询存在的理由。 */
+@media (prefers-reduced-motion: reduce) {
+  .mini-player__spectrum.is-live i { animation: none; height: 45%; }
+}
+
 /* On the heading row there is room for everything until the page itself gets
    narrow, so the only tier left is the phone one: the heading stacks and the
    widget keeps artwork and transport but drops the words. */
 @media (max-width: 48rem) {
   .page-heading { align-items: center; }
   .mini-player__copy { display: none; }
-}
-
-/* 最挤的一档：标签栏还在页头里占着 415px，右列只剩 117px 左右。 */
-@media (max-width: 70rem) {
-  .mini-player__rule,
-  .mini-player__skip { display: none; }
-}
-
-/* 官方固件那句状态文字在场时，这一档连播放键都放不下了（实测 960px 下带播放键
-   正好贴上标签栏，去掉后还剩 17px）。留封面：它既是「还在放这首」的凭据，也是
-   回音乐页的入口——一个会压到标签栏上的播放键不如没有。
-   下界卡在 52rem：再窄标签栏就移到屏底了，房间又回来了。 */
-@media (max-width: 70rem) and (min-width: 52.01rem) {
-  .studio-header.has-wide-actions .mini-player__toggle { display: none; }
-  .studio-header.has-wide-actions .mini-player__content { padding-inline: 0.15rem; }
-}
-
-/* 标签栏在 52rem 移到屏底（见下方那段手机布局），左列整条空了出来，
-   曲名和上一首/下一首可以回来。 */
-@media (max-width: 52rem) {
-  .mini-player { max-width: min(20rem, 52vw); }
-  .mini-player__copy { display: grid; max-width: 7rem; }
-  .mini-player__rule,
-  .mini-player__skip { display: inline-flex; }
-}
-
-@media (max-width: 44rem) {
-  .mini-player__copy { display: none; }
-  /* 手机上「Pixel Market」是装饰，正在播的歌是信息：有歌在播时把这段字的位置
-     让出来，品牌点阵留着。没歌在播时页头一个像素都不变。 */
-  .studio-header:has(.mini-player) .brand-name { display: none; }
-}
-
-/* 手机竖屏：品牌点阵 + 两枚 Chip + 设置按钮之后只剩不到 100px，够封面加一个播放键。 */
-@media (max-width: 38rem) {
-  .mini-player__rule,
-  .mini-player__skip { display: none; }
 }
 
 /* 侧载抽屉正文的纵向节奏（<FirmwarePanelBody>，音乐页与游戏页共用）。

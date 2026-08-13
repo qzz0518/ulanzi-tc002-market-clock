@@ -56,6 +56,17 @@ export function MiniPlayer({
       role="group"
       aria-label="正在播放"
       style={live ? ({ "--mini-tint": live.rgb } as React.CSSProperties) : undefined}
+      beforeContent={mini.coverSrc && (
+        // The cover itself, blown up and blurred, is the backdrop — not a flat
+        // average of it. A single colour behind glass reads as a tinted box; the
+        // blurred sleeve reads as glass sitting ON the artwork, which is the
+        // thing being copied. The averaged tint is still computed, but its job
+        // is now the scrim and the border, where a stable colour is what you
+        // want and a moving image is not.
+        <span className="mini-player__art" aria-hidden="true">
+          <img src={mini.coverSrc} alt="" decoding="async" draggable={false} />
+        </span>
+      )}
     >
       <Tooltip tooltip={mini.hint}>
         <ToolbarButton
@@ -92,7 +103,10 @@ export function MiniPlayer({
         type="button"
         className="mini-player__toggle"
         square
-        color="brand"
+        // No accent on the toggle: over a tinted panel the three transport
+        // controls have to read as one set, and a green pause button next to two
+        // neutral skips read as a status light rather than as the middle of a
+        // row. Same reasoning as the 播放模式 button beside the full transport.
         tightFocusRing
         aria-label={mini.toggleLabel}
         loading={mini.busy}
@@ -112,7 +126,32 @@ export function MiniPlayer({
       >
         <SkipForward />
       </ToolbarButton>
+      <MiniSpectrum playing={mini.playing} />
     </Toolbar>
+  );
+}
+
+/**
+ * Eight bars at the right end, alive only while something is playing.
+ *
+ * Deliberately NOT an analyser on the audio graph. Binding a
+ * createMediaElementSource to the element would route playback through the Web
+ * Audio graph for the whole session, and this element outlives every view now —
+ * one widget's decoration is not worth putting itself between the user and the
+ * sound. It is CSS animation, and it says the one thing it can honestly say:
+ * whether the track is running.
+ *
+ * Paused it holds still at its resting heights rather than disappearing, so the
+ * panel does not change width when you pause it.
+ */
+function MiniSpectrum({ playing }: { playing: boolean }) {
+  return (
+    <span
+      className={"mini-player__spectrum" + (playing ? " is-live" : "")}
+      aria-hidden="true"
+    >
+      {[0, 1, 2, 3, 4, 5, 6, 7].map((bar) => <i key={bar} />)}
+    </span>
   );
 }
 
