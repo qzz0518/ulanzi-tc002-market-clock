@@ -283,12 +283,17 @@
 .mini-player .cladd-button:disabled { color: rgb(var(--mini-ink) / 0.32) !important; }
 .mini-player__rule { background: rgb(var(--mini-ink) / 0.22); }
 
-/* cladd's hover and press surfaces are theme-light, which over the artwork
-   showed up as an opaque slab behind the title. A highlight on glass is the
-   ink at low alpha — the sleeve has to stay visible through it or the panel
-   stops being one material. */
-.mini-player [class*="cladd-surface-hover"]:hover { background: rgb(var(--mini-ink) / 0.12) !important; }
-.mini-player [class*="cladd-surface-press"]:active { background: rgb(var(--mini-ink) / 0.18) !important; }
+/* cladd paints hover and press as an overlay SPAN inside the button —
+   pointer-events: none, lit by a variant on the hovered parent. A :hover rule
+   aimed at that span never fires, which is how the theme's white surface ended
+   up as an opaque slab over a dark sleeve with white type on it. The overlay
+   reads its colour from a token, so the fix is the token: scoped to this
+   widget, hover is the ink at low alpha, and the sleeve stays visible through
+   it — glass, not paint. */
+.mini-player {
+  --cladd-surface-hover: rgb(var(--mini-ink, 22 26 34) / 0.1);
+  --cladd-surface-pressed: rgb(var(--mini-ink, 22 26 34) / 0.16);
+}
 
 @media (prefers-reduced-transparency: reduce) {
   .mini-player__art img { display: none; }
