@@ -632,9 +632,10 @@ describe("常规设置 under ZOS", () => {
     expect(html).not.toContain("请在下方确认它的局域网地址");
     // 地址表单是服务端的,照常留着——只是说清 ZOS 不走它。
     expect(html).toContain("时钟地址");
-    // The field stays, and says what it means FOR THE USER — that touching it
-    // does nothing today — rather than explaining that the device pulls.
-    expect(html).toContain("ZOS 用不到这个地址");
+    // The field stays, and its note answers the question users actually ask —
+    // "if the clock changes IP, does this break?" — with the consequence: the
+    // clock dials in, so its address never matters here.
+    expect(html).toContain("换 Wi-Fi 换 IP 都不受影响");
   });
 
   test("before the first report it says so, instead of painting a row of 离线", () => {

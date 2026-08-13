@@ -340,14 +340,13 @@ export function DeviceHostPanel({
           <span>02</span>
           <div>
             <h3 id="settings-host-title">时钟地址</h3>
-            {/* The address is not how ZOS is reached — the device pulls — but
-                saying so here explains our architecture to someone who only
-                wants to know whether to touch the field. What they need is the
-                consequence: under ZOS it changes nothing today, and it is what
-                the stock firmware would use. */}
+            {/* An earlier trim cut this down to "用不到" alone, and the user
+                read it as "so is the address hardcoded?" — the consequence that
+                matters is WHY it is safe: the arrow points the other way, so
+                the clock changing networks costs nothing. */}
             <p>
               {zos
-                ? "ZOS 用不到这个地址；换回官方固件时才会用它。"
+                ? "ZOS 是时钟主动连到服务的，换 Wi-Fi 换 IP 都不受影响；这个地址只有官方固件的推送通道用。"
                 : "时钟换了 IP 就在这里改，立即生效，重启后仍然有效。"}
             </p>
           </div>
