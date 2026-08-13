@@ -291,15 +291,21 @@
 .mini-player__cover {
   display: grid;
   overflow: hidden;
-  width: 1.9rem;
-  height: 1.9rem;
+  /* The reference sizes the sleeve to the widget, not to the text: it spans
+     both lines and defines the panel's height, so it reads as artwork rather
+     than as a favicon next to a label. 2.6rem is both lines plus their air. */
+  width: 2.6rem;
+  height: 2.6rem;
   flex: none;
   place-items: center;
   border-radius: 6px;
   background: var(--muted);
   color: var(--muted-foreground);
   font-family: var(--mono);
-  font-size: 0.66rem;
+  font-size: 0.8rem;
+  /* A hairline in the ink keeps a sleeve the same tone as the blurred backdrop
+     from melting into it — it IS the same image, blurred. */
+  box-shadow: 0 0 0 1px rgb(var(--mini-ink, 22 26 34) / 0.18);
 }
 .mini-player__cover-fallback,
 .mini-player__cover-image { grid-area: 1 / 1; }
