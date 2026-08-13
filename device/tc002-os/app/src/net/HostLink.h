@@ -60,10 +60,9 @@ class HostLink {
     int lyricStartMs;
     int lyricEndMs;
 
-    // Console -> device. See StateDoc for why each carries a sequence.
-    int settingsSeq;
-    int requestedVolume;
-    int requestedBrightness;
+    // Console -> device. See StateDoc for why each carries a sequence, and why
+    // the settings block carries three of them rather than one.
+    SettingsRequest settings;
     std::vector<StateDoc::Input> inputs;
 
     // The console's 主题设置. A setting, not a reading: it has one writer and
@@ -78,8 +77,7 @@ class HostLink {
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
                  consecutiveFailures(0), nowPlaying(false), playing(false),
                  positionMs(0), durationMs(0), stampMonoMs(0),
-                 lyricStartMs(-1), lyricEndMs(-1), settingsSeq(0),
-                 requestedVolume(-1), requestedBrightness(-1),
+                 lyricStartMs(-1), lyricEndMs(-1),
                  lyricMode(StateDoc::kDefaultMode), lyricSkin(StateDoc::kDefaultSkin),
                  accentRgb(0), hasAccent(false) {}
   };

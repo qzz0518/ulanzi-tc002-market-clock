@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CladdProvider } from "@cladd-ui/react";
@@ -30,17 +31,18 @@ describe("zos panel", () => {
     expect(html).toContain("下发到设备");
   });
 
-  test("the page carries one heading, and it is not visible chrome", () => {
+  test("the panel contributes no heading of its own", () => {
     const html = markup(createElement(ZosPanel));
-    // 页头的 Tab 已经写着「系统」,面板自己再叠一层眉题 + 大标题 + 一句话
-    // 就是同一件事说三遍——标题只留给读屏器。
-    expect(html).toContain('<h1 class="sr-only">ZOS 系统控制台</h1>');
+    // 页级标题是 app.tsx 的 .page-heading,全站一块骨架;面板再出一个(哪怕是
+    // sr-only)就是同一页两个名字。整页只有一个 h1 这条,由 app 级用例去数——
+    // 这里单渲面板看不见页头,断言不了整页。
+    expect(html).not.toContain("<h1");
     expect(html).not.toContain("DISPLAY CONTROL");
     expect(html).not.toContain("系统固件控制台");
+    expect(html).not.toContain("ZOS 系统控制台");
     // 一整块面板,不是三张各带标题的卡。
     expect(html).not.toContain("音量与亮度");
     expect(html).not.toContain("详细状态");
-    expect(html.match(/<h1/g)?.length ?? 0).toBe(1);
   });
 
   test("nothing is pinned, so there is nothing to hand back", () => {
@@ -65,17 +67,19 @@ describe("zos panel", () => {
     expect(html).not.toContain("已运行");
   });
 
-  test("volume steps and brightness slides — both are sends, not readouts", () => {
+  test("volume and brightness are one control twice — both are sends, not readouts", () => {
     const html = markup(createElement(ZosPanel));
-    // 0–6 共七格,一次动一格:NumberField 的 ± 就是设备侧键的那一步。
-    expect(html).toContain("cladd-number-field");
-    expect(html).toContain('aria-label="音量，0 到 6 级"');
-    // 亮度是比例,滑轨的填充量本身就是读数。
-    expect(html).toContain('type="range"');
-    expect(html).toContain("亮度（1 到 10 级）");
+    // 和「常规设置 → 显示与声音」同一套:两条一样的滑块,标签在左、读数在右。
+    // 一上一下摆两种控件,是用户第一眼就看出来的那处不一致。
+    expect(html.match(/type="range"/g)?.length ?? 0).toBe(2);
+    expect(html).not.toContain("cladd-number-field");
+    // Slider 自己没有可及名字,靠外层 label 里的 sr-only 取名。
+    expect(html).toContain('<span class="sr-only">音量</span>');
+    expect(html).toContain('<span class="sr-only">亮度</span>');
     // 读不回来不是缺陷,是序列号让设备旋钮压过控制台的代价——所以说「未下发」,
     // 不说「未知」,也不用一整段话解释自己。
     expect(html.match(/未下发/g)?.length ?? 0).toBe(2);
+    expect(html.match(/is-unsent/g)?.length ?? 0).toBe(2);
     expect(html).not.toContain("那边的改动不会回读到这里");
   });
 
@@ -182,9 +186,13 @@ describe("zos panel", () => {
     expect(appSource).toContain("<ZosPanel />");
     expect(appSource).toContain('nextView !== "zos"');
     expect(headerSource).toContain('value="zos"><MonitorCog />系统</Tab>');
-    // 系统页不要页级标题块:面板自带状态条,再来一层就是第二个页头。
-    expect(appSource).toContain('{view !== "zos" && (');
-    expect(appSource).not.toContain("TC002 ZOS CONSOLE");
+    // 系统页和其他 Tab 一样有且只有一个页级标题块:之前多出来的是页头下面
+    // 那块讲同一件事的分区标题,删的是它,页头本身是全站统一的骨架。
+    expect(appSource).toContain("TC002 ZOS CONSOLE");
+    expect(appSource).not.toContain('{view !== "zos" && (');
+    // 页头是无条件渲染的,所以它就是整页唯一的 h1——前提是没人再往组件里塞
+    // 第二个。下一条用例守这个前提。
+    expect(appSource).toMatch(/<div className="page-heading">/);
 
     // 整数倍放大:尺寸给在画布上(边框往外包),五个断点都是整数 px。
     // 反过来让边框盒去凑 52:16,扣掉边框剩下的内容宽就不再是 52 的整数倍。
@@ -201,6 +209,29 @@ describe("zos panel", () => {
     expect(css).toMatch(/\.zc-screen__notice\s*\{[^}]*z-index:\s*2;/s);
   });
 
+  test("every view has exactly one h1, because only the shell writes one", async () => {
+    // 系统页曾经同时有两个 h1:页头的「系统控制台」,和面板里留下的 sr-only
+    // 「ZOS 系统控制台」。读屏器按标题跳转会把同一页连报两个名字——用户投诉的
+    // 「两层标题」换了个地方活着。
+    //
+    // 单渲面板数不出整页的重复(它看不见页头),整页又没法在 SSR 里跑起来,所以
+    // 这条钉在源码上:标题只能由 app.tsx 的骨架出,组件树里一个 h1 都不许有。
+    const root = new URL("../web/src/components/", import.meta.url);
+    const files = Array.from(new Bun.Glob("**/*.tsx").scanSync(fileURLToPath(root)));
+    expect(files.length).toBeGreaterThan(10);
+    const offenders: string[] = [];
+    for (const file of files) {
+      const source = await Bun.file(new URL(file, root)).text();
+      if (/<h1[\s>]/.test(source)) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+
+    // 反过来,页级标题必须真的存在于骨架里,否则上面那条会在「谁都没有标题」
+    // 的情况下也通过。
+    const appSource = await Bun.file(new URL("../web/src/app.tsx", import.meta.url)).text();
+    expect(appSource).toContain("<h1>{pageCopy.title}</h1>");
+  });
+
   test("the right column is built from the kit, not from divs dressed up as it", () => {
     // 结构本身由 zos-menu.test.ts 真渲染出来看(四个触发器、单开、标记只出现
     // 一次)。这里只留 markup 里看不见的那几条:组件的取舍,以及不该复活的旧写法。
@@ -208,8 +239,8 @@ describe("zos panel", () => {
     // 分组小标题全 app 一个样,所以用 SectionTitle 而不是自己写一层眉题。
     expect(html).toContain("cladd-section-title");
     expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(2);
-    // 离散、一次一格 → NumberField;连续比例 → Slider。
-    expect(html).toContain("cladd-number-field");
+    // 音量与亮度都用 Slider:全 app 只有「常规设置」那一处在调这两个值,
+    // 那边两条都是 Slider,这里跟着走。
     expect(html).toContain("cladd-slider");
   });
 
@@ -221,7 +252,7 @@ describe("zos panel", () => {
 
     // 防抖用组件自带的,不再手搓 setTimeout——旧版那个 250ms debounce 加两个
     // ref 就是这么长出来的。
-    expect(panelSource).toContain("throttle={BRIGHTNESS_THROTTLE_MS}");
+    expect(panelSource).toContain("throttle={SETTINGS_THROTTLE_MS}");
     expect(panelSource).not.toContain("setTimeout");
     // 只读事实是「刻进去」的槽,不是又一张卡片。抽屉默认收起,渲染不出来,
     // 所以这一条只能在源码上盯。

@@ -909,9 +909,15 @@ export function App() {
     );
   }
 
-  // 系统页没有 pageCopy：那一页的第一屏本身就是一块带状态条的面板，页头的
-  // Tab 已经写着「系统」，再叠一层眉题 + 大标题 + 一句话就是同一件事说三遍。
-  const pageCopy = view === "music"
+  // 每个视图都有页头，系统页也不例外：之前的冗余是页头下面又接了一块讲同一件事的
+  // 分区标题，删掉的是那一块，不是页头本身。
+  const pageCopy = view === "zos"
+    ? {
+        kicker: "TC002 ZOS CONSOLE",
+        title: "系统控制台",
+        description: "实时镜像设备画面，远程操作旋钮与按键，调整亮度音量或把应用固定在屏上。",
+      }
+    : view === "music"
     ? {
         kicker: "TC002 PIXEL RADIO",
         title: "音乐歌词播放器",
@@ -975,15 +981,13 @@ export function App() {
         firmwareLocked={firmwareOnline}
         firmwareKind={firmwareKind}
       />
-      {view !== "zos" && (
-        <div className="page-heading">
-          <div>
-            <span>{pageCopy.kicker}</span>
-            <h1>{pageCopy.title}</h1>
-            <p>{pageCopy.description}</p>
-          </div>
+      <div className="page-heading">
+        <div>
+          <span>{pageCopy.kicker}</span>
+          <h1>{pageCopy.title}</h1>
+          <p>{pageCopy.description}</p>
         </div>
-      )}
+      </div>
 
       {view === "canvas" && (
         <section className="canvas-orientation-gate" aria-labelledby="canvas-orientation-title">

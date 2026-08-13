@@ -336,6 +336,19 @@ export class OsLinkHub {
   // and without the sequence the device would snap back to it on the next poll
   // and the user could never turn the volume up by hand again.
   private settingsSeq = 0;
+  // ...and one sequence per field, because the document carries the console's
+  // last request for BOTH levels forever and a value cannot say which one the
+  // user just moved. Without these the device could only see "volume 4,
+  // brightness 7" and had to act on both, so every volume change also ran the
+  // brightness path: a zero-sized brightness nudge, and a brightness bar drawn
+  // over the volume bar. The panel showed the wrong control while changing the
+  // right one.
+  //
+  // Kept as sequences rather than a "which field moved" flag so a device that
+  // reads two console writes as ONE document still applies both — the flag
+  // would have to describe a single write, and the poll is free to coalesce.
+  private volumeSeq = 0;
+  private brightnessSeq = 0;
   // A short tail rather than a queue the device drains. The document is pulled,
   // not pushed, so anything the device has not read yet has to still be in it —
   // but a press the device missed by more than a few hundred milliseconds is a
@@ -490,21 +503,30 @@ export class OsLinkHub {
    * A request, not a mirror of device state: the device is the authority on
    * what it is currently set to and reports that in telemetry. Passing null
    * leaves a setting alone rather than clearing it.
+   *
+   * Naming a field is what stamps its sequence, deliberately including a write
+   * that asks for the level the device already has. The stamp is "the user
+   * moved this control", not "this value differs" — a slider dragged back to
+   * where it started still deserves its bar on the panel, and the device has no
+   * other way to know the console did anything at all.
    */
   setDeviceSettings(next: Partial<OsDeviceSettings>): void {
     const clamp = (value: number, low: number, high: number) =>
       Math.max(low, Math.min(high, Math.round(value)));
-    let changed = false;
-    if (typeof next.volume === "number" && Number.isFinite(next.volume)) {
-      this.settings.volume = clamp(next.volume, 0, 6);
-      changed = true;
-    }
-    if (typeof next.brightness === "number" && Number.isFinite(next.brightness)) {
-      this.settings.brightness = clamp(next.brightness, 1, 10);
-      changed = true;
-    }
-    if (!changed) return;
+    const named = (value: number | null | undefined) =>
+      typeof value === "number" && Number.isFinite(value) ? value : null;
+    const volume = named(next.volume);
+    const brightness = named(next.brightness);
+    if (volume === null && brightness === null) return;
     this.settingsSeq += 1;
+    if (volume !== null) {
+      this.settings.volume = clamp(volume, 0, 6);
+      this.volumeSeq = this.settingsSeq;
+    }
+    if (brightness !== null) {
+      this.settings.brightness = clamp(brightness, 1, 10);
+      this.brightnessSeq = this.settingsSeq;
+    }
     this.bump();
   }
 
@@ -688,8 +710,20 @@ export class OsLinkHub {
     if (this.theme.accent !== null) lines.push(`accent\t${this.theme.accent}`);
     if (this.settingsSeq > 0) {
       lines.push(`setseq\t${this.settingsSeq}`);
-      if (this.settings.volume !== null) lines.push(`setvol\t${this.settings.volume}`);
-      if (this.settings.brightness !== null) lines.push(`setbri\t${this.settings.brightness}`);
+      // Each level travels with the sequence at which the console last asked
+      // for it, as a SEPARATE key rather than a third tab field — same reason
+      // `rev`/`ttl` are separate from `item`: a firmware that grows an arity
+      // check on `setvol` would drop the line entirely and silently stop
+      // applying that level. A firmware that has never heard of these two keys
+      // ignores them and behaves exactly as it did before they existed.
+      if (this.settings.volume !== null) {
+        lines.push(`setvol\t${this.settings.volume}`);
+        lines.push(`setvolseq\t${this.volumeSeq}`);
+      }
+      if (this.settings.brightness !== null) {
+        lines.push(`setbri\t${this.settings.brightness}`);
+        lines.push(`setbriseq\t${this.brightnessSeq}`);
+      }
     }
     for (const event of this.inputs) {
       lines.push(`input\t${event.seq}\t${event.action}`);

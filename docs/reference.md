@@ -277,7 +277,9 @@ skin	tape
 accent	ff8844
 setseq	3
 setvol	4
+setvolseq	2
 setbri	7
+setbriseq	3
 input	12	press
 np	1
 track	Her Majesty
@@ -325,6 +327,19 @@ item	settings	settings	设置
 就有 5 秒，比这更勤只会拉回一模一样的字节。`GET /api/os/frames` 的应答带 `X-Os-Rev`，设备
 记下的是**实际拿到**的版本而不是文档当初广告的那个——保存动作正好落在这两个时刻之间时，
 不至于让刚下载完的帧包立刻被判为过期。
+
+设置块同理是三个序列而不是一个。`setseq` 是「这份请求有多新」，设备只在它上升时动手；
+`setvolseq` / `setbriseq` 是「用户刚才动的是哪一个」。两者都需要：文档**永远**同时带着音量和
+亮度（控制台对每一项的最后一次请求），所以只看值的设备无法区分「刚拖了音量条」「刚拖了亮度
+条」和「什么都没动」——它只能两个都执行，于是每次改音量都会附带一次零幅度的亮度调整，并把
+亮度条画在音量条上面：**用户看到的是亮度界面，而音量确实变了**。之所以是序列而不是一个
+「哪个字段动了」的标志，是因为长轮询可以合并：控制台在 seq 5 改音量、seq 6 改亮度，设备可能
+只读到一份文档，标志只能描述一次写入，会把前一次丢掉。面板只有一条 bar，两个都动时给**更晚
+的那个**（手指还按着的那根滑块）；同一次 PUT 里两个一起动则给音量——亮度在每个亮起的像素里
+都看得见，静音的喇叭看不见，而且这是唯一不会顺手把侧键切到亮度模式的选择。同样按**新键**
+而不是 `setvol` 上的第三个字段发送，理由和 `rev`/`ttl` 一样；老固件忽略它们，行为与这两个键
+不存在时完全一致。控制台重发一个设备已经是这个值的档位仍然会推进序列——序列的语义是「用户
+动了这个控件」而不是「这个数变了」，否则把滑块拖回原位就没有任何回执。
 
 **ZOS 在位时，推送这一步会停，渲染这一步不会。** ZOS 顶替了官方 app，`POST /api/custom` 随之
 消失；而它的配网页对**任何未知路径**都回配置页加 HTTP 200，于是每一次推送都「成功」：
@@ -546,7 +561,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
-| `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值 |
+| `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值。只写请求里点名的那一项：另一项也会随 `setvolseq` / `setbriseq` 一起留在文档里，但序列不动，面板因此只为用户真正动过的那一项亮 bar |
 | `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}`（`lyricEndMs` 是这一句**唱完**的时刻，`lyricUntilMs` 是下一句接手的时刻；`lyricWords` 形如 `[{startMs,endMs,text}]`，最多 64 条、每条 ≤16 字符、合计 ≤200 字符，格式不对就整表丢弃而不是让上报失败），正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |

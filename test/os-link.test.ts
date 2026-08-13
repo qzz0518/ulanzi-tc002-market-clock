@@ -308,6 +308,74 @@ describe("device settings requested from the console", () => {
     expect(second).toContain("setbri\t7");
   });
 
+  // --- which field moved -----------------------------------------------------
+  // The document carrying BOTH levels forever is what makes the values right and
+  // the FEEDBACK wrong: from "volume 4, brightness 7" the device cannot tell
+  // which slider the user just touched, so it acted on both — a zero-sized
+  // brightness nudge, and a brightness bar drawn over the volume one. Every
+  // change of volume from the console showed the brightness screen.
+
+  test("each level carries the sequence it was last asked for at", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+
+    hub.setDeviceSettings({ volume: 4 });
+    expect(hub.serialize()).toContain("setvolseq\t1");
+
+    hub.setDeviceSettings({ brightness: 7 });
+    const second = hub.serialize();
+    // Volume is still in the document — it has to be, so a device that reads
+    // two writes as one poll applies both — but its sequence has not moved, and
+    // that is the whole difference the panel needs.
+    expect(second).toContain("setvol\t4");
+    expect(second).toContain("setvolseq\t1");
+    expect(second).toContain("setbri\t7");
+    expect(second).toContain("setbriseq\t2");
+
+    hub.setDeviceSettings({ volume: 2 });
+    const third = hub.serialize();
+    expect(third).toContain("setvolseq\t3");
+    expect(third).toContain("setbriseq\t2");
+  });
+
+  test("re-requesting the level already set still moves its sequence", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+    hub.setDeviceSettings({ volume: 4 });
+    hub.setDeviceSettings({ volume: 4 });
+    // The sequence means "the user moved this control", not "this number
+    // differs". A slider dragged back to where it started must still raise the
+    // bar, or the console gets no answer at all — the failure mode that makes
+    // "only show a bar when the value changed" the wrong fix.
+    expect(hub.serialize()).toContain("setvolseq\t2");
+    expect(hub.getDeviceSettings().seq).toBe(2);
+  });
+
+  test("a write naming both levels stamps both", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+    hub.setDeviceSettings({ volume: 5, brightness: 9 });
+    const doc = hub.serialize();
+    expect(doc).toContain("setseq\t1");
+    expect(doc).toContain("setvolseq\t1");
+    expect(doc).toContain("setbriseq\t1");
+  });
+
+  test("the settings block is the byte sequence the firmware self-check parses", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const hub = new OsLinkHub();
+    hub.setDeviceSettings({ brightness: 7 });
+    hub.setDeviceSettings({ brightness: 7 });
+    hub.setDeviceSettings({ brightness: 7 });
+    hub.setDeviceSettings({ volume: 4 });
+    // Order and adjacency, not just presence: device/tc002-os/hostcheck asserts
+    // this exact block, so the two halves of the wire contract are pinned from
+    // both sides rather than from one idealisation of it.
+    expect(hub.serialize()).toContain(
+      "setseq\t4\nsetvol\t4\nsetvolseq\t4\nsetbri\t7\nsetbriseq\t3\n",
+    );
+  });
+
   test("values are clamped to the device's own scales, not the caller's", async () => {
     const { OsLinkHub } = await import("../src/os-link.ts");
     const hub = new OsLinkHub();

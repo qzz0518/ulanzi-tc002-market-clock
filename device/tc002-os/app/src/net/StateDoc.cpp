@@ -80,9 +80,55 @@ bool kindFromName(const std::string& name, StateDoc::Kind* out) {
 
 }  // namespace
 
+SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
+                          int currentVolume, int currentBrightness) {
+  SettingsPlan plan;
+  // Nothing this device has not already acted on. The document repeats the last
+  // request on every poll, so this is the common case by a wide margin.
+  if (request.seq <= appliedSeq) return plan;
+
+  // A service that names neither field is older than this firmware. Read that
+  // as "both moved, at the document's sequence": it is what the wire meant
+  // before the per-field keys existed, and it keeps the VALUES landing exactly
+  // as they always did. Only the bar falls back to a guess below.
+  const bool perField = request.volumeSeq > 0 || request.brightnessSeq > 0;
+  const int volumeSeq = perField ? request.volumeSeq : request.seq;
+  const int brightnessSeq = perField ? request.brightnessSeq : request.seq;
+
+  plan.applyVolume = request.volume >= 0 && volumeSeq > appliedSeq;
+  plan.applyBrightness = request.brightness >= 0 && brightnessSeq > appliedSeq;
+
+  if (perField) {
+    // The sequences say which control the user moved, so the bar is not a
+    // guess. Both moving at once is a coalesced poll — two writes the device
+    // read as one document — and the later one is the slider still under the
+    // user's finger. See SettingsPlan for why a tie shows volume.
+    if (plan.applyVolume && plan.applyBrightness) {
+      plan.bar = brightnessSeq > volumeSeq ? SettingsPlan::kBrightnessBar
+                                           : SettingsPlan::kVolumeBar;
+    } else if (plan.applyVolume) {
+      plan.bar = SettingsPlan::kVolumeBar;
+    } else if (plan.applyBrightness) {
+      plan.bar = SettingsPlan::kBrightnessBar;
+    }
+    return plan;
+  }
+
+  // Legacy service: the only thing separating the field the user moved from the
+  // one riding along in every document is whether the value differs from what
+  // the device is at. A request for the level already set therefore raises
+  // nothing — the console loses its feedback, which is the price of not being
+  // told, and is still better than showing the wrong control's bar.
+  const bool volumeMoved = plan.applyVolume && request.volume != currentVolume;
+  const bool brightnessMoved =
+      plan.applyBrightness && request.brightness != currentBrightness;
+  if (volumeMoved) plan.bar = SettingsPlan::kVolumeBar;
+  else if (brightnessMoved) plan.bar = SettingsPlan::kBrightnessBar;
+  return plan;
+}
+
 StateDoc::StateDoc()
-    : mSeq(-1), mPinned(false), mMirror(false), mSettingsSeq(0),
-      mRequestedVolume(-1), mRequestedBrightness(-1), mHasNowPlaying(false),
+    : mSeq(-1), mPinned(false), mMirror(false), mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
       mLyricEndMs(-1), mLyricMode(kDefaultMode), mLyricSkin(kDefaultSkin),
       mAccentRgb(0), mHasAccent(false) {}
@@ -93,9 +139,7 @@ bool StateDoc::parse(const std::string& body) {
   mMirror = false;
   mFocus.clear();
   mItems.clear();
-  mSettingsSeq = 0;
-  mRequestedVolume = -1;
-  mRequestedBrightness = -1;
+  mSettings = SettingsRequest();
   mInputs.clear();
   mHasNowPlaying = false;
   mPlaying = false;
@@ -141,11 +185,19 @@ bool StateDoc::parse(const std::string& body) {
     } else if (fields[0] == "focus") {
       mFocus = fields[1];
     } else if (fields[0] == "setseq") {
-      mSettingsSeq = atoi(fields[1].c_str());
+      mSettings.seq = atoi(fields[1].c_str());
     } else if (fields[0] == "setvol") {
-      mRequestedVolume = atoi(fields[1].c_str());
+      mSettings.volume = atoi(fields[1].c_str());
     } else if (fields[0] == "setbri") {
-      mRequestedBrightness = atoi(fields[1].c_str());
+      mSettings.brightness = atoi(fields[1].c_str());
+    } else if (fields[0] == "setvolseq") {
+      // Separate keys rather than a third field on `setvol`, for the same
+      // reason `rev`/`ttl` are separate from `item`: a deployed parser that
+      // ever grows an arity check would drop the whole line, and a level the
+      // firmware silently stops applying is a very quiet failure.
+      mSettings.volumeSeq = atoi(fields[1].c_str());
+    } else if (fields[0] == "setbriseq") {
+      mSettings.brightnessSeq = atoi(fields[1].c_str());
     } else if (fields[0] == "input" && n >= 3) {
       Input event;
       event.seq = atoi(fields[1].c_str());

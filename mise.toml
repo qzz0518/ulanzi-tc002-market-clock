@@ -56,6 +56,18 @@ if [ "$includers" != "device/tc002-os/app/src/visual/Glyphs.cpp" ]; then
   echo "$includers" >&2
   exit 1
 fi
+# Which bar to raise for which level is one mapping, and it lives in the one
+# file the checks below actually link. The bug this guards against was a SECOND
+# copy of it, written inline in logic/osLogic.cc — a file that is #included by
+# activity/*.cpp and therefore compiled by no host check, so the copy could be
+# wrong (it was: a volume change raised the brightness bar) while every check
+# passed against the original.
+bars=$(grep -rl 'LevelOverlay::kVolume\\|LevelOverlay::kBrightness' device/tc002-os/app/src | sort)
+if [ "$bars" != "device/tc002-os/app/src/ui/LevelControl.cpp" ]; then
+  echo "FAIL the volume/brightness bar mapping belongs to ui/LevelControl.cpp alone; found:" >&2
+  echo "$bars" >&2
+  exit 1
+fi
 # The seven game engines are compiled in unchanged from the arcade tree, so its
 # src is on the include path AFTER this firmware's own: utils/Surface.h resolves
 # to the bridge here, visual/PixelFont.h falls through to the arcade's.

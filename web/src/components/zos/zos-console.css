@@ -284,33 +284,43 @@
 /* 子项缩进到与父项文字对齐——「下一层」要看得见。 */
 .zc-sub { display: flex; flex-direction: column; padding: 0.1rem 0 0.35rem 1.75rem; }
 
-/* --- 下发（音量 / 亮度） --------------------------------------------------- */
+/* --- 下发（音量 / 亮度） ---------------------------------------------------
+   一整块照「常规设置 → 显示与声音」抄过来：标签在左、控件簇靠右，簇内是滑块
+   加一个右对齐读数，行与行之间一条发丝线。数值（min-height / padding / gap /
+   字号）全部与 globals.css 里的 .device-setting-field 一族同值，两处并排看是
+   同一种行；只有横向内缩收到 0.5rem，好让这两行与上面的小标题和菜单行左对齐。 */
 
-.zc-out { display: grid; gap: 0.5rem; padding: 0.35rem 0.5rem 0; }
+.zc-out { display: grid; padding-top: 0.15rem; }
 .zc-out__row {
   display: grid;
-  grid-template-columns: 3.3rem minmax(0, 1fr) 3rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 3.8rem;
   align-items: center;
-  gap: 0.6rem;
+  gap: 1rem;
+  padding: 0.58rem 0.5rem;
+  border-bottom: 1px solid var(--border);
 }
-.zc-out__label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.32rem;
-  color: var(--muted-foreground);
-  font-size: 0.72rem;
-  white-space: nowrap;
+.zc-out__row:last-child { border-bottom: 0; }
+.zc-out__label { font-size: 0.75rem; font-weight: 550; }
+/* 参考实现是 min(15rem, 52vw)；这一列只有对话框的一半宽，簇宽跟着收，簇内
+   滑块与读数的比例不变。 */
+.zc-out__control { display: flex; width: min(11rem, 52vw); align-items: center; gap: 0.7rem; }
+.zc-out__slider { display: block; flex: 1; min-width: 0; }
+/* cladd 的滑块在拖动/聚焦时会顶起一个数值气泡（没有开关可以关掉），说的和右边
+   读数是同一件事，藏掉；焦点环本来长在气泡里，得补回滑块本体。与参考实现同解。 */
+.zc-out__slider [data-part="value"] { display: none; }
+.zc-out__slider:focus-within [data-part="thumb"] {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
-.zc-out__label svg { width: 0.85rem; height: 0.85rem; }
-.zc-out__slider { display: block; min-width: 0; }
-/* 还没下发过任何值时把控件压暗：滑块的位置是「按下去会从这里开始」，
-   不是设备读数。满色的填充条会被当成「亮度就是这么高」。 */
-.zc-out__row.is-unsent .cladd-number-field,
+/* 还没下发过任何值时把滑块压暗：它的位置是「按下去会从这里开始」，不是设备
+   读数——一条半满的轨道会被当成「亮度就是这么高」。读数那一格同时写「未下发」。 */
 .zc-out__row.is-unsent .zc-out__slider { opacity: 0.5; }
 .zc-out__value {
+  flex: none;
+  min-width: 2.9rem;
   color: var(--muted-foreground);
-  font-family: var(--mono);
-  font-size: 0.62rem;
+  font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }

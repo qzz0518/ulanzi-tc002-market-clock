@@ -41,6 +41,7 @@
 #include "ui/ChannelRingScreen.h"
 #include "ui/GameScreen.h"
 #include "ui/LauncherScreen.h"
+#include "ui/LevelControl.h"
 #include "ui/LevelOverlay.h"
 #include "ui/MusicScreen.h"
 #include "ui/ProvisionScreen.h"
@@ -333,17 +334,27 @@ void dispatchInput(tcos::Input input, int nowMs) {
 // Side buttons: short press adjusts volume, long press adjusts brightness. Both
 // raise the same HUD, because neither change is visible otherwise — the speaker
 // may be muted and a brightness step on an already-dim panel is easy to miss.
-void adjustLevel(bool brightness, int delta, int nowMs) {
-	tcos::DeviceControls& controls = tcos::DeviceControls::instance();
-	if (brightness) {
-		const int level = controls.nudgeBrightness(delta);
-		shell().overlay().show(tcos::LevelOverlay::kBrightness, level,
-		                       tcos::DeviceControls::kBrightnessSteps, nowMs);
-	} else {
-		const int level = controls.nudgeVolume(delta);
-		shell().overlay().show(tcos::LevelOverlay::kVolume, level,
-		                       tcos::DeviceControls::kVolumeMax, nowMs);
+//
+// The rules live in ui/LevelControl.cpp, and this is the only thing left here:
+// binding them to the two device singletons. DeviceControls.cpp calls the
+// FlyThings audio manager, so as long as the rules named it directly they could
+// not be compiled by any host check — which is how the console branch shipped
+// raising the brightness bar for a volume change. See ui/LevelControl.h.
+class DeviceLevelControls : public tcos::LevelControls {
+ public:
+	virtual int volume() const { return tcos::DeviceControls::instance().volume(); }
+	virtual int brightness() const { return tcos::DeviceControls::instance().brightness(); }
+	virtual int nudgeVolume(int delta) {
+		return tcos::DeviceControls::instance().nudgeVolume(delta);
 	}
+	virtual int nudgeBrightness(int delta) {
+		return tcos::DeviceControls::instance().nudgeBrightness(delta);
+	}
+};
+
+tcos::LevelControls& levels() {
+	static DeviceLevelControls single;
+	return single;
 }
 
 void handleKey(int code, int status, int nowMs) {
@@ -389,15 +400,13 @@ void handleKey(int code, int status, int nowMs) {
 	sHeld.fired = false;
 	if (!wasHeld || alreadyFired) return;
 
-	// A short press adjusts whatever the HUD is currently showing. While a
-	// brightness bar is up the user is in brightness, and making them hold the
-	// button for every step — or silently moving the volume instead — would both
-	// be wrong.
-	const bool brightness =
-		shell().overlay().shortPressKind(nowMs) == tcos::LevelOverlay::kBrightness;
-	if (code == E_KEYCODE_LEFT_BUTTON) adjustLevel(brightness, -1, nowMs);
-	else if (code == E_KEYCODE_RIGHT_BUTTON) adjustLevel(brightness, +1, nowMs);
-	else {
+	// A short press adjusts whatever the HUD is currently showing — see
+	// applyShortPress, which is where that rule is stated and checked.
+	if (code == E_KEYCODE_LEFT_BUTTON) {
+		tcos::applyShortPress(levels(), shell().overlay(), -1, nowMs);
+	} else if (code == E_KEYCODE_RIGHT_BUTTON) {
+		tcos::applyShortPress(levels(), shell().overlay(), +1, nowMs);
+	} else {
 		tcos::Sfx::instance().play(tcos::Sfx::kConfirm);
 		dispatchInput(tcos::kInputPress, nowMs);
 	}
@@ -406,9 +415,11 @@ void handleKey(int code, int status, int nowMs) {
 // Fired from the tick the moment the threshold passes, not on release: waiting
 // for the release would make every long press feel like it lagged.
 void handleHold(int code, int nowMs) {
-	if (code == E_KEYCODE_LEFT_BUTTON) adjustLevel(true, -1, nowMs);
-	else if (code == E_KEYCODE_RIGHT_BUTTON) adjustLevel(true, +1, nowMs);
-	else {
+	if (code == E_KEYCODE_LEFT_BUTTON) {
+		tcos::adjustLevel(levels(), shell().overlay(), true, -1, nowMs);
+	} else if (code == E_KEYCODE_RIGHT_BUTTON) {
+		tcos::adjustLevel(levels(), shell().overlay(), true, +1, nowMs);
+	} else {
 		tcos::Sfx::instance().play(tcos::Sfx::kBack);
 		dispatchInput(tcos::kInputHold, nowMs);
 	}
@@ -1227,7 +1238,7 @@ static bool onUI_Timer(int id) {
 		// Acting on it would replay whatever the console did before this boot.
 		if (!sConsoleSeqPrimed && sLink.online) {
 			sConsoleSeqPrimed = true;
-			sAppliedSettingsSeq = sLink.settingsSeq;
+			sAppliedSettingsSeq = sLink.settings.seq;
 			for (size_t i = 0; i < sLink.inputs.size(); ++i) {
 				if (sLink.inputs[i].seq > sAppliedInputSeq) sAppliedInputSeq = sLink.inputs[i].seq;
 			}
@@ -1248,24 +1259,15 @@ static bool onUI_Timer(int id) {
 			applyLyricTheme(sLink.lyricMode, sLink.lyricSkin, sLink.accentRgb, sLink.hasAccent);
 		}
 
-		// Settings the console asked for. Applied ONLY on a rising sequence: the
-		// document keeps carrying the last request forever, and re-applying it
-		// every poll would make the physical knob useless — the volume would
-		// spring back the instant the user let go.
-		if (sLink.settingsSeq > sAppliedSettingsSeq) {
-			sAppliedSettingsSeq = sLink.settingsSeq;
-			tcos::DeviceControls& controls = tcos::DeviceControls::instance();
-			if (sLink.requestedVolume >= 0) {
-				controls.nudgeVolume(sLink.requestedVolume - controls.volume());
-				shell().overlay().show(tcos::LevelOverlay::kVolume, controls.volume(),
-				                       tcos::DeviceControls::kVolumeMax, nowMs);
-			}
-			if (sLink.requestedBrightness >= 0) {
-				controls.nudgeBrightness(sLink.requestedBrightness - controls.brightness());
-				shell().overlay().show(tcos::LevelOverlay::kBrightness, controls.brightness(),
-				                       tcos::DeviceControls::kBrightnessSteps, nowMs);
-			}
-		}
+		// Settings the console asked for. The whole rule — apply only on a rising
+		// sequence, and raise the bar for the level that actually moved — is
+		// applyConsoleSettings, so it is compiled and asserted by the host
+		// self-check. It used to be written out here, where nothing could run it,
+		// which is how a volume-only change came to draw the BRIGHTNESS bar: the
+		// document carries both values forever, so a `requestedBrightness >= 0`
+		// test was true from the first brightness the console ever set.
+		tcos::applyConsoleSettings(sLink.settings, sAppliedSettingsSeq, levels(),
+		                           shell().overlay(), nowMs);
 
 		// Button and knob presses the console made on the user's behalf. Injected
 		// through the same path a real key takes, so a remote press cannot behave
@@ -1288,11 +1290,9 @@ static bool onUI_Timer(int id) {
 				tcos::Sfx::instance().play(tcos::Sfx::kBack);
 				dispatchInput(tcos::kInputHold, nowMs);
 			} else if (event.action == "left") {
-				adjustLevel(shell().overlay().shortPressKind(nowMs)
-				                == tcos::LevelOverlay::kBrightness, -1, nowMs);
+				tcos::applyShortPress(levels(), shell().overlay(), -1, nowMs);
 			} else if (event.action == "right") {
-				adjustLevel(shell().overlay().shortPressKind(nowMs)
-				                == tcos::LevelOverlay::kBrightness, +1, nowMs);
+				tcos::applyShortPress(levels(), shell().overlay(), +1, nowMs);
 			}
 		}
 		const std::string signature = tcos::menuSignature(sLink.items);

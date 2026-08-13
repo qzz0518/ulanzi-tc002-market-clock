@@ -30,7 +30,8 @@
 
 ```
 app/src/core/     Surface, Shell, RingModel, Transitions, Text, Ease  ← 全部 host 可编译
-app/src/ui/       Screen 接口与各页面, LevelOverlay, 图标, ZOS 字标   ← 同上
+app/src/ui/       Screen 接口与各页面, LevelOverlay/LevelControl,
+                  图标, ZOS 字标                                      ← 同上
 app/src/net/      HostLink, StateDoc, FrameBundle, HttpClient/Server,
                   WpaCtrl, WifiPolicy, SetupPortal, PortalService     ← 纯逻辑部分同上
 app/src/platform/ Presenter, Sfx, DeviceControls, NetInfo,
@@ -63,6 +64,12 @@ sideload/os       侧载启动脚本
 
 游戏页是唯一要求「原始按键边沿」的页面（`wantsRawButtons()`）：引擎需要知道方向键被按住
 了多久，所以侧键在游戏内不再是音量 / 亮度。长按在任何阶段都能退出游戏。
+
+侧键、控制台注入的按键、控制台的音量 / 亮度滑块，三条路都收口在 `ui/LevelControl.cpp`，
+`osLogic.cc` 里只剩一个把它接到两个单例上的适配器。原因很实际：`osLogic.cc` 是被 activity
+`#include` 的，不是独立翻译单元，任何 host 自检都编不到它——这套规则曾经写在那里，
+于是「只改音量」画出了亮度条，而自检里那份手抄副本照样全绿。`mise run os-hostcheck`
+现在直接链接这个文件，并额外守一条：全树只有它能出现 `LevelOverlay::kVolume/kBrightness`。
 
 ## 菜单
 

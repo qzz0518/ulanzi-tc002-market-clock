@@ -12,10 +12,8 @@ import {
   PinOff,
   Radio,
   RefreshCw,
-  SunMedium,
   Timer,
   TriangleAlert,
-  Volume2,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -26,7 +24,6 @@ import {
   CollapsiblePanel,
   CollapsibleRoot,
   CollapsibleTrigger,
-  NumberField,
   SectionTitle,
   Slider,
   Surface,
@@ -73,11 +70,12 @@ import "./zos-console.css";
 // updated when a frame arrived could never say "the frames stopped arriving".
 const AGE_TICK_MS = 500;
 
-// A brightness drag fires per notch, and one PUT per notch would race itself.
-// The Slider's own throttle coalesces the drag: the first notch goes out at
-// once (so a click on the track feels immediate), then at most one write per
-// interval, with a guaranteed trailing write for wherever the user settled.
-const BRIGHTNESS_THROTTLE_MS = 250;
+// A drag fires per notch, and one PUT per notch would race itself. The Slider's
+// own throttle coalesces it: the first notch goes out at once (so a click on the
+// track feels immediate), then at most one write per interval, with a guaranteed
+// trailing write for wherever the user settled. Volume and brightness share the
+// value because they are now the same control writing to the same endpoint.
+const SETTINGS_THROTTLE_MS = 250;
 
 const BATTERY_ICONS = {
   ok: BatteryFull,
@@ -169,8 +167,8 @@ export function ZosPanel() {
     }
   }, [toast]);
 
-  // No debounce of our own: the volume stepper writes once per deliberate press,
-  // and the brightness slider does its own coalescing (BRIGHTNESS_THROTTLE_MS).
+  // No debounce of our own: both sliders coalesce their own drags through the
+  // component's throttle (SETTINGS_THROTTLE_MS).
   const sendSettings = useCallback(async (patch: { volume?: number; brightness?: number }) => {
     const link = linkRef.current;
     if (!link) return;
@@ -246,9 +244,8 @@ export function ZosPanel() {
 
   return (
     <main className="zc-shell">
-      {/* 页头已经写着「系统」，面板本身就是这一页——标题只留给读屏器。 */}
-      <h1 className="sr-only">ZOS 系统控制台</h1>
-
+      {/* 页级标题由 app.tsx 的 .page-heading 出，和其他 Tab 同一块骨架；这里再补一个
+          sr-only 的 h1 就是同一页有两个名字，读屏器按标题跳转会连报两次。 */}
       <Surface variant="solid" outline className="zc-panel" contentClassName="flex flex-col">
         {/* ── 状态条：此刻为真的事实，各说一次 ── */}
         <div className="zc-strip">
@@ -362,50 +359,30 @@ export function ZosPanel() {
                 只知道自己发过什么。所以它们是「下发」，不是「读数」。 */}
             <SectionTitle className="zc-menu__title">下发到设备</SectionTitle>
             <div className="zc-out">
-              <div className={volumeShown === null ? "zc-out__row is-unsent" : "zc-out__row"}>
-                <span className="zc-out__label"><Volume2 aria-hidden="true" />音量</span>
-                {/* 0–6 共七格，人一次只动一格：官方文档里这正是 NumberField
-                    而不是 Slider 的场景。 */}
-                <NumberField
-                  size="md"
-                  color="brand"
-                  input={false}
-                  min={ZOS_VOLUME_MIN}
-                  max={ZOS_VOLUME_MAX}
-                  value={volumeShown ?? ZOS_VOLUME_START}
-                  role="group"
-                  aria-label={`音量，${ZOS_VOLUME_MIN} 到 ${ZOS_VOLUME_MAX} 级`}
-                  onChange={(value: number) => {
-                    setVolumeDraft(value);
-                    void sendSettings({ volume: value });
-                  }}
-                />
-                <span className="zc-out__value">{volumeText(volumeShown)}</span>
-              </div>
-              <div className={brightnessShown === null ? "zc-out__row is-unsent" : "zc-out__row"}>
-                <span className="zc-out__label"><SunMedium aria-hidden="true" />亮度</span>
-                {/* Slider 拿不到 aria-label，label 包住原生 range 才有名字。 */}
-                <label className="zc-out__slider">
-                  <span className="sr-only">亮度（{ZOS_BRIGHTNESS_MIN} 到 {ZOS_BRIGHTNESS_MAX} 级）</span>
-                  <Slider
-                    variant="track"
-                    rangeFill
-                    rounded
-                    size="sm"
-                    color="brand"
-                    min={ZOS_BRIGHTNESS_MIN}
-                    max={ZOS_BRIGHTNESS_MAX}
-                    step={1}
-                    throttle={BRIGHTNESS_THROTTLE_MS}
-                    value={brightnessShown ?? ZOS_BRIGHTNESS_START}
-                    onChange={(value: number) => {
-                      setBrightnessDraft(value);
-                      void sendSettings({ brightness: value });
-                    }}
-                  />
-                </label>
-                <span className="zc-out__value">{brightnessText(brightnessShown)}</span>
-              </div>
+              <ZosSendRow
+                label="音量"
+                min={ZOS_VOLUME_MIN}
+                max={ZOS_VOLUME_MAX}
+                value={volumeShown ?? ZOS_VOLUME_START}
+                sent={volumeShown !== null}
+                readout={volumeText(volumeShown)}
+                onChange={(value) => {
+                  setVolumeDraft(value);
+                  void sendSettings({ volume: value });
+                }}
+              />
+              <ZosSendRow
+                label="亮度"
+                min={ZOS_BRIGHTNESS_MIN}
+                max={ZOS_BRIGHTNESS_MAX}
+                value={brightnessShown ?? ZOS_BRIGHTNESS_START}
+                sent={brightnessShown !== null}
+                readout={brightnessText(brightnessShown)}
+                onChange={(value) => {
+                  setBrightnessDraft(value);
+                  void sendSettings({ brightness: value });
+                }}
+              />
             </div>
           </aside>
         </div>
@@ -475,6 +452,55 @@ export function ZosPanel() {
         onProvisioned={() => void linkRef.current?.refreshState()}
       />
     </main>
+  );
+}
+
+interface ZosSendRowProps {
+  label: string;
+  min: number;
+  max: number;
+  value: number;
+  /** 这一格下发过没有。没有的话滑块的位置只是个起点，不是设备读数。 */
+  sent: boolean;
+  readout: string;
+  onChange: (value: number) => void;
+}
+
+/**
+ * 一行「下发」：标签在左，滑块 + 右对齐读数在右。
+ *
+ * 排布、控件、字号都照「常规设置 → 显示与声音」那两行（device-settings-dialog）
+ * 来——同一个 cladd Slider，同一套标签/控件/读数的列节奏。音量 0–6 是七格离散
+ * 值，单看这一条 NumberField 的加减更贴切，但那样一上一下就是两种控件，全 app
+ * 也只有这里这么调音量；一致性优先。写成一个组件而不是两段 JSX，也是为了这两行
+ * 只可能长得一样。
+ *
+ * 与参考实现唯一的实质差别由协议决定：这两个值读不回来（序列号让设备旋钮和侧键
+ * 压过控制台），所以没下发过的行读「未下发」、滑块压暗——半满的轨道不能冒充设备
+ * 当前的亮度。
+ */
+function ZosSendRow({ label, min, max, value, sent, readout, onChange }: ZosSendRowProps) {
+  return (
+    <div className={sent ? "zc-out__row" : "zc-out__row is-unsent"}>
+      <span className="zc-out__label">{label}</span>
+      <div className="zc-out__control">
+        {/* Slider 拿不到 aria-label，label 包住原生 range 才有名字；量程由
+            range 自己的 min/max 播报，不必再写进名字里。 */}
+        <label className="zc-out__slider">
+          <span className="sr-only">{label}</span>
+          <Slider
+            value={value}
+            min={min}
+            max={max}
+            step={1}
+            color="brand"
+            throttle={SETTINGS_THROTTLE_MS}
+            onChange={onChange}
+          />
+        </label>
+        <span className="zc-out__value">{readout}</span>
+      </div>
+    </div>
   );
 }
 

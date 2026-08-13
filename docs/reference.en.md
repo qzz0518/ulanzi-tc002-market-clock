@@ -328,7 +328,9 @@ skin	tape
 accent	ff8844
 setseq	3
 setvol	4
+setvolseq	2
 setbri	7
+setbriseq	3
 input	12	press
 np	1
 track	Her Majesty
@@ -388,6 +390,26 @@ anything faster can only fetch bytes it already has. `GET /api/os/frames` answer
 `X-Os-Rev`, so the device records the revision it **actually received** rather than the one
 the document advertised when it decided to ask — a save landing between those two moments
 would otherwise make a brand-new bundle look stale on arrival.
+
+The settings block carries three sequences for the same kind of reason. `setseq` says how new
+the request is and the device acts only when it rises; `setvolseq` / `setbriseq` say **which
+level the user just moved**. Both are needed, because the document **always** carries volume
+and brightness together (the console's last request for each), so a device reading only the
+values cannot tell "the volume slider was just dragged" from "the brightness slider was" from
+"nothing was touched" — it had to act on both, which made every volume change also run a
+zero-sized brightness nudge and draw the brightness bar over the volume one: **the user saw
+the brightness screen while the volume did change**. Sequences rather than a "which field
+moved" flag, because the long poll may coalesce: the console moves volume at seq 5 and
+brightness at seq 6, the device reads one document, and a flag describing a single write would
+lose the earlier one. The panel has one bar, so when both moved it goes to the **later** one
+(the slider still under the user's finger), and when both moved in the same PUT it goes to
+volume — brightness is visible in every lit pixel while a muted speaker is not, and volume is
+the only choice that does not silently switch the side buttons into brightness mode. Sent as
+**new keys** rather than a third field on `setvol`, for the same reason as `rev`/`ttl`; older
+firmware ignores them and behaves exactly as it did before they existed. A console re-sending
+the level the device is already at still advances the sequence — it means "the user moved this
+control", not "this number changed", or dragging a slider back to where it started would
+produce no feedback at all.
 
 **While ZOS is resident the push stops; the render does not.** ZOS replaced the official app and
 `POST /api/custom` went with it; what answers now is a setup portal that returns the config
@@ -663,7 +685,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
-| `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned |
+| `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned. Only the field named in the request is stamped: the other one stays in the document with its own `setvolseq` / `setbriseq` unmoved, so the panel raises a bar only for the level the user actually touched |
 | `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing

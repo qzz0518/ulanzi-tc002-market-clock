@@ -9,6 +9,75 @@
 namespace tcos {
 
 /**
+ * The console's settings block: what it asked for, and WHEN it asked for each.
+ *
+ * Two per-field sequences beside the document's own, because a VALUE cannot say
+ * which control the user moved. The document carries the console's last request
+ * for both levels forever — deliberately, since that is what makes a coalesced
+ * poll (two console writes, one document) apply both instead of losing the
+ * earlier one — so a device reading only the values sees "volume 4, brightness
+ * 7" whether the user just moved the volume slider, the brightness slider, or
+ * nothing at all. The per-field sequences are the only thing that tells those
+ * apart, and telling them apart is what decides which bar the panel raises.
+ *
+ * Zero means "this service does not send per-field sequences": an older build,
+ * answered by treating both fields as moved at the document's own sequence,
+ * which is exactly the behaviour that shipped before these keys existed.
+ */
+struct SettingsRequest {
+  int seq;            // setseq; 0 before the console has ever written
+  int volume;         // setvol, or -1 when absent
+  int volumeSeq;      // setvolseq, or 0 when the service does not send one
+  int brightness;     // setbri, or -1 when absent
+  int brightnessSeq;  // setbriseq, or 0 when the service does not send one
+
+  SettingsRequest()
+      : seq(0), volume(-1), volumeSeq(0), brightness(-1), brightnessSeq(0) {}
+};
+
+/**
+ * What one settings document should actually do to the device.
+ *
+ * Split out of osLogic.cc for the same reason menuSignature was: it needs no
+ * FlyThings header, it is the only thing standing between a console slider and
+ * the panel, and while it lived inline it had no test — which is how a
+ * volume-only change could raise the BRIGHTNESS bar for the whole life of the
+ * build. The user saw the brightness screen and a volume that had, correctly,
+ * moved.
+ *
+ * `bar` is at most one kind, because the panel has one bar. When both levels
+ * move in the same document the more RECENT request wins (the higher per-field
+ * sequence — the slider still under the user's finger), and a genuine tie — one
+ * PUT carrying both — shows VOLUME: it is the change with no other evidence on
+ * the device (brightness is visible in every lit pixel, a muted speaker is
+ * not), and it is the only choice that leaves the side buttons in their default
+ * mode instead of silently arming brightness for the next 1.3 s.
+ */
+struct SettingsPlan {
+  enum Bar { kNoBar, kVolumeBar, kBrightnessBar };
+
+  bool applyVolume;
+  bool applyBrightness;
+  Bar bar;
+
+  SettingsPlan() : applyVolume(false), applyBrightness(false), bar(kNoBar) {}
+};
+
+/**
+ * Decides what to apply and what to show, given the last sequence the device
+ * acted on and the levels it is currently at.
+ *
+ * The current levels are read ONLY on the legacy path, where no per-field
+ * sequence exists and "did this value move" is the only signal left. On that
+ * path a console re-sending the level the device already has raises no bar at
+ * all — worse feedback than the bug being fixed, but strictly better than
+ * naming a control the user did not touch, and it can only happen against a
+ * service older than this firmware.
+ */
+SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
+                          int currentVolume, int currentBrightness);
+
+/**
  * Parser for the document served by GET /api/os/pull.
  *
  * The format is line-oriented `KEY\tVALUE`, chosen so this can be a split loop
@@ -117,16 +186,18 @@ class StateDoc {
    * option and would not be smooth anyway.
    */
   /**
-   * Settings the console asked for, and the sequence that makes them safe.
+   * Settings the console asked for, and the sequences that make them safe.
    *
-   * The device applies a value only when `settingsSeq()` is HIGHER than the one
-   * it last applied. Without that the console's old value sits in every
-   * document forever and is re-applied on each poll, which makes the knob
-   * useless: the volume springs back the instant the user lets go.
+   * The device applies a value only when its sequence is HIGHER than the one it
+   * last applied. Without that the console's old value sits in every document
+   * forever and is re-applied on each poll, which makes the knob useless: the
+   * volume springs back the instant the user lets go.
+   *
+   * Exposed as the whole struct, with no per-field accessor beside it, because
+   * reading one level without the other's sequence is exactly the mistake that
+   * showed a brightness bar for a volume change. Feed it to planSettings().
    */
-  int settingsSeq() const { return mSettingsSeq; }
-  int requestedVolume() const { return mRequestedVolume; }      // -1 when absent
-  int requestedBrightness() const { return mRequestedBrightness; }
+  const SettingsRequest& settings() const { return mSettings; }
 
   /**
    * Button and knob events the console pressed on the device's behalf.
@@ -190,9 +261,7 @@ class StateDoc {
   bool mMirror;
   std::string mFocus;
   std::vector<Item> mItems;
-  int mSettingsSeq;
-  int mRequestedVolume;
-  int mRequestedBrightness;
+  SettingsRequest mSettings;
   std::vector<Input> mInputs;
   bool mHasNowPlaying;
   bool mPlaying;

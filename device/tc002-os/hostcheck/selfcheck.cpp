@@ -52,6 +52,7 @@
 #include "ui/ChannelRingScreen.h"
 #include "ui/GameScreen.h"
 #include "ui/LauncherScreen.h"
+#include "ui/LevelControl.h"
 #include "ui/LevelOverlay.h"
 #include "ui/MusicScreen.h"
 #include "ui/ProvisionScreen.h"
@@ -2006,6 +2007,313 @@ void checkLevelOverlay() {
     }
   }
   check(sawDimmed, "the frame underneath is dimmed rather than erased");
+}
+
+// --- the console's volume/brightness path -----------------------------------
+//
+// Stand-in for DeviceControls, whose .cpp calls into the FlyThings audio
+// manager and cannot be linked here. It is the ONLY thing standing in: the
+// adjust/console rules below are ui/LevelControl.cpp itself, linked, not a copy
+// of it — a mirrored copy passes happily while the original is wrong, which is
+// what let the wrong-bar bug ship. The SCALES are the real ones too, taken from
+// the header rather than from two literals, so a self-check cannot pass against
+// a range the device does not have.
+struct FakeControls : public tcos::LevelControls {
+  int vol;
+  int bri;
+
+  FakeControls() : vol(3), bri(5) {}
+
+  virtual int volume() const { return vol; }
+  virtual int brightness() const { return bri; }
+
+  static int clampTo(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  virtual int nudgeVolume(int delta) {
+    vol = clampTo(vol + delta, 0, tcos::DeviceControls::kVolumeMax);
+    return vol;
+  }
+  virtual int nudgeBrightness(int delta) {
+    // Floors at one step, exactly as the device does: zero would black the
+    // panel out with no way to see the bar that turns it back up.
+    bri = clampTo(bri + delta, 1, tcos::DeviceControls::kBrightnessSteps);
+    return bri;
+  }
+};
+
+// Parses a document the way the device does, so these cases exercise the real
+// wire keys rather than a struct filled in by hand.
+tcos::SettingsRequest settingsFromDoc(const char* body) {
+  tcos::StateDoc doc;
+  doc.parse(body);
+  return doc.settings();
+}
+
+void checkConsoleSettings() {
+  using tcos::LevelOverlay;
+  using tcos::SettingsPlan;
+  using tcos::SettingsRequest;
+
+  // --- the wire keys -------------------------------------------------------
+  // Byte-for-byte the settings block OsLinkHub.serialize() emits, in its order.
+  // test/os-link.test.ts asserts the encoder still produces exactly this, so
+  // the two halves of the contract are pinned from both sides.
+  const SettingsRequest wire = settingsFromDoc(
+      "seq\t12\npinned\t0\nmirror\t0\n"
+      "setseq\t4\nsetvol\t4\nsetvolseq\t4\nsetbri\t7\nsetbriseq\t3\n"
+      "menu\t0\n");
+  check(wire.seq == 4 && wire.volume == 4 && wire.brightness == 7,
+        "the settings block still parses as it always did");
+  check(wire.volumeSeq == 4 && wire.brightnessSeq == 3,
+        "and each level now carries the sequence it was last asked for at");
+  // The keys share a prefix; an exact compare is the only thing keeping
+  // `setvolseq` out of `setvol`, and a level that silently became a sequence
+  // number would set the volume to 9 on a 0..6 scale.
+  const SettingsRequest seqOnly =
+      settingsFromDoc("seq\t1\nsetseq\t4\nsetvolseq\t4\nmenu\t0\n");
+  check(seqOnly.volume == -1 && seqOnly.volumeSeq == 4,
+        "setvolseq is not mistaken for setvol");
+
+  // --- THE BUG -------------------------------------------------------------
+  // Brightness was set once, long ago; the console now moves only the volume.
+  // The document still carries both — it always will — so the old code ran the
+  // brightness branch too: a zero-sized nudge that changed nothing, and a
+  // brightness bar drawn straight over the volume one.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 8;
+    const SettingsRequest volumeOnly = settingsFromDoc(
+        "seq\t20\nsetseq\t9\nsetvol\t6\nsetvolseq\t9\nsetbri\t7\nsetbriseq\t1\nmenu\t0\n");
+    tcos::applyConsoleSettings(volumeOnly, applied, controls, hud, 1000);
+    check(controls.volume() == 6, "a console volume change reaches the mixer");
+    check(controls.brightness() == 5,
+          "and leaves brightness where the device had it, not where the console last asked");
+    check(hud.visible(1000) && hud.kind() == LevelOverlay::kVolume,
+          "a volume-only change shows the VOLUME bar");
+    check(hud.value() == 6, "showing the level it just moved to");
+    // The bar is a mode as well as a readout, so the wrong bar also aimed the
+    // side buttons at the wrong control for the next 1.3 s.
+    check(hud.shortPressKind(1000) == LevelOverlay::kVolume,
+          "and leaves the side buttons on volume");
+    tcos::applyShortPress(controls, hud, -1, 1050);
+    check(controls.volume() == 5 && controls.brightness() == 5,
+          "so a short press right after it steps the volume, not the brightness");
+
+    // Re-polling the same document must change nothing: the document repeats
+    // the request forever, and this is what lets the knob win afterwards.
+    controls.vol = 2;
+    tcos::applyConsoleSettings(volumeOnly, applied, controls, hud, 2000);
+    check(controls.volume() == 2, "a repeated document does not re-apply the request");
+  }
+
+  // --- brightness only -----------------------------------------------------
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 8;
+    const SettingsRequest brightnessOnly = settingsFromDoc(
+        "seq\t21\nsetseq\t9\nsetvol\t4\nsetvolseq\t2\nsetbri\t9\nsetbriseq\t9\nmenu\t0\n");
+    tcos::applyConsoleSettings(brightnessOnly, applied, controls, hud, 1000);
+    check(controls.brightness() == 9, "a console brightness change reaches the panel");
+    check(controls.volume() == 3, "and leaves the volume alone");
+    check(hud.visible(1000) && hud.kind() == LevelOverlay::kBrightness &&
+              hud.value() == 9,
+          "a brightness-only change shows the brightness bar");
+    // Deliberate, and the same rule a long press already establishes: while a
+    // brightness bar is up the user is in brightness, whoever raised it.
+    check(hud.shortPressKind(1000) == LevelOverlay::kBrightness,
+          "the bar arms the side buttons for brightness while it is up");
+    tcos::applyShortPress(controls, hud, +1, 1050);
+    check(controls.brightness() == 10 && controls.volume() == 3,
+          "so a short press continues the brightness the console started");
+    // ...and only until it expires. No mode the user has to remember to leave.
+    const int gone = 1050 + LevelOverlay::kHoldMs + LevelOverlay::kExitMs + 1;
+    tcos::applyShortPress(controls, hud, -1, gone);
+    check(controls.volume() == 2 && controls.brightness() == 10,
+          "once the bar lapses the side buttons are back on volume");
+  }
+
+  // --- both in one sequence ------------------------------------------------
+  // One PUT naming both levels. Both are applied — dropping one would be a
+  // worse bug than the one being fixed — and the single bar goes to VOLUME:
+  // brightness is visible in every lit pixel while a muted speaker is not, and
+  // volume is the only choice that does not silently arm the side buttons for
+  // brightness.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 0;
+    const SettingsRequest both = settingsFromDoc(
+        "seq\t22\nsetseq\t4\nsetvol\t6\nsetvolseq\t4\nsetbri\t9\nsetbriseq\t4\nmenu\t0\n");
+    tcos::applyConsoleSettings(both, applied, controls, hud, 1000);
+    check(controls.volume() == 6 && controls.brightness() == 9,
+          "both levels are applied when both moved at the same sequence");
+    check(hud.kind() == LevelOverlay::kVolume && hud.value() == 6,
+          "and the one bar shows volume");
+    check(hud.shortPressKind(1000) == LevelOverlay::kVolume,
+          "leaving the side buttons where they were");
+  }
+
+  // --- two writes the device read as one document --------------------------
+  // The poll is free to coalesce: the console moved the volume at seq 5 and the
+  // brightness at seq 6, and the device saw one document. Both must land — a
+  // "which field moved" flag would have described one write and lost the other
+  // — and the bar goes to the LATER one, the slider still under the finger.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 4;
+    const SettingsRequest coalesced = settingsFromDoc(
+        "seq\t23\nsetseq\t6\nsetvol\t1\nsetvolseq\t5\nsetbri\t2\nsetbriseq\t6\nmenu\t0\n");
+    tcos::applyConsoleSettings(coalesced, applied, controls, hud, 1000);
+    check(controls.volume() == 1 && controls.brightness() == 2,
+          "a coalesced poll applies both requests rather than only the last");
+    check(hud.kind() == LevelOverlay::kBrightness && hud.value() == 2,
+          "and shows the more recent one");
+  }
+
+  // A level the console re-sends unchanged still raises its bar: the sequence
+  // says the user moved the control, which is not the same question as whether
+  // the number differs. Without this a slider dragged back to where it started
+  // would give the console no feedback at all.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 8;
+    const SettingsRequest same = settingsFromDoc(
+        "seq\t24\nsetseq\t9\nsetvol\t3\nsetvolseq\t9\nsetbri\t7\nsetbriseq\t1\nmenu\t0\n");
+    tcos::applyConsoleSettings(same, applied, controls, hud, 1000);
+    check(controls.volume() == 3, "re-requesting the current level changes nothing");
+    check(hud.visible(1000) && hud.kind() == LevelOverlay::kVolume,
+          "but still answers the console with the volume bar");
+  }
+
+  // --- a document from an older service ------------------------------------
+  // No per-field sequences at all. The VALUES must land exactly as they always
+  // did — this is the shape every deployed document had — and the bar falls
+  // back to the only signal left: which level actually differs from the
+  // device's.
+  {
+    FakeControls controls;  // volume 3, brightness 5
+    LevelOverlay hud;
+    int applied = 2;
+    const SettingsRequest legacy =
+        settingsFromDoc("seq\t25\nsetseq\t3\nsetvol\t6\nsetbri\t5\nmenu\t0\n");
+    check(legacy.volumeSeq == 0 && legacy.brightnessSeq == 0,
+          "an older service sends no per-field sequence");
+    tcos::applyConsoleSettings(legacy, applied, controls, hud, 1000);
+    check(controls.volume() == 6 && controls.brightness() == 5,
+          "an older service's document still applies both values");
+    check(hud.kind() == LevelOverlay::kVolume && hud.value() == 6,
+          "and the bar follows the level that actually moved");
+  }
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 2;
+    tcos::applyConsoleSettings(
+        settingsFromDoc("seq\t26\nsetseq\t3\nsetvol\t3\nsetbri\t9\nmenu\t0\n"),
+        applied, controls, hud, 1000);
+    check(controls.brightness() == 9 && hud.kind() == LevelOverlay::kBrightness,
+          "the same, the other way round");
+  }
+  {
+    // Both differ: the tie rule again, so the legacy and per-field paths never
+    // disagree about which control owns the single bar.
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 2;
+    tcos::applyConsoleSettings(
+        settingsFromDoc("seq\t27\nsetseq\t3\nsetvol\t0\nsetbri\t1\nmenu\t0\n"),
+        applied, controls, hud, 1000);
+    check(controls.volume() == 0 && controls.brightness() == 1,
+          "both legacy values are applied");
+    check(hud.kind() == LevelOverlay::kVolume, "and volume takes the bar");
+  }
+  {
+    // The one case the fallback cannot answer: a legacy service re-sending
+    // levels the device already has. Nothing moved, so nothing is shown —
+    // poorer feedback than the bug, but it names no control the user did not
+    // touch, and it can only happen against a service older than this build.
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 2;
+    tcos::applyConsoleSettings(
+        settingsFromDoc("seq\t28\nsetseq\t3\nsetvol\t3\nsetbri\t5\nmenu\t0\n"),
+        applied, controls, hud, 1000);
+    check(!hud.visible(1000),
+          "a legacy request for the levels already set raises no bar at all");
+  }
+
+  // --- the physical path, untouched ----------------------------------------
+  // Nothing above may change what a button does. This is the button path on its
+  // own, through the same adjustLevel the console now shares: short press is
+  // volume, long press is brightness, and a raised brightness bar keeps further
+  // short presses on brightness until it expires.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    tcos::applyShortPress(controls, hud, +1, 1000);
+    check(controls.volume() == 4 && controls.brightness() == 5,
+          "a short press with nothing on screen is still volume");
+    check(hud.kind() == LevelOverlay::kVolume, "and raises the volume bar");
+
+    tcos::adjustLevel(controls, hud, true, +1, 1100);  // long press
+    check(controls.brightness() == 6 && hud.kind() == LevelOverlay::kBrightness,
+          "a long press is still brightness");
+    tcos::applyShortPress(controls, hud, +1, 1150);
+    check(controls.brightness() == 7 && controls.volume() == 4,
+          "and further short presses stay in brightness while the bar is up");
+
+    const int gone = 1150 + LevelOverlay::kHoldMs + LevelOverlay::kExitMs + 1;
+    tcos::applyShortPress(controls, hud, -1, gone);
+    check(controls.volume() == 3 && controls.brightness() == 7,
+          "then fall back to volume once it lapses");
+  }
+
+  // A settings document the device has already acted on must not disturb the
+  // buttons either: the user turns the volume down by hand, and the console's
+  // stale request has to stay stale.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 0;
+    const SettingsRequest request = settingsFromDoc(
+        "seq\t29\nsetseq\t2\nsetvol\t6\nsetvolseq\t2\nsetbri\t8\nsetbriseq\t1\nmenu\t0\n");
+    tcos::applyConsoleSettings(request, applied, controls, hud, 1000);
+    check(controls.volume() == 6, "the console's request lands once");
+    for (int poll = 0; poll < 5; ++poll) {
+      tcos::applyShortPress(controls, hud, -1, 2000 + poll * 200);
+      tcos::applyConsoleSettings(request, applied, controls, hud, 2000 + poll * 200);
+    }
+    check(controls.volume() == 1, "and the knob keeps winning on every poll after it");
+  }
+
+  // The plan is the whole decision, so state it directly too — a caller that
+  // reads applyVolume/applyBrightness must never be told to move a level the
+  // console did not name.
+  {
+    SettingsRequest absent;
+    absent.seq = 4;
+    absent.volume = 5;
+    absent.volumeSeq = 4;  // brightness has never been set: -1, seq 0
+    const SettingsPlan plan = tcos::planSettings(absent, 0, 3, 5);
+    check(plan.applyVolume && !plan.applyBrightness &&
+              plan.bar == SettingsPlan::kVolumeBar,
+          "a level the console never set is never applied");
+  }
+  {
+    SettingsRequest stale;
+    stale.seq = 4;
+    stale.volume = 5;
+    stale.volumeSeq = 4;
+    stale.brightness = 8;
+    stale.brightnessSeq = 4;
+    const SettingsPlan plan = tcos::planSettings(stale, 4, 3, 5);
+    check(!plan.applyVolume && !plan.applyBrightness &&
+              plan.bar == SettingsPlan::kNoBar,
+          "a sequence that has not risen plans nothing");
+  }
 }
 
 // Replays exactly what osLogic.cc does when the user presses confirm on 游戏 and
@@ -5808,6 +6116,8 @@ int main() {
   std::printf("  navigation flow ok\n");
   checkLevelOverlay();
   std::printf("  level overlay ok\n");
+  checkConsoleSettings();
+  std::printf("  console settings ok\n");
   checkTimeSync();
   std::printf("  time sync ok\n");
   checkBrightness();
