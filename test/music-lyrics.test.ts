@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { MusicLyricLine, MusicTrack } from "../src/music/core.ts";
 import { buildLyricLines, LrclibLyricsClient, parseLrc } from "../src/music/lyrics.ts";
+import { parseLrcEndMarkers } from "../src/music/lyric-timing.ts";
 
 const TRACK: MusicTrack = {
   id: "4uLU6hMCjMI75M1A2tKUQC",
@@ -37,16 +38,75 @@ describe("lyric parsing", () => {
     expect(parseLrc(undefined)).toEqual([]);
   });
 
-  test("closes each line at the next one and the last at the track end", () => {
+  test("closes each line where the singing stops, never past the next one", () => {
     const lines = buildLyricLines(
       [{ startMs: 1_000, text: "一" }, { startMs: 4_000, text: "二" }],
       9_000,
       new Map([[1_000, "one"]]),
     );
+    // One glyph is one unit, so the rate cap is the 900 ms floor. Both lines are
+    // held far longer than they are sung — the first by 3 s, the last by 8 s —
+    // and neither highlight is asked to crawl across that.
     expect(lines).toEqual([
-      { startMs: 1_000, endMs: 4_000, text: "一", translation: "one" },
-      { startMs: 4_000, endMs: 9_000, text: "二" },
+      { startMs: 1_000, endMs: 1_900, text: "一", translation: "one", endSource: "estimate" },
+      { startMs: 4_000, endMs: 4_900, text: "二", endSource: "estimate" },
     ]);
+  });
+
+  test("takes the next line's start when the singing would run past it", () => {
+    // Six syllables at 630 ms would be 3.78 s but the successor is 700 ms away,
+    // so nothing had to be guessed and the source says so.
+    const lines = buildLyricLines(
+      [{ startMs: 0, text: "I've been tryna call" }, { startMs: 700, text: "next" }],
+      60_000,
+    );
+    expect(lines[0]).toEqual({ startMs: 0, endMs: 700, text: "I've been tryna call", endSource: "next" });
+  });
+
+  test("takes the source's own bare end mark when it is tighter than the estimate", () => {
+    // A real lrclib response shape: a text line, a bare timestamp marking where
+    // it stopped, then a 12 s gap before the next line. The naive rule gave this
+    // line 8.53 s, and the rate cap would have allowed 5 syllables x 630 =
+    // 3.15 s. The source says 2.48 s — the tightest of the three bounds — so it
+    // is used, labelled as the measurement it is.
+    const synced = "[00:13.42] I've been tryna call\n[00:15.90]\n[00:21.95] Yeah";
+    const lines = buildLyricLines(parseLrc(synced), 200_000, undefined, {
+      endMarkersMs: parseLrcEndMarkers(synced),
+    });
+    expect(lines[0]).toEqual({
+      startMs: 13_420,
+      endMs: 15_900,
+      text: "I've been tryna call",
+      endSource: "marker",
+    });
+  });
+
+  test("ignores an end mark that is really a separator on the next line", () => {
+    // A bare timestamp sitting exactly on the successor's start says nothing
+    // about where the singing stopped; taking it would be the old bug wearing a
+    // different hat.
+    const synced = "[00:01.00]一二三四五六七八\n[00:20.00]\n[00:20.00]下一句";
+    const lines = buildLyricLines(parseLrc(synced), 200_000, undefined, {
+      endMarkersMs: parseLrcEndMarkers(synced),
+    });
+    expect(lines[0]!.endSource).toBe("estimate");
+    expect(lines[0]!.endMs).toBe(1_000 + 8 * 630);
+  });
+
+  test("a separator one millisecond short of the next line is still a separator", () => {
+    // The real one, from 孤勇者's own LRC: the mark after 谁说站在光里的才算英雄
+    // sits 300 ms before the successor and claims 18.06 s for a line `yrc`
+    // measures at 5.27 s. It is inside the gap, so an "is it before the next
+    // line?" guard passes it — only the singing-rate cap catches it.
+    const synced = "[01:50.35]谁说站在光里的才算英雄\n[02:08.41]\n[02:08.71]他们说";
+    const lines = buildLyricLines(parseLrc(synced), 260_000, undefined, {
+      endMarkersMs: parseLrcEndMarkers(synced),
+    });
+    expect(lines[0]!.endSource).toBe("estimate");
+    expect(lines[0]!.endMs - lines[0]!.startMs).toBe(11 * 630);
+    // What the marker would have bought had it won: 18.06 s of highlight for a
+    // line that stops 12.8 s earlier.
+    expect(128_410 - 110_350).toBe(18_060);
   });
 });
 
@@ -59,9 +119,12 @@ describe("LRCLIB lyric lookup", () => {
     );
     const client = new LrclibLyricsClient({ fetcher });
 
+    // The Spotify path is line-level LRC — three glyphs each, so 1.89 s of
+    // singing. The second line is the one that mattered: it used to be handed
+    // the remaining 197 seconds of the track.
     expect(await client.lyrics(TRACK)).toEqual([
-      { startMs: 1_000, endMs: 3_000, text: "第一行" },
-      { startMs: 3_000, endMs: 200_000, text: "第二行" },
+      { startMs: 1_000, endMs: 1_000 + 3 * 630, text: "第一行", endSource: "estimate" },
+      { startMs: 3_000, endMs: 3_000 + 3 * 630, text: "第二行", endSource: "estimate" },
     ]);
     expect(urls[0]!.host).toBe("lrclib.net");
     expect(urls[0]!.searchParams.get("track_name")).toBe("夜航");
@@ -81,7 +144,7 @@ describe("LRCLIB lyric lookup", () => {
     const client = new LrclibLyricsClient({ fetcher });
 
     expect(await client.lyrics(TRACK)).toEqual([
-      { startMs: 1_000, endMs: 200_000, text: "对的那版" },
+      { startMs: 1_000, endMs: 1_000 + 4 * 630, text: "对的那版", endSource: "estimate" },
     ]);
     expect(urls.map((url) => url.pathname)).toEqual(["/api/get", "/api/search"]);
   });
@@ -95,7 +158,7 @@ describe("LRCLIB lyric lookup", () => {
 
   test("hands a miss to the fallback source instead of failing", async () => {
     const fallbackLines: MusicLyricLine[] = [
-      { startMs: 0, endMs: 200_000, text: "网易云补上的歌词" },
+      { startMs: 0, endMs: 200_000, text: "网易云补上的歌词", endSource: "next" },
     ];
     const { fetcher } = jsonFetcher(() => null);
     const client = new LrclibLyricsClient({

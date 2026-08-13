@@ -104,6 +104,7 @@ function fakeWorkspaceController(previewCalls?: boolean[]): WorkspaceController 
       previewCalls?.push(forceRefresh);
       return renderOfflineDashboard() as never;
     },
+    channelContentRevision: () => "deadbeef0001",
     pushAll: async () => ({ healthy: true }),
     pushChannel: async () => ({ healthy: true }),
   } as unknown as WorkspaceController;
@@ -451,6 +452,12 @@ describe("local control API", () => {
     expect(audio.status).toBe(204);
 
     // ...but the lyric timeline still comes from the service.
+    //
+    // BYTE-FOR-BYTE REGRESSION LOCK. The sideload parser in LyricsPage.cpp
+    // splits on the first tab and treats any key that is not "DUR" as a start
+    // time, so a new record type would land as a garbage line at 0 ms and an
+    // extra column would render as literal tab-separated text. A device that
+    // has not been reflashed must keep receiving exactly this.
     const now = await handler(new Request("http://127.0.0.1:43820/api/music/device/now"));
     expect(await now.text()).toBe("DUR\t213000\n1000\t第一行\n");
 
@@ -509,6 +516,68 @@ describe("local control API", () => {
     expect(degradedText).toContain("RMT\t1");
     expect(degradedText).toContain("RPOS\t-1");
     expect(degradedText).toContain("TID\t1301WleyT98MSxVHPZCA6M");
+    resetDeviceMusicSelection("netease");
+  });
+
+  test("serves the word-level lyric timeline only to a firmware that asked for it", async () => {
+    // 孤勇者's reported line, plus a wordless one, on the sideload wire.
+    const glyphs = [..."谁说站在光里的才算英雄"];
+    const provider = {
+      status: () => ({ loggedIn: true, profile: { provider: "netease", id: "1", nickname: "听众" } }),
+      trackDetail: async (id: string) => ({
+        track: { id, title: "孤勇者", artists: ["陈奕迅"], durationMs: 260_000 },
+        lyrics: [
+          {
+            startMs: 110_330,
+            endMs: 115_620,
+            text: "谁说站在光里的才算英雄",
+            endSource: "words",
+            words: [
+              [110_330, 350], [110_680, 250], [110_930, 460], [111_390, 400], [111_790, 400],
+              [112_190, 400], [112_590, 640], [113_230, 380], [113_610, 390], [114_000, 340],
+              [114_340, 1_280],
+            ].map(([startMs, durationMs], index) => ({
+              startMs: startMs!,
+              endMs: startMs! + durationMs!,
+              text: glyphs[index]!,
+            })),
+          },
+          { startMs: 128_880, endMs: 131_000, text: "他们说", endSource: "estimate" },
+        ],
+      }),
+    };
+    resetDeviceMusicSelection("netease");
+    const handler = createControlHandler(fakeWorkspaceController(), {
+      music: fakeMusicHub(provider),
+    });
+    await handler(new Request("http://127.0.0.1:43820/api/music/device/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
+      body: JSON.stringify({ trackId: "1901371647" }),
+    }));
+
+    // Unversioned: the old format, unchanged, with no end and no table — which
+    // is why the sideload player still derives the end from the next start.
+    const legacy = await handler(new Request("http://127.0.0.1:43820/api/music/device/now"));
+    expect(await legacy.text())
+      .toBe("DUR\t260000\n110330\t谁说站在光里的才算英雄\n128880\t他们说\n");
+
+    const v2 = await handler(new Request("http://127.0.0.1:43820/api/music/device/now?v=2"));
+    const lines = (await v2.text()).split("\n").filter(Boolean);
+    // A version record first, so a firmware flashed with the wrong build can
+    // tell the two formats apart instead of rendering tabs as text.
+    expect(lines[0]).toBe("V\t2");
+    expect(lines[1]).toBe("DUR\t260000");
+    // The sung end now travels with the line: 5.29 s, not the 18.55 s to the
+    // next one.
+    expect(lines[2]).toBe("L\t110330\t115620\t谁说站在光里的才算英雄");
+    const table = lines[3]!;
+    expect(table.startsWith("W\t0,350,350,250,")).toBe(true);
+    expect(table.slice(2).split(",")).toHaveLength(22);
+    // A line with no word timings simply carries no table, and the panel sweeps
+    // it exactly as it always did.
+    expect(lines[4]).toBe("L\t128880\t131000\t他们说");
+    expect(lines).toHaveLength(5);
     resetDeviceMusicSelection("netease");
   });
 
@@ -1104,6 +1173,7 @@ describe("tc002-os console routes", () => {
       uptimeMs: 1_000,
       freeKb: 16_000,
       supplicantRestarts: 0,
+      proto: 0,
       batteryPercent: 87,
       charging: false,
       flashed: false,
@@ -1275,6 +1345,67 @@ describe("tc002-os console routes", () => {
     const legacy = osLink.serialize().split("\n");
     expect(legacy).toContain("lyric\t第二行");
     expect(legacy.some((line) => line.startsWith("lyricat\t"))).toBe(false);
+  });
+
+  test("a console report can carry word timings, and a bad table is dropped not rejected", async () => {
+    const { OsLinkHub, OS_PROTO_LYRIC_WINDOW } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+    // The device announces which document revision it can read; without this it
+    // is treated as a build from before the split and gets the old encoding.
+    await handler(new Request(`${origin}/api/os/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ screen: "music", flashed: true, proto: OS_PROTO_LYRIC_WINDOW }),
+    }));
+    const report = (body: unknown) => handler(new Request(`${origin}/api/os/now-playing`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify(body),
+    }));
+    const base = {
+      track: "孤勇者", artist: "陈奕迅", playing: true,
+      positionMs: 113_000, durationMs: 260_000,
+      lyric: "谁说站在光里的才算英雄",
+      lyricStartMs: 110_330, lyricEndMs: 115_620, lyricUntilMs: 128_880,
+    };
+    const words = [
+      [110_330, 350], [110_680, 250], [110_930, 460], [111_390, 400], [111_790, 400],
+      [112_190, 400], [112_590, 640], [113_230, 380], [113_610, 390], [114_000, 340],
+      [114_340, 1_280],
+    ].map(([startMs, durationMs], index) => ({
+      startMs: startMs!,
+      endMs: startMs! + durationMs!,
+      text: [..."谁说站在光里的才算英雄"][index]!,
+    }));
+
+    expect((await report({ ...base, lyricWords: words })).status).toBe(200);
+    const doc = osLink.serialize().split("\n");
+    expect(doc).toContain("lyricend\t115620");
+    expect(doc).toContain("lyricuntil\t128880");
+    expect(doc.find((line) => line.startsWith("lyricw\t"))!.slice(7).split(","))
+      .toHaveLength(22);
+
+    // A malformed table must never fail the report: the panel falls back to the
+    // line-level sweep, which is the honest answer when the timings cannot be
+    // trusted, and the line itself still reaches the device.
+    for (const broken of [
+      [{ startMs: -1, endMs: 100, text: "谁" }],
+      [{ startMs: 500, endMs: 100, text: "谁" }],
+      [{ startMs: 500, endMs: 900, text: "" }],
+      [{ startMs: 900, endMs: 1_000, text: "说" }, { startMs: 500, endMs: 600, text: "谁" }],
+      Array.from({ length: 65 }, (_, i) => ({ startMs: i, endMs: i + 1, text: "字" })),
+      "not an array",
+    ]) {
+      const response = await report({ ...base, lyric: "另一句", lyricWords: broken });
+      expect(response.status).toBe(200);
+      const after = osLink.serialize().split("\n");
+      expect(after).toContain("lyric\t另一句");
+      expect(after.some((line) => line.startsWith("lyricw\t"))).toBe(false);
+      // Reset so the next iteration is not comparing against itself.
+      await report({ ...base, lyric: "重置", lyricWords: undefined });
+    }
   });
 
   // A restart used to be indistinguishable from a factory reset for this one

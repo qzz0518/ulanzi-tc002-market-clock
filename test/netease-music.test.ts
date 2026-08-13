@@ -117,9 +117,58 @@ describe("NetEase music service", () => {
       coverUrl: "https://p.example/cover.jpg",
     }]);
     expect((await service.trackDetail("123")).lyrics).toEqual([
-      { startMs: 1_200, endMs: 3_000, text: "第一行", translation: "First line" },
-      { startMs: 3_000, endMs: 5_000, text: "第二行" },
+      { startMs: 1_200, endMs: 3_000, text: "第一行", translation: "First line", endSource: "next" },
+      // Three glyphs, so 1.89 s of singing rather than the 2 s remaining in the
+      // track. This is the ~75-80% of NetEase tracks that have no yrc.
+      { startMs: 3_000, endMs: 3_000 + 3 * 630, text: "第二行", endSource: "estimate" },
     ]);
+  });
+
+  // `lyric_new` calls itself 新版歌词 - 包含逐字歌词 and asks for yv/ytv/yrv, so the
+  // word timings were arriving on every single request and being dropped on the
+  // floor. This is the whole fix: when they are there, nothing is estimated.
+  test("prefers the word-level yrc timeline, with its own translation track", async () => {
+    const { store } = await sessionStore();
+    const song = { id: 1, name: "孤勇者", ar: [{ name: "陈奕迅" }], al: { name: "" }, dt: 260_000 };
+    const service = new NeteaseMusicService({
+      sessionStore: store,
+      gateway: fakeGateway({
+        songDetail: async () => ({ body: { songs: [song] } }),
+        lyric: async () => ({
+          body: {
+            // The credit blobs really are the first records of the field.
+            yrc: {
+              lyric: '{"t":-1000,"c":[{"tx":"作词: "},{"tx":"唐恬"}]}\n'
+                + "[110330,5290](110330,350,0)谁(110680,250,0)说(110930,460,0)站(111390,400,0)在"
+                + "(111790,400,0)光(112190,400,0)里(112590,640,0)的(113230,380,0)才(113610,390,0)算"
+                + "(114000,340,0)英(114340,1280,0)雄\n"
+                + "[128880,900](128880,320,0)他(129200,120,0)们(129320,460,0)说\n",
+            },
+            // Aligned to the yrc timeline …
+            ytlrc: { lyric: "[01:50.33]Who says only those in the light are heroes" },
+            // … while this one is aligned to the INDEPENDENT lrc timeline. On a
+            // real track the two share almost no timestamps, so keeping tlyric
+            // after switching to yrc hangs translations on the wrong lines.
+            lrc: { lyric: "[01:50.35]谁说站在光里的才算英雄" },
+            tlyric: { lyric: "[01:50.35]WRONG TIMELINE" },
+          },
+        }),
+      }),
+    });
+    await service.initialize();
+
+    const lyrics = (await service.trackDetail("1")).lyrics;
+    expect(lyrics).toHaveLength(2);
+    // The line the user complained about. Sung for 5.29 s; the next line is
+    // 18.55 s away, and the old rule handed it all of that.
+    expect(lyrics[0]!.startMs).toBe(110_330);
+    expect(lyrics[0]!.endMs).toBe(115_620);
+    expect(lyrics[0]!.endSource).toBe("words");
+    expect(lyrics[0]!.words).toHaveLength(11);
+    expect(lyrics[0]!.translation).toBe("Who says only those in the light are heroes");
+    expect(JSON.stringify(lyrics)).not.toContain("WRONG TIMELINE");
+    // …and the credit blob is not a lyric line.
+    expect(lyrics.some((line) => line.text.includes("作词"))).toBe(false);
   });
 
   test("proxies only trusted NetEase media hosts and preserves byte ranges", async () => {

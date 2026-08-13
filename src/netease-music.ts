@@ -20,6 +20,7 @@ import {
   type UnknownRecord,
 } from "./music/core.ts";
 import { buildLyricLines, parseLrc, type LyricsLookup } from "./music/lyrics.ts";
+import { parseLrcEndMarkers, parseYrc } from "./music/lyric-timing.ts";
 import type { MusicLyricLine } from "./music/core.ts";
 
 export { MusicServiceError } from "./music/core.ts";
@@ -371,11 +372,23 @@ export class NeteaseLyricsFallback implements LyricsLookup {
     );
     if (!match) return [];
     const detail = await this.service.trackDetail(match.id);
-    // Re-time to the Spotify recording's length so the last line doesn't hang.
-    return detail.lyrics.map((line, index) => ({
-      ...line,
-      endMs: detail.lyrics[index + 1]?.startMs ?? Math.max(line.startMs + 2_000, track.durationMs),
-    }));
+    const durationMs = track.durationMs;
+    if (durationMs <= 0) return detail.lyrics;
+    // Fit the NetEase timeline to the Spotify recording, and NOTHING else.
+    //
+    // This used to re-derive every end as the next line's start, which quietly
+    // undid the whole point of the sung end for the one path that can actually
+    // reach word-level timing: a Spotify track whose lyrics came from NetEase
+    // may well have `yrc`, and the highlight would still have crawled through
+    // the instrumental. The recording lengths differ (a remaster, a radio edit),
+    // so the only legitimate correction here is the two ways a foreign timeline
+    // can overrun this one.
+    return detail.lyrics
+      .filter((line) => line.startMs < durationMs)
+      .map((line) => (line.endMs > durationMs && durationMs > line.startMs
+        // Truncated by the recording, not by the words — say so.
+        ? { ...line, endMs: durationMs, endSource: "next" as const }
+        : line));
   }
 }
 
@@ -440,11 +453,37 @@ function parseTrack(value: unknown): MusicTrack | null {
   };
 }
 
+/**
+ * Turns one `lyric_new` response into timed lines, preferring the word-level
+ * track when the song has one.
+ *
+ * `lyric_new` describes itself as 新版歌词 - 包含逐字歌词 and asks for `yv/ytv/yrv`,
+ * so every call already came back with a `yrc` field — NetEase's karaoke-grade
+ * word timings — and this function read only `lrc`. About 19-25% of tracks
+ * carry it; for those nothing about the line's end is estimated any more.
+ *
+ * The translation source has to move with it. `tlyric` is aligned to the `lrc`
+ * timeline and `ytlrc` to the `yrc` one, and the two timelines are independent:
+ * on 孤勇者 they have 69 and 57 lines with a single shared timestamp between
+ * them. Keeping `tlyric` while switching to `yrc` would silently hang the wrong
+ * translation on most lines (measured: 5% of `tlyric` starts land on a yrc
+ * line, versus 100% of `ytlrc`).
+ */
 function parseLyricResponse(body: UnknownRecord, trackDurationMs: number): MusicLyricLine[] {
+  const wordTimed = parseYrc(stringAt(body, ["yrc", "lyric"]));
+  if (wordTimed.length > 0) {
+    const translated = new Map(parseLrc(stringAt(body, ["ytlrc", "lyric"]))
+      .map((line) => [line.startMs, line.text] as const));
+    return buildLyricLines(wordTimed, trackDurationMs, translated);
+  }
   const original = parseLrc(stringAt(body, ["lrc", "lyric"]));
   const translated = new Map(parseLrc(stringAt(body, ["tlyric", "lyric"]))
     .map((line) => [line.startMs, line.text] as const));
-  return buildLyricLines(original, trackDurationMs, translated);
+  return buildLyricLines(original, trackDurationMs, translated, {
+    // NetEase's own line-level LRC carries end marks too, on the tracks that
+    // were downgraded from word-level upstream.
+    endMarkersMs: parseLrcEndMarkers(stringAt(body, ["lrc", "lyric"])),
+  });
 }
 
 function validCookie(value: string): boolean {

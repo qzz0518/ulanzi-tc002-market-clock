@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AppConfig } from "./config.ts";
 import { getContentDefinition, type ContentRenderResult } from "./content-registry.ts";
 import { buildImagePayload, type ClockPayload } from "./display.ts";
@@ -123,6 +124,25 @@ function errorMessage(error: unknown): string {
 
 const PREVIEW_CACHE_TTL_MS = 5_000;
 const PREVIEW_CACHE_LIMIT = 16;
+
+/**
+ * JSON with a deterministic key order.
+ *
+ * The render key doubles as a content revision the device caches against, so it
+ * has to survive a service restart: workspace.json is parsed back in file order
+ * while a channel that just came off the console carries the request body's
+ * order. Plain JSON.stringify would hand those two byte-identical channels two
+ * different keys, and every restart would look like an edit — the device would
+ * re-download every channel it already holds, for nothing.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(",")}}`;
+}
 
 export class WorkspaceController {
   private readonly config: AppConfig;
@@ -486,11 +506,22 @@ export class WorkspaceController {
     }
   }
 
-  async previewChannel(value: string | ChannelConfig, forceRefresh = false): Promise<RenderedChannel> {
-    const channel = typeof value === "string"
-      ? this.workspace.channels.find((candidate) => candidate.id === value)
-      : this.validateKnownContent({ version: 3, channels: [value] }).channels[0];
-    if (!channel) throw new SettingsValidationError("channel not found");
+  /**
+   * Everything a render depends on that a human can change.
+   *
+   * renderChannel() reads `channel.items` and nothing else off the channel, so
+   * the name, appName, enabled flag and refresh interval are deliberately
+   * absent: renaming a channel must not invalidate frames that would come back
+   * byte-identical. Market icons ARE in here, because regenerating one changes
+   * the pixels without touching any item.
+   *
+   * Volatile inputs — wall clock, quotes, weather — are deliberately NOT in
+   * here. They move without anyone editing anything, so folding them in would
+   * make this string change once a second and turn every cache into a miss.
+   * Their staleness is bounded by the channel's refresh interval instead, which
+   * is what `getEffectiveRefreshIntervalMs` is for.
+   */
+  private renderInputsKey(channel: ChannelConfig): string {
     const iconVersions = channel.items.flatMap((item) => {
       if (item.contentId !== "market:instrument" || typeof item.options.instrumentRef !== "string") {
         return [];
@@ -498,7 +529,34 @@ export class WorkspaceController {
       const instrument = this.instrumentStore?.get(item.options.instrumentRef);
       return [`${item.options.instrumentRef}:${instrument?.iconRef ?? "missing"}`];
     });
-    const key = JSON.stringify({ channel, iconVersions });
+    return canonicalJson({ items: channel.items, iconVersions });
+  }
+
+  /**
+   * A short, stable fingerprint of the frames a channel would render to.
+   *
+   * The tc002-os firmware pulls a channel's frames once and caches them, and
+   * the state document gives it no vocabulary to learn that the pixels behind
+   * an app name have changed: `item` carries a kind, an id and a label, and not
+   * one of the three moves when 灯牌's colour does. Publishing this alongside
+   * the menu entry is what makes an options edit expressible on the wire at all.
+   *
+   * Same string as the preview cache key, by construction — so "the device
+   * needs new frames" and "the cached render is no longer valid" can never
+   * disagree. 12 hex digits is 48 bits: a collision costs one skipped refresh
+   * of one channel, which is cheaper than the bytes a full digest would add to
+   * a document the device pulls every eight seconds.
+   */
+  channelContentRevision(channel: ChannelConfig): string {
+    return createHash("sha1").update(this.renderInputsKey(channel)).digest("hex").slice(0, 12);
+  }
+
+  async previewChannel(value: string | ChannelConfig, forceRefresh = false): Promise<RenderedChannel> {
+    const channel = typeof value === "string"
+      ? this.workspace.channels.find((candidate) => candidate.id === value)
+      : this.validateKnownContent({ version: 3, channels: [value] }).channels[0];
+    if (!channel) throw new SettingsValidationError("channel not found");
+    const key = this.renderInputsKey(channel);
     const now = this.now();
 
     for (const [cacheKey, entry] of this.previewCache) {

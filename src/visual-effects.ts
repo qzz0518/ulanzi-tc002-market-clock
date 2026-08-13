@@ -71,6 +71,8 @@ export interface VisualEffectOptions {
   signText?: string;
   /** Sign field colour id; unknown values fall back to green. */
   signPalette?: string;
+  /** Viewfinder palette id; unknown values fall back to the paper look. */
+  viewfinderPalette?: string;
 }
 
 type Random = () => number;
@@ -1432,6 +1434,7 @@ export function renderVisualEffect(
     return renderViewfinderClock(durationMs, nowMs, {
       temperatureC: options.weather?.temperatureC,
       weatherNotice: options.weatherNotice,
+      palette: options.viewfinderPalette,
     });
   }
   if (effectId === "weather") {

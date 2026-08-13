@@ -19,9 +19,14 @@ import {
   focusGlyphIndexForProgress,
   lyricScrollOffsetForProgress,
   MusicThemePanel,
-  projectedLyricProgress,
+  pixelLyricCursor,
+  pixelLyricScrollOffset,
+  pixelTextWidth,
+  projectedPlayheadMs,
+  type PixelLyricLine,
   type PixelLyricsFrameInput,
 } from "../web/src/components/music/pixel-lyrics-preview";
+import { lyricCells } from "../web/src/lib/lyric-cursor";
 
 // The preview only ever sets fillStyle and paints rectangles, so a recording
 // stub is a whole rasterizer. That is what lets the browser's 52 × 16 be
@@ -311,7 +316,8 @@ describe("music player UI", () => {
       mode: "skyline",
       currentText: "Hey Jude",
       hasLyric: true,
-      lyricProgress: 0.5,
+      cursor: { index: 4, frac: 0, progress: 0.5, phase: "singing" },
+      windowProgress: 0.5,
       trackProgress: 0.25,
       playing: true,
       scrollOffsetPx: 0,
@@ -362,11 +368,232 @@ describe("music player UI", () => {
     expect(focusGlyphIndexForProgress(0, 0.5)).toBe(-1);
   });
 
-  test("projects smooth frames using the active lyric's own duration", () => {
-    expect(projectedLyricProgress(0.25, 500, 2_000, true)).toBe(0.5);
-    expect(projectedLyricProgress(0.25, 500, 4_000, true)).toBe(0.375);
-    expect(projectedLyricProgress(0.25, 500, 2_000, false)).toBe(0.25);
-    expect(projectedLyricProgress(0.9, 500, 2_000, true)).toBe(1);
+  // --- the reported bug, on the preview canvas -------------------------------
+  //
+  // "谁说站在光里的才算英雄" is sung from 110330 for 5.29 s. The next line does not
+  // start until 128880, and defining the end as the next start gave the wipe
+  // 18.55 s to cross eleven glyphs — an eighth of the speed of the voice.
+  const GUYONGZHE_TEXT = "谁说站在光里的才算英雄";
+  const GUYONGZHE_LINE: PixelLyricLine = {
+    startMs: 110_330,
+    endMs: 115_620,
+    untilMs: 128_880,
+    cells: lyricCells({
+      startMs: 110_330,
+      endMs: 115_620,
+      text: GUYONGZHE_TEXT,
+      words: [
+        [110_330, 350], [110_680, 250], [110_930, 460], [111_390, 400], [111_790, 400],
+        [112_190, 400], [112_590, 640], [113_230, 380], [113_610, 390], [114_000, 340],
+        [114_340, 1_280],
+      ].map(([startMs, durationMs], index) => ({
+        startMs: startMs!,
+        endMs: startMs! + durationMs!,
+        text: [...GUYONGZHE_TEXT][index]!,
+      })),
+    }),
+  };
+
+  test("the preview lights the glyph the singer is on, not the one a sweep would", () => {
+    const at = (playheadMs: number) =>
+      pixelLyricCursor(GUYONGZHE_TEXT, GUYONGZHE_LINE, playheadMs).cursor;
+    const glyph = (index: number) => [...GUYONGZHE_TEXT][index];
+    // What the three renderers computed before: the 18.55 s window spread
+    // evenly over eleven glyphs.
+    const sweep = (playheadMs: number) => glyph(focusGlyphIndexForProgress(
+      11,
+      (playheadMs - 110_330) / (128_880 - 110_330),
+    ));
+
+    expect(GUYONGZHE_LINE.cells).toHaveLength(11);
+
+    // 0.67 s in the singer is on 站, the third glyph. The sweep is still on the
+    // first one and will stay there for another two seconds.
+    expect(glyph(at(111_000).index)).toBe("站");
+    expect(sweep(111_000)).toBe("谁");
+
+    // 2.67 s in: 的, glyph seven of eleven — the line is more than half sung.
+    expect(glyph(at(113_000).index)).toBe("的");
+    expect(sweep(113_000)).toBe("说");
+
+    // 雄 is held for 1.28 s, four times the length of 谁. A uniform sweep cannot
+    // express that at all, and lands five glyphs behind.
+    expect(glyph(at(115_000).index)).toBe("雄");
+    expect(at(115_000).phase).toBe("singing");
+    expect(sweep(115_000)).toBe("站");
+
+    // And here is the complaint itself. At 120 s the voice has been silent for
+    // 4.4 seconds and the line is simply finished; the old sweep was only just
+    // arriving at 光, glyph six of eleven, and had eight more seconds to go.
+    expect(at(120_000).phase).toBe("held");
+    expect(at(120_000).progress).toBe(1);
+    expect(sweep(120_000)).toBe("里");
+    expect(sweep(128_000)).toBe("雄");
+  });
+
+  test("nothing on the panel moves once the singing has stopped", () => {
+    // The user's sentence, as a pixel assertion: the highlight completes at the
+    // sung end and then holds. Three playheads spanning the instrumental have
+    // to rasterize to the same 52 × 16 image.
+    const base = {
+      skin: "signal" as const,
+      currentText: GUYONGZHE_TEXT,
+      hasLyric: true,
+      trackProgress: 0.4,
+      playing: true,
+      timeMs: 120_000,
+      // Isolates the lyric clock: the spectrum and the beat are driven by
+      // timeMs, which is held fixed here so any difference is the wipe's.
+      reducedMotion: true,
+    };
+    for (const mode of ["ticker", "skyline", "spotlight"] as const) {
+      const frameAt = (playheadMs: number) => {
+        const { cursor, windowProgress } = pixelLyricCursor(
+          GUYONGZHE_TEXT,
+          GUYONGZHE_LINE,
+          playheadMs,
+        );
+        return JSON.stringify(rasterizePreview({
+          ...base,
+          mode,
+          cursor,
+          windowProgress,
+          scrollOffsetPx: pixelLyricScrollOffset(GUYONGZHE_TEXT, cursor, mode, true),
+        }));
+      };
+      const finished = frameAt(115_620);
+      expect(frameAt(120_000), `${mode} kept moving at 120 s`).toBe(finished);
+      expect(frameAt(128_000), `${mode} kept moving at 128 s`).toBe(finished);
+      // …and it is genuinely a different picture from mid-line, so the test is
+      // not passing because everything is blank.
+      expect(frameAt(113_000)).not.toBe(finished);
+    }
+  });
+
+  test("a held line reads as sung end to end, with no glyph left glowing", () => {
+    const { cursor, windowProgress } = pixelLyricCursor(
+      GUYONGZHE_TEXT,
+      GUYONGZHE_LINE,
+      120_000,
+    );
+    // 走带: the text occupies rows 2..13 and the two cue rows are 0 and 15, so
+    // this band is the line and nothing else.
+    const grid = rasterizePreview({
+      skin: "signal",
+      mode: "ticker",
+      currentText: GUYONGZHE_TEXT,
+      hasLyric: true,
+      cursor,
+      windowProgress,
+      trackProgress: 0.4,
+      playing: true,
+      scrollOffsetPx: 0,
+      timeMs: 120_000,
+      reducedMotion: true,
+    });
+    const colors = new Set<string>();
+    for (let row = 2; row <= 13; row += 1) {
+      for (const color of grid[row]!) if (color !== "#000000") colors.add(color);
+    }
+    // Exactly the sung tier: no bright focus character parked mid-line for
+    // thirteen seconds, and nothing still dim as if it were yet to come.
+    expect([...colors]).toEqual(["#6ca34e"]);
+  });
+
+  test("cascade keeps the line on the panel through the instrumental", () => {
+    // The one place the two clocks must NOT be conflated. cascadeBandY flies the
+    // row off the top at the end of its ramp; keyed on the sung progress the
+    // line would leave at 115.6 s and the panel would sit blank for 13 s.
+    const base = {
+      skin: "signal" as const,
+      mode: "cascade" as const,
+      currentText: GUYONGZHE_TEXT,
+      hasLyric: true,
+      trackProgress: 0.4,
+      playing: true,
+      scrollOffsetPx: 0,
+      reducedMotion: false,
+    };
+    for (const playheadMs of [116_000, 120_000, 125_000]) {
+      const { cursor, windowProgress } = pixelLyricCursor(
+        GUYONGZHE_TEXT,
+        GUYONGZHE_LINE,
+        playheadMs,
+      );
+      expect(cursor.phase, String(playheadMs)).toBe("held");
+      const grid = rasterizePreview({ ...base, cursor, windowProgress, timeMs: playheadMs });
+      expect(litPixelsInRows(grid, 0, 12), `blank at ${playheadMs}`).toBeGreaterThan(0);
+    }
+    // It does leave, once its successor is actually due.
+    const late = pixelLyricCursor(GUYONGZHE_TEXT, GUYONGZHE_LINE, 128_800);
+    expect(late.windowProgress).toBeGreaterThan(0.95);
+  });
+
+  test("spotlight locks the sung glyph to centre even when the glyphs are not equal in time", () => {
+    // 雄 is held for 1.28 s, 说 for 250 ms. A `progress × textWidth` offset
+    // assumes the row is crossed at a constant rate and lands on the wrong
+    // column by whole cells the moment that stops being true.
+    const width = pixelTextWidth(GUYONGZHE_TEXT);
+    expect(width).toBe(11 * 12);
+    for (const [playheadMs, glyphIndex] of [[111_000, 2], [113_000, 6], [115_000, 10]] as const) {
+      const { cursor } = pixelLyricCursor(GUYONGZHE_TEXT, GUYONGZHE_LINE, playheadMs);
+      expect(cursor.index).toBe(glyphIndex);
+      const offset = pixelLyricScrollOffset(GUYONGZHE_TEXT, cursor, "spotlight");
+      // The focused cell straddles screen centre (x = 26), which is the whole
+      // contract of the mode.
+      expect(offset + glyphIndex * 12).toBeLessThanOrEqual(26);
+      expect(offset + (glyphIndex + 1) * 12).toBeGreaterThanOrEqual(26);
+    }
+  });
+
+  test("the track title is parked, not treated as a line that already finished", () => {
+    // With no lyric the panel shows the title, and the window for that case is
+    // all zeros. That must be recognised as "there is no window" rather than
+    // handed to the cursor as a span, which reads as "already over" and would
+    // scroll a long title to its last glyph and leave it there.
+    const title = "Sgt. Pepper's Lonely Hearts Club Band";
+    const noWindow: PixelLyricLine = { startMs: 0, endMs: 0, untilMs: 0 };
+    for (const playheadMs of [0, 1, 1_000, 41_000, 200_000]) {
+      const { cursor, windowProgress } = pixelLyricCursor(title, noWindow, playheadMs);
+      expect(cursor).toEqual({ index: 0, frac: 0, progress: 0, phase: "singing" });
+      expect(windowProgress).toBe(0);
+      expect(pixelLyricScrollOffset(title, cursor, "ticker")).toBe(0);
+      // The regression that made this an assertion rather than a comment: the
+      // no-window case used to be answered with a window of MAX_SAFE_INTEGER,
+      // whose progress is tiny but STRICTLY POSITIVE (3.3e-12 at 30 s). That
+      // misses cascadeBandY's `progress <= 0` guard, lands in the entrance ramp
+      // and rounds the band to y = 16 — the twelve-row text blitted at rows
+      // 16..27 of a sixteen-row panel, i.e. a blank screen for every song's
+      // intro and for the whole of any track with no lyrics at all.
+      expect(cascadeBandY(windowProgress)).toBe(2);
+      expect(cascadePhase(windowProgress)).toBe("hold");
+    }
+  });
+
+  test("a line with no word timings still sweeps exactly as it always did", () => {
+    // The whole Spotify catalogue comes through lrclib as line-level LRC. The
+    // cursor has to be a strict generalisation, not a replacement.
+    const line: PixelLyricLine = { startMs: 4_000, endMs: 10_000, untilMs: 10_000 };
+    for (let step = 0; step <= 20; step += 1) {
+      const playheadMs = 4_000 + step * 300;
+      const { cursor } = pixelLyricCursor("Hey Jude don't", line, playheadMs);
+      const progress = Math.min(1, Math.max(0, (playheadMs - 4_000) / 6_000));
+      const glyphCount = [..."Hey Jude don't"].length;
+      expect(cursor.progress).toBeCloseTo(progress, 10);
+      expect(cursor.index).toBe(focusGlyphIndexForProgress(glyphCount, progress));
+    }
+  });
+
+  test("smooths between renders by advancing the playhead, not the progress", () => {
+    // It used to advance a normalized progress by elapsed/lineDuration, which
+    // made the smoothing inherit the very number this work exists to correct: a
+    // 5-second line given an 18-second window smoothed at 3/8 speed. A playhead
+    // is a playhead, and the cursor decides what it means.
+    expect(projectedPlayheadMs(110_330, 500, true)).toBe(110_830);
+    expect(projectedPlayheadMs(110_330, 500, false)).toBe(110_330);
+    // A negative delta (a clock that stepped backwards between frames) never
+    // rewinds the line.
+    expect(projectedPlayheadMs(110_330, -500, true)).toBe(110_330);
   });
 
   test("explains the power-cycle fallback after device detection fails", () => {

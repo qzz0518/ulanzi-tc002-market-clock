@@ -167,6 +167,8 @@ interface CanvasWorkspaceProps {
   onApply: (pixels: number[]) => void;
   /** Writes the same pixels into a brand-new channel instead of the selected one. */
   onApplyAsChannel?: (pixels: number[]) => void;
+  /** 见 WorkspaceActions.onFlushEdits：固定到时钟前先把待保存的改动落盘。 */
+  onFlushEdits?: () => Promise<boolean>;
   onPreview: () => void;
   onPush: () => void;
 }
@@ -242,6 +244,7 @@ export function CanvasWorkspace({
   onCreateTarget,
   onApply,
   onApplyAsChannel,
+  onFlushEdits,
   onPreview,
   onPush,
 }: CanvasWorkspaceProps) {
@@ -989,6 +992,7 @@ export function CanvasWorkspace({
             firmwareMode={firmwareMode}
             channelAppName={targetChannelAppName}
             channelEnabled={targetChannelEnabled}
+            onFlushEdits={onFlushEdits}
             onPreview={onPreview}
             onPush={onPush}
           />

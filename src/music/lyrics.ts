@@ -3,9 +3,11 @@ import {
   MusicServiceError,
   numberValue,
   readBoundedBody,
+  type LyricEndSource,
   type MusicLyricLine,
   type MusicTrack,
 } from "./core.ts";
+import { estimateSungEndMs, parseLrcEndMarkers, type LyricLineDraft } from "./lyric-timing.ts";
 
 // LRC parsing is shared: NetEase hands us LRC directly, and LRCLIB — the open
 // lyric database we use for Spotify, which has no public lyric API — returns the
@@ -34,22 +36,78 @@ export function parseLrc(raw: string | undefined): Array<{ startMs: number; text
   return parsed.sort((a, b) => a.startMs - b.startMs);
 }
 
-// Turn timestamped starts into the closed [startMs, endMs) ranges the players
-// need, optionally zipping in a translation track keyed by identical timestamps.
+/**
+ * Turns timestamped starts into the [startMs, endMs) ranges the players need,
+ * optionally zipping in a translation track keyed by identical timestamps.
+ *
+ * `endMs` is when the line stopped being SUNG, which is the whole point of this
+ * function and the one thing it used to get wrong: it read
+ * `original[index + 1].startMs`, so the last line before an instrumental was
+ * handed the entire break and its karaoke highlight crawled across the glyphs
+ * long after the singer had finished. The next line's start is now only the
+ * ceiling — the value is never later than it, and usually earlier.
+ *
+ * Word timings answer outright when the source has them. Everything else is
+ * bounded rather than guessed — see `estimateSungEndMs`, which mins the
+ * successor's start, the source's own end mark and a singing-rate cap — and the
+ * result records which bound answered in `endSource` so nothing downstream can
+ * mistake a guess for a measurement.
+ */
 export function buildLyricLines(
-  original: Array<{ startMs: number; text: string }>,
+  original: readonly LyricLineDraft[],
   trackDurationMs: number,
   translations = new Map<number, string>(),
+  options: { endMarkersMs?: readonly number[] } = {},
 ): MusicLyricLine[] {
+  const markers = options.endMarkersMs ?? [];
   return original.map((line, index) => {
     const translation = translations.get(line.startMs);
+    // The display window: where the next line takes over. Unchanged, and still
+    // a hard ceiling — nothing below may push a line past its successor.
+    const windowEndMs = original[index + 1]?.startMs
+      ?? Math.max(line.startMs + 2_000, trackDurationMs);
+
+    let endMs: number;
+    let endSource: LyricEndSource;
+    if (line.words && line.words.length > 0) {
+      const sungEndMs = Math.max(...line.words.map((word) => word.endMs));
+      // Words win over any header the source also supplied, but not over the
+      // next line: a table that overran its successor would keep animating a
+      // line the panel has already replaced.
+      if (sungEndMs > line.startMs && sungEndMs <= windowEndMs) {
+        endMs = sungEndMs;
+        endSource = "words";
+      } else {
+        endMs = windowEndMs;
+        endSource = "next";
+      }
+    } else {
+      const markerMs = firstMarkerAfter(markers, line.startMs);
+      const estimated = estimateSungEndMs({
+        startMs: line.startMs,
+        text: line.text,
+        windowEndMs,
+        markerMs,
+      });
+      endMs = estimated.endMs;
+      endSource = estimated.source;
+    }
+
     return {
       startMs: line.startMs,
-      endMs: original[index + 1]?.startMs ?? Math.max(line.startMs + 2_000, trackDurationMs),
+      endMs,
       text: line.text,
+      endSource,
+      ...(line.words && line.words.length > 0 ? { words: line.words } : {}),
       ...(translation ? { translation } : {}),
     };
   });
+}
+
+/** The source's own end mark for this line, if it left one in the gap. */
+function firstMarkerAfter(markers: readonly number[], startMs: number): number | undefined {
+  for (const marker of markers) if (marker > startMs) return marker;
+  return undefined;
 }
 
 const LRCLIB_HOST = "lrclib.net";
@@ -108,7 +166,13 @@ export class LrclibLyricsClient implements LyricsLookup {
   private toLines(record: Record<string, unknown>, durationMs: number): MusicLyricLine[] {
     if (record.instrumental === true) return [];
     const synced = typeof record.syncedLyrics === "string" ? record.syncedLyrics : undefined;
-    return buildLyricLines(parseLrc(synced), durationMs);
+    // The bare end-mark lines are the only duration information LRCLIB ever
+    // carries — it has no word-level field at all — and parseLrc drops them
+    // because they have no text. Reading them separately is what keeps the
+    // Spotify catalogue from falling back to a pure estimate on every line.
+    return buildLyricLines(parseLrc(synced), durationMs, undefined, {
+      endMarkersMs: parseLrcEndMarkers(synced),
+    });
   }
 
   private async request(url: URL): Promise<unknown> {

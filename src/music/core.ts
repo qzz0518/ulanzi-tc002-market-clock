@@ -54,11 +54,51 @@ export interface MusicTrack {
   coverUrl?: string;
 }
 
+/** One timed word, exactly as the source declared it. Absolute track time. */
+export interface MusicLyricWord {
+  startMs: number;
+  endMs: number;
+  /** Verbatim, including any trailing space the source put inside the word. */
+  text: string;
+}
+
+/**
+ * How a line's `endMs` was decided.
+ *
+ *   "words"    — the last word's end. Exact.
+ *   "marker"   — a bare [mm:ss.xx] line in the LRC: the source's own end mark.
+ *   "estimate" — our singing-rate cap. A guess, and it can cut a genuinely
+ *                sustained note short.
+ *   "next"     — the next line starts before either of the above could apply,
+ *                so nothing had to be guessed.
+ */
+export type LyricEndSource = "words" | "marker" | "estimate" | "next";
+
 export interface MusicLyricLine {
   startMs: number;
+  /**
+   * When the line finished being SUNG — deliberately NOT when the next line
+   * starts. A verse's last line is followed by the instrumental, and defining
+   * its end as the next line's start is what made the karaoke highlight crawl
+   * for ten seconds after the singer stopped. See `endSource` for how confident
+   * this number is.
+   */
   endMs: number;
   text: string;
   translation?: string;
+  /**
+   * Per-word timings, present only when the source really carries them
+   * (NetEase `yrc`). The absence is the signal that this line has line-level
+   * timing only; nothing downstream may invent one.
+   */
+  words?: MusicLyricWord[];
+  /**
+   * Required rather than optional, so that "never fabricate timing data" is
+   * enforced by the type system: every construction site has to answer where
+   * its end came from, and the console can tell the user which lines are
+   * measured and which are estimated.
+   */
+  endSource: LyricEndSource;
 }
 
 export interface MusicTrackDetail {

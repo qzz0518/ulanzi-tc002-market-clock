@@ -18,7 +18,7 @@ import {
 import { LyricThemeStore } from "./lyric-theme-store.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
-import type { MusicLyricLine } from "./music/core.ts";
+import type { MusicLyricLine, MusicLyricWord } from "./music/core.ts";
 import { LrclibLyricsClient } from "./music/lyrics.ts";
 import { SpotifyAppStore, SpotifyMusicService, SpotifySessionStore } from "./music/spotify.ts";
 import { createGameSocketHub } from "./game-socket.ts";
@@ -264,11 +264,24 @@ function interruptibleSleep(ms: number): Promise<void> {
 // are republished on every settings change. setMenu is idempotent — an unchanged
 // list does not bump the sequence — so this can be called freely without waking
 // every parked long poll.
+//
+// Each channel carries a content revision and a time-to-live along with its
+// label. Those two fields are the whole reason a saved edit reaches the panel:
+// the device caches a channel's frames, and a menu of ids and labels alone
+// compares equal after every content edit ever made, so the sequence never
+// moved and the parked poll was never released. The revision moves when the
+// pixels would; the ttl says how long a render of a clock face stays true.
 const osLink = new OsLinkHub();
 function publishOsMenu(): void {
   const entries: OsMenuEntry[] = controller.getWorkspace().channels
     .filter((channel) => channel.enabled)
-    .map((channel) => ({ id: channel.appName, label: channel.name, kind: "channel" as const }));
+    .map((channel) => ({
+      id: channel.appName,
+      label: channel.name,
+      kind: "channel" as const,
+      rev: controller.channelContentRevision(channel),
+      ttlMs: controller.getEffectiveRefreshIntervalMs(channel),
+    }));
   // The three built-in destinations always follow the channels, so their
   // position does not shift as the user adds and removes content.
   entries.push({ id: "music", label: "音乐", kind: "music" });
@@ -290,7 +303,11 @@ let osNowArtist = "";
 interface OsLyricWindow {
   text: string;
   startMs: number;
+  /** When the line stops being sung. */
   endMs: number;
+  /** When the next line takes over. */
+  untilMs: number;
+  words?: MusicLyricWord[];
 }
 
 function lyricAt(
@@ -305,19 +322,32 @@ function lyricAt(
     if (lines[i]!.startMs > positionMs) break;
     index = i;
   }
-  if (index < 0) return { text: "", startMs: 0, endMs: 0 };
+  if (index < 0) return { text: "", startMs: 0, endMs: 0, untilMs: 0 };
   const current = lines[index]!;
   const next = lines[index + 1];
-  // The line ENDS where the next one starts; the last line runs to the end of
-  // the track, or four seconds if the duration is unknown or already past.
-  // Byte for byte the fallback in the sideloaded player's LyricsPage.cpp — the
-  // last line of every song would otherwise animate differently on the two
-  // firmwares, which is exactly the kind of near-parity this work exists to
-  // remove.
-  const endMs = next
+  // Two different questions, and conflating them is the bug this whole change
+  // exists to fix. `untilMs` is when the NEXT line takes over — the last line
+  // of a song runs to the end of the track, or four seconds if the duration is
+  // unknown, byte for byte the fallback in the sideloaded player. `endMs` is
+  // when this line stopped being SUNG, which the provider already worked out
+  // from word timings or bounded with an estimate; re-deriving it here from the
+  // next line's start (which is what this used to do) threw that away and left
+  // ZOS crawling through every instrumental.
+  const untilMs = next
     ? next.startMs
     : (durationMs > current.startMs ? durationMs : current.startMs + 4000);
-  return { text: current.text, startMs: current.startMs, endMs };
+  const endMs = current.endMs > current.startMs
+    // A foreign duration (a Connect snapshot of a different master) can make
+    // the window shorter than the line the provider timed.
+    ? Math.min(current.endMs, untilMs)
+    : untilMs;
+  return {
+    text: current.text,
+    startMs: current.startMs,
+    endMs,
+    untilMs,
+    ...(current.words ? { words: current.words } : {}),
+  };
 }
 
 async function publishOsNowPlaying(): Promise<void> {
@@ -370,6 +400,8 @@ async function publishOsNowPlaying(): Promise<void> {
     lyric: line.text,
     lyricStartMs: line.startMs,
     lyricEndMs: line.endMs,
+    lyricUntilMs: line.untilMs,
+    ...(line.words ? { lyricWords: line.words } : {}),
   }, "remote");
 }
 

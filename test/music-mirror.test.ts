@@ -1,7 +1,59 @@
 import { describe, expect, test } from "bun:test";
-import { mirrorFrameSchedule } from "../web/src/lib/music-mirror.ts";
+import { mirrorFrameSchedule, renderMirrorFrames } from "../web/src/lib/music-mirror.ts";
+import { lyricCells } from "../web/src/lib/lyric-cursor.ts";
+import type { PixelLyricLine } from "../web/src/components/music/pixel-lyrics-preview.tsx";
 
 const fps = (delayMs: number) => 1_000 / delayMs;
+
+// A 52 × 16 canvas is a byte array and four methods. Stubbing it here rather
+// than pulling in a DOM keeps the mirrored GIF — the thing the clock actually
+// receives — under assertion instead of under a comment.
+function installStubCanvas(): void {
+  (globalThis as { document?: unknown }).document = {
+    createElement: () => {
+      const width = 52;
+      const height = 16;
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      let fill = "#000000";
+      const paint = (x: number, y: number, w: number, h: number) => {
+        const red = Number.parseInt(fill.slice(1, 3), 16);
+        const green = Number.parseInt(fill.slice(3, 5), 16);
+        const blue = Number.parseInt(fill.slice(5, 7), 16);
+        for (let row = y; row < y + h; row += 1) {
+          for (let column = x; column < x + w; column += 1) {
+            if (row < 0 || row >= height || column < 0 || column >= width) continue;
+            const at = (row * width + column) * 4;
+            rgba[at] = red;
+            rgba[at + 1] = green;
+            rgba[at + 2] = blue;
+            rgba[at + 3] = 255;
+          }
+        }
+      };
+      return {
+        width,
+        height,
+        getContext: () => ({
+          imageSmoothingEnabled: true,
+          get fillStyle() {
+            return fill;
+          },
+          set fillStyle(value: string) {
+            fill = value;
+          },
+          clearRect: (x: number, y: number, w: number, h: number) => {
+            const keep = fill;
+            fill = "#000000";
+            paint(x, y, w, h);
+            fill = keep;
+          },
+          fillRect: paint,
+          getImageData: () => ({ data: rgba }),
+        }),
+      };
+    },
+  };
+}
 
 describe("music mirror frame schedule", () => {
   test("runs a normal lyric line at the 33fps baseline", () => {
@@ -65,5 +117,75 @@ describe("music mirror frame schedule", () => {
     expect(mirrorFrameSchedule(0).frameCount).toBeGreaterThan(1);
     expect(mirrorFrameSchedule(Number.NaN).frameCount).toBeGreaterThan(1);
     expect(mirrorFrameSchedule(10_000_000).frameCount).toBeLessThanOrEqual(400);
+  });
+});
+
+describe("mirrored lyric frames", () => {
+  const TEXT = "谁说站在光里的才算英雄";
+  const LINE: PixelLyricLine = {
+    startMs: 110_330,
+    endMs: 115_620,
+    untilMs: 128_880,
+    cells: lyricCells({
+      startMs: 110_330,
+      endMs: 115_620,
+      text: TEXT,
+      words: [
+        [110_330, 350], [110_680, 250], [110_930, 460], [111_390, 400], [111_790, 400],
+        [112_190, 400], [112_590, 640], [113_230, 380], [113_610, 390], [114_000, 340],
+        [114_340, 1_280],
+      ].map(([startMs, durationMs], index) => ({
+        startMs: startMs!,
+        endMs: startMs! + durationMs!,
+        text: [...TEXT][index]!,
+      })),
+    }),
+  };
+
+  const render = (line: PixelLyricLine) => {
+    installStubCanvas();
+    return renderMirrorFrames({
+      text: TEXT,
+      hasLyric: true,
+      line,
+      mode: "ticker",
+      skin: "signal",
+      trackProgress: 0.4,
+      playing: true,
+    });
+  };
+
+  test("the GIF covers the display window, not the singing", () => {
+    // The device loops the bundle until a new one arrives, so its length has to
+    // be the time the line owns the panel. Cut to the 5.29 s of singing, the
+    // whole karaoke wipe would replay three times over the 13.26 s instrumental
+    // — the reported defect again, only faster.
+    const frames = render(LINE);
+    const totalMs = frames.reduce((sum, frame) => sum + frame.delayMs, 0);
+    expect(totalMs).toBeGreaterThanOrEqual(18_000);
+    expect(totalMs).toBeLessThanOrEqual(19_000);
+  });
+
+  test("the wipe finishes with the singer and the rest of the loop holds still", () => {
+    const frames = render(LINE);
+    const delayMs = frames[0]!.delayMs;
+    // 115620 − 110330 = 5290 ms of singing.
+    const sungFrames = Math.ceil((115_620 - 110_330) / delayMs);
+    const tail = frames.slice(sungFrames + 1);
+    expect(tail.length).toBeGreaterThan(100);
+    for (const frame of tail) {
+      expect(frame.pixels).toBe(tail[0]!.pixels);
+    }
+    // And it really did animate before that, so this is not a blank GIF.
+    expect(new Set(frames.slice(0, sungFrames).map((frame) => frame.pixels)).size)
+      .toBeGreaterThan(3);
+  });
+
+  test("a line-level-only line still wipes across its whole window", () => {
+    // No cells: the untimed path, which is the entire Spotify catalogue. Here
+    // the sung end IS the window, and the sweep must reach the last glyph.
+    const frames = render({ startMs: 0, endMs: 4_000, untilMs: 4_000 });
+    expect(frames.at(-1)!.pixels).not.toBe(frames[0]!.pixels);
+    expect(new Set(frames.map((frame) => frame.pixels)).size).toBeGreaterThan(5);
   });
 });

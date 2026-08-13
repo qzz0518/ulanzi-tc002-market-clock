@@ -288,6 +288,8 @@ dur	23000
 lyric	Her Majesty's a pretty nice girl
 lyricat	18000
 lyricend	21500
+lyricuntil	26000
+lyricw	0,300,300,180,480,240,…
 menu	3
 item	channel	btc	市场轮播
 item	music	music	音乐
@@ -336,11 +338,37 @@ item	settings	settings	设置
 
 `lyricat` / `lyricend` 是**当前这一句**在整首歌里的起止（毫秒）。四种显示形式的几何、着色与
 节拍都是「这一句唱到哪儿」的函数，不是「这首歌放到哪儿」的函数：`pos`/`dur` 描述的是歌，
-而一句解析好的歌词字符串既没有开头也没有结尾，所以没有这个窗口设备就无从动画。末句的兜底
-与侧载歌词播放器逐字节相同（下一句的起点；没有下一句就取曲长，曲长不可用则 +4000ms），
-否则同一首歌的最后一句在两套固件上会动得不一样。两个键都可选：老服务不发，设备退化成单次
-扫过而不是黑屏。副歌里重复的一模一样的句子也靠 `lyricat` 判「换行了」——只比文字的话不会
-bump，设备会拿着上一句的窗口把进度钉在 1，句子唱完了还杵在那儿。
+而一句解析好的歌词字符串既没有开头也没有结尾，所以没有这个窗口设备就无从动画。两个键都
+可选：老服务不发，设备退化成单次扫过而不是黑屏。副歌里重复的一模一样的句子也靠 `lyricat`
+判「换行了」——只比文字的话不会 bump，设备会拿着上一句的窗口把进度钉在 1，句子唱完了还杵
+在那儿。
+
+**`lyricend` 是「唱完」，不是「下一句开始」。** 这是这套键最容易搞错也最要命的一点：段落的
+最后一句后面跟着一段伴奏，把句尾定义成下一句的起点就等于把整段伴奏一起算进高亮时长里。
+实测《孤勇者》「谁说站在光里的才算英雄」唱了 5.29 秒，下一句 18.55 秒后才来——高亮会用
+1686ms/字 爬过 11 个字，而歌手的实际速度是 481ms/字。所以 `lyricend` 取的是这一句真正唱完
+的时刻：有逐字歌词（网易 `yrc`）时就是最后一个字的结束，没有时取「下一句起点、来源自带的
+句尾标记、演唱速率 630ms/单位封顶（实测 50 首 / 2567 行语料的 p90）」三者的**最小值**，并且
+永远不会越过下一句。
+
+`lyricuntil` 是**下一句接手的时刻**，也就是这一句占着屏幕的窗口，只在它晚于 `lyricend` 时
+才发出。**只有升降模式的进出场编排可以读它**：`lyricend` 现在一唱完就到 1.0，若拿它驱动出场
+斜坡，整句会在歌手停下的瞬间飞出屏幕，然后面板空白 13 秒。着色、焦点字、填充条、节拍、
+滚动一律用 `lyricend` 这条时钟。
+
+**这三个键按固件能力发放。** ZOS 是刷进 flash 的，服务重启换不掉设备上的固件，所以
+`lyricend` 收紧含义这件事本身就是兼容性问题：老固件的 `MusicScreen::lineProgress()` 把它直接
+喂给 `cascadeBandY`，出场斜坡在 progress 1.0 时到 y = -16。设备因此在 `/api/os/report` 里带上
+`proto`（自己能读的文档版本号）：`proto >= 2` 才发收紧后的 `lyricend` 加 `lyricuntil` 加
+`lyricw`；没报过 `proto` 的固件拿到的是**改动前一字不差的文档**（`lyricend` = 下一句起点，
+没有另外两个键），升降模式不会变黑屏。`proto` 变了会 bump 一次 seq——每次设备开机一次——
+好让固件不用等下一句歌词就换到新编码。
+
+`lyricw` 是**逐字时间表**，`d0,w0,d1,w1,…`，每对是相对 `lyricat` 的偏移与时长（毫秒）。
+条目数**必须等于** `lyric` 字段（已经过 24 格截断之后）的码点数，不等就整表作废回落到行级
+——一格错位会在整首歌里点亮错的字，而这在截图上完全看不出来。必须是单个字段用逗号分隔，
+因为 `StateDoc::splitTabs(line, fields, 4)` 最多切三个 tab。约 19-25% 的网易曲目有逐字歌词，
+其余的这一行整个缺席。实测 24 格满表约 207 字节，典型文档 319 字节。
 
 `mode` / `skin` / `accent` 是控制台**主题设置**面板的三个值，四种显示形式（走带 / 天际 /
 聚光 / 升降）、四种像素配色（信号绿 / 磁带橙 / 蓝晒 / 街机红）、以及覆盖主色的 `rrggbb`
@@ -486,14 +514,14 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` / `POST` | `/api/os/device-app/*` | ZOS 的同一套侧载生命周期（确认口令 `START_TC002_OS_SESSION`） |
 | `GET` | `/api/os/pull` | ZOS 长轮询状态文档（`?seq=`，最多挂起 8 秒；行式 `KEY\tVALUE` 纯文本，免同源） |
 | `GET` | `/api/os/frames` | ZOS 按 `?app=` 拉取一个频道渲染好的帧包（`TCF1` 原始 RGB 二进制，免同源） |
-| `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts}`（字符串截断 64 字符，免同源，不 bump seq） |
+| `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq） |
 | `POST` | `/api/os/mirror` | ZOS 回传面板实拍帧（正文即 2496 字节原始 RGB，免同源）；应答 `{wanted}` 告诉设备是否继续推 |
 | `GET` | `/api/os/mirror` | 控制台取最新一帧，**取本身就是订阅**：10 秒不取设备自动停流 |
 | `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live） |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
 | `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值 |
-| `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?}`，正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
+| `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}`（`lyricEndMs` 是这一句**唱完**的时刻，`lyricUntilMs` 是下一句接手的时刻；`lyricWords` 形如 `[{startMs,endMs,text}]`，最多 64 条、每条 ≤16 字符、合计 ≤200 字符，格式不对就整表丢弃而不是让上报失败），正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |
 | `GET` | `/api/game/socket` | WebSocket 升级：`?room=<4位码>&role=host\|pad`，双人手柄与涂鸦墙的纯中继通道 |
@@ -503,7 +531,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `POST` | `/api/music/device/select`、`/api/music/device/control` | 网页下发选歌与控制补丁（播放/主题/配色/主色/seek） |
 | `GET` | `/api/music/device/state`、`/api/music/device/current` | 音乐固件轮询的纯文本控制状态；兼容的轻量当前曲目查询 |
 | `POST` | `/api/music/device/report`、`/api/music/device/heartbeat` | 固件上报按键动作与播放头心跳 |
-| `GET` | `/api/music/device/now`、`/api/music/device/audio` | 固件读取当前曲目歌词与下载音频 |
+| `GET` | `/api/music/device/now`、`/api/music/device/audio` | 固件读取当前曲目歌词与下载音频。`/now` 按查询参数版本化：不带 `?v` 逐字节返回原格式 `DUR\t<ms>` + `<startMs>\t<text>`（已部署的解析器把非 `DUR` 的键当起点，新增记录类型会被渲染成乱码行），`?v=2` 返回 `V\t2`、`DUR`、`L\t<startMs>\t<sungEndMs>\t<text>`，以及紧跟其后可选的 `W\t<d0,w0,…>` 逐字表 |
 
 写接口仅接受 JSON 并执行同源检查（设备上报的 `report` / `heartbeat` 以及 ZOS 的
 `/api/os/pull`、`/api/os/frames`、`/api/os/report`、`POST /api/os/mirror` 除外，它们的调用方

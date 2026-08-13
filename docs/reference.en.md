@@ -339,6 +339,8 @@ dur	23000
 lyric	Her Majesty's a pretty nice girl
 lyricat	18000
 lyricend	21500
+lyricuntil	26000
+lyricw	0,300,300,180,480,240,…
 menu	3
 item	channel	btc	市场轮播
 item	music	music	音乐
@@ -401,14 +403,46 @@ because otherwise it would hammer a third-party API for a device nobody connecte
 `lyricat` / `lyricend` are the **current line's** start and end in track time. Every display
 mode's geometry, colouring and beat is a function of progress *within the line*, not of the
 track: `pos`/`dur` describe the song, and one resolved lyric string has neither a start nor an
-end, so without this window the device has nothing to animate. The last line's fallback is
-byte for byte the sideloaded lyrics player's (the next line's start; failing that the track
-duration, failing that +4000 ms) — otherwise the last line of every song animates differently
-on the two firmwares. Both keys are optional: an older service sends neither and the device
-falls back to a single sweep rather than to a blank screen. `lyricat` is also what detects a
-new line in a chorus that repeats itself verbatim — keyed on the text alone no sequence bump
-fires, and the device keeps animating the previous window with progress pinned at 1, the line
-sitting there fully sung while the song moves on.
+end, so without this window the device has nothing to animate. Both keys are optional: an older
+service sends neither and the device falls back to a single sweep rather than to a blank
+screen. `lyricat` is also what detects a new line in a chorus that repeats itself verbatim —
+keyed on the text alone no sequence bump fires, and the device keeps animating the previous
+window with progress pinned at 1, the line sitting there fully sung while the song moves on.
+
+**`lyricend` is when the line stopped being SUNG, not when the next one starts.** This is the
+easy mistake and the expensive one: the last line of a verse is followed by an instrumental, so
+defining its end as the successor's start hands the whole break to the highlight. Measured on
+孤勇者, "谁说站在光里的才算英雄" is sung for 5.29 s and the next line does not arrive for 18.55 s —
+the wipe crossed eleven glyphs at 1686 ms each while the singer averaged 481. So `lyricend` is
+the moment the singing stopped: the last word's end when the track has word-level timing
+(NetEase `yrc`), otherwise the **minimum** of the next line's start, the source's own bare
+end-mark timestamp, and a singing-rate cap of 630 ms per unit (the p90 of a measured
+50-track / 2567-line corpus). It is never later than the next line.
+
+`lyricuntil` is when the **next line takes over** — the line's display window — and is emitted
+only when it is later than `lyricend`. **Only the cascade mode's entrance/exit choreography may
+read it.** With `lyricend` now reaching 1.0 the moment the voice stops, keying the exit ramp on
+it would fly the line off the panel at the start of a 13-second instrumental and leave the
+screen blank. Colouring, focus glyph, fill bar, beat and scroll all run on `lyricend`'s clock.
+
+**These three keys are handed out per firmware capability.** ZOS is flashed, so a service restart
+does not change the build on the device, which makes the tightened `lyricend` a compatibility
+problem in itself: an older firmware feeds it straight into `cascadeBandY`, whose exit ramp
+reaches y = -16 at progress 1.0. The device therefore reports a `proto` — the document revision
+it can read — in `/api/os/report`. Only `proto >= 2` receives the tightened `lyricend` plus
+`lyricuntil` and `lyricw`; a firmware that has never sent one gets **byte for byte the document
+it got before this change** (`lyricend` = the next line's start, neither other key), so cascade
+never goes blank on it. A change of `proto` bumps the sequence once — once per device boot — so
+a freshly flashed unit switches encoding without waiting for the next lyric line.
+
+`lyricw` is the **per-glyph timing table**, `d0,w0,d1,w1,…`, each pair an offset and a width in
+milliseconds relative to `lyricat`. The entry count **must equal** the codepoint count of the
+`lyric` field *after* its 24-cell truncation; a mismatch voids the whole table and the panel
+falls back to the line-level sweep — one cell out of step lights the wrong character for the
+rest of the song and is invisible on a screenshot. It has to be a single comma-separated field
+because `StateDoc::splitTabs(line, fields, 4)` stops after three tabs. Roughly 19-25% of NetEase
+tracks carry word timings; for the rest the key is simply absent. A full 24-cell table measures
+about 207 bytes, against a typical 319-byte document.
 
 `mode` / `skin` / `accent` are the console's **主题设置** panel: four display forms (ticker /
 skyline / spotlight / cascade), four palettes (signal / tape / blueprint / arcade), and an
@@ -582,18 +616,18 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |
 | `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll |
 | `POST` | `/api/music/device/report`, `/api/music/device/heartbeat` | Firmware key-action reports and playhead heartbeats |
-| `GET` | `/api/music/device/now`, `/api/music/device/audio` | Firmware-side lyric fetch and audio download |
+| `GET` | `/api/music/device/now`, `/api/music/device/audio` | Firmware-side lyric fetch and audio download. `/now` is versioned by query parameter: no `?v` returns the original `DUR\t<ms>` + `<startMs>\t<text>` bytes verbatim (a deployed parser treats any non-`DUR` key as a start time, so a new record type would render as garbage), `?v=2` returns `V\t2`, `DUR`, `L\t<startMs>\t<sungEndMs>\t<text>` and an optional `W\t<d0,w0,…>` table for the line above it |
 | `GET` / `POST` | `/api/os/device-app/*` | The same sideload lifecycle for ZOS (confirmation phrase `START_TC002_OS_SESSION`) |
 | `GET` | `/api/os/pull` | ZOS long-polls the state document (`?seq=`, parks up to 8 s; line-oriented `KEY\tVALUE` plain text, cross-origin) |
 | `GET` | `/api/os/frames` | ZOS fetches one channel's rendered frames by `?app=` (`TCF1` raw-RGB binary, cross-origin) |
-| `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts}` (strings truncated at 64 chars, cross-origin, never bumps seq) |
+| `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto}` (strings truncated at 64 chars, cross-origin; bumps seq only when `proto` changes) |
 | `POST` | `/api/os/mirror` | ZOS uploads a captured panel frame (body is 2496 raw RGB bytes, cross-origin); the reply `{wanted}` tells the device whether to keep streaming |
 | `GET` | `/api/os/mirror` | Console reads the latest frame — **asking is the subscription**: stop polling and the device stops streaming 10 s later |
 | `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}` (live means a report arrived within 15 s) |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned |
-| `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?}`; a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
+| `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing
 `report` / `heartbeat` endpoints and ZOS's `/api/os/pull`, `/api/os/frames`, `/api/os/report`

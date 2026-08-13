@@ -24,6 +24,11 @@ import {
   SIGN_PALETTE_IDS,
 } from "./visual/sign.ts";
 import {
+  VIEWFINDER_DEFAULT_PALETTE,
+  VIEWFINDER_PALETTES,
+  VIEWFINDER_PALETTE_IDS,
+} from "./visual/viewfinder.ts";
+import {
   WeatherNotConfiguredError,
   parseCoordinate,
   type WeatherObservation,
@@ -254,7 +259,7 @@ const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description
   sign: { title: "灯牌", description: "整屏亚克力灯箱底色配黑字文案，超过一屏自动分屏轮显。" },
   starfield: { title: "星空穿梭", description: "星点从中心加速飞出的曲速效果。" },
   suncolor: { title: "日出日落色温钟", description: "按太阳高度角把整屏染成夜蓝、晨橙、日白或暮红。" },
-  viewfinder: { title: "取景框钟", description: "米色底、橄榄墨色大字时间，取景框角标配温度与日期角签；整屏常亮，亮度偏高。" },
+  viewfinder: { title: "取景框钟", description: "取景框角标围住的大字时间，配温度与日期角签；六套配色从整屏常亮的胶片米到只点亮字迹的暗房红。" },
   weather: { title: "天气粒子", description: "按 Open-Meteo 实况自动切换晴、云、雨、雪粒子。" },
 };
 
@@ -302,17 +307,39 @@ const TIME_DRIVEN_VISUALS: readonly VisualEffectId[] = [
 function visualOptionFields(effectId: VisualEffectId): ContentOptionField[] {
   if (effectId === "flipclock" || effectId === "matrixclock") return [];
   if (effectId === "suncolor") return [...LOCATION_OPTIONS];
+  if (effectId === "viewfinder") {
+    // A clock face has no animation to speed up, so no SPEED_OPTION — same
+    // reasoning as the sign below. The help text leads with brightness because
+    // that is the axis the palettes are ordered on and the reason the dark ones
+    // exist: the field is drawn on all 832 LEDs, so it, not the type, is what
+    // lights up a bedroom. (The location options come from the bespoke
+    // definition that owns this face's weather dependency.)
+    return [
+      {
+        key: "viewfinderPalette",
+        label: "配色",
+        type: "select",
+        default: VIEWFINDER_DEFAULT_PALETTE,
+        help: "从亮到暗排列：前三种整屏底色常亮，后三种只点亮字，适合夜间常驻。",
+        choices: VIEWFINDER_PALETTE_IDS.map((id) => ({
+          value: id,
+          label: VIEWFINDER_PALETTES[id].label,
+        })),
+      },
+    ];
+  }
   if (effectId === "sign") {
     // A static sign has nothing to speed up, so no SPEED_OPTION. The width
-    // limit lives in the help text because 52 px holds exactly four 12 px
-    // hanzi — the user must know that before typing, not after.
+    // limit lives in the help text because 52 px holds four 12 px hanzi, or
+    // five once the renderer drops to its condensed 10 px face — the user must
+    // know where that line is before typing, not after.
     return [
       {
         key: "signText",
         label: "文案",
         type: "text",
         default: SIGN_DEFAULT_TEXT,
-        help: "汉字每屏最多 4 个，字母数字算半个；超宽自动分屏轮显，也可用 / 手动分屏。",
+        help: "汉字每屏最多 5 个（第 5 个字起自动换紧缩字形，笔画多的字会略糊），字母数字算半个；超宽自动分屏轮显，也可用 / 手动分屏。",
       },
       {
         key: "signPalette",
@@ -528,8 +555,14 @@ const VIEWFINDER_DEFINITION: ContentDefinition = {
   description: VISUAL_NAMES.viewfinder.description,
   defaultDurationMs: 10_000,
   preferredRefreshIntervalMs: 10_000,
-  options: [...LOCATION_OPTIONS],
+  options: [...LOCATION_OPTIONS, ...visualOptionFields("viewfinder")],
   async render(context, item) {
+    const palette = typeof item.options.viewfinderPalette === "string"
+      ? item.options.viewfinderPalette
+      : undefined;
+    // Configuration states keep the shared amber-on-black notice presentation
+    // rather than the chosen palette: it has to read as "this face is not set
+    // up", identically to 天气粒子 and 大字天气钟, not as a styled clock.
     const notice = (weatherNotice: string) =>
       renderVisualEffect("viewfinder", item.durationMs, context.nowMs, { weatherNotice });
     let latitude: number;
@@ -548,6 +581,7 @@ const VIEWFINDER_DEFINITION: ContentDefinition = {
       return notice("未配置");
     }
     return renderVisualEffect("viewfinder", item.durationMs, context.nowMs, {
+      viewfinderPalette: palette,
       weather: {
         condition: weather.condition,
         temperatureC: weather.temperatureC,

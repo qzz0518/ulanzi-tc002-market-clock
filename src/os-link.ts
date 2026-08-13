@@ -13,12 +13,35 @@
  * dependency on a device with ~1 MB free, for a document with a dozen fields.
  */
 
+import { encodeLyricCells, lyricCells } from "./music/lyric-timing.ts";
+import type { MusicLyricWord } from "./music/core.ts";
+
 export interface OsMenuEntry {
   /** Stable id the firmware echoes back when the user activates it. */
   id: string;
   /** UTF-8 label as shown on the panel. */
   label: string;
   kind: "channel" | "music" | "game" | "settings";
+  /**
+   * Fingerprint of the frames behind this entry, when it has any.
+   *
+   * The device fetches a channel's pixels once and holds them, and until this
+   * existed the document could not say that the pixels changed: an options edit
+   * moves neither the id nor the label, so the menu compared equal, the
+   * sequence never bumped, and the only way to see a new 灯牌 colour was to turn
+   * the knob to another channel and back. The revision is what an edit actually
+   * changes on the wire.
+   */
+  rev?: string;
+  /**
+   * How long this entry's frames stay true, in milliseconds.
+   *
+   * A time-driven face — 大字天气钟, 取景框钟 — renders ten seconds of frames of a
+   * clock, and a device that loops them forever is showing a minute that has
+   * already passed. The service is the only side that knows how long a channel's
+   * render is good for, so it says so rather than making the firmware guess.
+   */
+  ttlMs?: number;
 }
 
 export interface OsDisplayCommand {
@@ -117,7 +140,32 @@ export interface OsNowPlaying {
    * rather than the service inventing a window it does not know.
    */
   lyricStartMs: number;
+  /**
+   * When the line stopped being SUNG — the number this whole change exists to
+   * produce, as opposed to the next line's start it used to be.
+   *
+   * It reaches the panel as `lyricend` only for a firmware that has said it
+   * understands the split (OS_PROTO_LYRIC_WINDOW); an older build is still sent
+   * the display window under that key, because that is what its cascade
+   * choreography is built on.
+   */
   lyricEndMs: number;
+  /**
+   * When the NEXT line takes over — the line's display window, as opposed to
+   * its singing.
+   *
+   * Only the cascade mode's entrance/exit choreography may use it. With
+   * `lyricEndMs` now pinning at the moment the voice stops, keying the exit ramp
+   * on it would fly the line off the panel at the start of a 13 s instrumental
+   * and leave the screen blank until the next line. Equal to `lyricEndMs` when
+   * the two coincide, in which case it is left off the wire.
+   */
+  lyricUntilMs: number;
+  /**
+   * Per-word timings for this line, when the source really has them. Absent
+   * means line-level timing only and the panel sweeps as it always did.
+   */
+  lyricWords?: MusicLyricWord[];
 }
 
 /**
@@ -154,6 +202,11 @@ export interface OsTelemetry {
   batteryPercent: number;
   charging: boolean;
   /**
+   * Which revision of the state document this firmware understands. Absent or 0
+   * means the build predates the sung/display split — see OS_PROTO_LYRIC_WINDOW.
+   */
+  proto: number;
+  /**
    * True when ZOS is running from flash rather than from a sideload.
    *
    * Only the device can answer this, and the console needs it to say what a
@@ -166,13 +219,50 @@ export interface OsTelemetry {
   receivedAt: number;
 }
 
+/**
+ * The document revision that understands `lyricend` meaning the SUNG end.
+ *
+ * ZOS is flashed, not sideloaded, so a device in the field keeps running its
+ * build across service restarts and there is no moment where the two are
+ * guaranteed to move together. That makes the meaning of `lyricend` a
+ * compatibility problem rather than a naming one: `MusicScreen::lineProgress()`
+ * feeds it straight into `cascadeBandY`, whose exit ramp reaches y = -16 at
+ * progress 1. Tightening the key under an un-upgraded firmware would fly the
+ * line off the panel the instant the singer stops and leave 升降 blank for the
+ * whole instrumental — on 孤勇者, 13.3 seconds of black screen.
+ *
+ * So the device says what it can read, and `serialize()` writes the encoding it
+ * asked for. A build that has never sent `proto` gets exactly the document it
+ * got before this change; nothing regresses, and no deploy order is load-bearing.
+ * Delete the legacy branch once no device can still be running such a build.
+ */
+export const OS_PROTO_LYRIC_WINDOW = 2;
+
 const MAX_LABEL_CELLS = 24;
 const MAX_ENTRIES = 32;
+// A second is the floor because the device re-fetches a whole frame bundle when
+// a ttl expires; anything shorter turns a clock face into a download loop on a
+// single-core device with a 15 ms panel. A day is the ceiling because a larger
+// number would not survive the firmware's atoi into an int32 as milliseconds.
+const MIN_TTL_MS = 1_000;
+const MAX_TTL_MS = 86_400_000;
 
 function sanitizeField(value: string): string {
   // Tabs and newlines are the record separators, so they can never appear in a
   // value. Channel names are user-authored and arrive from workspace.json.
   return value.replace(/[\t\r\n]+/g, " ").trim();
+}
+
+/** Hex-ish token or nothing; the device compares it, so shape beats meaning. */
+function normalizeRev(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const token = value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
+  return token === "" ? undefined : token;
+}
+
+function normalizeTtl(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.max(MIN_TTL_MS, Math.min(MAX_TTL_MS, Math.round(value)));
 }
 
 function clampLabel(value: string): string {
@@ -188,6 +278,34 @@ interface Waiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** What the hub keeps: the report plus the wire form of its cell table. */
+type StoredNowPlaying = OsNowPlaying & { lyricCells: string };
+
+/**
+ * The `lyricw` payload for a label that has already been sanitized and clamped.
+ *
+ * The table's index IS the glyph index on the panel, so it has to be built
+ * against the same string the panel will lay out. Cells are derived from the
+ * FULL line (that is the only text the word timings reconstruct) and then
+ * truncated exactly as clampLabel truncated the label, which keeps the two in
+ * step by construction rather than by a comparison somebody has to remember.
+ * A line whose words do not rebuild its text yields no table at all — the
+ * panel falls back to the line-level sweep rather than lighting wrong glyphs.
+ */
+function encodeLabelCells(
+  fullText: string,
+  label: string,
+  line: { startMs: number; endMs: number; words?: readonly MusicLyricWord[] | undefined },
+): string {
+  if (!line.words || line.words.length === 0) return "";
+  if (line.endMs <= line.startMs) return "";
+  const cells = lyricCells({ startMs: line.startMs, endMs: line.endMs, text: fullText, words: line.words });
+  if (cells.length === 0) return "";
+  const kept = cells.slice(0, [...label].length);
+  if (kept.length === 0) return "";
+  return encodeLyricCells(kept, line.startMs);
+}
+
 export class OsLinkHub {
   private seq = 1;
   private menu: OsMenuEntry[] = [];
@@ -200,6 +318,10 @@ export class OsLinkHub {
   // would fall back to promising the stock firmware — the dangerous direction,
   // at exactly the moment the user is reading a restore guide.
   private zosEverFlashed = false;
+  // Not sticky, unlike zosEverFlashed: this describes the build that is on the
+  // device right now, and a downgrade has to be able to take the tighter
+  // encoding away again.
+  private deviceProto = 0;
   private settings: OsDeviceSettings = { volume: null, brightness: null };
   // Defaults identical to sDeviceState's in src/control-api.ts, so the two
   // agree before the first write rather than only after one.
@@ -217,7 +339,7 @@ export class OsLinkHub {
   // worse than dropping it.
   private inputs: OsInputEvent[] = [];
   private inputSeq = 0;
-  private nowPlaying: OsNowPlaying | null = null;
+  private nowPlaying: StoredNowPlaying | null = null;
   private nowPlayingStampedAt = 0;
   private nowPlayingSource: OsNowPlayingSource | null = null;
   private readonly waiters = new Set<Waiter>();
@@ -229,11 +351,17 @@ export class OsLinkHub {
   }
 
   setMenu(entries: OsMenuEntry[]): void {
-    const next = entries.slice(0, MAX_ENTRIES).map((entry) => ({
-      id: sanitizeField(entry.id),
-      label: clampLabel(sanitizeField(entry.label)),
-      kind: entry.kind,
-    }));
+    const next = entries.slice(0, MAX_ENTRIES).map((entry) => {
+      const rev = normalizeRev(entry.rev);
+      const ttlMs = normalizeTtl(entry.ttlMs);
+      return {
+        id: sanitizeField(entry.id),
+        label: clampLabel(sanitizeField(entry.label)),
+        kind: entry.kind,
+        ...(rev === undefined ? {} : { rev }),
+        ...(ttlMs === undefined ? {} : { ttlMs }),
+      };
+    });
     if (this.serializeMenu(next) === this.serializeMenu(this.menu)) return;
     this.menu = next;
     this.bump();
@@ -283,16 +411,27 @@ export class OsLinkHub {
    */
   setNowPlaying(now: OsNowPlaying | null, source: OsNowPlayingSource = "remote"): void {
     if (!this.mayWriteNowPlaying(now, source)) return;
-    const next = now === null ? null : {
-      track: clampLabel(sanitizeField(now.track)),
-      artist: clampLabel(sanitizeField(now.artist)),
-      playing: now.playing,
-      positionMs: Math.max(0, Math.round(now.positionMs)),
-      durationMs: Math.max(0, Math.round(now.durationMs)),
-      lyric: clampLabel(sanitizeField(now.lyric)),
-      lyricStartMs: Math.max(0, Math.round(now.lyricStartMs)),
-      lyricEndMs: Math.max(0, Math.round(now.lyricEndMs)),
-    };
+    const next = now === null ? null : ((): StoredNowPlaying => {
+      const lyric = clampLabel(sanitizeField(now.lyric));
+      const lyricStartMs = Math.max(0, Math.round(now.lyricStartMs));
+      const lyricEndMs = Math.max(0, Math.round(now.lyricEndMs));
+      return {
+        track: clampLabel(sanitizeField(now.track)),
+        artist: clampLabel(sanitizeField(now.artist)),
+        playing: now.playing,
+        positionMs: Math.max(0, Math.round(now.positionMs)),
+        durationMs: Math.max(0, Math.round(now.durationMs)),
+        lyric,
+        lyricStartMs,
+        lyricEndMs,
+        lyricUntilMs: Math.max(0, Math.round(now.lyricUntilMs)),
+        lyricCells: encodeLabelCells(
+          sanitizeField(now.lyric),
+          lyric,
+          { startMs: lyricStartMs, endMs: lyricEndMs, words: now.lyricWords },
+        ),
+      };
+    })();
     const before = this.nowPlaying;
     const textChanged = (before === null) !== (next === null) ||
       (before !== null && next !== null && (
@@ -305,7 +444,13 @@ export class OsLinkHub {
         // never sees the new document, and it keeps animating the previous
         // line's window with progress pinned at 1 — the line sits there fully
         // sung while the song moves on.
-        before.lyricStartMs !== next.lyricStartMs
+        before.lyricStartMs !== next.lyricStartMs ||
+        before.lyricUntilMs !== next.lyricUntilMs ||
+        // The cell table can arrive AFTER the line it belongs to: the console
+        // reports on a 4 s timer and a track switch can land a wordless report
+        // first. Without this the refinement never reaches the device and the
+        // panel keeps sweeping a line it could have been walking word by word.
+        before.lyricCells !== next.lyricCells
       ));
     this.nowPlaying = next;
     this.nowPlayingStampedAt = this.now();
@@ -321,7 +466,7 @@ export class OsLinkHub {
     return next !== null && next.playing && this.nowPlaying?.playing !== true;
   }
 
-  getNowPlaying(): OsNowPlaying | null {
+  getNowPlaying(): StoredNowPlaying | null {
     return this.nowPlaying === null ? null : { ...this.nowPlaying };
   }
 
@@ -432,9 +577,22 @@ export class OsLinkHub {
 
   report(telemetry: Omit<OsTelemetry, "receivedAt">): void {
     if (telemetry.flashed) this.zosEverFlashed = true;
+    const proto = Number.isFinite(telemetry.proto) ? Math.max(0, Math.floor(telemetry.proto)) : 0;
     // Telemetry never bumps the sequence: it flows device->console, and waking
     // every long poll on it would turn a status heartbeat into a broadcast storm.
-    this.telemetry = { ...telemetry, receivedAt: this.now() };
+    // The one exception is the document's own encoding changing, which happens
+    // once per device boot and has to reach the parked poll the device is
+    // sitting in — otherwise a freshly flashed unit reads the legacy encoding
+    // until the next lyric line happens to move.
+    const changed = proto !== this.deviceProto;
+    this.deviceProto = proto;
+    this.telemetry = { ...telemetry, proto, receivedAt: this.now() };
+    if (changed) this.bump();
+  }
+
+  /** The document revision the device last said it understands; 0 before any report. */
+  deviceProtocol(): number {
+    return this.deviceProto;
   }
 
   getTelemetry(): OsTelemetry | null {
@@ -480,8 +638,18 @@ export class OsLinkHub {
     return this.now() - this.telemetry.receivedAt < withinMs;
   }
 
+  /**
+   * The change signature, not the wire format — this string is never sent.
+   *
+   * The revision and ttl are part of it on purpose: this comparison is the only
+   * thing standing between a saved edit and a parked long poll, and keyed on
+   * kind/id/label alone it answered "nothing changed" to every content edit the
+   * user has ever made.
+   */
   private serializeMenu(entries: OsMenuEntry[]): string {
-    return entries.map((e) => `${e.kind}\t${e.id}\t${e.label}`).join("\n");
+    return entries
+      .map((e) => `${e.kind}\t${e.id}\t${e.label}\t${e.rev ?? ""}\t${e.ttlMs ?? ""}`)
+      .join("\n");
   }
 
   serialize(): string {
@@ -531,14 +699,44 @@ export class OsLinkHub {
         // absence carries the meaning instead — which is also what an older
         // service looks like to a newer firmware.
         if (np.lyricEndMs > np.lyricStartMs) {
+          const windowEndMs = Math.max(np.lyricUntilMs, np.lyricEndMs);
+          const understandsWindow = this.deviceProto >= OS_PROTO_LYRIC_WINDOW;
           lines.push(`lyricat\t${np.lyricStartMs}`);
-          lines.push(`lyricend\t${np.lyricEndMs}`);
+          // Legacy builds read this as "when the next line takes over" and key
+          // the cascade choreography on it, so they keep getting that number.
+          // See OS_PROTO_LYRIC_WINDOW.
+          lines.push(`lyricend\t${understandsWindow ? np.lyricEndMs : windowEndMs}`);
+          if (understandsWindow) {
+            // Only when the line really is held past its singing. Emitting it
+            // unconditionally would put 18 bytes in every document to say what
+            // `lyricend` already says.
+            if (windowEndMs > np.lyricEndMs) lines.push(`lyricuntil\t${windowEndMs}`);
+            // One field, comma separated: StateDoc::splitTabs stops after three
+            // tabs, so a tab-separated table would arrive truncated. Withheld
+            // from a legacy build not because it would misparse — unknown keys
+            // are ignored — but because a per-glyph table is up to 207 bytes on
+            // every document, for a renderer that cannot read it.
+            if (np.lyricCells !== "") lines.push(`lyricw\t${np.lyricCells}`);
+          }
         }
       }
     }
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {
       lines.push(`item\t${entry.kind}\t${entry.id}\t${entry.label}`);
+      // Annotations of the item that just went by, emitted as NEW KEYS rather
+      // than as two more tab fields on `item`. This is load-bearing: the
+      // deployed firmware matches `fields[0] == "item" && n == 4` — a strict
+      // arity check — so a fifth field would make it drop every menu entry and
+      // lose the channel ring entirely until it is reflashed. Its parser
+      // ignores keys it does not know, on purpose, which is what lets these
+      // ship to a device that has never heard of them.
+      //
+      // Each record repeats the id even though it directly follows its item, so
+      // a firmware that indexes rather than appends is not forced to rely on
+      // ordering it never agreed to.
+      if (entry.rev !== undefined) lines.push(`rev\t${entry.id}\t${entry.rev}`);
+      if (entry.ttlMs !== undefined) lines.push(`ttl\t${entry.id}\t${entry.ttlMs}`);
     }
     // A trailing newline lets the firmware treat every record identically
     // instead of special-casing the last one.

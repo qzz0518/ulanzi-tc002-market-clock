@@ -29,6 +29,16 @@ interface WorkspaceActionsProps {
   channelAppName?: string;
   /** 未启用的频道不在设备菜单里，固定它在固件那侧会静默失败。 */
   channelEnabled?: boolean;
+  /**
+   * Flush any edit the 700 ms autosave has not written yet; false means it failed.
+   *
+   * Pinning is a request for the device to show *this* channel, and the device
+   * renders from the service's copy — so a pin that raced the debounce would
+   * put the pre-edit pixels on the panel and look exactly like the staleness
+   * this whole change exists to remove. `onPush` already flushes for the same
+   * reason; this is the ZOS button finally doing the same.
+   */
+  onFlushEdits?: () => Promise<boolean>;
   onPreview?: () => void;
   onPush: () => void;
 }
@@ -44,6 +54,7 @@ export function WorkspaceActions({
   firmwareMode = "official",
   channelAppName,
   channelEnabled = true,
+  onFlushEdits,
   onPreview,
   onPush,
 }: WorkspaceActionsProps) {
@@ -51,6 +62,17 @@ export function WorkspaceActions({
   const zosFocus = useZosFocus(zos);
   const pinBusy = zosFocus.busy;
   const pinError = zosFocus.error;
+  const pin = (focus: string) => {
+    if (!onFlushEdits) {
+      zosFocus.toggle(focus);
+      return;
+    }
+    void onFlushEdits().then((saved) => {
+      // A failed save already raised its own toast; pinning anyway would send
+      // the clock to a channel whose newest edit only exists in this browser.
+      if (saved) zosFocus.toggle(focus);
+    });
+  };
 
   const locked = disabled || busy !== null;
   const pushing = busy === "push";
@@ -64,6 +86,12 @@ export function WorkspaceActions({
   // device copy is. ZOS inverts that: the device fetches the channel's frames
   // when it shows it, so there is no push to be behind on — saying "尚未推送到
   // 设备" about a channel the clock can already display would be the lie.
+  //
+  // What this used to say — "保存后进入该频道即为最新" — was itself the lie:
+  // re-entering a channel is precisely what did NOT refresh it. The service now
+  // publishes a per-channel content revision, so what the console can honestly
+  // claim is that it told the clock; what the clock then does with that is the
+  // firmware's half.
   const deviceLabel = zos
     ? pinError
       ? `固定失败：${pinError}`
@@ -71,7 +99,7 @@ export function WorkspaceActions({
         ? "频道未启用 · 不在时钟菜单里"
         : pinnedHere
           ? "已固定在时钟上 · 旋钮暂时不切台"
-          : "ZOS 主动拉取 · 保存后进入该频道即为最新"
+          : "ZOS 主动拉取 · 保存后已通知时钟更新"
     : !lastPushAt
       ? "尚未推送到设备"
       : deviceOutOfDate
@@ -118,7 +146,7 @@ export function WorkspaceActions({
               : channelEnabled
                 ? "把时钟切到这个频道并锁住旋钮"
                 : "频道未启用，不会出现在时钟菜单里"}
-            onClick={() => zosFocus.toggle(channelAppName)}
+            onClick={() => pin(channelAppName)}
           >
             {pinBusy
               ? <LoaderCircle className="animate-spin" aria-hidden="true" />

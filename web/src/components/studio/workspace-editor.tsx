@@ -107,6 +107,8 @@ interface WorkspaceEditorProps {
   onTimerStart: (itemId: string) => void;
   onTimerPause: (itemId: string) => void;
   onOpenCatalog: () => void;
+  /** 见 WorkspaceActions.onFlushEdits：固定到时钟前先把待保存的改动落盘。 */
+  onFlushEdits?: () => Promise<boolean>;
   onPush: () => void;
 }
 
@@ -544,6 +546,7 @@ export function WorkspaceEditor({
   onTimerStart,
   onTimerPause,
   onOpenCatalog,
+  onFlushEdits,
   onPush,
 }: WorkspaceEditorProps) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -677,6 +680,7 @@ export function WorkspaceEditor({
             firmwareMode={firmwareMode}
             channelAppName={channel.appName}
             channelEnabled={channel.enabled}
+            onFlushEdits={onFlushEdits}
             onPush={onPush}
           />
         </div>

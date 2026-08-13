@@ -1,12 +1,11 @@
-import {
-  spotlightOffsetPx,
-  type MusicMode,
-} from "@/components/music/pixel-lyric-modes";
+import { type MusicMode } from "@/components/music/pixel-lyric-modes";
 import {
   drawPixelLyricsFrame,
-  lyricScrollOffsetForProgress,
+  pixelLyricCursor,
+  pixelLyricScrollOffset,
   pixelTextWidth,
   type MusicSkin,
+  type PixelLyricLine,
 } from "@/components/music/pixel-lyrics-preview";
 import type { SpectrumLookup } from "@/lib/spectrum-timeline";
 
@@ -64,12 +63,22 @@ export function mirrorFrameSchedule(
 export function renderMirrorFrames(input: {
   text: string;
   hasLyric: boolean;
-  durationMs: number;
+  /**
+   * The line's DISPLAY window — start to when the next line takes over, not to
+   * when the singer stopped.
+   *
+   * The GIF is a loop, and the device replays it until a new bundle arrives, so
+   * its total length has to be the time the line owns the panel. Cutting it to
+   * the sung span would replay the whole karaoke wipe two or three times over a
+   * thirteen-second instrumental, which is the same defect the sung end exists
+   * to remove, only faster. The wipe finishing early inside a longer loop is
+   * exactly right: the trailing frames hold the finished line, still.
+   */
+  line: PixelLyricLine;
   mode: MusicMode;
   skin: MusicSkin;
   trackProgress: number;
   playing: boolean;
-  startTimeMs?: number;
   spectrum?: SpectrumLookup;
 }): MirrorFrame[] {
   const canvas = document.createElement("canvas");
@@ -78,28 +87,32 @@ export function renderMirrorFrames(input: {
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) return [];
 
+  const { startMs, untilMs, endMs } = input.line;
+  const windowMs = Math.max(untilMs, endMs) - startMs;
   const textWidth = pixelTextWidth(input.text);
   // 聚光模式的文字逐像素扫过屏幕，所以它需要的帧数就是文字的像素宽；其余模式按整格
   // 跳字，用基线帧率即可。
   const motionSteps = input.mode === "spotlight" ? Math.max(0, Math.round(textWidth)) : 0;
-  const { frameCount, delayMs } = mirrorFrameSchedule(input.durationMs, motionSteps);
+  const { frameCount, delayMs } = mirrorFrameSchedule(windowMs, motionSteps);
 
   const frames: MirrorFrame[] = [];
   for (let index = 0; index < frameCount; index += 1) {
-    const progress = index / (frameCount - 1);
-    const scrollOffsetPx = input.mode === "spotlight"
-      ? spotlightOffsetPx(textWidth, progress)
-      : lyricScrollOffsetForProgress(textWidth, progress, false);
+    // Sampled on the TRACK CLOCK, not on a normalized 0..1 sweep. That is what
+    // lets a word-timed line reach the panel: the cursor needs a real playhead
+    // to compare its cell table against.
+    const playheadMs = startMs + index * delayMs;
+    const { cursor, windowProgress } = pixelLyricCursor(input.text, input.line, playheadMs);
     drawPixelLyricsFrame(context, {
       skin: input.skin,
       mode: input.mode,
       currentText: input.text,
       hasLyric: input.hasLyric,
-      lyricProgress: progress,
+      cursor,
+      windowProgress,
       trackProgress: input.trackProgress,
       playing: input.playing,
-      scrollOffsetPx,
-      timeMs: (input.startTimeMs ?? 0) + index * delayMs,
+      scrollOffsetPx: pixelLyricScrollOffset(input.text, cursor, input.mode, false),
+      timeMs: playheadMs,
       spectrum: input.spectrum,
       reducedMotion: false,
     });

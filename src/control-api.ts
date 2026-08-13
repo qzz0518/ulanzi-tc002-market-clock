@@ -25,8 +25,10 @@ import {
   proxyMusicArt,
   type MusicProvider,
   type MusicProviderId,
+  type MusicLyricWord,
   type MusicRemoteSnapshot,
 } from "./music/core.ts";
+import { encodeLyricCells, lyricCells } from "./music/lyric-timing.ts";
 import type { MusicHub } from "./music/hub.ts";
 import { PWA_ICONS, PWA_MANIFEST, pwaServiceWorker } from "./pwa.ts";
 import { SettingsValidationError } from "./settings.ts";
@@ -602,6 +604,37 @@ function optionalMediaId(value: unknown): string | null {
 
 function activeMusicProvider(hub: MusicHub): MusicProvider {
   return hub.activeProvider();
+}
+
+// Per-word timings reported by the console for the line it is showing.
+//
+// Bounded the same way the rest of this endpoint is: 64 words is more than a
+// 24-cell panel label can possibly need, and the text budget matches the 200
+// characters the sibling fields are already sliced to. A malformed array is
+// DROPPED rather than rejected — a lyric report must never fail the panel, and
+// dropping it falls back to the line-level sweep, which is the honest answer
+// when we cannot trust the timings.
+function readLyricWords(value: unknown): MusicLyricWord[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return undefined;
+  const words: MusicLyricWord[] = [];
+  let characters = 0;
+  let previousStartMs = -1;
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+    const record = entry as Record<string, unknown>;
+    const startMs = record.startMs;
+    const endMs = record.endMs;
+    const text = record.text;
+    if (typeof startMs !== "number" || !Number.isFinite(startMs) || startMs < 0) return undefined;
+    if (typeof endMs !== "number" || !Number.isFinite(endMs) || endMs < startMs) return undefined;
+    if (typeof text !== "string" || text.length === 0 || text.length > 16) return undefined;
+    if (startMs < previousStartMs) return undefined;
+    previousStartMs = startMs;
+    characters += text.length;
+    if (characters > 200) return undefined;
+    words.push({ startMs: Math.round(startMs), endMs: Math.round(endMs), text });
+  }
+  return words;
 }
 
 // Read the Connect player and fold it into the shared device state. Both the
@@ -1494,8 +1527,16 @@ export function createControlHandler(
 
       if (request.method === "GET" && url.pathname === "/api/music/device/now") {
         // Device-facing lyric timeline. Plain text (not JSON) so the TC002 parses
-        // it without a JSON lib: one "DUR\t<ms>" header line, then "<startMs>\t<text>"
-        // lines in UTF-8. Empty body = nothing selected (device falls back to demo).
+        // it without a JSON lib. Empty body = nothing selected (device falls back
+        // to demo).
+        //
+        // VERSIONED BY QUERY PARAMETER, and that is the only safe shape. The
+        // deployed sideload parser splits on the first tab and treats any key
+        // that is not "DUR" as a start time, so a fourth record type would land
+        // as a garbage line at 0 ms and an extra column would be rendered as
+        // literal tab-separated text. A firmware that has not been reflashed
+        // therefore must keep receiving the exact bytes it always did, and the
+        // regression test locks that byte for byte.
         const headers = {
           "Content-Type": "text/plain; charset=utf-8",
           "Cache-Control": "no-store",
@@ -1504,11 +1545,28 @@ export function createControlHandler(
           return new Response("", { headers });
         }
         const detail = await activeMusicProvider(options.music).trackDetail(sDeviceState.trackId);
-        let body = `DUR\t${Math.round(detail.track.durationMs)}\n`;
+        const version = url.searchParams.get("v");
+        let body = version === "2" ? "V\t2\n" : "";
+        body += `DUR\t${Math.round(detail.track.durationMs)}\n`;
         for (const line of detail.lyrics) {
           const text = line.text.replace(/[\t\r\n]+/g, " ").trim();
           if (!text) continue;
-          body += `${Math.round(line.startMs)}\t${text}\n`;
+          if (version !== "2") {
+            body += `${Math.round(line.startMs)}\t${text}\n`;
+            continue;
+          }
+          const startMs = Math.round(line.startMs);
+          const endMs = Math.max(startMs, Math.round(line.endMs));
+          body += `L\t${startMs}\t${endMs}\t${text}\n`;
+          // The cell table is built against the SANITIZED text, because that is
+          // what the device lays out; a table indexed off the raw text would
+          // light the wrong glyph on any line that carried a tab.
+          const cells = lyricCells({ startMs, endMs, text, words: line.words });
+          // 96 is `Cell cells[96]` in LyricsPage::draw — a longer line cannot be
+          // laid out on the device at all, so a table for it is dead weight.
+          if (cells.length > 0 && cells.length <= 96) {
+            body += `W\t${encodeLyricCells(cells, startMs)}\n`;
+          }
         }
         return new Response(body, { headers });
       }
@@ -1773,6 +1831,17 @@ export function createControlHandler(
           DISPLAY_WIDTH,
           DISPLAY_HEIGHT,
         );
+        // Deliberately NOT conditional on a rev the device might send: a channel
+        // whose revision has not moved can still render different pixels, which
+        // is the entire point of a clock face. The revision answers "did someone
+        // edit this", the ttl answers "has this render aged out", and answering
+        // 304 to the second question would freeze the panel all over again.
+        //
+        // Echoed as a header so the device records the revision it actually
+        // received rather than the one the document happened to advertise when
+        // it decided to ask — a save landing between those two moments would
+        // otherwise cost a redundant round trip.
+        const rev = controller.channelContentRevision(channel);
         // The typed array itself is not a BodyInit under this lib target; its
         // backing buffer is, and encodeFrameBundle allocates exactly one.
         return new Response(bundle.buffer as ArrayBuffer, {
@@ -1780,6 +1849,7 @@ export function createControlHandler(
           headers: {
             "Content-Type": "application/octet-stream",
             "Cache-Control": "no-store",
+            ...(rev ? { "X-Os-Rev": rev } : {}),
           },
         });
       }
@@ -1801,6 +1871,10 @@ export function createControlHandler(
           uptimeMs: num("uptimeMs"),
           freeKb: num("freeKb"),
           supplicantRestarts: num("supplicantRestarts"),
+          // Which state-document revision this build can read. Absent means a
+          // firmware from before the split, and the hub answers it with the
+          // encoding it was written against — see OS_PROTO_LYRIC_WINDOW.
+          proto: num("proto"),
           // -1 rather than 0 when the device has no reading yet: a console that
           // showed 0% would be reporting a flat battery on a charged device.
           batteryPercent: typeof input.batteryPercent === "number"
@@ -1919,6 +1993,7 @@ export function createControlHandler(
           typeof input[key] === "number" && Number.isFinite(input[key] as number)
             ? Math.max(0, Math.round(input[key] as number))
             : 0;
+        const words = readLyricWords(input.lyricWords);
         options.osLink.setNowPlaying({
           track: text("track"),
           artist: text("artist"),
@@ -1932,6 +2007,11 @@ export function createControlHandler(
           // than to a blank screen.
           lyricStartMs: ms("lyricStartMs"),
           lyricEndMs: ms("lyricEndMs"),
+          // When the next line takes over, which is a different question from
+          // when this one stopped being sung — see OsNowPlaying. A console that
+          // predates it sends nothing and the hub treats the two as equal.
+          lyricUntilMs: ms("lyricUntilMs") || ms("lyricEndMs"),
+          ...(words ? { lyricWords: words } : {}),
         }, "console");
         return jsonResponse({
           nowPlaying: options.osLink.getNowPlaying(),

@@ -231,11 +231,26 @@ export interface MusicTrack {
   coverUrl?: string;
 }
 
-export interface MusicLyricLine {
+// Mirrors src/music/core.ts. `/api/music/tracks/:id` serializes the provider's
+// lines wholesale, so the two shapes have to agree field for field.
+export interface MusicLyricWord {
   startMs: number;
   endMs: number;
   text: string;
+}
+
+export type LyricEndSource = "words" | "marker" | "estimate" | "next";
+
+export interface MusicLyricLine {
+  startMs: number;
+  /** When the line stopped being SUNG — not when the next one starts. */
+  endMs: number;
+  text: string;
   translation?: string;
+  /** Present only when the source really carries word timings (NetEase yrc). */
+  words?: MusicLyricWord[];
+  /** How endMs was decided; drives the 逐字 / 估算 badge. */
+  endSource: LyricEndSource;
 }
 
 export interface MusicTrackDetail {

@@ -50,8 +50,10 @@ import {
   MusicThemePanel,
   PixelLyricsPreview,
   type MusicSkin,
+  type PixelLyricLine,
 } from "@/components/music/pixel-lyrics-preview";
 import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
+import { lyricCells } from "@/lib/lyric-cursor";
 import { api, jsonApi } from "@/lib/api";
 import { createLatestTaskRunner, type LatestTaskRunner } from "@/lib/latest-task-runner";
 import { clampPlaybackPositionMs } from "@/lib/music-playback";
@@ -680,6 +682,86 @@ export function MusicPlayer({
 
   const activeLyric = activeLyricIndex >= 0 ? selected?.lyrics[activeLyricIndex] : undefined;
 
+  /**
+   * The active line as a window plus a cell table — the one shape every
+   * consumer here needs, computed once.
+   *
+   * `untilMs` is the next line's start (or the end of the track); `endMs` is
+   * what the provider decided the line's SINGING end was, and the two are the
+   * same number only when one line follows another immediately. `endMs` is
+   * clamped to the window because a Spotify Connect snapshot can be a different
+   * master than the NetEase timeline the lyrics came from.
+   */
+  const activeLine = useMemo<PixelLyricLine>(() => {
+    // All zeros means "no window", and every consumer reads it that way: the
+    // hub omits lyricat/lyricend rather than sending a degenerate one, and
+    // `pixelLyricCursor` answers with its idle cursor rather than inventing a
+    // window. Nothing downstream may synthesise a substitute — see the comment
+    // on pixelLyricCursor for what both directions of that mistake look like.
+    if (!activeLyric || !selected) return { startMs: 0, endMs: 0, untilMs: 0 };
+    const next = selected.lyrics[activeLyricIndex + 1];
+    const trackMs = selected.track.durationMs;
+    const untilMs = next
+      ? next.startMs
+      : (trackMs > activeLyric.startMs ? trackMs : activeLyric.startMs + 4_000);
+    const endMs = activeLyric.endMs > activeLyric.startMs
+      ? Math.min(activeLyric.endMs, untilMs)
+      : untilMs;
+    // Built from the raw line, not from what the panel happens to show: the
+    // table's index IS the glyph index, and lyricCells returns nothing at all
+    // rather than a table that would light the wrong character.
+    const cells = lyricCells({ startMs: activeLyric.startMs, endMs, text: activeLyric.text, words: activeLyric.words });
+    return {
+      startMs: activeLyric.startMs,
+      endMs,
+      untilMs,
+      ...(cells.length > 0 ? { cells } : {}),
+    };
+  }, [activeLyric, activeLyricIndex, selected]);
+
+  /**
+   * The lyric half of the now-playing report.
+   *
+   * The panel cannot look any of this up: the service polls Spotify but nothing
+   * can poll a browser, so for a device-audio provider this component is the
+   * only thing in the system that knows what is coming out of the speakers.
+   *
+   * Four fields rather than two, because the panel needs to tell three moments
+   * apart — when the line starts, when the SINGING stops, and when the next
+   * line takes over. `lyricEndMs` used to be the third of those, which is what
+   * made the highlight crawl through every instrumental. The words are sent
+   * when the source has them; the service turns them into the per-glyph table
+   * (after its own truncation, so the indices cannot drift) and the panel walks
+   * the line at the rate it was actually sung.
+   */
+  /**
+   * How the current line's end was decided, in the user's words.
+   *
+   * Only the two cases worth acting on get a chip: "逐字" when the source really
+   * timed every word, "估算" when we bounded it ourselves by singing rate — the
+   * one case where the highlight can finish before the singer does. A line
+   * ended by the source's own end mark, or by the next line arriving, is simply
+   * correct and says nothing.
+   */
+  const lyricTimingBadge = useMemo(() => {
+    if (!activeLyric) return null;
+    if (activeLyric.words?.length) {
+      return { label: "逐字", exact: true, hint: "这句有逐字时间，高亮跟着每个字走" };
+    }
+    if (activeLyric.endSource === "estimate") {
+      return { label: "估算", exact: false, hint: "没有逐字歌词，按演唱速率估算句尾；长拖腔可能提前收住" };
+    }
+    return null;
+  }, [activeLyric]);
+
+  const lyricReport = useMemo(() => ({
+    lyric: activeLyric?.text ?? "",
+    lyricStartMs: activeLine.startMs,
+    lyricEndMs: activeLine.endMs,
+    lyricUntilMs: activeLine.untilMs,
+    ...(activeLyric?.words?.length ? { lyricWords: activeLyric.words } : {}),
+  }), [activeLine, activeLyric]);
+
   // Tell the clock what is playing HERE.
   //
   // On ZOS the panel is a lyric display, not a speaker: audio stays in this
@@ -712,13 +794,7 @@ export function MusicPlayer({
           playing: false,
           positionMs: Math.round(currentMs),
           durationMs: selected.track.durationMs,
-          lyric: activeLyric?.text ?? "",
-          // The line's window, not just its words. Every 显示形式 animates
-          // against progress WITHIN the line, so a panel given only the text
-          // has nothing to sweep — and this component is the only thing in the
-          // system that knows it for a device-audio provider.
-          lyricStartMs: activeLyric?.startMs ?? 0,
-          lyricEndMs: activeLyric?.endMs ?? 0,
+          ...lyricReport,
         }
         : null);
       return;
@@ -729,16 +805,15 @@ export function MusicPlayer({
       playing: true,
       positionMs: Math.round(currentMs),
       durationMs: selected.track.durationMs,
-      lyric: activeLyric?.text ?? "",
-      lyricStartMs: activeLyric?.startMs ?? 0,
-      lyricEndMs: activeLyric?.endMs ?? 0,
+      ...lyricReport,
     });
     send();
     const timer = window.setInterval(send, 4_000);
     return () => window.clearInterval(timer);
-    // currentMs ticks every frame; activeLyric is what actually changes the
-    // panel, so the effect is keyed on the line rather than on the playhead.
-  }, [zos, selected, playing, activeLyric]);
+    // currentMs ticks every frame; the lyric report is what actually changes
+    // the panel, so the effect is keyed on it rather than on the playhead. It
+    // covers the word table too — a report can arrive before the timings do.
+  }, [zos, selected, playing, lyricReport]);
 
   // A closed tab must not leave the last lyric on the clock. keepalive, because
   // a normal fetch is cancelled the moment the page goes away — the same reason
@@ -764,29 +839,29 @@ export function MusicPlayer({
     // ZOS never gets mirror frames: the endpoint answers 503 (measured), and the
     // device draws its own music page from the now-playing the service publishes.
     if (!mirrorOn || !selected || deviceOnline || zos) return;
-    const durationMs = activeLyric ? activeLyric.endMs - activeLyric.startMs : 4_000;
+    // With no lyric the GIF is the title on a four-second loop, so the window
+    // is synthesised around the current playhead.
+    const line: PixelLyricLine = activeLyric
+      ? activeLine
+      : { startMs: currentMs, endMs: currentMs + 4_000, untilMs: currentMs + 4_000 };
     const frames = renderMirrorFrames({
       text: activeLyric?.text ?? selected.track.title,
       hasLyric: Boolean(activeLyric && activeLyric.text.trim().length > 0),
-      durationMs,
+      line,
       mode,
       skin,
       trackProgress: trackProgressRef.current,
       playing,
-      startTimeMs: activeLyric?.startMs ?? currentMs,
       spectrum: activeSpectrum,
     });
     if (frames.length > 0) void mirrorRunnerRef.current?.enqueue({ frames });
-  }, [activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin, zos]);
+  }, [activeLine, activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin, zos]);
   const effectiveDurationMs = durationMs > 0 ? durationMs : selected?.track.durationMs ?? 0;
   durationRef.current = effectiveDurationMs;
   const timelineDisplayMs = Math.min(dragMs ?? currentMs, effectiveDurationMs);
   const selectedTrackIndex = selected
     ? tracks.findIndex((track) => track.id === selected.track.id)
     : -1;
-  const lyricProgress = activeLyric
-    ? Math.min(1, Math.max(0, (currentMs - activeLyric.startMs) / Math.max(1, activeLyric.endMs - activeLyric.startMs)))
-    : 0;
   const trackProgress = effectiveDurationMs > 0 ? Math.min(1, currentMs / effectiveDurationMs) : 0;
   trackProgressRef.current = trackProgress;
 
@@ -1926,8 +2001,7 @@ export function MusicPlayer({
               <PixelLyricsPreview
                 currentText={displayCurrent}
                 hasLyric={Boolean(activeLyric && activeLyric.text.trim().length > 0)}
-                lyricProgress={lyricProgress}
-                lyricDurationMs={activeLyric ? activeLyric.endMs - activeLyric.startMs : 0}
+                line={activeLine}
                 trackProgress={trackProgress}
                 timeMs={currentMs}
                 playing={playing && !loadingTrack}
@@ -1971,6 +2045,24 @@ export function MusicPlayer({
             <section className="music-lyrics-panel" aria-labelledby="music-lyrics-title">
             <header>
               <div><span>LYRICS</span><h3 id="music-lyrics-title">歌词轨</h3></div>
+              {/*
+                Say out loud which kind of timing the current line has.
+                A word-timed line and a rate-estimated one look identical on the
+                panel until you watch one finish early, and the estimate really
+                can cut a long held note short — so the console names it rather
+                than presenting a guess as a measurement.
+              */}
+              {lyricTimingBadge && (
+                <Chip
+                  size="sm"
+                  color={lyricTimingBadge.exact ? "brand" : "neutral"}
+                  variant="transparent"
+                  aria-live="polite"
+                  title={lyricTimingBadge.hint}
+                >
+                  {lyricTimingBadge.label}
+                </Chip>
+              )}
               <small>{selected ? "点击歌词可跳转" : "选择歌曲后显示"}</small>
             </header>
             {visibleLyrics.length > 0 ? (

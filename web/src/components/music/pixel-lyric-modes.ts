@@ -26,9 +26,29 @@ function fract(value: number): number {
 /**
  * Spotlight mode locks the currently sung pixel column to the screen center
  * (x = 26): the returned value is the screen x of the bitmap's left edge.
+ *
+ * Superseded for drawing by `spotlightOffsetForFocusPx`, which takes the pixel
+ * the cursor is genuinely on rather than deriving one from a scalar progress.
+ * Kept because it is half of the shared numeric core: `LyricModes.h` still
+ * carries the same two lines, and this is the copy the parity tests compare it
+ * against. Until both firmwares move to the cursor, deleting it here would
+ * remove the only thing holding them to the same arithmetic.
  */
 export function spotlightOffsetPx(textWidth: number, lyricProgress: number): number {
-  return 26 - Math.round(unit(lyricProgress) * Math.max(0, textWidth));
+  return spotlightOffsetForFocusPx(unit(lyricProgress) * Math.max(0, textWidth));
+}
+
+/**
+ * The same lock, driven by the pixel the cursor is actually on.
+ *
+ * `progress * textWidth` only finds the sung column when time is spread evenly
+ * over the row, which stops being true the moment a line has real word
+ * timings — the singer holds one glyph for a second and races through four
+ * more. The cursor knows which cell it is in and how far, so the focus pixel
+ * comes from the cell table instead.
+ */
+export function spotlightOffsetForFocusPx(focusPx: number): number {
+  return 26 - Math.round(Math.max(0, focusPx));
 }
 
 /**
@@ -119,17 +139,21 @@ export function skylineBarLevel(
  * Beat impulse shared by animated modes: snaps to 1 as each glyph starts
  * and decays until the next one; falls back to a 120 BPM pulse without
  * lyric timing.
+ *
+ * Takes the cursor's position INSIDE the current cell rather than a whole-line
+ * progress and a glyph count. It only ever wanted `fract(progress * n)`, and
+ * with word-level timing that identity no longer holds — cells are not equal
+ * width in time — so the cursor is the only thing that can answer it. Passing
+ * the fraction directly also removes the float noise that turned a kick of 1
+ * into 0.999 → 0 right on a syllable onset.
  */
 export function beatKick(
   playing: boolean,
   hasLyricTiming: boolean,
-  lyricProgress: number,
-  glyphCount: number,
+  cellFrac: number,
   timeMs: number,
 ): number {
   if (!playing) return 0;
-  if (hasLyricTiming && glyphCount > 0) {
-    return (1 - fract(unit(lyricProgress) * glyphCount)) ** 2;
-  }
+  if (hasLyricTiming) return (1 - unit(cellFrac)) ** 2;
   return (1 - fract(timeMs / 500)) ** 2 * 0.7;
 }

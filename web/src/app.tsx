@@ -718,11 +718,19 @@ export function App() {
     await renderPreview(previewTarget, true, true);
   };
 
+  // 任何「让设备照着现在的设置来」的动作都得先落盘：设备渲染的是服务端那份，
+  // 抢在 700ms 自动保存前点下去就会把改动前的画面送上屏。推送一直是这么做的，
+  // ZOS 的「在时钟上显示」现在也走同一条。
+  const flushEdits = useCallback(async (): Promise<boolean> => {
+    if (savedRevisionRef.current === editRevisionRef.current) return true;
+    return persistWorkspace();
+  }, [persistWorkspace]);
+
   const push = async () => {
     if (!selectedChannel) return;
     setBusy("push");
     try {
-      if (savedRevisionRef.current !== editRevisionRef.current && !await persistWorkspace()) return;
+      if (!await flushEdits()) return;
       const response = await jsonApi<{ state: RuntimeState }>("/api/channels/push", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1076,6 +1084,7 @@ export function App() {
                 toast.success("计时器已暂停到起始画面");
               }}
               onOpenCatalog={() => showMobileConsolePane("catalog")}
+              onFlushEdits={flushEdits}
               onPush={() => void push()}
             />
             {/* 内容市场不接 firmwareMode：它只往频道里加内容，没有任何关于
@@ -1114,6 +1123,7 @@ export function App() {
             onCreateTarget={createCanvasTarget}
             onApply={applyCanvas}
             onApplyAsChannel={applyCanvasAsChannel}
+            onFlushEdits={flushEdits}
             onPreview={() => void preview()}
             onPush={() => void push()}
           />
