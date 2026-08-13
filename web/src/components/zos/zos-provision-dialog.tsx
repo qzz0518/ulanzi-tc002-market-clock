@@ -503,6 +503,19 @@ export function ZosProvisionDialog({
     if (!open) return;
     const session = createProvisionSession({
       transport: createWebBluetoothTransport(),
+      pageProtocol: window.location.protocol,
+      pageHost: window.location.host,
+      readAccess: async () => {
+        const response = await fetch("/api/access", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = await response.json() as {
+          access?: { address?: string | null; port?: number | null };
+        };
+        return {
+          address: body.access?.address ?? null,
+          port: body.access?.port ?? null,
+        };
+      },
       readOsState: async () => {
         const response = await fetch("/api/os/state", { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);

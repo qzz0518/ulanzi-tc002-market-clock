@@ -193,6 +193,17 @@ bool ssidIsSafe(const std::string& ssid);
  */
 bool pskIsSafe(const std::string& psk);
 
+/**
+ * Whether a console address may be adopted as the pull target.
+ *
+ * `host` or `host:port` only — no scheme, no path, no second colon. The value
+ * arrives over the air and ends up in /data/zos-host, which readHostAddress()
+ * expands into the URL the firmware will poll for the rest of its life; this
+ * charset is what keeps a hostile writer from smuggling a path, a scheme or a
+ * second address into that file.
+ */
+bool hostIsSafe(const std::string& host);
+
 // --- the advertisement ------------------------------------------------------
 
 /**

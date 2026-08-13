@@ -91,6 +91,12 @@ int BleProvisionSession::lockoutRemainingMs(int nowMs) const {
   return kLockoutMs - elapsed;
 }
 
+std::string BleProvisionSession::takeConsoleHost() {
+  const std::string host = mAdoptedHost;
+  mAdoptedHost.clear();
+  return host;
+}
+
 const char* BleProvisionSession::phase() const {
   switch (mPhase) {
     case kPhaseLocked: return "locked";
@@ -267,6 +273,7 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
   if (cmd == "abort") {
     mRequest = kRequestNone;
     mRequestSsid.clear();
+    mRequestHost.clear();
     for (size_t i = 0; i < mRequestPsk.size(); ++i) mRequestPsk[i] = '\0';
     mRequestPsk.clear();
     if (mPhase == kPhaseScanning || mPhase == kPhaseJoining || mPhase == kPhaseFailed) {
@@ -318,6 +325,15 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
       audit("join", "arg");
       return;
     }
+    // Optional console address. Invalid means IGNORED, not rejected — the join
+    // must not fail over a field the firmware can live without.
+    const std::string host = message.get("host");
+    if (!host.empty() && ble::hostIsSafe(host)) {
+      mRequestHost = host;
+    } else {
+      if (!host.empty()) audit("host", "arg");
+      mRequestHost.clear();
+    }
     mRequestSsid = ssid;
     mRequestPsk = psk;
     mRequest = kRequestJoin;
@@ -368,6 +384,10 @@ void BleProvisionSession::noteLink(const Link& link, int nowMs) {
     if (link.online) {
       setPhase(kPhaseOnline, kErrNone);
       if (!link.ssid.empty()) mTargetSsid = link.ssid;
+      if (!mRequestHost.empty()) {
+        mAdoptedHost = mRequestHost;
+        mRequestHost.clear();
+      }
       emitState();
       return;
     }
@@ -383,6 +403,7 @@ void BleProvisionSession::noteLink(const Link& link, int nowMs) {
     // single early sample classifies the attempt as no-ap before the radio has
     // been touched. kJoinBudgetMs still ends an attempt that never associates.
     if ((!link.joining && mSawJoining) || budgetSpent) {
+      mRequestHost.clear();
       setPhase(kPhaseFailed,
                classifyFailure(mSawAssociated, mSawHandshake, mSawCompleted, link.online));
       emitState();

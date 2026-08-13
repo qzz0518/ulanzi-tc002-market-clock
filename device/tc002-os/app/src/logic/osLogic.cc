@@ -9,6 +9,8 @@
 
 #include <os/SystemProperties.h>
 
+#include <unistd.h>
+
 #include "net/BleProvisionSession.h"
 #include "net/HostLink.h"
 #include "net/PortalService.h"
@@ -609,6 +611,14 @@ void handleHold(int code, int nowMs) {
 // The sideload bundle carries the address and the launch script drops it here,
 // which also means changing it is a redeploy rather than a rebuild. A missing
 // file is not an error — the firmware runs standalone, it just has no channels.
+// Accept the three shapes a human would write, so a redeploy cannot be broken
+// by the obvious spelling of the same address.
+std::string normalizeHostAddress(const std::string& value) {
+	if (value.compare(0, 7, "http://") == 0) return value;
+	if (value.find(':') != std::string::npos) return "http://" + value;
+	return "http://" + value + ":43820";
+}
+
 std::string readHostAddress() {
 	// tmpfs first, because a sideload's address is the one being tested and
 	// should win; then the persistent copies, which are the only ones a FLASHED
@@ -633,13 +643,42 @@ std::string readHostAddress() {
 			value.erase(value.size() - 1);
 		}
 		if (value.empty()) continue;
-		// Accept the three shapes a human would write, so a redeploy cannot be
-		// broken by the obvious spelling of the same address.
-		if (value.compare(0, 7, "http://") == 0) return value;
-		if (value.find(':') != std::string::npos) return "http://" + value;
-		return "http://" + value + ":43820";
+		return normalizeHostAddress(value);
 	}
 	return std::string();
+}
+
+/**
+ * A successful BLE join may carry where the console now lives — the one moment
+ * the two facts naturally travel together, because changing Wi-Fi usually means
+ * the laptop moved networks too. Written the way Prefs::commit writes: temp,
+ * flush, fsync, rename — jffs2 will happily rename over an unflushed file.
+ *
+ * The pull loop restarts with the new address either way; the file only
+ * decides whether it survives a power cycle. A sideload session's /tmp
+ * override still wins on re-read, which is that chain's existing contract.
+ */
+void adoptConsoleHost(const std::string& host) {
+	FILE* f = fopen("/data/zos-host.tmp", "w");
+	if (f != NULL) {
+		fputs(host.c_str(), f);
+		fputs("\n", f);
+		fflush(f);
+		fsync(fileno(f));
+		fclose(f);
+		if (rename("/data/zos-host.tmp", "/data/zos-host") != 0) {
+			unlink("/data/zos-host.tmp");
+			tcos::ProvisionLog::device().log("host-persist", "outcome=rename-failed");
+		}
+	} else {
+		tcos::ProvisionLog::device().log("host-persist", "outcome=open-failed");
+	}
+	// The address is not a secret; the breadcrumb is how a wrong one gets
+	// diagnosed after the fact, from the only log this device keeps.
+	tcos::ProvisionLog::device().log("host-adopt", std::string("host=") + host);
+	hostLink().stop();
+	const std::string url = readHostAddress();
+	hostLink().start(url.empty() ? normalizeHostAddress(host) : url);
 }
 
 void updateChannelRing(const std::vector<tcos::StateDoc::Item>& items, int nowMs) {
@@ -894,6 +933,13 @@ void pumpBle(int nowMs) {
 	link.ip = sNetIp;
 	link.wpaState = sWifi.lastWpaState();
 	sBleSession.noteLink(link, nowMs);
+
+	// A join that carried the console's new address hands it over exactly once,
+	// after it has proven itself by coming online.
+	{
+		const std::string adopted = sBleSession.takeConsoleHost();
+		if (!adopted.empty()) adoptConsoleHost(adopted);
+	}
 
 	// The scan pump. Same pair WifiPolicy uses — startScan() then scanNetworks()
 	// — because there is one sweep and one contract about what an empty result

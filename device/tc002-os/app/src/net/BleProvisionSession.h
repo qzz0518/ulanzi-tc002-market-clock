@@ -125,6 +125,16 @@ class BleProvisionSession {
   Request takeRequest(std::string* ssid, std::string* psk);
 
   /**
+   * The console address a successful join carried, surrendered exactly once.
+   *
+   * Empty until a join that named a `host` reaches kPhaseOnline; reading it
+   * clears it. The session never touches the filesystem — the glue writes
+   * /data/zos-host and restarts the pull loop, which is what keeps this state
+   * machine linkable from the host check.
+   */
+  std::string takeConsoleHost();
+
+  /**
    * One redacted audit line per handled message, for the breadcrumb log.
    *
    * The caller never sees the message itself, and that is the point: the only
@@ -212,6 +222,11 @@ class BleProvisionSession {
   Request mRequest;
   std::string mRequestSsid;
   std::string mRequestPsk;
+  // Carried by the join being attempted; promoted to mAdoptedHost only when
+  // that join reaches online, and dropped with a failed or aborted join so a
+  // stale address cannot ride a later, unrelated success.
+  std::string mRequestHost;
+  std::string mAdoptedHost;
 
   std::vector<std::string> mOutbound;
   std::vector<std::string> mAudit;

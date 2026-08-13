@@ -6821,6 +6821,118 @@ void checkBleProtocol() {
 
 // ---------------------------------------------------------------------------
 // BLE provisioning: the state machine.
+void checkBleHostField() {
+  using tcos::BleProvisionSession;
+  using namespace tcos::ble;
+
+  // --- the validator, axis by axis. The value ends up in /data/zos-host and
+  // then in a URL the firmware polls forever, so every rejection here is a
+  // shape that file must never contain. ---
+  check(hostIsSafe("192.168.8.108"), "a bare address is a host");
+  check(hostIsSafe("192.168.8.108:43820"), "an address with a port is a host");
+  check(hostIsSafe("studio.local"), "an mDNS name is a host");
+  check(hostIsSafe(std::string(64, 'a')), "64 bytes exactly fits");
+  check(hostIsSafe("host:65535"), "the last port fits");
+  check(!hostIsSafe(""), "empty is not a host");
+  check(!hostIsSafe(std::string(65, 'a')), "65 bytes is not");
+  check(!hostIsSafe("http://192.168.8.108"), "a scheme is not");
+  check(!hostIsSafe("192.168.8.108/pull"), "a path is not");
+  check(!hostIsSafe("host:port"), "an alphabetic port is not");
+  check(!hostIsSafe("host:0"), "port zero is not");
+  check(!hostIsSafe("host:65536"), "one past the last port is not");
+  check(!hostIsSafe("host:"), "a bare colon is not");
+  check(!hostIsSafe("a:1:2"), "two colons is not - no bracketless v6");
+  check(!hostIsSafe("a..b"), "an empty label is not");
+  check(!hostIsSafe(".a"), "a leading dot is not");
+  check(!hostIsSafe("-a"), "a leading dash is not");
+  check(!hostIsSafe("a-"), "a trailing dash is not");
+  check(!hostIsSafe("a b"), "a space is not");
+
+  // --- the session: the address rides the join, is surrendered exactly once,
+  // and only a join that came online may surrender it. ---
+  struct Fixture {
+    BleProvisionSession session;
+    Fixture() {
+      session.configure("ZOS-A772", "test-build", "CC:C4:B2:77:A7:72");
+      session.beginAdvertising(4242, 0);
+      session.onConnect(0);
+      session.onMessage("cmd\tcode\ncode\t" + session.code() + "\n", 0);
+      drain();
+    }
+    void drain() {
+      std::string out;
+      while (session.takeOutbound(&out)) {}
+      std::string a;
+      while (session.takeAudit(&a)) audits.push_back(a);
+    }
+    static BleProvisionSession::Link online() {
+      BleProvisionSession::Link link;
+      link.online = true;
+      link.joining = false;
+      link.locked = false;
+      link.ssid = "net";
+      link.ip = "192.168.9.7";
+      link.wpaState = "COMPLETED";
+      return link;
+    }
+    static BleProvisionSession::Link offline(bool joining) {
+      BleProvisionSession::Link link;
+      link.online = false;
+      link.joining = joining;
+      link.locked = false;
+      link.wpaState = joining ? "ASSOCIATING" : "DISCONNECTED";
+      return link;
+    }
+    std::vector<std::string> audits;
+  };
+
+  {
+    Fixture f;
+    f.session.onMessage("cmd\tjoin\nssid\tnet\npsk\tpassword1\nhost\t192.168.9.2:43820\n", 10);
+    f.drain();
+    check(f.session.takeConsoleHost().empty(), "nothing surrendered before the join comes online");
+    f.session.noteLink(Fixture::online(), 500);
+    check(f.session.takeConsoleHost() == "192.168.9.2:43820", "the address rides the join to online");
+    check(f.session.takeConsoleHost().empty(), "and is surrendered exactly once");
+  }
+  {
+    Fixture f;
+    f.session.onMessage("cmd\tjoin\nssid\tnet\npsk\tpassword1\n", 10);
+    f.drain();
+    f.session.noteLink(Fixture::online(), 500);
+    check(f.session.takeConsoleHost().empty(), "a join without a host surrenders nothing");
+  }
+  {
+    Fixture f;
+    // A scheme is invalid: the join must still proceed, the field is dropped,
+    // and the breadcrumb says so - a console bug must not brick provisioning.
+    f.session.onMessage("cmd\tjoin\nssid\tnet\npsk\tpassword1\nhost\thttp://x\n", 10);
+    f.drain();
+    bool audited = false;
+    for (size_t i = 0; i < f.audits.size(); ++i) {
+      if (f.audits[i].find("host") != std::string::npos) audited = true;
+    }
+    check(audited, "an invalid host is audited");
+    f.session.noteLink(Fixture::online(), 500);
+    check(f.session.takeConsoleHost().empty(), "and never surrendered");
+  }
+  {
+    Fixture f;
+    f.session.onMessage("cmd\tjoin\nssid\tnet\npsk\tpassword1\nhost\t192.168.9.2\n", 10);
+    f.drain();
+    // Associates, then the policy gives up: the pending host must die with the
+    // attempt, or a stale address rides the NEXT join.
+    f.session.noteLink(Fixture::offline(true), 100);
+    f.session.noteLink(Fixture::offline(false), 200);
+    f.session.onMessage("cmd\tjoin\nssid\tnet\npsk\tpassword1\n", 300);
+    f.drain();
+    f.session.noteLink(Fixture::online(), 900);
+    check(f.session.takeConsoleHost().empty(), "a failed join drops its host for good");
+  }
+
+  std::printf("  ble host field ok\n");
+}
+
 void checkBleSession() {
   using tcos::BleProvisionSession;
 
@@ -7588,6 +7700,7 @@ int main() {
   checkBleProtocol();
   std::printf("  ble protocol ok\n");
   checkBleSession();
+  checkBleHostField();
   std::printf("  ble session ok\n");
   checkProvisionScreen();
   std::printf("  provision screen ok\n");

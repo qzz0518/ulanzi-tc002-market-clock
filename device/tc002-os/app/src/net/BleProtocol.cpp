@@ -322,6 +322,37 @@ bool pskIsSafe(const std::string& psk) {
   return true;
 }
 
+bool hostIsSafe(const std::string& host) {
+  if (host.empty() || host.size() > 64) return false;
+  std::string name = host;
+  const size_t colon = host.find(':');
+  if (colon != std::string::npos) {
+    // Exactly one colon and digits behind it: host:port, never a bracketless
+    // IPv6 literal — readHostAddress() would mis-split one the same way.
+    if (host.find(':', colon + 1) != std::string::npos) return false;
+    const std::string port = host.substr(colon + 1);
+    if (port.empty() || port.size() > 5) return false;
+    long value = 0;
+    for (size_t i = 0; i < port.size(); ++i) {
+      if (port[i] < '0' || port[i] > '9') return false;
+      value = value * 10 + (port[i] - '0');
+    }
+    if (value < 1 || value > 65535) return false;
+    name = host.substr(0, colon);
+  }
+  if (name.empty()) return false;
+  if (name[0] == '.' || name[0] == '-') return false;
+  if (name[name.size() - 1] == '.' || name[name.size() - 1] == '-') return false;
+  for (size_t i = 0; i < name.size(); ++i) {
+    const char c = name[i];
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') || c == '.' || c == '-';
+    if (!ok) return false;
+    if (c == '.' && i > 0 && name[i - 1] == '.') return false;
+  }
+  return true;
+}
+
 // --- the advertisement --------------------------------------------------------
 
 bool buildAdvertisingData(const std::string& name, std::vector<uint8_t>* out) {

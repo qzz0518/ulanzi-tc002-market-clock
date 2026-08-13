@@ -31,6 +31,7 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 | `APP_NAME` | `btc` | 全新安装或旧配置首次迁移时的默认频道名 |
 | `ADB_BIN` | 安装时自动检测 | `adb` 的绝对路径；LaunchAgent 不继承终端 PATH |
 | `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据）；**所有**设备请求都经过它，包括 live / notify |
+| `OPENUSAGE_URL` | `http://127.0.0.1:6736` | OpenUsage 本地 API 地址，VIBE 用量数据源；回环请求，与 `CLOCK_HTTP_PROXY` 无关 |
 
 ## 控制台行为
 
@@ -88,6 +89,27 @@ Frankfurter / Gold API，无备用路由），报价失败即降级显示。
 也可粘贴 `ugc.ulanzistudio.com/contentView/...` 链接导入。导入素材会最近邻还原到 52×16、
 保留 GIF 帧时序，快照存于本机 `.runtime/pixel-assets`——之后预览和推送不依赖官方站点在线，
 也不会被上游改动静默替换。社区作品不随本仓库分发，界面保留作者与来源。
+
+## AI 用量（VIBE）
+
+「AI 用量总览」（`tools:vibe-duo`，两个 AI 编码代理并排）与「AI 用量详情」
+（`tools:vibe-agent`，单个代理的指标行、进度条与重置时间）是两个常规内容类型，数值全部
+来自本机 OpenUsage 菜单栏应用的只读本地 API（`OPENUSAGE_URL`，默认
+`http://127.0.0.1:6736`）。不移植它那十个 Provider：读凭据、刷 OAuth、对接十家私有接口
+正是会烂掉的那部分代码，而走它的 API，屏上的数字与用户菜单栏里看到的**永远是同一个**
+（[ADR 0010](adr/0010-vibe-openusage-source.md)）。
+
+控制台的 **VIBE** 标签页对齐 OpenUsage 的 Customize：provider 列表、每个代理最多 2 个星标
+指标（`PUT /api/vibe/starred`；上屏显示的就是它们）、LED 预览，以及一键把频道布置到时钟。
+布置是按 App 名约定做的 read-modify-write：总览叫 `vibe`，每个代理的详情页叫 `vibe_<id>`
+（`vibe_claude`、`vibe_codex`……），于是旋钮直接翻页，不需要任何新协议、也不新增布置路由。
+
+**宁缺毋假**：快照缓存 15 分钟（OpenUsage 固定 5 分钟刷新的三倍，因此不复用
+`SOURCE_STALE_MS` 那 120 秒），抓取失败时在此期间沿用上一次的好数据，超过就报错而不是继续
+显示旧数字。OpenUsage 没在跑时 LED 画 `OPENUSAGE OFFLINE` 提示帧——与「未配置」的天气面
+一样，这是一种被命名的状态而不是频道故障，控制台则显示安装引导。快照超过 10 分钟会在右上角
+点一颗琥珀像素（与 OpenUsage 的 "Outdated" 同一阈值）；某个指标缺数据就整项隐藏，绝不画占位
+横杠。
 
 ## 音乐
 
@@ -522,6 +544,15 @@ http://192.168.8.185:43820     # 完整
 文件缺失不是错误——固件照常独立运行，只是没有频道也没有镜像；启动脚本对它的搬移是带条件
 判断的，否则 `set -e` 会把「没配控制台」变成一次失败的启动和一块黑屏。
 
+**蓝牙配网会顺手更新这个地址。** 换 WiFi 通常意味着笔记本也换了网段，两件事天然同时发生，
+所以 `join` 命令可以多带一个 `host` 字段；设备只在这次 join **真的联网成功之后**才采纳它，
+写进 `/data/zos-host`（临时文件 + fsync + rename，jffs2 会痛快地 rename 一个没落盘的文件），
+然后就地重启拉取循环，不用重启进程。失败或中止的 join 会把待定地址丢掉——否则一个过期地址
+会搭上下一次成功的 join。控制台发哪个地址：优先浏览器打开本页用的地址（它已经证明能路由），
+其次服务自己的局域网地址（在这台跑服务的机器上配网时，页面地址是 127.0.0.1，对时钟没用）；
+两者都不可用就**什么都不发**，设备保留原有地址——设备是覆盖写入，一个自信的错地址比沉默更贵。
+https 一律不发：固件只会拼 `http://`。
+
 ### WiFi 与配网：做到哪一步了
 
 **已经能用的：** 固件自带一个 HTTP 服务，在设备**正常地址的 8080 端口**上提供配网页
@@ -591,6 +622,8 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` / `POST` | `/api/market/instruments` | 列出已添加资产；按候选引用注册新资产 |
 | `GET` | `/api/market/icons/:iconRef.png` | 运行时资产的 16×16 像素图标（不可变缓存） |
 | `GET` | `/api/weather/geocode` | 按地名搜索定位候选（`?q=` 1–64 字符；Open-Meteo 免 key，服务端缓存 10 分钟） |
+| `GET` | `/api/vibe/status` | VIBE 用量快照，连同 provider 目录与星标表（只读，免同源）。`?refresh=1` 强制向 OpenUsage 抓一次，默认走缓存。OpenUsage 不可达**不算 HTTP 错误**：仍返回 200，`snapshot` 为 `null` 并附 `error`，控制台据此显示安装引导 |
+| `PUT` | `/api/vibe/starred` | 设置某个代理上屏显示哪些指标：`{providerId, starred}`，`starred` 去重后最多 2 项；应答是与目录默认合并后的完整星标表（同源 + JSON，校验失败 400） |
 | `GET` | `/api/presets`、`/api/icons/:id.png` | 兼容旧客户端的市场预设与内置资产图标 |
 | `GET` / `PUT` | `/api/settings` | 兼容旧版单市场轮播设置 |
 | `POST` | `/api/preview` | 兼容旧版：直接返回渲染的 GIF/PNG 字节 |

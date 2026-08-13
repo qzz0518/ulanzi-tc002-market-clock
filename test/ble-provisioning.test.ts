@@ -15,7 +15,9 @@ import {
   bleAbortCommand,
   bleCodeCommand,
   bleHelloCommand,
+  bleHostIsSafe,
   bleJoinCommand,
+  consoleHostForJoin,
   bleScanCommand,
   createBleReassembler,
   createProvisionSession,
@@ -280,6 +282,61 @@ describe("BLE document codec", () => {
     expect(bleAbortCommand()).toBe("cmd\tabort\n");
     expect(bleCodeCommand("418327")).toBe("cmd\tcode\ncode\t418327\n");
     expect(bleJoinCommand("home-2g", "hunter2")).toBe("cmd\tjoin\nssid\thome-2g\npsk\thunter2\n");
+  });
+
+  test("the console address rides the join, and only when it is worth sending", () => {
+    // The device OVERWRITES /data/zos-host with whatever it is told, so null —
+    // "say nothing, keep the address you have" — is the safe answer, and every
+    // rule below exists to pick it rather than a confidently wrong address.
+    const at = (over: Partial<Parameters<typeof consoleHostForJoin>[0]> = {}) =>
+      consoleHostForJoin({
+        pageProtocol: "http:",
+        pageHost: "192.168.8.108:43820",
+        serviceAddress: "192.168.8.108",
+        servicePort: 43820,
+        ...over,
+      });
+
+    // The address the browser reached this page at is ground truth: it proved
+    // it routes. It wins over the service's own guess.
+    expect(at({ serviceAddress: "10.0.0.9" })).toBe("192.168.8.108:43820");
+    // Provisioning is normally done ON the machine running the service — Web
+    // Bluetooth is a desktop browser feature — where the page address says
+    // 127.0.0.1 and means nothing to the clock. That is the case the service
+    // address exists for, and it is the common one.
+    expect(at({ pageHost: "127.0.0.1:43820" })).toBe("192.168.8.108:43820");
+    expect(at({ pageHost: "localhost:43820" })).toBe("192.168.8.108:43820");
+    // A default-port page carries no port; the firmware would fill in 43820 and
+    // be wrong, so the scheme default is made explicit instead.
+    expect(at({ pageHost: "studio.local" })).toBe("studio.local:80");
+    // https is refused outright: the firmware only builds http:// URLs, so
+    // adopting a TLS address swaps a working link for a dead one.
+    expect(at({ pageProtocol: "https:" })).toBeNull();
+    // Nothing usable anywhere: stay quiet.
+    expect(at({ pageHost: "127.0.0.1:43820", serviceAddress: null })).toBeNull();
+    expect(at({ pageHost: "127.0.0.1:43820", serviceAddress: "127.0.0.1" })).toBeNull();
+
+    // The field is omitted, not sent empty — an absent field is what leaves the
+    // device on the address it already knows.
+    expect(bleJoinCommand("home-2g", "hunter2", null))
+      .toBe("cmd\tjoin\nssid\thome-2g\npsk\thunter2\n");
+    expect(bleJoinCommand("home-2g", "hunter2", "192.168.8.108:43820"))
+      .toBe("cmd\tjoin\nssid\thome-2g\npsk\thunter2\nhost\t192.168.8.108:43820\n");
+  });
+
+  test("bleHostIsSafe mirrors the firmware, so we never send what it would ignore", () => {
+    // Same axes as ble::hostIsSafe in BleProtocol.cpp — this pair is the reason
+    // an invalid host is a console bug caught here rather than a silent no-op
+    // on the device.
+    for (const ok of ["192.168.8.108", "192.168.8.108:43820", "studio.local", "a".repeat(64)]) {
+      expect([ok, bleHostIsSafe(ok)]).toEqual([ok, true]);
+    }
+    for (const bad of [
+      "", "a".repeat(65), "http://192.168.8.108", "192.168.8.108/pull",
+      "host:port", "host:0", "host:65536", "host:", "a:1:2", "a..b", ".a", "-a", "a-", "a b",
+    ]) {
+      expect([bad, bleHostIsSafe(bad)]).toEqual([bad, false]);
+    }
   });
 
   test("the codec refuses a separator byte rather than rewriting the value around it", () => {

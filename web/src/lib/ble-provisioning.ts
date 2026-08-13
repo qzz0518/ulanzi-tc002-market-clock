@@ -255,11 +255,81 @@ export function bleScanCommand(): string {
   return encodeBleDoc([["cmd", "scan"]]);
 }
 
-export function bleJoinCommand(ssid: string, psk: string): string {
+/**
+ * Mirrors ble::hostIsSafe in the firmware. Kept in sync deliberately: the
+ * device silently IGNORES a host it cannot accept, so a console that sent one
+ * anyway would look like it had configured the clock when it had not.
+ */
+export function bleHostIsSafe(host: string): boolean {
+  if (!host || host.length > 64) return false;
+  let name = host;
+  const colon = host.indexOf(":");
+  if (colon !== -1) {
+    if (host.indexOf(":", colon + 1) !== -1) return false;  // no bracketless v6
+    const port = host.slice(colon + 1);
+    if (!/^[0-9]{1,5}$/.test(port)) return false;
+    const value = Number(port);
+    if (value < 1 || value > 65535) return false;
+    name = host.slice(0, colon);
+  }
+  if (!name) return false;
+  if (!/^[0-9a-zA-Z.-]+$/.test(name)) return false;
+  if (/^[.-]|[.-]$|\.\./.test(name)) return false;
+  return true;
+}
+
+const LOOPBACK = /^(localhost|127\.[0-9.]+|\[?::1\]?)$/i;
+
+/**
+ * Where the clock should look for this console after it joins — or null, which
+ * means "say nothing and let the device keep the address it already has".
+ *
+ * Null is the safe answer and the reason this function is fussy: the device
+ * OVERWRITES /data/zos-host with whatever it is told, so a confidently wrong
+ * address costs the user their working link. Two sources, in order:
+ *
+ *  - the address this page was actually reached at, when it is not loopback.
+ *    Ground truth — the browser proved it routes. A missing port means the
+ *    scheme default, which must be made explicit or the firmware would fill in
+ *    43820 and be wrong.
+ *  - else the service's own LAN address, because provisioning is usually done
+ *    from the machine running it (Web Bluetooth is a desktop browser feature),
+ *    where the page address is 127.0.0.1 and useless to the clock.
+ *
+ * https is refused outright: the firmware only ever builds http:// URLs, so
+ * adopting a TLS address would replace a working link with a dead one.
+ */
+export function consoleHostForJoin(input: {
+  pageProtocol: string;
+  pageHost: string;
+  serviceAddress: string | null;
+  servicePort: number | null;
+}): string | null {
+  if (input.pageProtocol !== "http:") return null;
+  const page = input.pageHost.trim();
+  const colon = page.lastIndexOf(":");
+  const bare = colon > page.lastIndexOf("]") && colon !== -1 ? page.slice(0, colon) : page;
+  if (page && !LOOPBACK.test(bare)) {
+    const withPort = colon > page.lastIndexOf("]") && colon !== -1 ? page : `${page}:80`;
+    if (bleHostIsSafe(withPort)) return withPort;
+  }
+  if (input.serviceAddress && input.servicePort) {
+    const candidate = `${input.serviceAddress}:${input.servicePort}`;
+    if (!LOOPBACK.test(input.serviceAddress) && bleHostIsSafe(candidate)) return candidate;
+  }
+  return null;
+}
+
+export function bleJoinCommand(ssid: string, psk: string, host?: string | null): string {
   // The PSK is a value like any other here; it never reaches a log, a toast, or
   // an `evt` — see the device-side rule this mirrors (ProvisionLog cannot
   // structurally receive it).
-  return encodeBleDoc([["cmd", "join"], ["ssid", ssid], ["psk", psk]]);
+  const fields: Array<[string, string]> = [["cmd", "join"], ["ssid", ssid], ["psk", psk]];
+  // Omitted rather than sent empty: an absent field leaves the device on the
+  // address it already knows, which is the correct outcome when we cannot work
+  // out a better one.
+  if (host) fields.push(["host", host]);
+  return encodeBleDoc(fields);
 }
 
 export function bleAbortCommand(): string {
@@ -911,6 +981,14 @@ export interface ProvisionSessionOptions {
     ssid: string | null;
     reportSeq: number;
   }>;
+  /**
+   * The service's own LAN address, for the join to carry. Optional because a
+   * failure here must not fail a join: the clock keeps its existing address.
+   */
+  readAccess?: () => Promise<{ address: string | null; port: number | null }>;
+  /** Injected rather than read from `location`, so the chooser stays testable. */
+  pageProtocol?: string;
+  pageHost?: string;
   now?: () => number;
   setTimer?: (callback: () => void, ms: number) => number;
   clearTimer?: (handle: number) => void;
@@ -1434,8 +1512,20 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
       lanWatermark = await options.readOsState()
         .then((osState) => osState.reportSeq)
         .catch(() => null);
+      // Best effort, and deliberately after the watermark: this is a nicety
+      // riding an already-committed join, never a reason for one to fail.
+      let consoleHost: string | null = null;
+      if (options.readAccess) {
+        const access = await options.readAccess().catch(() => null);
+        consoleHost = consoleHostForJoin({
+          pageProtocol: options.pageProtocol ?? "http:",
+          pageHost: options.pageHost ?? "",
+          serviceAddress: access?.address ?? null,
+          servicePort: access?.port ?? null,
+        });
+      }
       armReply("join", REPLY_TIMEOUT_MS, () => fail("no-reply"));
-      await send(bleJoinCommand(state.ssid, psk));
+      await send(bleJoinCommand(state.ssid, psk, consoleHost));
     },
 
     backToNetworks() {

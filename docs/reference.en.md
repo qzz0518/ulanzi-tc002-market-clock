@@ -34,6 +34,7 @@ port 43820.
 | `APP_NAME` | `btc` | Default channel name for fresh installs and first-run legacy migration |
 | `ADB_BIN` | auto-detected at install | Absolute `adb` path; a LaunchAgent doesn't inherit the shell PATH |
 | `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials); **every** device request goes through it, live and notify included |
+| `OPENUSAGE_URL` | `http://127.0.0.1:6736` | OpenUsage's local API — the VIBE usage data source; a loopback request, so `CLOCK_HTTP_PROXY` never applies |
 
 ## Control-panel behavior
 
@@ -107,6 +108,33 @@ nearest-neighbor sampling, keep GIF timing, and are snapshotted under
 `.runtime/pixel-assets` — later previews and pushes don't depend on the upstream site, and a
 snapshot is never silently replaced by upstream edits. Community artwork is not bundled with
 this repository, and author/source attribution is retained.
+
+## AI usage (VIBE)
+
+"AI 用量总览" (`tools:vibe-duo`, two AI coding agents side by side) and "AI 用量详情"
+(`tools:vibe-agent`, one agent's metric rows, meters, and reset times) are two ordinary
+content types whose numbers all come from the read-only local API of the OpenUsage menu bar
+app on this machine (`OPENUSAGE_URL`, default `http://127.0.0.1:6736`). Its ten providers are
+not ported: reading credentials, refreshing OAuth, and speaking to ten private endpoints is
+exactly the code that rots, and going through the API means the panel's numbers **always**
+match what the user sees in the menu bar
+([ADR 0010](adr/0010-vibe-openusage-source.md)).
+
+The console's **VIBE** tab mirrors OpenUsage's Customize: the provider list, at most two
+starred metrics per agent (`PUT /api/vibe/starred` — those are the ones that reach the panel),
+an LED preview, and one click to lay the channels out on the clock. That layout is a
+read-modify-write over an app-name convention: the overview is `vibe` and each agent's detail
+page is `vibe_<id>` (`vibe_claude`, `vibe_codex`, …), so the knob simply pages through them —
+no new protocol, and no new server route.
+
+**Nothing rather than something wrong**: the snapshot is cached for 15 minutes (3× OpenUsage's
+fixed 5-minute refresh, which is why `SOURCE_STALE_MS` and its 120 s is not reused). Within
+that window a failed fetch keeps serving the last good numbers; past it, it raises instead of
+showing stale ones. With OpenUsage not running the panel draws an `OPENUSAGE OFFLINE` frame —
+like the weather faces' "not configured", a named state rather than a channel failure — while
+the console shows an install pointer. A snapshot older than 10 minutes lights one amber pixel
+in the top-right corner (OpenUsage's own "Outdated" threshold); a metric with no data is
+dropped entirely rather than drawn as a placeholder dash.
 
 ## Music
 
@@ -647,6 +675,19 @@ A missing file is not an error — the firmware runs standalone, it just has no 
 mirror. The entry script's move is guarded for that reason: `set -e` would otherwise turn "no
 console configured" into a failed launch and a blank panel.
 
+**BLE provisioning updates this address in passing.** Changing Wi-Fi usually means the laptop
+moved networks too — the two facts travel together — so the `join` command may carry an extra
+`host` field. The device adopts it only after that join actually comes online, writing
+`/data/zos-host` (temp file, fsync, rename — jffs2 will happily rename an unflushed file) and
+restarting the pull loop in place, with no process restart. A failed or aborted join drops the
+pending address, or a stale one would ride the next success. Which address the console sends:
+the one the browser reached this page at, when it is not loopback (it has proven it routes),
+otherwise the service's own LAN address — provisioning is normally done ON the machine running
+the service, where the page address is 127.0.0.1 and useless to the clock. When neither is
+usable it sends **nothing** and the device keeps the address it has: the write is an overwrite,
+and a confidently wrong address costs more than silence. https is never sent — the firmware only
+builds `http://` URLs.
+
 ### Wi-Fi and provisioning: how far it goes
 
 **Working today:** the firmware runs its own HTTP server and serves the provisioning page on
@@ -729,6 +770,8 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/market/search` | Search addable market assets by query and kind |
 | `GET` / `POST` | `/api/market/instruments` | List added assets; register one by candidate ref |
 | `GET` | `/api/market/icons/:iconRef.png` | 16×16 pixel icon of a runtime asset (immutable cache) |
+| `GET` | `/api/vibe/status` | The VIBE usage snapshot plus the provider catalog and starred table (read-only, cross-origin). `?refresh=1` forces one fetch from OpenUsage; otherwise the cache answers. An unreachable OpenUsage is **not an HTTP error**: still 200, with `snapshot: null` and an `error`, which is what the console renders its install pointer from |
+| `PUT` | `/api/vibe/starred` | Choose which metrics an agent shows on the panel: `{providerId, starred}`, at most 2 after de-duplication; the reply is the full starred table merged with the catalog defaults (same-origin + JSON, 400 on validation failure) |
 | `GET` | `/api/presets`, `/api/icons/:id.png` | Legacy market presets and built-in asset icons |
 | `GET` / `PUT` | `/api/settings` | Legacy single-carousel settings |
 | `POST` | `/api/preview` | Legacy: returns rendered GIF/PNG bytes directly |
