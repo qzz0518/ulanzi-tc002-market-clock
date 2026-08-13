@@ -168,6 +168,8 @@ describe("常规 tab, ZOS — two different tables, not one half-filled", () => 
     const html = markup(createElement(ZosGeneralPanel, {
       requested: { volume: 4, brightness: 7, seq: 2 },
       live: true,
+      sleep: { on: false, startMin: 1380, endMin: 420, idleSec: 300, asleep: false, clockSynced: true },
+      onSleepSend: noop,
       bleSupport: BLE_OK,
       onSend: noop,
       onProvision: noop,
@@ -194,6 +196,8 @@ describe("常规 tab, ZOS — two different tables, not one half-filled", () => 
     const html = markup(createElement(ZosGeneralPanel, {
       requested: null,
       live: false,
+      sleep: null,
+      onSleepSend: noop,
       bleSupport: BLE_OK,
       onSend: noop,
       onProvision: noop,
@@ -210,6 +214,8 @@ describe("常规 tab, ZOS — two different tables, not one half-filled", () => 
     const html = markup(createElement(ZosGeneralPanel, {
       requested: null,
       live: true,
+      sleep: { on: true, startMin: 1380, endMin: 420, idleSec: 300, asleep: false, clockSynced: true },
+      onSleepSend: noop,
       bleSupport: BLE_OK,
       onSend: noop,
       onProvision: noop,

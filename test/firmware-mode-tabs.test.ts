@@ -677,6 +677,8 @@ describe("常规设置 under ZOS", () => {
     const html = markup(createElement(ZosGeneralPanel, {
       requested: { volume: 4, brightness: 7, seq: 2 },
       live: true,
+      sleep: { on: false, startMin: 1380, endMin: 420, idleSec: 300, asleep: false, clockSynced: true },
+      onSleepSend: noop,
       bleSupport: {
         code: "ok",
         ok: true,
@@ -707,6 +709,8 @@ describe("常规设置 under ZOS", () => {
     const html = markup(createElement(ZosGeneralPanel, {
       requested: null,
       live: true,
+      sleep: null,
+      onSleepSend: noop,
       bleSupport: {
         code: "insecure-context",
         ok: false,

@@ -53,9 +53,36 @@ export interface ZosTelemetry {
   charging?: boolean;
   /** True when ZOS runs from flash rather than a sideload session. */
   flashed?: boolean;
+  /** 夜间息屏, as the device actually holds it. Optional: older firmware omits it. */
+  sleep?: ZosSleepReport;
   receivedAt: number;
   /** Report age per the service's clock; see ZosMirrorFrame.ageMs. */
   ageMs?: number;
+}
+
+/**
+ * The sleep block of a telemetry report — device truth, not a request echo.
+ * `clockSynced` is here because the firmware refuses to sleep on an unsynced
+ * clock, and a panel that hides that refusal would look broken at exactly the
+ * moment it is being careful.
+ */
+export interface ZosSleepReport {
+  on: boolean;
+  /** Minutes since local midnight; startMin === endMin means the whole day. */
+  startMin: number;
+  endMin: number;
+  idleSec: number;
+  asleep: boolean;
+  clockSynced: boolean;
+}
+
+/** What the console last asked /api/os/sleep for — a request, not device truth. */
+export interface ZosRequestedSleep {
+  enabled: boolean | null;
+  startMin: number | null;
+  endMin: number | null;
+  idleSec: number | null;
+  seq: number;
 }
 
 /** What the console last asked the device to adopt — a request, not device truth. */
@@ -76,6 +103,7 @@ export interface ZosState {
   /** Sticky: a flashed ZOS stays true even while the device is off the air. */
   zosFlashed?: boolean;
   requestedSettings?: ZosRequestedSettings;
+  requestedSleep?: ZosRequestedSleep;
   /** Service-side event tail. Not drained on consumption, so never shown as "pending". */
   pendingInputs?: ZosInputEvent[];
 }
@@ -727,6 +755,10 @@ export interface ZosLink {
   sendInput(action: ZosInputAction): Promise<ZosInputEvent>;
   /** PUT /api/os/settings. Resolves with what the service will now request. */
   setSettings(settings: { volume?: number; brightness?: number }): Promise<ZosRequestedSettings>;
+  /** Partial on purpose: only named fields travel, so an edit to one cannot
+   * overwrite the other three — the exact bug the service layer already fixed
+   * once and now guards with a test. */
+  setSleep(patch: { enabled?: boolean; startMin?: number; endMin?: number; idleSec?: number }): Promise<ZosRequestedSleep>;
 }
 
 async function describeFailure(response: Response): Promise<string> {
@@ -853,6 +885,22 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
       if (settings.volume !== undefined) payload.volume = settings.volume;
       if (settings.brightness !== undefined) payload.brightness = settings.brightness;
       const body = await readJson<{ requested: ZosRequestedSettings }>("/api/os/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return body.requested;
+    },
+    async setSleep(patch) {
+      // Same field-withholding as setSettings: the route treats an absent key
+      // as "not named", and naming all four would overwrite the three the user
+      // did not touch with whatever this tab last saw.
+      const payload: { enabled?: boolean; startMin?: number; endMin?: number; idleSec?: number } = {};
+      if (patch.enabled !== undefined) payload.enabled = patch.enabled;
+      if (patch.startMin !== undefined) payload.startMin = patch.startMin;
+      if (patch.endMin !== undefined) payload.endMin = patch.endMin;
+      if (patch.idleSec !== undefined) payload.idleSec = patch.idleSec;
+      const body = await readJson<{ requested: ZosRequestedSleep }>("/api/os/sleep", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

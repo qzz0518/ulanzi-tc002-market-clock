@@ -44,9 +44,20 @@ import {
   type ZosLink,
   type ZosReadoutRow,
   type ZosRequestedSettings,
+  type ZosSleepReport,
   type ZosState,
 } from "@/lib/zos-link";
 import { ZosSendRows, type ZosSendSettingsPatch } from "@/components/zos/zos-send-row";
+import {
+  SLEEP_IDLE_OPTIONS,
+  SLEEP_WINDOW_MINUTES,
+  describeSleepStatus,
+  effectiveSleepView,
+  reconcileSleepPending,
+  sleepIdleLabel,
+  sleepMinuteLabel,
+  type SleepPatch,
+} from "@/lib/zos-sleep";
 import { BleUnavailableNote } from "@/components/zos/zos-ble-note";
 import { ZosProvisionDialog, useBleSupport } from "@/components/zos/zos-provision-dialog";
 import { useAppToast } from "@/lib/use-app-toast";
@@ -662,6 +673,17 @@ export function DeviceSettingsDialog({
     }
   };
 
+  const sendZosSleep = async (patch: SleepPatch) => {
+    const link = zosLinkRef.current;
+    if (!link) return;
+    try {
+      const requested = await link.setSleep(patch);
+      setZosState((current) => current === null ? current : { ...current, requestedSleep: requested });
+    } catch (error) {
+      toast.error("息屏设置下发失败", { description: errorMessage(error) });
+    }
+  };
+
   const save = async () => {
     if (!draft || saving || surface !== "official") return;
     setSaving(true);
@@ -858,8 +880,10 @@ export function DeviceSettingsDialog({
         <ZosGeneralPanel
           requested={zosState?.requestedSettings ?? null}
           live={zosLive}
+          sleep={zosState?.telemetry?.sleep ?? null}
           bleSupport={bleSupport}
           onSend={(patch) => void sendZosSettings(patch)}
+          onSleepSend={(patch) => void sendZosSleep(patch)}
           onProvision={() => setProvisionOpen(true)}
         />
       ) : surface === "sideload" ? (
@@ -1185,8 +1209,11 @@ interface ZosGeneralPanelProps {
   requested: ZosRequestedSettings | null;
   /** 设备此刻有没有在上报。false 时这一页不是死的，只是慢一拍。 */
   live: boolean;
+  /** 夜间息屏的设备实况——和音量不同，它是读得回来的。 */
+  sleep: ZosSleepReport | null;
   bleSupport: BleSupport;
   onSend: (patch: ZosSendSettingsPatch) => void;
+  onSleepSend: (patch: SleepPatch) => void;
   onProvision: () => void;
 }
 
@@ -1206,10 +1233,35 @@ interface ZosGeneralPanelProps {
 export function ZosGeneralPanel({
   requested,
   live,
+  sleep,
   bleSupport,
   onSend,
+  onSleepSend,
   onProvision,
 }: ZosGeneralPanelProps) {
+  // The edit overlay. Sleep is read back (unlike volume), but the round trip is
+  // slow by design — the device applies on its next poll, the report follows a
+  // heartbeat later — so an edit has to stay visible in the controls for those
+  // seconds. The report is the arbiter: each field retires when it agrees.
+  const [pendingSleep, setPendingSleep] = useState<SleepPatch>({});
+  useEffect(() => {
+    setPendingSleep((current) => reconcileSleepPending(current, sleep));
+  }, [sleep]);
+  const sleepView = effectiveSleepView(pendingSleep, sleep);
+  const editSleep = (patch: SleepPatch) => {
+    setPendingSleep((current) => ({ ...current, ...patch }));
+    onSleepSend(patch);
+  };
+  // A value set by the knob or an older console can sit off the half-hour
+  // grid; the select must carry it rather than snap it, or opening this dialog
+  // would silently edit the device.
+  const windowOptions = (current: number): number[] =>
+    SLEEP_WINDOW_MINUTES.includes(current)
+      ? [...SLEEP_WINDOW_MINUTES]
+      : [...SLEEP_WINDOW_MINUTES, current].sort((a, b) => a - b);
+  const idleOptions = SLEEP_IDLE_OPTIONS.some((option) => option.seconds === sleepView.idleSec)
+    ? SLEEP_IDLE_OPTIONS.map((option) => option.seconds)
+    : [...SLEEP_IDLE_OPTIONS.map((option) => option.seconds), sleepView.idleSec].sort((a, b) => a - b);
   return (
     <div className="device-settings-form">
       {!live && (
@@ -1251,9 +1303,73 @@ export function ZosGeneralPanel({
         </div>
       </section>
 
-      <section className="device-settings-section" aria-labelledby="zos-network-title">
+      <section className="device-settings-section" aria-labelledby="zos-sleep-title">
         <div className="device-settings-section__heading">
           <span>02</span>
+          <div>
+            <h3 id="zos-sleep-title">夜间息屏</h3>
+            <p>时段内没人动它就熄屏；旋钮、按键或控制台任何操作立刻点亮。</p>
+          </div>
+        </div>
+        <div className="device-settings-fields">
+          <SettingField id="zos-sleep-on" label="自动息屏" help="关闭后时段和等待时间都会保留。">
+            <DeviceSettingSwitch
+              label="自动息屏"
+              checked={sleepView.enabled}
+              onChange={(checked) => editSleep({ enabled: checked })}
+            />
+          </SettingField>
+          <SettingField id="zos-sleep-start" label="开始时间">
+            <Select
+              id="zos-sleep-start"
+              aria-labelledby="zos-sleep-start-label"
+              value={sleepView.startMin}
+              options={windowOptions(sleepView.startMin)}
+              renderOption={({ value }) => sleepMinuteLabel(value)}
+              popoverClassName="device-settings-timezone-options"
+              onChange={(value) => editSleep({ startMin: value })}
+            >
+              {sleepMinuteLabel(sleepView.startMin)}
+            </Select>
+          </SettingField>
+          <SettingField
+            id="zos-sleep-end"
+            label="结束时间"
+            help="时段可以跨午夜；起止相同表示全天。"
+          >
+            <Select
+              id="zos-sleep-end"
+              aria-labelledby="zos-sleep-end-label"
+              value={sleepView.endMin}
+              options={windowOptions(sleepView.endMin)}
+              renderOption={({ value }) => sleepMinuteLabel(value)}
+              popoverClassName="device-settings-timezone-options"
+              onChange={(value) => editSleep({ endMin: value })}
+            >
+              {sleepMinuteLabel(sleepView.endMin)}
+            </Select>
+          </SettingField>
+          <SettingField id="zos-sleep-idle" label="息屏等待" help="时段内无操作多久后熄屏。">
+            <Select
+              id="zos-sleep-idle"
+              aria-labelledby="zos-sleep-idle-label"
+              value={sleepView.idleSec}
+              options={idleOptions}
+              renderOption={({ value }) => sleepIdleLabel(value)}
+              popoverClassName="device-settings-timezone-options"
+              onChange={(value) => editSleep({ idleSec: value })}
+            >
+              {sleepIdleLabel(sleepView.idleSec)}
+            </Select>
+          </SettingField>
+          {/* 设备实况——不是这台控制台发过什么，而是固件此刻按什么在跑。 */}
+          <p className="device-settings-note">{describeSleepStatus(sleep, live)}</p>
+        </div>
+      </section>
+
+      <section className="device-settings-section" aria-labelledby="zos-network-title">
+        <div className="device-settings-section__heading">
+          <span>03</span>
           <div>
             <h3 id="zos-network-title">网络</h3>
             <p>换了路由器或改了密码时，用蓝牙重新连一次。</p>
@@ -1277,7 +1393,7 @@ export function ZosGeneralPanel({
         </div>
       </section>
 
-      <AboutSection index="03" />
+      <AboutSection index="04" />
     </div>
   );
 }
