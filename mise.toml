@@ -67,6 +67,7 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/app/src/visual/*.cpp \
   device/tc002-os/app/src/net/*.cpp \
   device/tc002-os/app/src/platform/InstallMode.cpp \
+  device/tc002-os/app/src/platform/ProvisionLog.cpp \
   device/tc002-arcade/app/src/games/*.cpp \
   -o .runtime/os-selfcheck && .runtime/os-selfcheck
 """
@@ -74,11 +75,17 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
 [tasks.os-build]
 description = "Cross-build tc002-os to an ELF32-ARM libzkgui-os.so"
 run = """
+# The build id lands in /data/zos-build.id on the device (ProvisionLog): it is
+# the breadcrumb that proves WHICH code is flashed, so it carries the git rev, a
+# -dirty marker when the tree has uncommitted changes, and a timestamp.
+rev=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+[ -n "$(git status --porcelain 2>/dev/null)" ] && rev="$rev-dirty"
 docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
   -w /work/tc002-lyrics-player/flythings-build flythings-build \
   make APP=../../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os \
     EXTRA_SRC_DIRS=../../tc002-arcade/app/src/games EXTRA_INC=../../tc002-arcade/app/src \
-    EXTRA_PKGS=zknet EXTRA_LIBS=-lzknet
+    EXTRA_PKGS=zknet EXTRA_LIBS=-lzknet \
+    ZOS_BUILD_ID="$rev-$(date +%Y%m%d%H%M)"
 """
 
 [tasks.os-linkaudit]

@@ -37,6 +37,14 @@ class SetupPortal : public HttpServer::Handler {
     /** SSIDs currently visible, strongest first. May be empty while scanning. */
     virtual std::vector<std::string> scanResults() = 0;
     /**
+     * True when the list scanResults() just served came from a previous boot's
+     * persisted sweep rather than this boot's radio. The page labels such a
+     * list 上次扫描: a stale list beats a blank one, but only if it does not
+     * masquerade as live. Default false so a backend without a cache — and the
+     * host check's fakes — need not care.
+     */
+    virtual bool scanResultsAreCached() { return false; }
+    /**
      * Hand credentials to the WiFi policy. Returns false when the device
      * refused to act on them.
      *

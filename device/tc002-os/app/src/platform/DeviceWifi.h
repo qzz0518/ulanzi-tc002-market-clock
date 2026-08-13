@@ -2,6 +2,7 @@
 #define PLATFORM_DEVICEWIFI_H_
 
 #include <pthread.h>
+#include <sys/types.h>
 
 #include <string>
 #include <vector>
@@ -187,142 +188,236 @@ class DeviceWifi : public WifiPolicy::Actuator {
   }
 
   /**
-   * Where the hotspot's dnsmasq keeps its pid, its leases and its complaints.
+   * The hotspot conf hostapd is pointed at, and the entropy file it seeds its
+   * random pool from.
    *
-   * All four on tmpfs. The two `.err` paths are one per argument tier, and they
-   * are separate files rather than one appended to: the fallback's message must
-   * not overwrite the preferred list's, which is the one naming the argument
-   * this build rejected, and an appended log on a device stuck in this state
-   * grows for as long as it is stuck, on a box with ~1 MB free.
+   * The entropy file is the vendor's own recipe, byte for byte:
+   * `soft_ap_enable` in this device's libzknet.so calls
+   * `ensure_entropy_file_exists("/data/misc/wifi/entropy.bin")` — create with
+   * 0660 and a 21-byte seed when absent — and then runs
+   * `hostapd -e /data/misc/wifi/entropy.bin <conf>`. A headless box with no
+   * input devices fills its kernel entropy pool at a crawl, and a hostapd left
+   * to that pool can refuse the WPA handshake outright ("Not enough entropy in
+   * random pool"); the file is how the stock firmware sidesteps that on this
+   * exact hardware. It is a regenerable cache, not user data, so it is NOT
+   * covered by backupOnce.
+   */
+  static const char* hostapdConfPath() { return "/data/misc/wifi/hostapd.conf"; }
+  static const char* entropyFile() { return "/data/misc/wifi/entropy.bin"; }
+
+  /**
+   * hostapd's argv, minus the binary itself. Two shapes:
+   *
+   *   withEntropy — `-B -e <entropy> <conf>`, the vendor's own invocation (see
+   *     entropyFile) with our -B kept: hostapd itself was never the component
+   *     observed failing, so its execution model is not the thing to change.
+   *   plain — `-B <conf>`, the invocation this firmware has always used, the
+   *     one that put the SSID on the air in every session so far. The bring-up
+   *     falls back to it if the build rejects -e, because an unverified flag
+   *     may cost a spawn but must never cost the hotspot.
+   */
+  static std::vector<std::string> hostapdArgs(bool withEntropy) {
+    std::vector<std::string> args;
+    args.push_back("-B");
+    if (withEntropy) {
+      args.push_back("-e");
+      args.push_back(entropyFile());
+    }
+    args.push_back(hostapdConfPath());
+    return args;
+  }
+
+  /**
+   * Where the hotspot's DHCP server keeps its leases, its (layer-3) pid, and
+   * its complaints.
+   *
+   * The leases and the pid stay on tmpfs: the lease file is rewritten on every
+   * lease and /data is jffs2 — the one partition a power cycle does not clear,
+   * and the one holding the user's credentials.
+   *
+   * The stderr captures moved to /data, and that is a lesson, not a taste. The
+   * first generation of these files lived in /tmp, and the only way to read
+   * them — power-cycle the device back onto WiFi and come in over adb — is
+   * precisely the operation that erases tmpfs: a year of diagnoses self-
+   * destructed on the way to their only reader. One file per layer, truncated
+   * on each attempt, so the newest failure of each SHAPE is kept and a device
+   * stuck retrying cannot grow a log on the credentials partition. Layer 1
+   * additionally runs --log-dhcp into its file, which is what turns "no lease"
+   * into one of three distinct bugs (see dnsmasqArgsForLayer).
    */
   static const char* dnsmasqPidFile() { return "/tmp/zos-dnsmasq.pid"; }
   static const char* dnsmasqLeaseFile() { return "/tmp/zos-dnsmasq.leases"; }
-  static const char* dnsmasqErrFile() { return "/tmp/zos-dnsmasq.err"; }
-  static const char* dnsmasqProvenErrFile() { return "/tmp/zos-dnsmasq-proven.err"; }
+  static const char* dnsmasqErrFile(int layer) {
+    if (layer <= 1) return "/data/zos-dnsmasq.l1.log";
+    if (layer == 2) return "/data/zos-dnsmasq.l2.log";
+    return "/data/zos-dnsmasq.l3.log";
+  }
+
+  static const int kDnsmasqLayers = 3;
 
   /**
-   * dnsmasq's arguments for the hotspot, gateway address in, binary path out.
+   * dnsmasq's arguments: THREE LAYERS, tried in order by superviseDhcp().
    *
-   * TWO TIERS, and the second is the reason the first is allowed to be
-   * ambitious. dnsmasq exits EC_BADCONF on any argument it does not accept, and
-   * on this unit a dnsmasq that does not start is indistinguishable from the
-   * shipped bug: the SSID goes on the air, a phone associates, and no lease ever
-   * arrives. Only ONE change in the list below has been executed on the device's
-   * own dnsmasq build; the rest is reasoning about a binary we have read the
-   * strings of. So superviseDhcp() tries this list, and if this build rejects
-   * any part of it, falls straight through to dnsmasqProvenArgs() — the exact
-   * invocation measured working on the unit. An unverified flag can cost a
-   * process spawn; it must not be able to cost the hotspot.
+   * The ladder exists because dnsmasq exits EC_BADCONF on any argument it does
+   * not accept, and on this unit a dnsmasq that does not start is
+   * indistinguishable from the shipped bug: SSID on the air, phone associates,
+   * no lease ever arrives. Each layer is more modest than the one before it,
+   * and each stands on a different kind of evidence:
    *
-   * MEASURED on the device, and the whole bug:
+   *   LAYER 1 — everything spelled out, REASONED. The vendor conf neutralised
+   *     (--conf-file=/dev/null) and each setting it supplied repeated
+   *     explicitly, plus --dhcp-authoritative (a phone with a cached foreign
+   *     lease is NAKed instead of ignored into 169.254.x) and --log-dhcp,
+   *     whose output lands in the /data stderr capture. That log is the
+   *     payoff: after a failed session it separates "the phone never sent a
+   *     DISCOVER" (driver or phone side) from "we sent an OFFER that never
+   *     arrived" (driver dropping broadcast) from "no DHCP context matched"
+   *     (address hole) — three different bugs, three different fixes,
+   *     indistinguishable from outside.
+   *   LAYER 2 — the VENDOR'S argv, character for character out of this
+   *     device's own libzknet.so (`soft_ap_enable`, the fork+execv branch):
+   *     `--no-daemon --no-resolv --no-poll --dhcp-range=…`. /etc/dnsmasq.conf
+   *     is read implicitly, exactly as the vendor runs it, and supplies
+   *     user=root, no-hosts, interface=wlan0 and a /data lease path; its own
+   *     dhcp-range on 192.168.1.x rides along and is inert, because a DHCP
+   *     context only matches when it covers the address the request arrived
+   *     on. This is the invocation every stock unit of this platform family
+   *     serves its production hotspot with. No --address catch-all, so the
+   *     captive-portal sheet may not auto-open — the panel's printed address
+   *     is the fallback path, and a lease with no sheet beats a sheet with no
+   *     lease.
+   *   LAYER 3 — the invocation MEASURED on this unit (adb, by hand): the
+   *     argument list this firmware always shipped plus --pid-file, which
+   *     turned exit 3 into exit 0 and a resident daemon. The only layer that
+   *     daemonises, kept verbatim as the last resort precisely because it is
+   *     the only one ever seen working here.
    *
-   *   --pid-file — the compiled-in default is /var/run/dnsmasq.pid and this
-   *     device has no /var at all: not /var, not /var/run, not /var/lib. Without
-   *     this line dnsmasq exits 3 with "failed to open pidfile
-   *     /var/run/dnsmasq.pid: No such file or directory"; with it, exit 0 and it
-   *     stays up. That is the one measurement, and it is the one that matters.
+   * Layers 1 and 2 carry --no-daemon, and that is the deeper fix, not a
+   * detail. The vendor keeps dnsmasq as a FOREGROUND child and supervises the
+   * pid it holds. This firmware used to force daemonisation and re-identify
+   * the daemon BY NAME, which (a) made the compiled-in pidfile default under
+   * the nonexistent /var fatal — the original bug — and (b) let ANY dnsmasq on
+   * the box satisfy the health check, including one started by init off the
+   * vendor conf whose 192.168.1.x pool can never match this AP. A foreground
+   * child cannot have a pidfile problem, cannot be confused with a stranger,
+   * and hands back its exit status through waitpid instead of vanishing.
    *
-   * INFERRED, i.e. reasoned from the vendor's /etc/dnsmasq.conf and from
-   * dnsmasq's documented behaviour, and never executed here:
-   *
-   *   --conf-file=/dev/null — dnsmasq reads /etc/dnsmasq.conf implicitly and
-   *     this unit ships one. Read off the device it carries `user=root`,
-   *     `no-hosts`, `no-resolv`, `no-poll`, `interface=wlan0`, a lease path
-   *     under /data — and `dhcp-range=192.168.1.101,192.168.1.200,12h`, a second
-   *     pool in a subnet this AP does not have. Which file wins for a scalar
-   *     option is a claim about dnsmasq's parse order that nothing here can
-   *     check, so the answer is not to depend on it either way: neutralise the
-   *     file and repeat every setting it supplied. /dev/null rather than an
-   *     empty argument, which would rely on the parser reading "" as "no file"
-   *     rather than as the default path. If this build will not take the flag,
-   *     dnsmasqProvenArgs() leaves the file exactly where the measurement found
-   *     it — including the lease path that is the reason the observed failure
-   *     was about the pid file and not about leases.
-   *   --user=root — dnsmasq's compiled-in default user is `nobody`, resolved
-   *     with getpwnam at startup and fatal (EC_BADCONF) when the lookup fails.
-   *     The vendor conf set root, so every start ever measured on this unit was
-   *     as root; neutralising that file without this line is the one change
-   *     there is no evidence for at all.
-   *   --no-hosts — also from the vendor conf. Without it /etc/hosts is loaded
-   *     and a local record answers BEFORE the --address=/#/ catch-all, i.e. a
-   *     hole in the wildcard the captive-portal prompt depends on.
-   *   --dhcp-leasefile — the same trap one directory over: the compiled-in
-   *     default is /var/lib/misc/dnsmasq.leases. The vendor conf pointed this at
-   *     /data, which is why the observed failure was the pid file and not this.
-   *     /tmp rather than /data because the file is rewritten on every lease and
-   *     /data is jffs2 — the one partition a power cycle does not clear, and the
-   *     one holding the user's credentials.
-   *   --dhcp-authoritative — a phone arriving with a cached lease from another
-   *     network DHCPREQUESTs that address; a non-authoritative server says
-   *     nothing, and the phone retries for many seconds and then self-assigns
-   *     169.254.x. Associated, no portal: indistinguishable from the bug this
-   *     list exists to fix.
-   *
-   * From libzknet's own argument list, i.e. the shape the stock firmware runs on
-   * this exact binary: --interface, --dhcp-range (three fields, no netmask —
-   * dnsmasq takes the mask off the receiving interface, which step 5 of the
-   * bring-up sets), --address=/#/<gw>, --no-resolv, --no-poll. The catch-all
-   * matters as much as the lease: a phone with no route to the internet warns
-   * about it and often drops silently back to mobile data, and resolving every
-   * name here is what makes the captive-portal sheet open instead.
-   *
-   * The pool is DERIVED from the gateway rather than written out again. A range
-   * outside the address wlan0 carries matches no DHCP context at DISCOVER time:
-   * dnsmasq stays up, answers nothing, and every supervision check still reports
-   * a healthy hotspot. That is precisely the mistake the vendor's own conf ships
-   * (`dhcp-range=192.168.1.101,…` on a device whose AP is 192.168.100.1), and it
-   * is why this is derived rather than a second literal. .100-.200 are
-   * libzknet's endpoints, so a phone that met this clock under the stock
-   * firmware keeps the address it cached.
+   * Flag provenance, for the next person who has to shrink or grow these:
+   * --pid-file is MEASURED (no /var here; exit 3 without it, exit 0 with).
+   * --user=root repeats the vendor conf: dnsmasq's compiled-in default is
+   * `nobody`, resolved with getpwnam and fatal when absent, and every start
+   * ever observed on this unit was as root. --no-hosts keeps /etc/hosts from
+   * answering ahead of the --address=/#/ catch-all. --dhcp-leasefile moves the
+   * lease churn off jffs2. The pool is DERIVED from the gateway rather than
+   * written twice, because a pool outside the interface's address matches no
+   * DHCP context — dnsmasq then stays up, answers nothing, and looks healthy
+   * to every process check, which is exactly the mistake the vendor conf
+   * itself ships. .100–.200 are libzknet's endpoints, so a phone that met this
+   * clock under the stock firmware keeps the address it cached.
    *
    * Pure and inline because the host check cannot link anything that talks to
-   * the radio, and this list is otherwise only answerable on hardware — which is
-   * how it shipped wrong.
+   * the radio, and these lists are otherwise only answerable on hardware —
+   * which is how the original shipped wrong.
    */
-  static std::vector<std::string> dnsmasqArgs(const std::string& gateway) {
+  static std::vector<std::string> dnsmasqLayer1Args(const std::string& gateway) {
     std::vector<std::string> args;
+    args.push_back("--no-daemon");
+    args.push_back("--log-dhcp");
     args.push_back("--conf-file=/dev/null");
     args.push_back("--user=root");
     args.push_back("--no-hosts");
     args.push_back("--dhcp-authoritative");
     args.push_back(std::string("--dhcp-leasefile=") + dnsmasqLeaseFile());
-    appendProvenDnsmasqArgs(gateway, &args);
+    args.push_back("--interface=wlan0");
+    args.push_back("--dhcp-range=" + poolPrefix(gateway) + "100," + poolPrefix(gateway) +
+                   "200,1h");
+    args.push_back("--address=/#/" + gateway);
+    args.push_back("--no-resolv");
+    args.push_back("--no-poll");
     return args;
   }
 
-  /**
-   * The invocation measured working on the device, and nothing else.
-   *
-   * Exactly the argument list this firmware always shipped plus --pid-file: run
-   * on the unit it exits 0 and the daemon stays up. Every other flag in
-   * dnsmasqArgs() above is an improvement on a state that was never observed to
-   * fail, so this is what a rejected improvement falls back to.
-   *
-   * Note what is deliberately ABSENT: no --conf-file. /etc/dnsmasq.conf is left
-   * to be read implicitly, exactly as it was when the measurement was taken, so
-   * `user=root`, `no-hosts` and a writable lease path come from the vendor's own
-   * file rather than from arguments this build may not accept. Its second
-   * `dhcp-range` on 192.168.1.0/24 comes with them, and is inert: a context only
-   * matches when it covers the address the request arrived on, and wlan0 carries
-   * the gateway below.
-   */
+  static std::vector<std::string> dnsmasqLayer2Args(const std::string& gateway) {
+    // Character for character the vendor's own invocation, with only the pool
+    // derived instead of a second literal — see the layer table above.
+    std::vector<std::string> args;
+    args.push_back("--no-daemon");
+    args.push_back("--no-resolv");
+    args.push_back("--no-poll");
+    args.push_back("--dhcp-range=" + poolPrefix(gateway) + "100," + poolPrefix(gateway) +
+                   "200,1h");
+    return args;
+  }
+
   static std::vector<std::string> dnsmasqProvenArgs(const std::string& gateway) {
     std::vector<std::string> args;
     appendProvenDnsmasqArgs(gateway, &args);
     return args;
   }
 
+  /** The one dispatch superviseDhcp() walks, so the ORDER of the ladder is a
+   *  fact the host check pins rather than a comment. */
+  static std::vector<std::string> dnsmasqArgsForLayer(int layer, const std::string& gateway) {
+    if (layer <= 1) return dnsmasqLayer1Args(gateway);
+    if (layer == 2) return dnsmasqLayer2Args(gateway);
+    return dnsmasqProvenArgs(gateway);
+  }
+
   static void appendProvenDnsmasqArgs(const std::string& gateway,
                                       std::vector<std::string>* args) {
-    const size_t lastDot = gateway.rfind('.');
-    const std::string prefix =
-        lastDot == std::string::npos ? gateway : gateway.substr(0, lastDot + 1);
     args->push_back("--interface=wlan0");
-    args->push_back("--dhcp-range=" + prefix + "100," + prefix + "200,1h");
+    args->push_back("--dhcp-range=" + poolPrefix(gateway) + "100," + poolPrefix(gateway) +
+                    "200,1h");
     args->push_back("--address=/#/" + gateway);
     args->push_back("--no-resolv");
     args->push_back("--no-poll");
     args->push_back(std::string("--pid-file=") + dnsmasqPidFile());
+  }
+
+  static std::string poolPrefix(const std::string& gateway) {
+    const size_t lastDot = gateway.rfind('.');
+    return lastDot == std::string::npos ? gateway : gateway.substr(0, lastDot + 1);
+  }
+
+  /**
+   * Whether a /proc/<pid>/cmdline (NULs already turned to spaces) names a
+   * dnsmasq THIS firmware started, as opposed to somebody else's.
+   *
+   * The old health check asked only "is any process named dnsmasq alive?", and
+   * a dnsmasq started by init off the vendor conf — serving a 192.168.1.x pool
+   * that can never match this AP — satisfied it perfectly while not one lease
+   * went out. Identity is therefore claimed by content: layers 1 and 3 carry a
+   * zos-dnsmasq path in their argv, and layer 2 (the vendor-verbatim argv,
+   * which has no zos path by definition) is fingerprinted by the pool derived
+   * from OUR gateway, which the vendor conf's own pool does not share. A bare
+   * `/bin/dnsmasq` — exactly what an init-spawned one looks like — matches
+   * nothing here on purpose.
+   */
+  static bool cmdlineClaimsOurDnsmasq(const std::string& cmdline, const std::string& gateway) {
+    const std::string bin = "/bin/dnsmasq";
+    if (cmdline.compare(0, bin.size(), bin) != 0) return false;
+    // Exactly the binary, not /bin/dnsmasq-something.
+    if (cmdline.size() > bin.size() && cmdline[bin.size()] != ' ') return false;
+    if (cmdline.find("zos-dnsmasq") != std::string::npos) return true;
+    return cmdline.find("--dhcp-range=" + poolPrefix(gateway) + "100,") != std::string::npos;
+  }
+
+  /**
+   * Whether a parsed SCAN_RESULTS reply means "the sweep is done".
+   *
+   * The answer is NO for an empty list, and this predicate exists because the
+   * opposite answer is precisely how the setup page's dropdown shipped empty:
+   * SCAN_RESULTS reads the supplicant's CACHE, which answers instantly and is
+   * legitimately bare (header only) for the first seconds after the daemon
+   * starts. Treating that as a finished sweep let the policy leave kScanning
+   * on its first 160 ms tick, raise the hotspot, and thereby stop the
+   * supplicant — killing the real 2–4 s sweep mid-air, every time. An empty
+   * cache is indistinguishable from a sweep still running, so it must be
+   * reported the same way; the scan TIMEOUT in WifiPolicy is what bounds the
+   * wait.
+   */
+  static bool scanSweepComplete(bool parsedOk, size_t networks) {
+    return parsedOk && networks > 0;
   }
 
  private:
@@ -353,9 +448,28 @@ class DeviceWifi : public WifiPolicy::Actuator {
   // is a courtesy, not a guarantee, and the address reconciliation above is what
   // makes it safe to stop waiting.
   void awaitDhcpQuiet(int timeoutMs);
-  // One dnsmasq start attempt with one argument list, confirmed to have left a
-  // daemon behind. Static because it needs no state — the tiering lives in
-  // superviseDhcp, which is the only caller.
+  // Whether the DHCP server this object started is still serving — by PID for
+  // the foreground layers (waitpid also reaps and reports HOW it died), by pid
+  // file plus cmdline for layer 3, and never by bare process name: that check
+  // once claimed init's own dnsmasq as ours. Reports deaths to the breadcrumb
+  // log on the way through.
+  bool dnsmasqHealthy();
+  // One attempt with one layer's argument list. Foreground layers spawn and
+  // then confirm the child survived 700 ms (a rejected argument or an occupied
+  // port 67 exits well inside that); layer 3 daemonises exactly as measured.
+  // Every outcome — alive, exit code, spawn failure — lands in the breadcrumb
+  // log, which is the entire point of the layering being observable.
+  bool attemptDnsmasqLayer(int layer);
+  // Stops OUR dnsmasq: the held pid first (reaped, so a foreground child never
+  // zombies), then any survivor whose cmdline claims to be ours. A dnsmasq
+  // that is not ours predates this hotspot and is left alone.
+  void stopDnsmasq();
+  // The vendor's entropy-file recipe (see entropyFile). Returns a static
+  // status word — "exists" / "created" / "fail" — for the breadcrumb line.
+  static const char* ensureEntropyFile();
+  // Layer-3 only: one dnsmasq start attempt with one argument list, confirmed
+  // to have left a daemon behind by name — the daemonised model gives nothing
+  // better to hold.
   static bool spawnDnsmasq(const std::vector<std::string>& args, const char* errPath);
 
   WpaCtrl mCtrl;
@@ -387,6 +501,26 @@ class DeviceWifi : public WifiPolicy::Actuator {
   // watches it would otherwise be a process spawn every three seconds forever
   // on a device with ~1 MB free.
   int mDhcpFailedAtMs;
+  // The DHCP server this object is supervising: its pid (a direct child for
+  // the foreground layers; the daemon's own, read back from its pid file, for
+  // layer 3; -1 when none) and which argument layer produced it. Worker-thread
+  // only, like the failure stamps above.
+  pid_t mDnsmasqPid;
+  int mDnsmasqLayer;
+  // How many times the supervised dnsmasq died and was replaced, for the
+  // DNSMASQ_DEAD breadcrumb — a counter because "died once at boot" and "dies
+  // every round" are different bugs wearing the same line.
+  int mDhcpRespawns;
+  // wlan0's address as last observed by the supervision round, so the
+  // ADDR_CHANGE breadcrumb fires on transitions only: jffs2 gets a line when
+  // libzknet's late DHCP write steals the gateway, not one per round forever.
+  std::string mLastApAddr;
+  // The sweep the SCAN_DONE breadcrumb times: when the first SCAN of the
+  // current sweep went out, and whether this sweep's completion was already
+  // logged. UI-thread only (startScan/scanResults both run on the policy
+  // tick).
+  int mScanIssuedMs;
+  bool mScanDoneLogged;
   // The network id the supplicant handed back for the credentials we are
   // currently trying. Reused instead of ADD_NETWORKing again on every retry:
   // the policy re-attempts the stored network every 20 s while provisioning,

@@ -8,6 +8,8 @@ WifiPolicy::WifiPolicy(Actuator* actuator)
       mStateSinceMs(0),
       mLastRetryMs(0),
       mLastSoftApCheckMs(0),
+      mLastScanIssueMs(0),
+      mProvisionReason(""),
       mSupplicantRestarts(0),
       mSoftApRestarts(0),
       mHaveCredentials(false),
@@ -70,16 +72,18 @@ void WifiPolicy::applyCredentials(const std::string& ssid, const std::string& ps
 }
 
 // Scan first, hotspot second. Always in that order — see Actuator::startScan.
-void WifiPolicy::beginProvisioning(int nowMs) {
+void WifiPolicy::beginProvisioning(int nowMs, const char* reason) {
+  mProvisionReason = reason;
   mScanned.clear();
   mActuator->startScan();
+  mLastScanIssueMs = nowMs;
   enter(kScanning, nowMs);
 }
 
 void WifiPolicy::beginConnect(int nowMs) {
   if (mActuator == 0) return;
   if (!mHaveCredentials) {
-    beginProvisioning(nowMs);
+    beginProvisioning(nowMs, "no-creds");
     return;
   }
   if (!mActuator->connect(mSsid, mPsk)) {
@@ -148,18 +152,28 @@ void WifiPolicy::tick(int nowMs) {
         // black panel, so fall back to provisioning — while still retrying in
         // the background, because the usual cause is a slow reboot.
         mLastRetryMs = nowMs;
-        beginProvisioning(nowMs);
+        beginProvisioning(nowMs, "connect-timeout");
       }
       break;
 
     case kScanning:
-      // Collect what we can, then raise the hotspot whether or not the sweep
-      // finished. An empty list costs the user a typed SSID; waiting forever
-      // costs them a device that never offers a way in at all.
+      // Wait for the sweep to PRODUCE something, re-asking while it stays
+      // empty, and only then raise the hotspot — or raise it anyway once the
+      // budget is spent, because a device that never offers a way in is worse
+      // than an empty list. The actuator answers false for an empty sweep (see
+      // Actuator::scanResults for the year this ordering was broken), so the
+      // exit here is "first non-empty result, or timeout" and nothing else.
       if (mActuator->scanResults(&mScanned) || inState >= kScanTimeoutMs) {
         mActuator->startSoftAp();
         mLastRetryMs = nowMs;
         enter(kProvisioning, nowMs);
+      } else if ((nowMs - mLastScanIssueMs) >= kScanRetryMs) {
+        // The first SCAN can be swallowed whole — FAIL-BUSY from a supplicant
+        // mid-start is routine — and nothing else ever asks again. Re-issuing
+        // into a sweep already running is harmless: the supplicant answers
+        // FAIL-BUSY and keeps sweeping.
+        mLastScanIssueMs = nowMs;
+        mActuator->startScan();
       }
       break;
 

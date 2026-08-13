@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -36,6 +37,7 @@
 #include "platform/DeviceControls.h"
 #include "platform/InstallMode.h"
 #include "platform/Presenter.h"
+#include "platform/ProvisionLog.h"
 #include "net/WifiPolicy.h"
 #include "games/breakout.h"
 #include "games/flappy.h"
@@ -1642,6 +1644,8 @@ void checkHttpServer() {
 class FakePortalBackend : public tcos::SetupPortal::Backend {
  public:
   std::vector<std::string> scanResults() { return networks; }
+  bool scanResultsAreCached() { return cached; }
+  bool cached = false;
   bool submit(const std::string& s, const std::string& p, std::string* reason) {
     if (refuse) {
       *reason = "link-locked";
@@ -1715,13 +1719,26 @@ void checkSetupPortal() {
 
   // Scan results are JSON, and an SSID is user-controlled data from the air.
   req.path = "/scan";
-  check(portal.handle(req).body == "{\"networks\":[]}", "an empty scan is still valid JSON");
+  check(portal.handle(req).body == "{\"networks\":[],\"cached\":false}",
+        "an empty scan is still valid JSON");
   backend.networks.push_back("home");
   backend.networks.push_back("say \"hi\"");
   backend.networks.push_back("back\\slash");
   const std::string scanBody = portal.handle(req).body;
   check(scanBody.find("\\\"hi\\\"") != std::string::npos, "quotes in an SSID are escaped");
   check(scanBody.find("back\\\\slash") != std::string::npos, "backslashes are escaped");
+
+  // A list served from the previous boot's cache says so, and the page turns
+  // that into a visible 上次扫描 label: stale must not masquerade as live.
+  check(scanBody.find("\"cached\":false") != std::string::npos,
+        "a live list is marked live");
+  backend.cached = true;
+  check(portal.handle(req).body.find("\"cached\":true") != std::string::npos,
+        "a cached list is marked cached");
+  backend.cached = false;
+  check(page.body.find("id=ch") != std::string::npos &&
+            page.body.find("d.cached") != std::string::npos,
+        "and the page carries the cache label plus the script that shows it");
   check(SetupPortal::jsonEscape("\x01") == "\\u0001",
         "a control byte becomes an escape rather than invalid JSON");
   check(SetupPortal::htmlEscape("<b>&\"") == "&lt;b&gt;&amp;&quot;", "html escaping covers the set");
@@ -2377,7 +2394,14 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
     scanDone = autoScan;
   }
   bool scanResults(std::vector<std::string>* out) {
+    // Mirrors the REAL actuator's contract, including the half it got wrong
+    // for a year: an empty list answers false — "not done yet" — never "done,
+    // nothing there". The supplicant's cache is legitimately empty while the
+    // sweep runs, and a fake that reported that as completion let the policy
+    // tests stay green while the device raised its hotspot 160 ms in and
+    // killed every real sweep. See DeviceWifi::scanSweepComplete.
     if (!scanDone) return false;
+    if (visible.empty()) return false;
     *out = visible;
     return true;
   }
@@ -3567,6 +3591,8 @@ void checkWifiPolicy() {
     check(w.apUp && w.apStarts == 1, "the hotspot is raised");
     check(policy.scanned().size() == 1, "and the page has a list to offer");
     check(w.connects == 0, "nothing is attempted without credentials");
+    check(std::string(policy.provisionReason()) == "no-creds",
+          "and the breadcrumb reason says this was a first boot, not a lost network");
   }
 
   // A radio that never answers must not strand the user: the hotspot goes up
@@ -3629,6 +3655,7 @@ void checkWifiPolicy() {
   // no adb — so it is supervised exactly like the supplicant.
   {
     FakeWifi w;
+    w.visible.push_back("neighbour");  // a finished sweep, so scanning ends at once
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);
@@ -3650,6 +3677,7 @@ void checkWifiPolicy() {
   // scan six times a second.
   {
     FakeWifi w;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);
@@ -3690,6 +3718,7 @@ void checkWifiPolicy() {
   {
     FakeWifi w;
     w.stored = true;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);                                  // -> starting
@@ -3713,6 +3742,7 @@ void checkWifiPolicy() {
   {
     FakeWifi w;
     w.stored = true;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);
@@ -3724,6 +3754,8 @@ void checkWifiPolicy() {
     check(policy.state() == WifiPolicy::kScanning,
           "a moved router sweeps for alternatives rather than waiting forever");
     check(!w.apUp, "and does it before the hotspot, which would stop the supplicant");
+    check(std::string(policy.provisionReason()) == "connect-timeout",
+          "the breadcrumb reason distinguishes lost credentials from a first boot");
     policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs);
     check(policy.state() == WifiPolicy::kProvisioning, "then falls back to provisioning");
     check(w.apUp, "the hotspot comes up so the user has a way in");
@@ -3746,6 +3778,7 @@ void checkWifiPolicy() {
   {
     FakeWifi w;
     w.stored = true;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);                                  // grace -> starting
@@ -3762,6 +3795,7 @@ void checkWifiPolicy() {
   // Credentials from the setup page take effect immediately.
   {
     FakeWifi w;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);   // grace -> starting
@@ -3781,6 +3815,7 @@ void checkWifiPolicy() {
   // this unit has.
   {
     FakeWifi w;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);
@@ -3833,6 +3868,7 @@ void checkWifiPolicy() {
   // rescue, and it would do so while looking exactly like a right one.
   {
     FakeWifi w;
+    w.visible.push_back("neighbour");
     WifiPolicy policy(&w);
     policy.begin(0);
     policy.tick(WifiPolicy::kAdoptGraceMs + 10);
@@ -3953,6 +3989,67 @@ void checkWifiPolicy() {
     check(w.dhcpCalls == 7, "and asked again on every timeout");
     check(w.apStarts == 0, "the radio is never taken off the network the user chose");
   }
+
+  // FAULT 2, the regression block. The supplicant answers SCAN_RESULTS from
+  // its cache instantly, and a fresh daemon's cache is empty — so "empty" must
+  // read as "not done", or the policy leaves kScanning on its first 160 ms
+  // tick, raises the hotspot, and the AP kills the real sweep. This is exactly
+  // how the setup page's dropdown shipped empty for every first boot.
+  {
+    FakeWifi w;  // scanDone flips true immediately (autoScan), but visible is EMPTY
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    check(policy.state() == WifiPolicy::kScanning, "scanning");
+    const int t0 = WifiPolicy::kAdoptGraceMs + 20;
+
+    // The first tick after entry is where the old code already gave up.
+    policy.tick(t0 + 160);
+    check(policy.state() == WifiPolicy::kScanning,
+          "an empty supplicant cache does not end the sweep on the first tick");
+    check(!w.apUp, "and the hotspot stays down — raising it would kill the sweep");
+
+    // While the sweep stays empty the SCAN is re-issued: the first one can be
+    // eaten whole (FAIL-BUSY from a supplicant mid-start) and nobody else asks.
+    const int scansBefore = w.scans;
+    policy.tick(t0 + WifiPolicy::kScanRetryMs + 10);
+    check(w.scans == scansBefore + 1, "an empty sweep is re-asked on the retry period");
+
+    // The first NON-empty result ends the wait immediately — no full budget.
+    w.visible.push_back("home");
+    w.visible.push_back("neighbour");
+    policy.tick(t0 + WifiPolicy::kScanRetryMs + 200);
+    check(policy.state() == WifiPolicy::kProvisioning,
+          "the first non-empty result raises the hotspot without waiting out the budget");
+    check(policy.scanned().size() == 2, "with the full list for the page");
+  }
+
+  // ...and a radio whose cache STAYS empty still ends in a hotspot: the budget
+  // is a bound, not a trap. The list is then honestly empty and the page's
+  // typed-SSID box (plus the /data scan cache, on the device) is the fallback.
+  {
+    FakeWifi w;  // visible stays empty forever
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    const int t0 = WifiPolicy::kAdoptGraceMs + 20;
+    policy.tick(t0 + WifiPolicy::kScanTimeoutMs - 100);
+    check(policy.state() == WifiPolicy::kScanning, "still trying inside the budget");
+    policy.tick(t0 + WifiPolicy::kScanTimeoutMs + 10);
+    check(policy.state() == WifiPolicy::kProvisioning && w.apUp,
+          "a sweep that never fills still ends with a way in");
+    check(policy.scanned().empty(), "and an honestly empty list");
+  }
+
+  // The budget is sized for the radio, not for taste: two full 2.4 GHz sweeps
+  // (2-4 s each) plus a FAIL-BUSY retry must fit, or the timeout re-creates the
+  // empty-dropdown bug with extra steps.
+  check(WifiPolicy::kScanTimeoutMs >= 12000,
+        "the scan budget covers two full sweeps and a busy retry");
+  check(WifiPolicy::kScanRetryMs * 2 < WifiPolicy::kScanTimeoutMs,
+        "and the retry period fits at least twice inside it");
 }
 
 // True when exactly one argument starts with `prefix`, and it equals `whole`.
@@ -4026,23 +4123,57 @@ void checkSoftApRecipe() {
         "and never as a PBKDF2 hash, which would mean linking libssl");
   check(conf[conf.size() - 1] == '\n', "the file ends with a newline");
 
+  // --- hostapd's argv: the vendor's entropy recipe, with a fallback ---------
+  //
+  // The preferred shape is libzknet's own — `-e /data/misc/wifi/entropy.bin`
+  // with the file pre-seeded — because a headless box with no input devices
+  // fills its kernel entropy pool at a crawl and a hostapd left to that pool
+  // can refuse WPA handshakes. The fallback is the bare invocation this
+  // firmware always used, the one that demonstrably puts the SSID on the air:
+  // a build that rejects -e must cost one spawn, never the hotspot.
+  {
+    const std::vector<std::string> withEntropy = DeviceWifi::hostapdArgs(true);
+    check(withEntropy.size() == 4 && withEntropy[0] == "-B" && withEntropy[1] == "-e" &&
+              withEntropy[2] == DeviceWifi::entropyFile() &&
+              withEntropy[3] == DeviceWifi::hostapdConfPath(),
+          "hostapd's preferred argv is the vendor shape: -B -e <entropy> <conf>");
+    const std::vector<std::string> plain = DeviceWifi::hostapdArgs(false);
+    check(plain.size() == 2 && plain[0] == "-B" && plain[1] == DeviceWifi::hostapdConfPath(),
+          "and the fallback is exactly the invocation that has always aired the SSID");
+    check(std::string(DeviceWifi::entropyFile()) == "/data/misc/wifi/entropy.bin",
+          "the entropy file is the vendor's own path, byte for byte");
+  }
+
   // --- dnsmasq, the half that made the hotspot useless ----------------------
   //
   // Measured on the device: with the pid file left at its compiled-in default,
   // /var/run/dnsmasq.pid, dnsmasq exits 3 — there is no /var on this rootfs at
   // all — so the SSID went on the air and no phone was ever handed an address.
-  const std::vector<std::string> args = DeviceWifi::dnsmasqArgs("192.168.100.1");
+  // Three argument layers now, most capable first, best evidence last; each is
+  // pinned here because none of them can be exercised without the radio.
+  const std::vector<std::string> l1 = DeviceWifi::dnsmasqLayer1Args("192.168.100.1");
+  const std::vector<std::string> l2 = DeviceWifi::dnsmasqLayer2Args("192.168.100.1");
   const std::vector<std::string> proven = DeviceWifi::dnsmasqProvenArgs("192.168.100.1");
 
-  // THE FALLBACK IS THE MEASUREMENT, character for character.
+  // THE LADDER'S ORDER is itself a fact: layer 1 is reasoned, layer 2 is the
+  // vendor's binary-proven argv, layer 3 is the one invocation measured on
+  // this exact unit. superviseDhcp walks this dispatch, so pinning it here
+  // pins the runtime behaviour.
+  check(DeviceWifi::kDnsmasqLayers == 3, "three layers, no more, no fewer");
+  check(DeviceWifi::dnsmasqArgsForLayer(1, "192.168.100.1") == l1 &&
+            DeviceWifi::dnsmasqArgsForLayer(2, "192.168.100.1") == l2 &&
+            DeviceWifi::dnsmasqArgsForLayer(3, "192.168.100.1") == proven,
+        "the dispatch runs reasoned, then vendor-proven, then device-measured");
+
+  // LAYER 3 IS THE MEASUREMENT, character for character.
   //
   // This is the check that matters most in this file, and it is a check on
   // restraint rather than on cleverness. dnsmasq exits EC_BADCONF on any
-  // argument it does not accept, so an unverified flag in the preferred list is
-  // a way to reproduce the original bug exactly — the SSID on the air and not
-  // one lease. What makes that survivable is that superviseDhcp falls back to
-  // the argument list actually executed on this unit: the four arguments this
-  // firmware always passed, plus the --pid-file that turned exit 3 into exit 0.
+  // argument it does not accept, so an unverified flag anywhere above it can
+  // reproduce the original bug exactly — the SSID on the air and not one
+  // lease. What makes that survivable is that the last rung is the argument
+  // list actually executed on this unit: the four arguments this firmware
+  // always passed, plus the --pid-file that turned exit 3 into exit 0.
   // Nothing may be added to it. An "improvement" here is an improvement to the
   // only thing known to work.
   {
@@ -4054,7 +4185,7 @@ void checkSoftApRecipe() {
     measured.push_back("--no-poll");
     measured.push_back("--pid-file=/tmp/zos-dnsmasq.pid");
     check(proven == measured,
-          "the fallback list is exactly the invocation measured working on the device — "
+          "layer 3 is exactly the invocation measured working on the device — "
           "the original four arguments plus the pid file, and nothing else");
     // Deliberately absent, and the absence is the point: /etc/dnsmasq.conf is
     // left to be read implicitly, exactly as it was when the measurement was
@@ -4065,86 +4196,243 @@ void checkSoftApRecipe() {
           "and it does not neutralise the vendor conf it is relying on");
   }
 
-  // The preferred list has to contain the fallback: whatever else it tries, it
-  // may not drop the one line that was measured to make dnsmasq start.
-  for (size_t i = 0; i < proven.size(); ++i) {
-    bool present = false;
-    for (size_t j = 0; j < args.size(); ++j) {
-      if (args[j] == proven[i]) present = true;
+  // LAYER 2 IS THE VENDOR'S, character for character: the argv inside this
+  // device's own libzknet.so (soft_ap_enable, the fork+execv branch), the
+  // shape every stock unit of this platform family serves its production
+  // hotspot with. Only the pool is derived instead of a second literal.
+  {
+    std::vector<std::string> vendor;
+    vendor.push_back("--no-daemon");
+    vendor.push_back("--no-resolv");
+    vendor.push_back("--no-poll");
+    vendor.push_back("--dhcp-range=192.168.100.100,192.168.100.200,1h");
+    check(l2 == vendor,
+          "layer 2 is libzknet's own argv verbatim, pool derived from the gateway");
+  }
+
+  // LAYER 1: the vendor's execution model with everything spelled out. The
+  // foreground run is the deeper fix — a --no-daemon dnsmasq writes no pidfile
+  // (the entire original failure class disappears), stays our own child (so
+  // supervision is waitpid on a known pid, not a name walk that once claimed
+  // init's dnsmasq as ours), and hands back its exit status when it dies.
+  {
+    check(hasOneArg(l1, "--no-daemon", "--no-daemon") &&
+              hasOneArg(l2, "--no-daemon", "--no-daemon"),
+        "layers 1 and 2 run dnsmasq in the foreground, the vendor's model");
+    bool l1HasPidFile = false;
+    for (size_t i = 0; i < l1.size(); ++i) {
+      if (l1[i].compare(0, 10, "--pid-file") == 0) l1HasPidFile = true;
     }
-    check(present, "the preferred list keeps every argument of the measured one");
+    check(!l1HasPidFile,
+          "a foreground dnsmasq writes no pidfile, so layer 1 passes none — the "
+          "whole /var/run failure class cannot recur there");
+    check(hasOneArg(l1, "--log-dhcp", "--log-dhcp"),
+          "layer 1 logs every DISCOVER/OFFER into its /data capture — the file that "
+          "separates 'phone never asked' from 'driver dropped the OFFER' from "
+          "'no context matched'");
+    check(hasOneArg(l1, "--conf-file", "--conf-file=/dev/null"),
+          "the vendor's /etc/dnsmasq.conf is taken out of the picture");
+    check(hasOneArg(l1, "--user", "--user=root"),
+          "root is spelled out: dnsmasq's default user is `nobody`, and a getpwnam "
+          "that fails is fatal — every start measured on this unit was as root");
+    check(hasOneArg(l1, "--no-hosts", "--no-hosts"),
+          "/etc/hosts stays unread, or a local record would answer before the "
+          "captive-portal catch-all");
+    check(hasOneArg(l1, "--dhcp-authoritative", "--dhcp-authoritative"),
+          "a phone arriving with a cached lease is NAKed rather than ignored");
+    check(hasOneArg(l1, "--no-resolv", "--no-resolv") &&
+              hasOneArg(l1, "--no-poll", "--no-poll"),
+          "no upstream resolver is looked for; there is none while the AP is up");
+    check(hasOneArg(l1, "--dhcp-leasefile", "--dhcp-leasefile=/tmp/zos-dnsmasq.leases"),
+          "the lease file is on tmpfs — rewritten per lease, and /data is the "
+          "credentials partition");
   }
 
-  check(hasOneArg(args, "--pid-file", "--pid-file=/tmp/zos-dnsmasq.pid"),
-        "the pid file is on tmpfs — /var does not exist on this device, and its "
-        "absence is the whole bug");
-  check(hasOneArg(args, "--dhcp-leasefile", "--dhcp-leasefile=/tmp/zos-dnsmasq.leases"),
-        "and so is the lease file, whose default lives under the same missing /var");
-  for (size_t i = 0; i < args.size(); ++i) {
-    check(args[i].find("/var/") == std::string::npos, "no argument names a path under /var");
-  }
-  for (size_t i = 0; i < proven.size(); ++i) {
-    check(proven[i].find("/var/") == std::string::npos,
-          "and neither does the fallback, whose lease path comes from the vendor conf");
-  }
-
-  // /etc/dnsmasq.conf is read implicitly and on this unit carries a dhcp-range
-  // in a subnet the AP does not have. Which file wins for a scalar option is a
-  // claim about dnsmasq's parse order that nothing here can verify, so the
-  // preferred list does not depend on it either way: neutralise the file and own
-  // every setting it supplied. If the flag is rejected, the fallback above is
-  // the state the measurement was taken in.
-  check(hasOneArg(args, "--conf-file", "--conf-file=/dev/null"),
-        "the vendor's /etc/dnsmasq.conf is taken out of the picture");
-  check(hasOneArg(args, "--user", "--user=root"),
-        "root is spelled out: dnsmasq's default user is `nobody`, and a getpwnam "
-        "that fails is fatal — every start measured on this unit was as root");
-  check(hasOneArg(args, "--no-hosts", "--no-hosts"),
-        "/etc/hosts stays unread, or a local record would answer before the "
-        "captive-portal catch-all");
-  check(hasOneArg(args, "--dhcp-authoritative", "--dhcp-authoritative"),
-        "a phone arriving with a cached lease is NAKed rather than ignored");
-  check(hasOneArg(args, "--no-resolv", "--no-resolv") &&
-            hasOneArg(args, "--no-poll", "--no-poll"),
-        "no upstream resolver is looked for; there is none while the AP is up");
-
-  // THE invariant. A pool outside the address on wlan0 matches no DHCP context,
-  // so dnsmasq stays up, answers nothing, and every supervision check still
-  // reports a healthy hotspot — which is exactly the mistake the vendor conf
-  // ships (dhcp-range=192.168.1.101 on a device whose AP is 192.168.100.1).
-  check(hasOneArg(args, "--dhcp-range",
-                  "--dhcp-range=192.168.100.100,192.168.100.200,1h"),
-        "the pool is libzknet's own, inside the gateway's /24");
-  check(hasOneArg(args, "--address=", "--address=/#/192.168.100.1"),
+  // THE invariant, in every layer that names a pool. A pool outside the
+  // address on wlan0 matches no DHCP context, so dnsmasq stays up, answers
+  // nothing, and every supervision check still reports a healthy hotspot —
+  // which is exactly the mistake the vendor conf ships (dhcp-range=192.168.1.101
+  // on a device whose AP is 192.168.100.1).
+  check(hasOneArg(l1, "--dhcp-range", "--dhcp-range=192.168.100.100,192.168.100.200,1h") &&
+            hasOneArg(l2, "--dhcp-range",
+                      "--dhcp-range=192.168.100.100,192.168.100.200,1h"),
+        "every pool is libzknet's own, inside the gateway's /24");
+  check(hasOneArg(l1, "--address=", "--address=/#/192.168.100.1"),
         "every name resolves to the gateway, which is what opens the captive sheet");
-  check(hasOneArg(args, "--interface", "--interface=wlan0"), "and it serves wlan0 only");
+  check(hasOneArg(l1, "--interface", "--interface=wlan0"), "and layer 1 serves wlan0 only");
+
+  // No layer may name a path under the /var this device does not have.
+  for (int layer = 1; layer <= DeviceWifi::kDnsmasqLayers; ++layer) {
+    const std::vector<std::string> args = DeviceWifi::dnsmasqArgsForLayer(layer, "192.168.100.1");
+    for (size_t i = 0; i < args.size(); ++i) {
+      check(args[i].find("/var/") == std::string::npos, "no argument names a path under /var");
+    }
+  }
 
   // Derived, not written twice: move the gateway and the pool has to follow, or
-  // the two disagree the way the vendor's file does. Both tiers, because the
-  // fallback is a real code path and a fallback that leases on the wrong subnet
-  // is the bug it exists to avoid.
-  const std::vector<std::string> moved = DeviceWifi::dnsmasqArgs("10.0.7.1");
-  const std::vector<std::string> movedProven = DeviceWifi::dnsmasqProvenArgs("10.0.7.1");
-  check(hasOneArg(moved, "--dhcp-range", "--dhcp-range=10.0.7.100,10.0.7.200,1h"),
-        "a different gateway carries its pool with it");
-  check(hasOneArg(moved, "--address=", "--address=/#/10.0.7.1"),
-        "and the DNS catch-all with it too");
-  check(hasOneArg(movedProven, "--dhcp-range", "--dhcp-range=10.0.7.100,10.0.7.200,1h") &&
-            hasOneArg(movedProven, "--address=", "--address=/#/10.0.7.1"),
-        "and the fallback follows the gateway the same way");
+  // the two disagree the way the vendor's file does. All layers, because each
+  // is a real code path and a pool on the wrong subnet is the bug itself.
+  check(hasOneArg(DeviceWifi::dnsmasqLayer1Args("10.0.7.1"), "--dhcp-range",
+                  "--dhcp-range=10.0.7.100,10.0.7.200,1h") &&
+            hasOneArg(DeviceWifi::dnsmasqLayer2Args("10.0.7.1"), "--dhcp-range",
+                      "--dhcp-range=10.0.7.100,10.0.7.200,1h") &&
+            hasOneArg(DeviceWifi::dnsmasqProvenArgs("10.0.7.1"), "--dhcp-range",
+                      "--dhcp-range=10.0.7.100,10.0.7.200,1h"),
+        "a different gateway carries its pool with it in every layer");
+  check(hasOneArg(DeviceWifi::dnsmasqLayer1Args("10.0.7.1"), "--address=",
+                  "--address=/#/10.0.7.1") &&
+            hasOneArg(DeviceWifi::dnsmasqProvenArgs("10.0.7.1"), "--address=",
+                      "--address=/#/10.0.7.1"),
+        "and the DNS catch-all follows it too");
 
-  // The three tmpfs paths dnsmasq is given, named once each so the device-side
-  // recipe and the places to look after a failure cannot drift apart.
+  // WHERE THE EVIDENCE LIVES. The lease and pid files stay on tmpfs (rewritten
+  // constantly; /data holds the credentials), but the stderr captures are on
+  // /data and one per layer: the power cycle that lets adb back in ERASES
+  // /tmp, which is exactly how a year of tmpfs breadcrumbs never survived to
+  // be read. Distinct files, so the layer that named a rejected argument is
+  // never overwritten by the layer that ran after it.
   check(std::string(DeviceWifi::dnsmasqPidFile()).compare(0, 5, "/tmp/") == 0 &&
-            std::string(DeviceWifi::dnsmasqLeaseFile()).compare(0, 5, "/tmp/") == 0 &&
-            std::string(DeviceWifi::dnsmasqErrFile()).compare(0, 5, "/tmp/") == 0 &&
-            std::string(DeviceWifi::dnsmasqProvenErrFile()).compare(0, 5, "/tmp/") == 0,
-        "pid, leases and both stderr captures live on tmpfs, not on the jffs2 "
-        "partition that holds the user's credentials");
-  check(std::string(DeviceWifi::dnsmasqErrFile()) !=
-            std::string(DeviceWifi::dnsmasqProvenErrFile()),
-        "and the fallback's complaint does not overwrite the one naming the "
-        "argument this build rejected");
+            std::string(DeviceWifi::dnsmasqLeaseFile()).compare(0, 5, "/tmp/") == 0,
+        "pid and leases live on tmpfs, not on the jffs2 partition that holds the "
+        "user's credentials");
+  check(std::string(DeviceWifi::dnsmasqErrFile(1)).compare(0, 6, "/data/") == 0 &&
+            std::string(DeviceWifi::dnsmasqErrFile(2)).compare(0, 6, "/data/") == 0 &&
+            std::string(DeviceWifi::dnsmasqErrFile(3)).compare(0, 6, "/data/") == 0,
+        "every stderr capture lives on /data — the only storage that still exists "
+        "after the power cycle that lets adb back in");
+  check(std::string(DeviceWifi::dnsmasqErrFile(1)) != std::string(DeviceWifi::dnsmasqErrFile(2)) &&
+            std::string(DeviceWifi::dnsmasqErrFile(2)) !=
+                std::string(DeviceWifi::dnsmasqErrFile(3)) &&
+            std::string(DeviceWifi::dnsmasqErrFile(1)) !=
+                std::string(DeviceWifi::dnsmasqErrFile(3)),
+        "and no layer's complaint can overwrite another's");
+
+  // --- who counts as OUR dnsmasq --------------------------------------------
+  //
+  // The old health check asked "is any process named dnsmasq alive?" — and a
+  // dnsmasq started by init off the vendor conf, serving a 192.168.1.x pool
+  // that can never match this AP, satisfied it perfectly while not one lease
+  // went out. Identity is now claimed by cmdline content, and these are the
+  // fixtures that pin who is in and who is out.
+  {
+    const std::string gw = "192.168.100.1";
+    std::string joined1 = "/bin/dnsmasq";
+    for (size_t i = 0; i < l1.size(); ++i) joined1 += " " + l1[i];
+    std::string joined2 = "/bin/dnsmasq";
+    for (size_t i = 0; i < l2.size(); ++i) joined2 += " " + l2[i];
+    std::string joined3 = "/bin/dnsmasq";
+    for (size_t i = 0; i < proven.size(); ++i) joined3 += " " + proven[i];
+    check(DeviceWifi::cmdlineClaimsOurDnsmasq(joined1, gw),
+          "layer 1 is recognised by its zos lease path");
+    check(DeviceWifi::cmdlineClaimsOurDnsmasq(joined2, gw),
+          "layer 2 — vendor-verbatim argv, no zos path — by the pool derived from "
+          "OUR gateway");
+    check(DeviceWifi::cmdlineClaimsOurDnsmasq(joined3, gw),
+          "layer 3 by its zos pid file");
+    check(!DeviceWifi::cmdlineClaimsOurDnsmasq("/bin/dnsmasq", gw),
+          "a bare /bin/dnsmasq — exactly what an init-spawned one looks like — is "
+          "NOT ours");
+    check(!DeviceWifi::cmdlineClaimsOurDnsmasq(
+              "/bin/dnsmasq --dhcp-range=192.168.1.101,192.168.1.200,12h", gw),
+          "and neither is one serving the vendor conf's 192.168.1.x pool");
+    check(!DeviceWifi::cmdlineClaimsOurDnsmasq(
+              "/bin/dnsmasqd --dhcp-range=192.168.100.100,192.168.100.200,1h", gw),
+          "a different binary does not count, even with our pool");
+    check(!DeviceWifi::cmdlineClaimsOurDnsmasq("/bin/hostapd -B /data/misc/wifi/hostapd.conf",
+                                               gw),
+          "and neither does a different daemon entirely");
+  }
+
+  // --- the scan-completion contract -----------------------------------------
+  //
+  // The pinned form of the rule that emptied the setup page's dropdown: the
+  // supplicant answers SCAN_RESULTS from its cache instantly, a fresh daemon's
+  // cache parses as a perfectly valid EMPTY list, and treating that as a
+  // finished sweep let the policy raise the hotspot on its first tick — which
+  // stopped the supplicant and killed the real sweep mid-air, every time.
+  check(!DeviceWifi::scanSweepComplete(true, 0),
+        "an empty supplicant cache is NOT a finished sweep");
+  check(DeviceWifi::scanSweepComplete(true, 1), "one network is");
+  check(DeviceWifi::scanSweepComplete(true, 12), "and so is a full list");
+  check(!DeviceWifi::scanSweepComplete(false, 4),
+        "a failed parse is never a finished sweep, whatever it claims to carry");
+}
+
+// The breadcrumb log is the only debug channel a provisioning device has —
+// the radio leaves the LAN, adb dies, logcat is banned, and /tmp is erased by
+// the very power cycle that lets a reader back in. Its pure halves (format,
+// sanitisation) and its real file behaviour (append, seq, rotation) are all
+// host-checkable, so they are checked here rather than discovered on a
+// stranded clock.
+void checkProvisionLog() {
+  using tcos::ProvisionLog;
+
+  // One line, one event, flat key=value: `grep DNSMASQ` must be a complete
+  // query language for a stranger reading a pulled file.
+  check(ProvisionLog::formatLine(3, 12345, "AP_ENTER", "reason=no-creds scanned=0") ==
+            "3 12345 AP_ENTER reason=no-creds scanned=0\n",
+        "a line is seq, uptime, tag, fields");
+  check(ProvisionLog::formatLine(1, 5, "BOOT", "") == "1 5 BOOT\n",
+        "no fields means no trailing separator");
+
+  // An SSID off the air can carry anything; a newline must not fake a second
+  // event and a control byte must not mangle the pulled file.
+  check(ProvisionLog::sanitize("a\nb\rc\td") == "a b c d",
+        "line breaks and tabs inside a field become spaces");
+  check(ProvisionLog::sanitize("ok\x01ok") == "ok?ok", "other control bytes are defanged");
+  check(ProvisionLog::formatLine(2, 9, "PORTAL_HIT", "ssid=evil\nBOOT rev=fake") ==
+            "2 9 PORTAL_HIT ssid=evil BOOT rev=fake\n",
+        "so a hostile SSID cannot forge a breadcrumb line");
+
+  // The REDACTION property is structural, not procedural: this API has no
+  // argument a PSK could arrive through — the one call site that holds the key
+  // (DeviceProvisioning::submit) writes the literal `psk=redacted` before any
+  // string reaches the logger. There is nothing to test beyond the call sites,
+  // which is the point: nothing to test is nothing to get wrong.
+
+  // Real file behaviour, on a scratch path with a tiny budget so rotation is
+  // reachable in a test.
+  const char* p = "/tmp/zos-provlog-test.log";
+  const char* p1 = "/tmp/zos-provlog-test.log.1";
+  ::unlink(p);
+  ::unlink(p1);
+  {
+    tcos::ProvisionLog log(p, p1, 256);
+    log.log("BOOT", "rev=test");
+    log.log("SCAN_CMD", "reply=OK");
+    const std::string body = readFixture(p);
+    check(body.compare(0, 2, "1 ") == 0, "seq starts at 1");
+    check(body.find(" BOOT rev=test\n") != std::string::npos, "the first event is appended");
+    check(body.find(" SCAN_CMD reply=OK\n") != std::string::npos, "and the second after it");
+    check(body.find("\n2 ") != std::string::npos, "with the seq counting up");
+
+    // Overflow the budget: the file must rotate to .1 and keep growing from
+    // nearly empty, never balloon on the credentials partition.
+    for (int i = 0; i < 40; ++i) log.log("PAD", "x=0123456789abcdef");
+    struct stat st;
+    check(::stat(p1, &st) == 0, "an oversized log rotates to .1 instead of growing");
+    check(::stat(p, &st) == 0 && st.st_size <= 256 + 64,
+          "and the live file restarts near-empty after rotation");
+  }
+  ::unlink(p);
+  ::unlink(p1);
+
+  // The boot stamp: compare-first, because /data is jffs2 and an unchanged id
+  // must cost a read, not a write.
+  const char* stamp = "/tmp/zos-provlog-test.id";
+  ::unlink(stamp);
+  check(tcos::ProvisionLog::writeFileIfChanged(stamp, "rev-1\n"), "a missing stamp is written");
+  check(readFixture(stamp) == "rev-1\n", "with the body given");
+  check(tcos::ProvisionLog::writeFileIfChanged(stamp, "rev-1\n"), "an identical body succeeds");
+  check(tcos::ProvisionLog::writeFileIfChanged(stamp, "rev-2\n"), "a new body replaces it");
+  check(readFixture(stamp) == "rev-2\n", "completely");
+  ::unlink(stamp);
+
+  check(std::string(ProvisionLog::devicePath()).compare(0, 6, "/data/") == 0 &&
+            std::string(ProvisionLog::deviceRotatedPath()).compare(0, 6, "/data/") == 0 &&
+            std::string(ProvisionLog::buildIdPath()).compare(0, 6, "/data/") == 0,
+        "everything the coordinator must read after a power cycle lives on /data — "
+        "tmpfs breadcrumbs are the mistake this class exists to end");
 }
 
 }  // namespace
@@ -4205,6 +4493,8 @@ int main() {
   std::printf("  wifi policy ok\n");
   checkSoftApRecipe();
   std::printf("  soft ap recipe ok\n");
+  checkProvisionLog();
+  std::printf("  provision log ok\n");
   checkZosLogo();
   std::printf("  zos logo ok\n");
   checkBootScreen();

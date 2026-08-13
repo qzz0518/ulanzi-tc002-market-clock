@@ -20,6 +20,7 @@
 #include "base/log.h"
 #include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
+#include "platform/ProvisionLog.h"
 
 // posix_spawn's environment argument. Declared here rather than relied on from
 // <unistd.h> because it must be the global one, not a namespace member.
@@ -37,7 +38,9 @@ const char* kWpaConf = "/data/misc/wifi/wpa_supplicant.conf";
 // against is a device that boots with a broken config, and boot is exactly when
 // /tmp is empty.
 const char* kWpaConfBackup = "/data/misc/wifi/wpa_supplicant.conf.zos-bak";
-const char* kHostapdConf = "/data/misc/wifi/hostapd.conf";
+// One name for the conf, owned by the header so the host check pins the same
+// path the device writes.
+const char* kHostapdConf = DeviceWifi::hostapdConfPath();
 const char* kHostapdConfBackup = "/data/misc/wifi/hostapd.conf.zos-bak";
 
 // Absolute paths, and no shell. The device's PATH is `/sbin:/bin:/tmp:`, so
@@ -193,6 +196,45 @@ int findProcess(const char* name) {
 
 bool processRunning(const char* name) { return findProcess(name) >= 0; }
 
+// Whether a pid still has a /proc entry. Used for processes that are not our
+// children (the layer-3 daemon), where waitpid can say nothing.
+bool processAlive(int pid) {
+  char path[32];
+  ::snprintf(path, sizeof(path), "/proc/%d", pid);
+  return fileExists(path);
+}
+
+// /proc/<pid>/cmdline with the NUL separators turned into spaces, or "" when
+// the process is gone. This is the identity a pid is verified against: pids
+// are recycled, and on a box this small "still alive" and "still the process I
+// started" genuinely diverge.
+std::string readCmdline(int pid) {
+  char path[64];
+  ::snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+  FILE* f = ::fopen(path, "rb");
+  if (f == 0) return std::string();
+  char buf[512];
+  const size_t n = ::fread(buf, 1, sizeof(buf), f);
+  ::fclose(f);
+  std::string out(buf, n);
+  for (size_t i = 0; i < out.size(); ++i) {
+    if (out[i] == '\0') out[i] = ' ';
+  }
+  while (!out.empty() && out[out.size() - 1] == ' ') out.erase(out.size() - 1);
+  return out;
+}
+
+// The pid dnsmasq wrote to its own pid file (layer 3 daemonises, so the child
+// this app spawned is not the daemon that survives). -1 when unreadable.
+int readDnsmasqPidFile() {
+  FILE* f = ::fopen(DeviceWifi::dnsmasqPidFile(), "r");
+  if (f == 0) return -1;
+  int pid = -1;
+  if (::fscanf(f, "%d", &pid) != 1) pid = -1;
+  ::fclose(f);
+  return pid > 0 ? pid : -1;
+}
+
 // Stops a daemon by NAME, because there is no pid to remember: hostapd is
 // started with -B, so the process this app spawned forks and exits immediately
 // and the daemon that survives is a different pid. The device has no killall,
@@ -284,6 +326,38 @@ bool spawnAndWait(const char* path, char* const argv[], int timeoutMs,
   return false;
 }
 
+// Starts a binary that is meant to STAY — the vendor's execution model for
+// dnsmasq — and returns its pid without waiting, or -1.
+//
+// The counterpart to spawnAndWait above, which exists for children that exit
+// (ifconfig) or daemonise (hostapd -B). A foreground dnsmasq is deliberately
+// neither: the pid returned here is the server itself, so supervision can
+// waitpid it — which both proves identity beyond any /proc heuristic and hands
+// back the exit status when it dies, the single most informative number this
+// subsystem has ever had. The child's stderr goes to `stderrPath` (O_TRUNC:
+// newest attempt wins), which for the hotspot layers is a file on /data — the
+// only storage that still exists after the power cycle that lets adb back in.
+pid_t spawnDaemon(const char* path, char* const argv[], const char* stderrPath) {
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_t* actionsPtr = 0;
+  if (stderrPath != 0 && ::posix_spawn_file_actions_init(&actions) == 0) {
+    if (::posix_spawn_file_actions_addopen(&actions, 2, stderrPath,
+                                           O_WRONLY | O_CREAT | O_TRUNC, 0644) == 0) {
+      actionsPtr = &actions;
+    } else {
+      ::posix_spawn_file_actions_destroy(&actions);
+    }
+  }
+  pid_t pid = -1;
+  const int spawned = ::posix_spawn(&pid, path, actionsPtr, 0, argv, environ);
+  if (actionsPtr != 0) ::posix_spawn_file_actions_destroy(actionsPtr);
+  if (spawned != 0) {
+    LOGE_TRACE("wifi: cannot spawn %s", path);
+    return -1;
+  }
+  return pid;
+}
+
 // Copies `path` to `backup` unless a backup is already there.
 //
 // ONCE is the whole point. /data survives a power cycle, so it is the one place
@@ -363,6 +437,12 @@ DeviceWifi::DeviceWifi()
       mApDhcpFailed(false),
       mApFailedAtMs(-1),
       mDhcpFailedAtMs(-1),
+      mDnsmasqPid(-1),
+      mDnsmasqLayer(0),
+      mDhcpRespawns(0),
+      // "true" = no sweep in flight, so the first startScan() stamps a fresh one.
+      mScanIssuedMs(-1),
+      mScanDoneLogged(true),
       mNetworkId(-1) {
   ::pthread_mutex_init(&mCtrlLock, 0);
   ::pthread_mutex_init(&mLock, 0);
@@ -458,6 +538,24 @@ bool DeviceWifi::scanResults(std::vector<std::string>* out) {
   ::pthread_mutex_unlock(&mCtrlLock);
   if (!ok) return false;
   for (size_t i = 0; i < nets.size(); ++i) out->push_back(nets[i].ssid);
+
+  // CONTRACT (WifiPolicy::Actuator::scanResults): an empty list is "not done",
+  // never "done, nothing there". SCAN_RESULTS reads the supplicant's cache,
+  // which answers instantly and is a bare header for the first seconds of a
+  // fresh daemon's life — returning true for it let the policy declare the
+  // sweep finished on its first 160 ms tick, raise the hotspot, stop the
+  // supplicant, and kill the real sweep mid-air. The scan budget was dead code
+  // and the setup page's dropdown was empty for every first boot there was.
+  // scanSweepComplete is the pinned, host-checked form of this rule.
+  if (!scanSweepComplete(true, out->size())) return false;
+
+  if (!mScanDoneLogged) {
+    mScanDoneLogged = true;
+    char fields[64];
+    ::snprintf(fields, sizeof(fields), "n=%d t=%d exit=result", static_cast<int>(out->size()),
+               mScanIssuedMs >= 0 ? monotonicMs() - mScanIssuedMs : -1);
+    ProvisionLog::device().log("SCAN_DONE", fields);
+  }
   return true;
 }
 
@@ -479,12 +577,28 @@ void DeviceWifi::startScan() {
     mEverRefused = true;
     return;
   }
+  // The supplicant's raw answer, kept for the breadcrumb: OK means a sweep is
+  // now running, FAIL-BUSY means one already was (fine either way), and
+  // no-socket means there was nobody to ask — three different explanations for
+  // an empty dropdown, indistinguishable after the fact without this line.
+  std::string reply = "no-socket";
   ::pthread_mutex_lock(&mCtrlLock);
   if (mCtrl.isOpen() || mCtrl.open(kInterface)) {
-    std::string reply;
-    mCtrl.request("SCAN", &reply);
+    if (!mCtrl.request("SCAN", &reply)) reply = "no-reply";
   }
   ::pthread_mutex_unlock(&mCtrlLock);
+  while (!reply.empty() && (reply[reply.size() - 1] == '\n' || reply[reply.size() - 1] == '\r')) {
+    reply.erase(reply.size() - 1);
+  }
+
+  // A fresh sweep starts the SCAN_DONE clock; a re-issue into a sweep already
+  // running (WifiPolicy::kScanRetryMs) keeps the original start time, because
+  // the duration worth knowing is "SCAN to first non-empty cache".
+  if (mScanDoneLogged) {
+    mScanDoneLogged = false;
+    mScanIssuedMs = monotonicMs();
+  }
+  ProvisionLog::device().log("SCAN_CMD", "reply=" + reply);
 }
 
 bool DeviceWifi::connect(const std::string& ssid, const std::string& psk) {
@@ -804,7 +918,19 @@ bool DeviceWifi::applyApAddress() {
   argv[3] = const_cast<char*>("netmask");
   argv[4] = const_cast<char*>("255.255.255.0");
   argv[5] = 0;
-  if (spawnAndWait(kIfconfigBin, argv, 4000)) return true;
+  const bool ok = spawnAndWait(kIfconfigBin, argv, 4000);
+  // rc AND readback, always. The bring-up used to ignore this function's
+  // return value, and the audit found no other reporter: a silent ifconfig
+  // failure produced a hotspot whose dnsmasq matched no DHCP context, looked
+  // healthy to every process check, and left nothing to read afterwards. The
+  // readback is the ground truth the rc is checked against — ifconfig can exit
+  // 0 and the address still be gone a moment later (libzknet's late lease
+  // write), which ADDR_CHANGE in the supervision round then catches.
+  const std::string readback = netinfo::ipAddress();
+  ProvisionLog::device().log("AP_ADDR", std::string("rc=") + (ok ? "ok" : "fail") +
+                                            " readback=" +
+                                            (readback.empty() ? "none" : readback));
+  if (ok) return true;
   LOGE_TRACE("wifi: could not address %s as %s", kInterface, kSoftApAddress);
   return false;
 }
@@ -859,6 +985,133 @@ bool DeviceWifi::spawnDnsmasq(const std::vector<std::string>& args, const char* 
   return false;
 }
 
+// Whether the DHCP server this object started is still the one serving.
+//
+// Never by bare process name: that check once claimed ANY dnsmasq — including
+// one started by init off the vendor conf, whose 192.168.1.x pool can never
+// match this AP — and reported the shipped bug as a healthy hotspot. Identity
+// comes from waitpid (a foreground child is ours beyond argument) backed by
+// the cmdline fingerprint for pids that are not our children.
+bool DeviceWifi::dnsmasqHealthy() {
+  char fields[128];
+  if (mDnsmasqPid > 0) {
+    int status = 0;
+    const pid_t done = ::waitpid(mDnsmasqPid, &status, WNOHANG);
+    if (done == mDnsmasqPid) {
+      // Our foreground child died, and the exit status is the whole story —
+      // the number the daemonised model threw away for a year.
+      ++mDhcpRespawns;
+      if (WIFEXITED(status)) {
+        ::snprintf(fields, sizeof(fields), "pid=%d exit=%d respawn=%d",
+                   static_cast<int>(mDnsmasqPid), WEXITSTATUS(status), mDhcpRespawns);
+      } else if (WIFSIGNALED(status)) {
+        ::snprintf(fields, sizeof(fields), "pid=%d signal=%d respawn=%d",
+                   static_cast<int>(mDnsmasqPid), WTERMSIG(status), mDhcpRespawns);
+      } else {
+        ::snprintf(fields, sizeof(fields), "pid=%d exit=unknown respawn=%d",
+                   static_cast<int>(mDnsmasqPid), mDhcpRespawns);
+      }
+      ProvisionLog::device().log("DNSMASQ_DEAD", fields);
+      mDnsmasqPid = -1;
+      return false;
+    }
+    if (done == 0) return true;  // still running, still our child
+    // Not our child: the layer-3 daemon, or a server adopted after a firmware
+    // restart. Alive means a /proc entry whose cmdline still claims to be OUR
+    // dnsmasq — pid recycling is real on a box that respawns this much.
+    if (processAlive(mDnsmasqPid) &&
+        cmdlineClaimsOurDnsmasq(readCmdline(mDnsmasqPid), kSoftApAddress)) {
+      return true;
+    }
+    ++mDhcpRespawns;
+    ::snprintf(fields, sizeof(fields), "pid=%d exit=unknown respawn=%d",
+               static_cast<int>(mDnsmasqPid), mDhcpRespawns);
+    ProvisionLog::device().log("DNSMASQ_DEAD", fields);
+    mDnsmasqPid = -1;
+    return false;
+  }
+
+  // No pid on record — first round, or the firmware restarted under a live
+  // hotspot. Adopt a server only when its command line proves it is ours; a
+  // stranger serving the wrong pool must read as "no DHCP", because that is
+  // what it is.
+  const int pid = findProcess("dnsmasq");
+  if (pid > 0 && cmdlineClaimsOurDnsmasq(readCmdline(pid), kSoftApAddress)) {
+    mDnsmasqPid = pid;
+    if (mDnsmasqLayer <= 0) mDnsmasqLayer = kDnsmasqLayers;  // provenance unknown; assume least
+    ::snprintf(fields, sizeof(fields), "pid=%d", pid);
+    ProvisionLog::device().log("DNSMASQ_ADOPT", fields);
+    return true;
+  }
+  return false;
+}
+
+// One start attempt with one layer's argument list. True when a server is up
+// and owned; every outcome lands in the breadcrumb log either way.
+bool DeviceWifi::attemptDnsmasqLayer(int layer) {
+  const std::vector<std::string> args = dnsmasqArgsForLayer(layer, kSoftApAddress);
+  const char* errPath = dnsmasqErrFile(layer);
+  char fields[160];
+
+  if (layer >= kDnsmasqLayers) {
+    // The measured invocation, executed exactly as it was measured: the parent
+    // daemonises, success is a named process appearing, and the pid worth
+    // holding is the one dnsmasq wrote to its own pid file.
+    const bool up = spawnDnsmasq(args, errPath);
+    if (up) {
+      mDnsmasqPid = readDnsmasqPidFile();  // -1 degrades to the cmdline walk above
+      mDnsmasqLayer = layer;
+      ::snprintf(fields, sizeof(fields), "layer=%d pid=%d outcome=alive", layer,
+                 static_cast<int>(mDnsmasqPid));
+    } else {
+      ::snprintf(fields, sizeof(fields), "layer=%d outcome=down see=%s", layer, errPath);
+    }
+    ProvisionLog::device().log("DNSMASQ_TRY", fields);
+    return up;
+  }
+
+  std::vector<char*> argv;
+  argv.push_back(const_cast<char*>(kDnsmasqBin));
+  for (size_t i = 0; i < args.size(); ++i) {
+    argv.push_back(const_cast<char*>(args[i].c_str()));
+  }
+  argv.push_back(0);
+
+  const pid_t pid = spawnDaemon(kDnsmasqBin, &argv[0], errPath);
+  if (pid < 0) {
+    ::snprintf(fields, sizeof(fields), "layer=%d outcome=spawn-fail", layer);
+    ProvisionLog::device().log("DNSMASQ_TRY", fields);
+    return false;
+  }
+  // 700 ms covers option parsing and both binds; a rejected argument or an
+  // occupied port 67 exits well inside it, and the exit code below then names
+  // the layer that was refused — the line the original bug never wrote.
+  sleepMs(700);
+  int status = 0;
+  const pid_t done = ::waitpid(pid, &status, WNOHANG);
+  if (done == pid) {
+    if (WIFEXITED(status)) {
+      ::snprintf(fields, sizeof(fields), "layer=%d pid=%d outcome=exit:%d see=%s", layer,
+                 static_cast<int>(pid), WEXITSTATUS(status), errPath);
+    } else if (WIFSIGNALED(status)) {
+      ::snprintf(fields, sizeof(fields), "layer=%d pid=%d outcome=signal:%d see=%s", layer,
+                 static_cast<int>(pid), WTERMSIG(status), errPath);
+    } else {
+      ::snprintf(fields, sizeof(fields), "layer=%d pid=%d outcome=exit:unknown see=%s", layer,
+                 static_cast<int>(pid), errPath);
+    }
+    ProvisionLog::device().log("DNSMASQ_TRY", fields);
+    return false;
+  }
+
+  mDnsmasqPid = pid;
+  mDnsmasqLayer = layer;
+  ::snprintf(fields, sizeof(fields), "layer=%d pid=%d outcome=alive", layer,
+             static_cast<int>(pid));
+  ProvisionLog::device().log("DNSMASQ_TRY", fields);
+  return true;
+}
+
 // Keeps the hotspot's DHCP server alive, and records whether the hotspot can
 // hand out an address at all.
 //
@@ -873,7 +1126,7 @@ void DeviceWifi::superviseDhcp() {
   // reconciled the address by the time this runs.
   const bool addressed = netinfo::ipAddress() == kSoftApAddress;
 
-  if (processRunning("dnsmasq")) {
+  if (dnsmasqHealthy()) {
     mApDhcpFailed = !addressed;
     if (addressed) mDhcpFailedAtMs = -1;
     return;
@@ -883,25 +1136,19 @@ void DeviceWifi::superviseDhcp() {
     return;
   }
 
-  // PREFERRED LIST FIRST, MEASURED LIST SECOND. dnsmasq exits EC_BADCONF on any
-  // argument it does not accept, and only one line in the preferred list has
-  // ever been executed on this device's build — so a single rejected flag would
-  // otherwise reproduce, exactly, the bug this whole path exists to fix. The
-  // fallback is the invocation measured working on the unit, with the vendor's
-  // /etc/dnsmasq.conf left in place to supply what it supplied then. See
-  // DeviceWifi::dnsmasqArgs for which flags are measured and which are reasoned.
-  bool up = spawnDnsmasq(dnsmasqArgs(kSoftApAddress), dnsmasqErrFile());
-  if (!up) {
-    LOGE_TRACE("wifi: dnsmasq refused the preferred arguments (see %s); trying the "
-               "invocation measured on this device",
-               dnsmasqErrFile());
-    up = spawnDnsmasq(dnsmasqProvenArgs(kSoftApAddress), dnsmasqProvenErrFile());
-    if (up) LOGD("wifi: dnsmasq up on the fallback argument list");
-  }
-  if (up) {
-    mApDhcpFailed = !addressed;
-    if (addressed) mDhcpFailedAtMs = -1;
-    return;
+  // THE LADDER, most capable first, best evidence last. dnsmasq exits
+  // EC_BADCONF on any argument it does not accept, and a rejected flag must
+  // cost one spawn, never the hotspot — see dnsmasqArgsForLayer in the header
+  // for what each layer is and what evidence stands behind it. Every attempt
+  // writes a DNSMASQ_TRY breadcrumb, so a pulled log names the layer that
+  // served, or the exit code of each one that refused.
+  for (int layer = 1; layer <= kDnsmasqLayers; ++layer) {
+    if (attemptDnsmasqLayer(layer)) {
+      if (layer > 1) LOGD("wifi: dnsmasq up on argument layer %d", layer);
+      mApDhcpFailed = !addressed;
+      if (addressed) mDhcpFailedAtMs = -1;
+      return;
+    }
   }
 
   // Not fatal, and deliberately still not a reason to abandon the hotspot: the
@@ -916,9 +1163,8 @@ void DeviceWifi::superviseDhcp() {
   // The flag below is what the settings screen turns into an instruction.
   mApDhcpFailed = true;
   mDhcpFailedAtMs = monotonicMs();
-  LOGE_TRACE("wifi: dnsmasq did not start on either argument list; the hotspot has no DHCP "
-             "(see %s and %s)",
-             dnsmasqErrFile(), dnsmasqProvenErrFile());
+  LOGE_TRACE("wifi: dnsmasq did not start on any argument layer; the hotspot has no DHCP "
+             "(see /data/zos-dnsmasq.l*.log)");
 }
 
 bool DeviceWifi::bringUpSoftAp() {
@@ -943,7 +1189,17 @@ bool DeviceWifi::bringUpSoftAp() {
     // while staying in /proc, which is the shipped bug with a healthy-looking
     // process check on top of it. A getifaddrs against the /proc walk this round
     // has already paid for is free.
-    if (netinfo::ipAddress() != kSoftApAddress) {
+    const std::string addr = netinfo::ipAddress();
+    if (addr != mLastApAddr) {
+      // Transitions only: this is the breadcrumb that pins (or clears) the
+      // address-hole hypothesis, and a per-round line would be a jffs2 write
+      // every three seconds for the life of a stranded device.
+      ProvisionLog::device().log("ADDR_CHANGE",
+                                 "old=" + (mLastApAddr.empty() ? "none" : mLastApAddr) +
+                                     " new=" + (addr.empty() ? "none" : addr));
+      mLastApAddr = addr;
+    }
+    if (addr != kSoftApAddress) {
       LOGE_TRACE("wifi: %s lost %s while the hotspot was up; re-applying", kInterface,
                  kSoftApAddress);
       applyApAddress();
@@ -983,17 +1239,50 @@ bool DeviceWifi::bringUpSoftAp() {
   mNetworkId = -1;  // ids restart from zero with the daemon
   ::pthread_mutex_unlock(&mCtrlLock);
   for (int waited = 0; waited < 3000 && supplicantRunning(); waited += 100) sleepMs(100);
+  {
+    // Whether ctl.stop actually took. A supplicant that survived it would fight
+    // hostapd for wlan0 with symptoms identical to every other DHCP failure —
+    // this line is what rules that in or out from a pulled log.
+    char svc[64];
+    svc[0] = '\0';
+    SystemProperties::getString("init.svc.wpa_supplicant", svc, "");
+    ProvisionLog::device().log("SUPP_STOP", std::string("svc=") + (svc[0] != '\0' ? svc : "unset"));
+  }
 
   // 4. hostapd. -B daemonises, so the process spawned here forks and exits;
   //    what survives is supervised by name (see softApRunning), because init
   //    has no service entry for it and nothing else would notice it dying.
+  //
+  //    TWO TIERS, like dnsmasq's ladder and for the same reason. The preferred
+  //    shape is the vendor's own — `-e <entropy file>` with the file pre-seeded
+  //    (see entropyFile() in the header): a headless box with no input devices
+  //    fills its kernel entropy pool at a crawl, and a hostapd left to that
+  //    pool can refuse WPA handshakes outright. The fallback is the bare
+  //    invocation this firmware always used, the one that has demonstrably put
+  //    the SSID on the air — a build that rejected -e must not cost the
+  //    hotspot.
   {
-    char* argv[4];
-    argv[0] = const_cast<char*>(kHostapdBin);
-    argv[1] = const_cast<char*>("-B");
-    argv[2] = const_cast<char*>(kHostapdConf);
-    argv[3] = 0;
-    if (!spawnAndWait(kHostapdBin, argv, 4000)) {
+    const char* entropy = ensureEntropyFile();
+    bool spawned = false;
+    // Built from the same hostapdArgs() the host check pins, so what is
+    // asserted and what actually runs cannot drift apart — the exact drift
+    // that let the dnsmasq argv ship broken.
+    for (int tier = 0; tier < 2 && !spawned; ++tier) {
+      const bool withEntropy = tier == 0;
+      const std::vector<std::string> args = hostapdArgs(withEntropy);
+      std::vector<char*> argv;
+      argv.push_back(const_cast<char*>(kHostapdBin));
+      for (size_t i = 0; i < args.size(); ++i) {
+        argv.push_back(const_cast<char*>(args[i].c_str()));
+      }
+      argv.push_back(0);
+      spawned = spawnAndWait(kHostapdBin, &argv[0], 4000);
+      std::string fields = std::string("args=") + (withEntropy ? "entropy" : "plain") +
+                           " rc=" + (spawned ? "ok" : "fail");
+      if (withEntropy) fields += std::string(" entropy=") + entropy;
+      ProvisionLog::device().log("HOSTAPD_SPAWN", fields);
+    }
+    if (!spawned) {
       // GIVE THE RADIO BACK. The supplicant was stopped two steps ago, so
       // returning here without this leaves the device with no station link AND
       // no hotspot — no network at all, and therefore no adb. That is the exact
@@ -1006,6 +1295,7 @@ bool DeviceWifi::bringUpSoftAp() {
       mApDhcpFailed = false;
       mDhcpFailedAtMs = -1;
       SystemProperties::setString("ctl.start", "wpa_supplicant");
+      ProvisionLog::device().log("AP_ABORT", "step=hostapd supplicant=restored");
       LOGE_TRACE("wifi: hostapd would not start; no hotspot, supplicant restored");
       return false;
     }
@@ -1021,13 +1311,18 @@ bool DeviceWifi::bringUpSoftAp() {
   // 6. dnsmasq, for the lease and for the captive-portal prompt. The vendor's
   //    own docs say a phone joining U-Clock gets an address, so something on
   //    the device hands them out; this is that something, with the same pool
-  //    the stock firmware uses. Every argument it takes, why, and which of them
-  //    have actually been executed on this device's build, is in
-  //    DeviceWifi::dnsmasqArgs — this step is where one missing argument made
-  //    the whole hotspot useless.
+  //    the stock firmware uses. The three argument layers, what each one is
+  //    for, and what evidence stands behind each are in
+  //    DeviceWifi::dnsmasqArgsForLayer — this step is where one missing
+  //    argument once made the whole hotspot useless.
   superviseDhcp();
 
   mApFailedAtMs = -1;
+  // Baseline for the ADDR_CHANGE transitions the supervision rounds will log.
+  mLastApAddr = netinfo::ipAddress();
+  ProvisionLog::device().log("AP_UP", "ssid=" + ssid + " addr=" +
+                                          (mLastApAddr.empty() ? "none" : mLastApAddr) +
+                                          " dhcp=" + (mApDhcpFailed ? "down" : "up"));
   // Say what actually happened. This line used to claim success unconditionally
   // and was the last word on a hotspot that could not hand out a single address.
   LOGD("wifi: hotspot %s up on %s, DHCP %s", ssid.c_str(), kSoftApAddress,
@@ -1035,18 +1330,101 @@ bool DeviceWifi::bringUpSoftAp() {
   return true;
 }
 
+// Stops OUR dnsmasq and nothing else's. The held pid first — and reaped, so a
+// foreground child never zombies for the life of zkgui — then any survivor
+// whose cmdline claims to be ours (a server whose pid was lost across a
+// firmware restart). A dnsmasq that is not ours predates this hotspot and is
+// deliberately left alone: killing init's daemon to clean up our own mess
+// would be a new way to change system state nobody asked us to change.
+void DeviceWifi::stopDnsmasq() {
+  if (mDnsmasqPid > 0) {
+    ::kill(mDnsmasqPid, SIGTERM);
+    bool gone = false;
+    for (int waited = 0; waited < 2000 && !gone; waited += 50) {
+      int status = 0;
+      const pid_t done = ::waitpid(mDnsmasqPid, &status, WNOHANG);
+      if (done == mDnsmasqPid) {
+        gone = true;
+        break;
+      }
+      if (done < 0 && !processAlive(mDnsmasqPid)) {
+        gone = true;  // not our child (layer 3); /proc is the truth
+        break;
+      }
+      sleepMs(50);
+    }
+    if (!gone) {
+      ::kill(mDnsmasqPid, SIGKILL);
+      int status = 0;
+      ::waitpid(mDnsmasqPid, &status, WNOHANG);
+    }
+    mDnsmasqPid = -1;
+  }
+
+  const int pid = findProcess("dnsmasq");
+  if (pid > 0 && cmdlineClaimsOurDnsmasq(readCmdline(pid), kSoftApAddress)) {
+    ::kill(pid, SIGTERM);
+    for (int waited = 0; waited < 2000 && processAlive(pid); waited += 50) sleepMs(50);
+    if (processAlive(pid)) ::kill(pid, SIGKILL);
+  }
+}
+
+// Pre-seeds hostapd's entropy file, the vendor's own recipe byte for byte —
+// see entropyFile() in the header for why a headless box needs it at all.
+// Returns a static status word for the HOSTAPD_SPAWN breadcrumb. NOT covered
+// by backupOnce: this is a regenerable cache with vendor semantics, not user
+// data, and hostapd itself rewrites it as it runs.
+const char* DeviceWifi::ensureEntropyFile() {
+  if (fileExists(entropyFile())) return "exists";
+  // 21 bytes is the vendor's own seed size (ensure_entropy_file_exists in
+  // libzknet.so). The content only needs to be unpredictable, not perfect:
+  // hostapd stirs it into its pool and keeps updating the file.
+  unsigned char seed[21];
+  bool filled = false;
+  const int rfd = ::open("/dev/urandom", O_RDONLY);
+  if (rfd >= 0) {
+    filled = ::read(rfd, seed, sizeof(seed)) == static_cast<ssize_t>(sizeof(seed));
+    ::close(rfd);
+  }
+  if (!filled) {
+    // /dev/urandom missing would be its own surprise; a clock-derived seed
+    // still beats an absent file, which pins hostapd to a kernel pool this
+    // input-less box may never fill.
+    struct timespec ts;
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    for (size_t i = 0; i < sizeof(seed); ++i) {
+      seed[i] = static_cast<unsigned char>((ts.tv_nsec >> (i % 24)) ^ (0x5aU + i));
+    }
+  }
+  const int fd = ::open(entropyFile(), O_WRONLY | O_CREAT | O_TRUNC, 0660);
+  if (fd < 0) return "fail";
+  const bool ok = ::write(fd, seed, sizeof(seed)) == static_cast<ssize_t>(sizeof(seed));
+  ::close(fd);
+  if (!ok) {
+    ::unlink(entropyFile());
+    return "fail";
+  }
+  return "created";
+}
+
 void DeviceWifi::tearDownSoftAp() {
   if (!linkChangesAllowed()) return;
 
-  // Reverse order. dnsmasq first so no phone is handed a lease on a network
-  // that is about to disappear.
-  terminateProcess("dnsmasq");
+  // The vendor's own teardown order (soft_ap_disable in libzknet.so): the DHCP
+  // server first, so no phone is handed a lease on a network that is about to
+  // disappear; then hostapd, which deauthenticates its clients and takes the
+  // interface out of AP mode; then the address. Every path through here still
+  // ends at the ctl.start below — that is the one invariant this function
+  // exists to keep.
+  stopDnsmasq();
   // The hotspot is going away, so "this hotspot has no DHCP" stops being true.
   // Cleared here rather than only on the next bring-up, because the panel reads
   // it and a stale warning on a device that has since joined a network is its
   // own kind of lie.
   mApDhcpFailed = false;
   mDhcpFailedAtMs = -1;
+
+  terminateProcess("hostapd");
 
   // Drop the AP address before the supplicant comes back, or wlan0 keeps
   // 192.168.100.1 alongside whatever DHCP hands it and the routing table has
@@ -1059,14 +1437,14 @@ void DeviceWifi::tearDownSoftAp() {
     argv[3] = 0;
     spawnAndWait(kIfconfigBin, argv, 4000);
   }
-
-  terminateProcess("hostapd");
+  mLastApAddr.clear();
 
   // And give the radio back. Nothing else will: /etc/init.rc declares
   // wpa_supplicant `disabled` + `oneshot`, so if this line is not reached the
   // device has neither a hotspot nor a way to join a network — which is the
   // single failure this whole file exists to avoid.
   SystemProperties::setString("ctl.start", "wpa_supplicant");
+  ProvisionLog::device().log("AP_EXIT", "supplicant=restarting");
   LOGD("wifi: hotspot down, supplicant restarting");
 }
 

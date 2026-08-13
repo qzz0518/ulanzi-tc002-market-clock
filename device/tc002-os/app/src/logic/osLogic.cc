@@ -21,6 +21,7 @@
 #include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
 #include "platform/Prefs.h"
+#include "platform/ProvisionLog.h"
 #include "platform/Sfx.h"
 #include "platform/Presenter.h"
 #include "core/Shell.h"
@@ -694,6 +695,16 @@ static void onUI_init() {
 	// no battery-backed RTC — the device was measured sitting at 1970 with this
 	// line absent. Its own thread; resolution and the round trip both block.
 	timeSync().start();
+	// The provisioning breadcrumbs open with WHICH BUILD this is, and they open
+	// BEFORE the portal starts serving so BOOT is genuinely the first line of a
+	// session. /data survives the power cycle that is the only way to read
+	// anything from a stranded device, and the stamp kills hypothesis zero —
+	// "the fix was never actually flashed" — before any other line is trusted.
+	// Compare-first, so an unchanged id costs a read of jffs2, not a write.
+	tcos::ProvisionLog::writeFileIfChanged(tcos::ProvisionLog::buildIdPath(),
+	                                       std::string(tcos::ProvisionLog::buildId()) + "\n");
+	tcos::ProvisionLog::device().log("BOOT",
+	                                 std::string("rev=") + tcos::ProvisionLog::buildId());
 	if (sPortalService.start(kPortalPreferredPort, &sPortal) < 0) {
 		sPortalService.start(kPortalFallbackPort, &sPortal);
 	}
@@ -847,6 +858,18 @@ static bool onUI_Timer(int id) {
 			// the radio cannot be asked again for as long as the page is up.
 			if (provisioning && !sWasProvisioning) {
 				sProvisioning.setScannedNetworks(sWifiPolicy.scanned());
+				// The first two lines a coordinator reads after a failed session:
+				// what the sweep produced, and why the hotspot went up at all. A
+				// non-empty sweep already logged its own SCAN_DONE with a duration;
+				// the timeout case has nobody else to say so.
+				const int scanned = (int)sWifiPolicy.scanned().size();
+				if (scanned == 0) {
+					tcos::ProvisionLog::device().log("SCAN_DONE", "n=0 exit=timeout");
+				}
+				char apFields[64];
+				snprintf(apFields, sizeof(apFields), "reason=%s scanned=%d",
+				         sWifiPolicy.provisionReason(), scanned);
+				tcos::ProvisionLog::device().log("AP_ENTER", apFields);
 			}
 			sWasProvisioning = provisioning;
 		}

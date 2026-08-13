@@ -26,10 +26,12 @@ const char* kPageHtml =
     "button:disabled{opacity:.5}"
     "#msg{margin-top:16px;padding:12px;border-radius:10px;background:#141a16;"
     "font-size:14px;display:none}"
+    "#ch{display:none;margin:6px 0 0;color:#8fa396;font-size:12px}"
     "</style></head><body>"
     "<h1>连接 Wi-Fi</h1>"
     "<p class=sub>仅支持 2.4G 网络</p>"
     "<label for=s>网络</label><select id=s></select>"
+    "<p id=ch>列表来自上次扫描，可能已过期</p>"
     "<label for=m>找不到？手动输入名称</label><input id=m autocomplete=off "
     "autocapitalize=off autocorrect=off spellcheck=false>"
     "<label for=p>密码</label><input id=p type=password autocomplete=off>"
@@ -39,6 +41,7 @@ const char* kPageHtml =
     "function show(t){var m=document.getElementById('msg');m.style.display='block';m.textContent=t}"
     "function load(){fetch('/scan').then(r=>r.json()).then(d=>{"
     "var s=document.getElementById('s');s.innerHTML='';"
+    "document.getElementById('ch').style.display=d.cached?'block':'none';"
     "if(!d.networks.length){var o=document.createElement('option');"
     "o.value='';o.textContent='未发现网络';s.appendChild(o);setTimeout(load,2000);return}"
     "d.networks.forEach(function(n){var o=document.createElement('option');"
@@ -117,8 +120,12 @@ HttpServer::Response SetupPortal::scan() const {
   HttpServer::Response r;
   r.contentType = "application/json";
   std::string body = "{\"networks\":[";
+  bool cached = false;
   if (mBackend != 0) {
     const std::vector<std::string> networks = mBackend->scanResults();
+    // Asked AFTER scanResults on purpose: the backend decides cached-ness while
+    // assembling that very answer.
+    cached = mBackend->scanResultsAreCached();
     for (size_t i = 0; i < networks.size(); ++i) {
       if (i > 0) body += ",";
       body += "\"";
@@ -126,7 +133,9 @@ HttpServer::Response SetupPortal::scan() const {
       body += "\"";
     }
   }
-  body += "]}";
+  body += "],\"cached\":";
+  body += cached ? "true" : "false";
+  body += "}";
   r.body = body;
   return r;
 }

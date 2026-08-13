@@ -39,6 +39,7 @@ class DeviceProvisioning : public SetupPortal::Backend {
 
   // --- SetupPortal::Backend -------------------------------------------------
   std::vector<std::string> scanResults();
+  bool scanResultsAreCached();
   bool submit(const std::string& ssid, const std::string& psk, std::string* reason);
   std::string status();
   std::string ipAddress();
@@ -63,6 +64,15 @@ class DeviceProvisioning : public SetupPortal::Backend {
    * "正在扫描…" forever with no way to name a network at all. WifiPolicy already
    * gathers this list before it starts the AP, exactly for this; it just had no
    * route to the page. This is that route.
+   *
+   * A non-empty sweep is also persisted to /data/zos-scan-cache.txt (SSIDs
+   * only, one per line, atomic rename), and that file seeds mScanned on the
+   * next boot. The reason is the worst first-boot path: a sweep that times out
+   * EMPTY — busy air, slow supplicant — used to mean a dropdown with nothing in
+   * it for the whole session, because the radio cannot be asked again while
+   * the AP holds it. With the cache, the page offers what the radio saw last
+   * time it could see anything, labelled as such; stale beats blank, and the
+   * typed-SSID box remains the escape hatch either way.
    */
   void setScannedNetworks(const std::vector<std::string>& ssids);
 
@@ -81,6 +91,12 @@ class DeviceProvisioning : public SetupPortal::Backend {
   DeviceProvisioning(const DeviceProvisioning&);
   DeviceProvisioning& operator=(const DeviceProvisioning&);
 
+  // Loads /data/zos-scan-cache.txt into mScanned once, lazily — this object is
+  // a global constructed while the .so is still being dlopen'd, and file I/O
+  // belongs after that, on the first call that wants the data.
+  void ensureCacheLoadedLocked();
+  void persistScanCacheLocked();
+
   mutable pthread_mutex_t mLock;
   WpaCtrl mCtrl;
   std::string mPendingSsid;
@@ -91,6 +107,15 @@ class DeviceProvisioning : public SetupPortal::Backend {
   // there is one. Cleared by the next submit, so a second attempt starts clean.
   bool mApplying;
   bool mAttemptFailed;
+  // Whether mScanned came off the disk cache (previous boot) rather than this
+  // boot's radio, and whether the last /scan reply was served from it — the
+  // page labels a cached list so the user knows it may be stale.
+  bool mCacheLoaded;
+  bool mScannedFromCache;
+  bool mServedFromCache;
+  // The last /scan answer size that was breadcrumbed, so PORTAL_HIT logs on
+  // change only: the page polls every 2 s and /data is jffs2.
+  int mLastLoggedScanCount;
   std::string mLastSsid;
   std::vector<std::string> mScanned;
 };

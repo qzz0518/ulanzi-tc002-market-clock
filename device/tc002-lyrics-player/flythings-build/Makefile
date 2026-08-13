@@ -58,6 +58,17 @@ CXXFLAGS := -c -fmessage-length=0 -pipe -Wformat -Werror=format-security \
             -fstack-protector -fno-caller-saves -fexceptions -fPIC \
             -std=gnu++11 -O3 -DLOG_TAG='"zkgui"' -D$(PLATFORM) $(INCLUDES)
 
+# Build identity for tc002-os's provisioning breadcrumbs (/data/zos-build.id).
+# Passed by the caller (mise os-build) as ZOS_BUILD_ID=<rev>-<stamp>; when
+# absent the source falls back to "dev-unstamped" and says so. The one object
+# that embeds it is forced stale on every invocation below, because a build id
+# that can go stale un-kills the exact hypothesis it exists to kill: "is the
+# flashed image actually the code we think it is".
+ZOS_BUILD_ID ?=
+ifneq ($(ZOS_BUILD_ID),)
+CXXFLAGS += -DZOS_BUILD_ID='"$(ZOS_BUILD_ID)"'
+endif
+
 # Link flags from .cproject, minus -z,defs: the app resolves framework symbols
 # at load time, so undefined symbols are expected in a standalone link.
 LDFLAGS := -shared -Wl,-z,now -Wl,-z,relro -Wl,--warn-common \
@@ -126,7 +137,13 @@ $(OUT): $(OBJS) $(SRCLIST)
 	@echo "=== built $(OUT) ==="
 	@$(TOOLCHAIN)/bin/arm-linux-gnueabihf-readelf -h $@ | grep -E 'Class|Machine|Type'
 
+# The object carrying ZOS_BUILD_ID recompiles on every invocation (see above).
+# Harmless for the other firmwares, which have no such file.
+$(BUILD_DIR)/src/platform/ProvisionLog.cpp.o: FORCE
+
 clean:
 	rm -rf $(BUILD_DIR) $(OUT)
 
-.PHONY: all clean
+FORCE:
+
+.PHONY: all clean FORCE

@@ -101,11 +101,22 @@ class WifiPolicy {
     /**
      * Begin a scan for nearby networks, and collect it.
      *
-     * scanResults returns false while the sweep is still running. The ordering
-     * is forced by the hardware, not by taste: bringing the hotspot up stops
-     * wpa_supplicant, and a stopped supplicant cannot scan. So the list the
-     * provisioning page offers has to be gathered BEFORE the AP goes up, which
-     * is what the kScanning state exists for.
+     * scanResults returns false until the sweep has PRODUCED something: still
+     * running and "ran, found nothing yet" are the same answer, because the
+     * supplicant cannot tell them apart either — SCAN_RESULTS reads its cache,
+     * which answers instantly and is legitimately empty for the first seconds
+     * of a fresh daemon's life. The real actuator once returned true for that
+     * empty cache, and the whole scan budget below became dead code: the
+     * policy read the empty cache on its first tick, declared the sweep done,
+     * and raised the hotspot — killing the actual sweep mid-air and emptying
+     * the setup page's dropdown for every first boot there ever was. The
+     * timeout below is what bounds the wait; the actuator must never end it
+     * early with nothing.
+     *
+     * The ordering is forced by the hardware, not by taste: bringing the
+     * hotspot up stops wpa_supplicant, and a stopped supplicant cannot scan.
+     * So the list the provisioning page offers has to be gathered BEFORE the
+     * AP goes up, which is what the kScanning state exists for.
      */
     virtual void startScan() = 0;
     virtual bool scanResults(std::vector<std::string>* out) = 0;
@@ -144,10 +155,20 @@ class WifiPolicy {
   // router that is merely slow to come back, and recovering by itself beats
   // making the user configure a network that already works.
   static const int kBackgroundRetryMs = 20000;
-  // A sweep of the 2.4 GHz band takes a couple of seconds on this radio. The
-  // budget is generous because the alternative is a provisioning page with an
-  // empty network list, which sends the user straight to typing an SSID by hand.
-  static const int kScanTimeoutMs = 5000;
+  // A sweep of the 2.4 GHz band takes 2-4 s on this radio, and the first SCAN
+  // of a freshly started supplicant is routinely answered FAIL-BUSY and has to
+  // be re-asked. Twelve seconds covers two full sweeps plus that retry, and the
+  // price is honest: the WORST first boot reaches its hotspot 12 s later. The
+  // alternative was a provisioning page with an empty network list — which is
+  // not a slower page, it is a dead end that sends the user to typing an SSID
+  // by hand on a phone keyboard, where one wrong character looks exactly like a
+  // wrong password.
+  static const int kScanTimeoutMs = 12000;
+  // While the sweep stays empty, re-issue SCAN on this period. The first SCAN
+  // can be swallowed (FAIL-BUSY, or the daemon still loading its config), and
+  // nothing else would ever ask again — the budget above would then be 12 s of
+  // waiting on a sweep that was never running.
+  static const int kScanRetryMs = 4000;
   /**
    * How often the hotspot is checked, while provisioning, for still being up.
    *
@@ -199,6 +220,16 @@ class WifiPolicy {
   const std::vector<std::string>& scanned() const { return mScanned; }
 
   /**
+   * Why the machine last headed for provisioning: "no-creds" (first boot,
+   * nothing stored) or "connect-timeout" (stored credentials that stopped
+   * working — a moved router, a changed password). Static strings, safe to
+   * hold. The two are different investigations after a failed session, and the
+   * breadcrumb line this feeds is the only place the distinction survives a
+   * power cycle.
+   */
+  const char* provisionReason() const { return mProvisionReason; }
+
+  /**
    * True when begin() found a working link and adopted it without issuing a
    * single command. Reported so the settings screen can say so, and so the
    * host check can assert that the adopt path really is side-effect free.
@@ -215,13 +246,18 @@ class WifiPolicy {
  private:
   void enter(State state, int nowMs);
   void beginConnect(int nowMs);
-  void beginProvisioning(int nowMs);
+  void beginProvisioning(int nowMs, const char* reason);
 
   Actuator* mActuator;
   State mState;
   int mStateSinceMs;
   int mLastRetryMs;
   int mLastSoftApCheckMs;
+  // When SCAN was last issued, so an empty sweep is re-asked on kScanRetryMs
+  // rather than waited on for the whole budget.
+  int mLastScanIssueMs;
+  // Static strings only — see provisionReason().
+  const char* mProvisionReason;
   int mSupplicantRestarts;
   int mSoftApRestarts;
   std::string mSsid;
