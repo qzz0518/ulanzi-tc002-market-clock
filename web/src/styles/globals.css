@@ -214,27 +214,22 @@
   min-width: 0;
   flex: none;
   overflow: hidden;
-  /* Squared to the same radius as the buttons on the page. cladd's
-     rounded={false} drops its own pill; this pins the result. */
   border-radius: 10px;
-  /* The scrim ALWAYS leans dark, and the type is always white.
-     The first cut switched type between dark and light depending on the cover's
-     luma, which meant the widget had two looks and a mid-grey sleeve sat right
-     on the boundary flickering between them. The references do not do that: they
-     darken whatever the artwork is until one text colour always works. So the
-     cover's own colour survives as the hue and the border, and the scrim's job
-     is to guarantee contrast rather than to be pretty. */
-  background:
-    linear-gradient(rgb(0 0 0 / 0.34), rgb(0 0 0 / 0.34)),
-    linear-gradient(rgb(var(--mini-tint, 90, 100, 120) / 0.55), rgb(var(--mini-tint, 90, 100, 120) / 0.55)),
-    #4a5568;
-  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.55);
-  transition: background 320ms ease, box-shadow 320ms ease;
+  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.45);
+  transition: box-shadow 320ms ease;
 }
 
-/* The blurred sleeve. Oversized and pushed past every edge because a blur
-   samples beyond its own box: at inset 0 the corners go transparent and the
-   panel gets a pale halo exactly where the border is. */
+/* Ink follows the sleeve, and everything on the panel reads from this one
+   variable. Deriving each piece separately is how the previous cut ended up
+   with white type over a pale cover: the title had a rule, the buttons kept
+   cladd's brand green, and the two disagreed. */
+.mini-player.is-light { --mini-ink: 22, 26, 34; }
+.mini-player.is-dark { --mini-ink: 255, 255, 255; }
+
+/* The blurred sleeve, plus a scrim that is part of the SAME layer.
+   The scrim used to be a background on .mini-player, which never showed:
+   cladd's Surface paints its own background span above it. Anything meant to
+   sit over the artwork has to be in the artwork's own stacking context. */
 .mini-player__art {
   position: absolute;
   z-index: 0;
@@ -246,31 +241,42 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-  filter: blur(16px) saturate(1.7);
-  opacity: 0.9;
+  /* Oversized and pushed past every edge because a blur samples beyond its own
+     box: at inset 0 the corners go transparent and the panel wears a pale halo
+     exactly where the border is. */
+  filter: blur(16px) saturate(1.55);
 }
+/* A wash towards whichever end the ink is NOT, so a busy cover cannot swallow
+   the type. Light enough to stay restrained — the sleeve is still the subject. */
+.mini-player__art::after {
+  position: absolute;
+  content: "";
+  inset: 0;
+}
+.mini-player.is-light .mini-player__art::after { background: rgb(255 255 255 / 0.42); }
+.mini-player.is-dark .mini-player__art::after { background: rgb(0 0 0 / 0.34); }
+
 /* Everything cladd renders inside the toolbar has to sit above the artwork. */
 .mini-player__content { position: relative; z-index: 1; min-width: 0; gap: 0.15rem; }
 
-/* One colour for the whole control set, over a ground we now guarantee is dark.
-   The transport was inheriting the app's brand green, which on a photographic
-   backdrop read as three status lights rather than as buttons. */
-.mini-player__title { color: #fff; }
-.mini-player__artist { color: rgb(255 255 255 / 0.72); }
-.mini-player .cladd-button { color: rgb(255 255 255 / 0.92); }
-.mini-player .cladd-button:disabled { color: rgb(255 255 255 / 0.38); }
-.mini-player__rule { background: rgb(255 255 255 / 0.28); }
+/* One ink for type and controls. The buttons need `inherit` rather than a
+   colour: cladd sets its own on the element, and a competing declaration is a
+   specificity race this would keep losing after every kit upgrade. */
+.mini-player__title { color: rgb(var(--mini-ink)); }
+.mini-player__artist { color: rgb(var(--mini-ink) / 0.66); }
+.mini-player .cladd-button { color: rgb(var(--mini-ink) / 0.88) !important; }
+.mini-player .cladd-button:disabled { color: rgb(var(--mini-ink) / 0.32) !important; }
+.mini-player__rule { background: rgb(var(--mini-ink) / 0.22); }
 
-/* cladd's own hover/press surfaces are theme-light, which over the artwork
-   showed up as an opaque white slab behind the title. Glass highlights are
-   white AND translucent — the artwork has to stay visible through them or the
-   panel stops being one material. */
-.mini-player .cladd-surface-hover\:bg-cladd-surface-hover:hover,
-.mini-player [class*="cladd-surface-hover"]:hover { background: rgb(255 255 255 / 0.16) !important; }
-.mini-player [class*="cladd-surface-press"]:active { background: rgb(255 255 255 / 0.24) !important; }
+/* cladd's hover and press surfaces are theme-light, which over the artwork
+   showed up as an opaque slab behind the title. A highlight on glass is the
+   ink at low alpha — the sleeve has to stay visible through it or the panel
+   stops being one material. */
+.mini-player [class*="cladd-surface-hover"]:hover { background: rgb(var(--mini-ink) / 0.12) !important; }
+.mini-player [class*="cladd-surface-press"]:active { background: rgb(var(--mini-ink) / 0.18) !important; }
 
 @media (prefers-reduced-transparency: reduce) {
-  .mini-player__art { display: none; }
+  .mini-player__art img { display: none; }
 }
 
 .mini-player__content > * { flex: none; }
@@ -324,26 +330,25 @@
 }
 .mini-player__spectrum i {
   width: 2px;
-  height: 18%;
   border-radius: 1px;
-  opacity: 0.55;
+  height: 18%;
+  /* One family, stepped — the ink at eight alphas rather than eight hues.
+     A rainbow put the loudest thing on the page in the corner of a widget whose
+     whole job is to be glanceable; stepping one colour still reads as a
+     spectrum because the STEPS are what the eye follows, not the palette. */
+  background: rgb(var(--mini-ink, 22, 26, 34));
+  opacity: 0.28;
 }
-/* Multi-colour, low to high — the convention every hardware analyser uses, so
-   the eye reads the row as a spectrum rather than as eight blinking dots. The
-   hues are fixed rather than taken from the cover: the panel behind them is
-   already the cover, and tinting these to match it would make them disappear
-   into it exactly when they are supposed to be the one moving thing. */
-.mini-player__spectrum i:nth-child(1) { background: #34d399; }
-.mini-player__spectrum i:nth-child(2) { background: #4ade80; }
-.mini-player__spectrum i:nth-child(3) { background: #a3e635; }
-.mini-player__spectrum i:nth-child(4) { background: #facc15; }
-.mini-player__spectrum i:nth-child(5) { background: #fb923c; }
-.mini-player__spectrum i:nth-child(6) { background: #f87171; }
-.mini-player__spectrum i:nth-child(7) { background: #f472b6; }
-.mini-player__spectrum i:nth-child(8) { background: #c084fc; }
+.mini-player__spectrum i:nth-child(1) { opacity: 0.3; }
+.mini-player__spectrum i:nth-child(2) { opacity: 0.42; }
+.mini-player__spectrum i:nth-child(3) { opacity: 0.54; }
+.mini-player__spectrum i:nth-child(4) { opacity: 0.66; }
+.mini-player__spectrum i:nth-child(5) { opacity: 0.66; }
+.mini-player__spectrum i:nth-child(6) { opacity: 0.54; }
+.mini-player__spectrum i:nth-child(7) { opacity: 0.42; }
+.mini-player__spectrum i:nth-child(8) { opacity: 0.3; }
 .mini-player__spectrum.is-live i {
   animation: mini-spectrum 900ms ease-in-out infinite alternate;
-  opacity: 1;
 }
 /* 每根条错开相位和周期，否则八根一起跳就是一个方块在缩放，不是频谱。 */
 .mini-player__spectrum.is-live i:nth-child(1) { animation-duration: 760ms; animation-delay: -120ms; }

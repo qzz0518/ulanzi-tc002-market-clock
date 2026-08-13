@@ -43,11 +43,10 @@ export function MiniPlayer({
   const live = tint && tint.src === mini.coverSrc ? tint.tint : null;
   return (
     <Toolbar
-      // No light/dark variant any more: the scrim always darkens, so one set of
-      // white type works on every sleeve. `dark` is still reported by the tint
-      // reader — it just has no caller here, and a widget with two looks was
-      // worse than one that commits.
-      className="mini-player"
+      // Ink follows the sleeve. A frosted panel takes its lightness from the
+      // artwork, so nothing but the artwork can decide whether black or white
+      // type reads on it — see --mini-ink in globals.css.
+      className={"mini-player" + (live?.dark ? " is-dark" : " is-light")}
       contentClassName="mini-player__content"
       size="sm"
       // Squared off rather than the default pill: this sits under a heading, in
