@@ -37,6 +37,7 @@ import {
 import { MusicPlayer } from "@/components/music/music-player";
 import { GameShell } from "@/components/game/game-shell";
 import { ZosPanel } from "@/components/zos/zos-panel";
+import { MiniPlayer } from "@/components/music/mini-player";
 import { StudioHeader } from "@/components/studio/studio-header";
 import { WorkspaceEditor } from "@/components/studio/workspace-editor";
 
@@ -997,6 +998,13 @@ export function App() {
           <h1>{pageCopy.title}</h1>
           <p>{pageCopy.description}</p>
         </div>
+        {/* The mini player sits on the heading row rather than in the header
+            bar. In the bar it was competing with six tabs and two chips for a
+            gap measured at 117px in the worst case, which is what forced the
+            collapse tiers; here the right half of the row is empty on every
+            page, so the widget keeps its artwork, title and all three controls
+            at any width the app supports. */}
+        <MiniPlayer view={view} onOpen={() => changeView("music")} />
       </div>
 
       {view === "canvas" && (

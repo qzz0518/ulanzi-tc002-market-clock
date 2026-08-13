@@ -25,7 +25,6 @@ import {
 } from "@/lib/firmware-mode";
 import type { FirmwareKind, RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
-import { MiniPlayer } from "@/components/music/mini-player";
 
 interface StudioHeaderProps {
   view: StudioView;
@@ -133,11 +132,6 @@ export function StudioHeader({
       </Tabs>
 
       <div className="header-actions">
-        {/* 播放不再随音乐页卸载，所以除音乐页外每一页都能看到并操作它。
-            It renders nothing on 音乐 (the full transport is already there) and
-            nothing when no track is loaded, so the row below is unchanged for
-            anyone who has not started playing. */}
-        <MiniPlayer view={view} onOpen={() => onViewChange("music")} />
         <div className="firmware-status" role="status" aria-live="polite">
           <Chip
             className="firmware-chip"

@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { Toolbar, ToolbarButton, ToolbarSeparator, Tooltip } from "@cladd-ui/react";
 import { musicPlaybackStore } from "@/lib/music-playback-store";
+import { readCoverTint, type CoverTint } from "@/lib/cover-tint";
 import { useMiniPlayerView } from "@/lib/use-mini-player";
 import type { MiniPlayerView } from "@/lib/mini-player";
 import type { StudioView } from "@/types";
@@ -30,20 +32,30 @@ export function MiniPlayer({
 }) {
   const mini = useMiniPlayerView(view);
   const store = musicPlaybackStore();
+  // Keyed by cover URL so a stale tint can never outlive the track it came from
+  // — the widget is one element reused across songs, and the artwork loads
+  // asynchronously behind it.
+  const [tint, setTint] = useState<{ src: string; tint: CoverTint } | null>(null);
   // Nothing loaded, or the full player is already on screen: render nothing at
-  // all. An empty widget parked in the header would cost the same room to say
-  // less than the silence does.
+  // all. An empty widget parked on the heading row would cost the same room to
+  // say less than the silence does.
   if (!mini) return null;
+  const live = tint && tint.src === mini.coverSrc ? tint.tint : null;
   return (
     <Toolbar
-      className="mini-player"
+      className={"mini-player" + (live?.dark ? " is-dark" : "")}
       contentClassName="mini-player__content"
       size="sm"
+      // Squared off rather than the default pill: this sits under a heading, in
+      // a row of rectangles, and a capsule read as a floating pop-up rather than
+      // as part of the page.
+      rounded={false}
       // 出错时整块的描边转红，具体原因在 tooltip 里 —— 让它继续装作一切正常，
       // 用户就只会看到一首停住的歌而不知道为什么。
       color={mini.error ? "red" : undefined}
       role="group"
       aria-label="正在播放"
+      style={live ? ({ "--mini-tint": live.rgb } as React.CSSProperties) : undefined}
     >
       <Tooltip tooltip={mini.hint}>
         <ToolbarButton
@@ -54,7 +66,10 @@ export function MiniPlayer({
           aria-label={mini.trackLabel}
           onClick={onOpen}
         >
-          <MiniCover mini={mini} />
+          <MiniCover
+            mini={mini}
+            onTint={(next) => setTint(mini.coverSrc ? { src: mini.coverSrc, tint: next } : null)}
+          />
           <span className="mini-player__copy">
             <strong className="mini-player__title">{mini.title}</strong>
             <span className="mini-player__artist">{mini.artists}</span>
@@ -106,7 +121,13 @@ export function MiniPlayer({
  * missing, blocked or slow degrades to a legible mark rather than a hole —
  * the same two-layer trick the music view's covers use.
  */
-function MiniCover({ mini }: { mini: MiniPlayerView }) {
+function MiniCover({
+  mini,
+  onTint,
+}: {
+  mini: MiniPlayerView;
+  onTint: (tint: CoverTint) => void;
+}) {
   return (
     <span className="mini-player__cover" aria-hidden="true">
       <span className="mini-player__cover-fallback">{mini.coverFallback}</span>
@@ -118,6 +139,10 @@ function MiniCover({ mini }: { mini: MiniPlayerView }) {
           alt=""
           decoding="async"
           draggable={false}
+          onLoad={(event) => {
+            const next = readCoverTint(event.currentTarget);
+            if (next) onTint(next);
+          }}
           onError={(event) => { event.currentTarget.hidden = true; }}
         />
       )}
