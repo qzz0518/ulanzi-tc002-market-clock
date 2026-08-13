@@ -19,7 +19,7 @@ function pixels(...runs: Array<[number, number, number, number]>): Uint8ClampedA
 }
 
 function channels(rgb: string): number[] {
-  return rgb.split(",").map((part) => Number(part.trim()));
+  return rgb.split(/\s+/).map(Number);
 }
 
 describe("cover tint", () => {
@@ -57,10 +57,10 @@ describe("cover tint", () => {
   });
 
   test("falls back rather than throwing when nothing is countable", () => {
-    expect(dominantColorFromPixels(new Uint8ClampedArray(0)).rgb).toBe("120, 120, 120");
+    expect(dominantColorFromPixels(new Uint8ClampedArray(0)).rgb).toBe("120 120 120");
     // All transparent, and all outside the luma window: both must survive.
-    expect(dominantColorFromPixels(new Uint8ClampedArray(64)).rgb).toBe("120, 120, 120");
-    expect(dominantColorFromPixels(pixels([255, 255, 255, 50])).rgb).toBe("120, 120, 120");
+    expect(dominantColorFromPixels(new Uint8ClampedArray(64)).rgb).toBe("120 120 120");
+    expect(dominantColorFromPixels(pixels([255, 255, 255, 50])).rgb).toBe("120 120 120");
   });
 
   test("never emits a channel outside 0-255", () => {

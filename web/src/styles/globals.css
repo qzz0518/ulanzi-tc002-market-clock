@@ -215,7 +215,7 @@
   flex: none;
   overflow: hidden;
   border-radius: 10px;
-  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128, 128, 128) / 0.45);
+  box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128 128 128) / 0.45);
   transition: box-shadow 320ms ease;
 }
 
@@ -223,8 +223,13 @@
    variable. Deriving each piece separately is how the previous cut ended up
    with white type over a pale cover: the title had a rule, the buttons kept
    cladd's brand green, and the two disagreed. */
-.mini-player.is-light { --mini-ink: 22, 26, 34; }
-.mini-player.is-dark { --mini-ink: 255, 255, 255; }
+/* SPACE-separated on purpose. rgb(var(--x) / a) only parses when the triple is
+   space-separated; with commas the declaration survives the cascade and then
+   dies at computed-value time — silently, !important and all. That killed every
+   alpha-carrying rule below while the two alpha-free ones kept working, which is
+   exactly the half-green widget the screenshots showed. */
+.mini-player.is-light { --mini-ink: 22 26 34; }
+.mini-player.is-dark { --mini-ink: 255 255 255; }
 
 /* The blurred sleeve, plus a scrim that is part of the SAME layer.
    The scrim used to be a background on .mini-player, which never showed:
@@ -336,17 +341,19 @@
      A rainbow put the loudest thing on the page in the corner of a widget whose
      whole job is to be glanceable; stepping one colour still reads as a
      spectrum because the STEPS are what the eye follows, not the palette. */
-  background: rgb(var(--mini-ink, 22, 26, 34));
+  background: rgb(var(--mini-ink, 22 26 34));
   opacity: 0.28;
 }
-.mini-player__spectrum i:nth-child(1) { opacity: 0.3; }
-.mini-player__spectrum i:nth-child(2) { opacity: 0.42; }
-.mini-player__spectrum i:nth-child(3) { opacity: 0.54; }
-.mini-player__spectrum i:nth-child(4) { opacity: 0.66; }
-.mini-player__spectrum i:nth-child(5) { opacity: 0.66; }
-.mini-player__spectrum i:nth-child(6) { opacity: 0.54; }
-.mini-player__spectrum i:nth-child(7) { opacity: 0.42; }
-.mini-player__spectrum i:nth-child(8) { opacity: 0.3; }
+/* Resting heights are staggered too, so a paused track reads as a spectrum
+   someone stopped, not as a row of dots — which is also what the reference does. */
+.mini-player__spectrum i:nth-child(1) { height: 55%; opacity: 0.3; }
+.mini-player__spectrum i:nth-child(2) { height: 30%; opacity: 0.42; }
+.mini-player__spectrum i:nth-child(3) { height: 75%; opacity: 0.54; }
+.mini-player__spectrum i:nth-child(4) { height: 45%; opacity: 0.66; }
+.mini-player__spectrum i:nth-child(5) { height: 85%; opacity: 0.66; }
+.mini-player__spectrum i:nth-child(6) { height: 35%; opacity: 0.54; }
+.mini-player__spectrum i:nth-child(7) { height: 60%; opacity: 0.42; }
+.mini-player__spectrum i:nth-child(8) { height: 25%; opacity: 0.3; }
 .mini-player__spectrum.is-live i {
   animation: mini-spectrum 900ms ease-in-out infinite alternate;
 }

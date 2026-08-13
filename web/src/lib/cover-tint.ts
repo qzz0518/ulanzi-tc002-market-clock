@@ -13,7 +13,9 @@
  */
 
 export interface CoverTint {
-  /** `r, g, b` — a bare triple so CSS can build any alpha it likes from it. */
+  /** `r g b`, SPACE-separated: rgb(var(--tint) / a) needs the modern syntax,
+   * and a comma triple makes every alpha-carrying declaration invalid at
+   * computed-value time — the cascade keeps it, the renderer drops it. */
   rgb: string;
   /** True when the artwork is dark enough that light type reads better on it. */
   dark: boolean;
@@ -69,11 +71,11 @@ export function dominantColorFromPixels(pixels: ArrayLike<number>): CoverTint {
     blue += b * pixelWeight;
     weight += pixelWeight;
   }
-  if (weight === 0) return { rgb: "120, 120, 120", dark: false };
+  if (weight === 0) return { rgb: "120 120 120", dark: false };
   const out = [red / weight, green / weight, blue / weight].map((channel) =>
     Math.max(0, Math.min(255, Math.round(channel)))
   ) as [number, number, number];
-  return { rgb: out.join(", "), dark: luma(out[0], out[1], out[2]) < 128 };
+  return { rgb: out.join(" "), dark: luma(out[0], out[1], out[2]) < 128 };
 }
 
 /** Reads the tint off a loaded, same-origin image. Null if it cannot be read. */
