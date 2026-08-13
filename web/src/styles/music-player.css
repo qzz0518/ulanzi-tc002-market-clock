@@ -1843,6 +1843,23 @@
 
 }
 
+/* Exact complement of the two-column breakpoint: the sections stack, and DOM
+   order leads with search — right while idle, wrong once a track is loaded,
+   when the transport, the 52×16 preview and the theme panel are what the user
+   scrolled back for. `order` flips the stack without reordering the JSX, so
+   neither section unmounts; the seam hairline moves to the library so it
+   stays between the sections instead of capping the page. */
+@media not all and (min-width: 70rem) {
+  .music-studio.has-track .music-stage {
+    order: -1;
+    border-top: 0;
+  }
+
+  .music-studio.has-track .music-library {
+    border-top: 1px solid var(--music-line);
+  }
+}
+
 @media (max-width: 52rem) {
   .studio-page.is-music-page {
     padding-bottom: calc(5.1rem + env(safe-area-inset-bottom));

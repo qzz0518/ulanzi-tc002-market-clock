@@ -948,7 +948,11 @@ export function MusicPlayer({
   const pageTracks = tracks.slice(pageStart, pageStart + TRACKS_PER_PAGE);
 
   return (
-    <div className="music-studio">
+    // `has-track` drives the stacked-layout section order (music-player.css):
+    // with a track loaded the stage — transport, 52×16 preview, theme panel —
+    // outranks the search rail on a phone. Keyed on `selected`, not `playing`,
+    // so tapping pause does not reshuffle the whole page.
+    <div className={"music-studio" + (selected ? " has-track" : "")}>
       <section className="music-library" aria-labelledby="music-library-title">
         <header className="music-library__header">
           <div className="music-section-heading">
