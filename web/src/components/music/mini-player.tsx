@@ -17,11 +17,12 @@ import type { StudioView } from "@/types";
  * the action the music view's own transport calls, so "next" means one thing in
  * this console.
  *
- * Rendered inside `.header-actions`, to the left of the firmware and battery
- * chips. It collapses in stages as the header narrows (see `.mini-player` in
- * globals.css) — artist line, then title, then previous/next. The artwork never
- * goes: it is the one piece that is both identity and the way back, so at the
- * narrowest widths the widget is exactly that and nothing else.
+ * Rendered at the right end of the page-heading row (app.tsx), which stays a
+ * flex ROW at every width — the phone tier must never stack it, or this widget
+ * becomes a full-width block under the title. As the page narrows it sheds
+ * load instead (see `.mini-player` in globals.css): the words at 48rem, the
+ * spectrum at 34rem. The artwork and transport never go: the cover is both
+ * identity and the way back, and play/pause is the reason it exists.
  */
 export function MiniPlayer({
   view,

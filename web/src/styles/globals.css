@@ -189,26 +189,17 @@
 .firmware-status { display: inline-flex; align-items: center; gap: 0.35rem; }
 .firmware-chip { white-space: nowrap; }
 
-/* 顶栏迷你播放器（除音乐页外每一页都在）。壳体、按钮、分隔线全是 cladd
+/* 标题行迷你播放器（除音乐页外每一页都在）。壳体、按钮、分隔线全是 cladd
    Toolbar/ToolbarButton/ToolbarSeparator，这里只负责排版和逐级收窄。
 
-   It has to earn its place in a row that already carries a firmware chip, a
-   battery chip and the settings button, so the room was measured rather than
-   guessed — .runtime/verify-mini-player.mjs sweeps the live console from 1680
-   down to 360 in both shapes this row takes, and reports the gap between the
-   widget and whatever sits to its left. Empty header, before any of this:
-
-     1600px → 381px   1280px → 269px   960px → 117px
-     1440px → 349px   1100px → 179px   ≤832px → tabs leave the header
-
-   At 52rem the tab strip becomes the fixed bottom bar and the header goes
-   two-column, which hands the left 1fr back — that is why room comes *back*
-   under 52rem instead of running out. Between 70rem and 52rem is the real
-   pinch: six tabs plus two 16rem side columns leave barely 117px, and the
-   widget must fit that or it runs into the tabs. So each tier drops the least
-   load-bearing part first (artist line → title → previous and next), and the
-   artwork is last out: it is identity and the way back at once. Worst measured
-   gap after all of it is 17px, at 880–960px on official firmware. */
+   It lives on the page-heading row now, not in the header bar — there it was
+   competing with six tabs and two chips for a worst-case 117px, which forced a
+   ladder of collapse tiers. The heading's right half is empty on every page,
+   so only two tiers survive: the words go at 48rem, the spectrum at 34rem
+   (both measured in their own @media blocks below). What must never change is
+   the row itself: the phone tier keeps .page-heading a flex ROW, because as a
+   block child this Toolbar is full-width — the blurred sleeve becomes a page-
+   wide banner with an empty right half, which is exactly the phone bug. */
 .mini-player {
   position: relative;
   min-width: 0;
@@ -397,10 +388,10 @@
 }
 
 /* On the heading row there is room for everything until the page itself gets
-   narrow, so the only tier left is the phone one: the heading stacks and the
-   widget keeps artwork and transport but drops the words. */
+   narrow. The row itself never stacks (the 52rem tier keeps it a flex row);
+   the widget sheds load instead — words first here, spectrum at 34rem.
+   Artwork and transport are the floor: identity and the way back. */
 @media (max-width: 48rem) {
-  .page-heading { align-items: center; }
   .mini-player__copy { display: none; }
 }
 
@@ -1203,11 +1194,18 @@
   .header-actions { grid-column: 2; grid-row: 1; }
   .brand-device { display: none; }
   .device-settings-trigger { min-width: 2.75rem; }
-  .page-heading { display: block; padding: 0.7rem 0 0.55rem; }
+  /* Still a ROW. This used to be display:block, which quietly demoted the mini
+     player from a content-sized flex item to a full-width block under the
+     title — the blurred-sleeve backdrop stretched across the whole page with
+     nothing in its right half. The kicker and description are hidden below, so
+     the row is just h1 + widget, and both centre on the same axis. */
+  .page-heading { align-items: center; padding: 0.7rem 0 0.55rem; }
   /* Same scoping as the base rule: unscoped, this display:none would erase the
      mini player's artist line and the spans cladd wraps its icons in. */
   .page-heading > div:first-child > span { display: none; }
-  .page-heading h1 { font-size: 1.12rem; letter-spacing: -0.02em; }
+  /* One line, then ellipsis: the widget's cover and square buttons cannot
+     shrink, so all of the give on this row comes out of the title. */
+  .page-heading h1 { overflow: hidden; font-size: 1.12rem; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
   .page-heading > div:first-child > p { display: none; }
   .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library, .studio-layout.is-game { display: block; padding-top: 0; }
   .studio-layout.is-zos { display: block; padding-top: 0; }
@@ -1376,6 +1374,11 @@
 
 @media (max-width: 34rem) {
   .device-status span { display: none; }
+  /* The heading row's arithmetic on a 320px phone: 288px inside the page
+     padding, ~108px of six-glyph title, ~180px of widget WITH the spectrum —
+     over budget; ~145px without it. The spectrum is the one purely decorative
+     piece, so it is the one that goes. Cover and transport stay to the end. */
+  .mini-player__spectrum { display: none; }
   /* 顶栏放不下两段文字了：固件名收成图标（aria-label 仍在），电量百分比留着
      ——「像手机一样」的那个数字正是这块要显示的东西。 */
   .firmware-chip__label { display: none; }
@@ -1442,7 +1445,7 @@
   .brand-device, .is-canvas-page .page-heading, .is-game-page .page-heading { display: none; }
   .header-actions { grid-column: 2; grid-row: 1; }
   .device-settings-trigger { min-width: 2.75rem; }
-  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
+  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
   .main-tabs button { justify-content: center; }
   .studio-layout.is-canvas { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); }
   .studio-layout.is-game { display: block; }
