@@ -154,6 +154,11 @@ const controller = new WorkspaceController({
   workspaceStore,
   pushPayload: (appName, payload) => pushClockPayloadNamed(config, appName, payload),
   deleteApp: (appName) => deleteClockApp(config, appName),
+  // Deferred read: osLink is constructed below. zosFlashed() is sticky and
+  // device-reported — only the device knows what is in its flash, and once it
+  // has said so the answer does not change until somebody reflashes, at which
+  // point the service is restarted anyway.
+  devicePushSuspended: () => osLink.zosFlashed(),
   pixelAssetStore,
   instrumentStore,
   marketIconStore,
@@ -244,6 +249,9 @@ const notify = new NotifyManager({
 let stopping = false;
 let wakeSleep: (() => void) | undefined;
 const loggedUpdateCounts = new Map<string, number>();
+// Logged once, on the transition. Otherwise silent by design — the loop still
+// runs every interval, and a line per pass would be a line a minute forever.
+let osPushSuppressed = false;
 
 function interruptibleSleep(ms: number): Promise<void> {
   if (stopping) return Promise.resolve();
@@ -521,6 +529,19 @@ async function run(): Promise<void> {
   }
 
   while (!stopping) {
+    // The loop keeps its schedule under a flashed ZOS; only the device write is
+    // dropped (see WorkspaceControllerOptions.devicePushSuspended). Suspending
+    // the loop itself was the shape this started as, and it froze every quote
+    // and temperature in the process: pushDue() is the only periodic caller
+    // that renders with forceRefresh, and forceRefresh is the only thing that
+    // goes to the network for market and weather data.
+    if (!osPushSuppressed && osLink.zosFlashed()) {
+      osPushSuppressed = true;
+      log("device_push_suspended", {
+        reason: "zos_flashed",
+        detail: "the device pulls its own frames; channels keep refreshing on their interval",
+      });
+    }
     try {
       const state = await controller.pushDue();
       const updatedChannels = state.channels.filter((channel) =>

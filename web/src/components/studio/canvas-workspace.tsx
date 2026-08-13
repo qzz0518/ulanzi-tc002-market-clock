@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
@@ -20,8 +21,19 @@ import {
   Trash2,
   Type,
 } from "lucide-react";
-import { Button, Chip, Input, NumberScrubber, Select, Switch } from "@cladd-ui/react";
-import { pixelizeImage, type PixelView, type PixelizeMethod } from "@/lib/canvas-pixelize";
+import { Button, Chip, Input, Select, Switch } from "@cladd-ui/react";
+import {
+  applyCropDrag,
+  beginCropDrag,
+  defaultCrop,
+  moveCrop,
+  pixelizeCrop,
+  resizeCrop,
+  type CropDrag,
+  type CropHandle,
+  type CropRect,
+  type PixelView,
+} from "@/lib/canvas-pixelize";
 import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
 import {
   createLiveScreen,
@@ -55,11 +67,18 @@ const PALETTE = [
   0xffffff, 0x00ff66, 0xff3030, 0xffd000, 0x4285f4, 0xf25022,
   0x34a853, 0x00a4ef, 0x9aa0a6, 0xea4335, 0xffb900, 0x000000,
 ];
-const IMAGE_METHODS: Record<PixelizeMethod, string> = {
-  mode: "主色投票",
-  nearest: "最近邻",
-  smooth: "平滑采样",
-};
+// Corner handles only. The crop is locked to the panel's 3.25:1, so an edge
+// handle would move both axes anyway and read as broken.
+const CROP_HANDLES: readonly CropHandle[] = ["nw", "ne", "sw", "se"];
+// Long-edge cap on the decoded buffer, for two measured reasons. A 6000x4000
+// phone photo is 24M px, past iOS Safari's ~16.7M px canvas-area ceiling, where
+// drawImage quietly no-ops and getImageData hands back a fully transparent
+// buffer — a black panel reported as a success. The same buffer also parks
+// 96 MB of Uint8ClampedArray in React state for the session. Nothing is lost at
+// 2560: even a crop spanning a tenth of the image is still 256 source pixels
+// across a 52-cell panel, ~4.9 per cell, and a full-width crop is 49x more
+// detail than the panel can show.
+const DECODE_MAX_EDGE = 2560;
 // The presets are the honest set the 16-row panel allows, not a taste menu:
 // the 3x5 face at 1x/2x/3x (4x would be 20 rows), the 5x7 face at 1x/2x, and
 // the firmware's own 12px blob, which is the only one with CJK and the only one
@@ -257,6 +276,10 @@ export function CanvasWorkspace({
   // only ever sees it when the green box on screen really is that text.
   const textPlacementRef = useRef<TextPlacement | null>(null);
   const imageUrlRef = useRef<string | null>(null);
+  // Same shape as pointerActionRef below: one ref decides what the current drag
+  // means, so the crop box reuses the board's drag idiom instead of inventing
+  // a second one three panels away.
+  const cropDragRef = useRef<CropDrag | null>(null);
   const liveScreenRef = useRef<LiveScreen | null>(null);
   const liveSocketRef = useRef<RoomSocket | null>(null);
   const liveFrameRef = useRef<HTMLCanvasElement | null>(null);
@@ -289,10 +312,7 @@ export function CanvasWorkspace({
   const [imageView, setImageView] = useState<PixelView | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string | null>(null);
-  const [imageSize, setImageSize] = useState(13);
-  const [imageMethod, setImageMethod] = useState<PixelizeMethod>("mode");
-  const [snapPalette, setSnapPalette] = useState(true);
-  const [invertImage, setInvertImage] = useState(false);
+  const [crop, setCrop] = useState<CropRect | null>(null);
   const [exportScale, setExportScale] = useState(12);
   const [live, setLive] = useState(false);
   const [liveInviteOpen, setLiveInviteOpen] = useState(false);
@@ -641,7 +661,7 @@ export function CanvasWorkspace({
       eraser: "橡皮：拖动清除像素。",
       select: "选择：拖出选区，再从选区内部拖动搬移。",
       text: "文字：先在右侧设置内容与字体，再点击画布落字；落完自动变成可拖动的选区。",
-      image: "图片：从右侧上传并生成，生成后可整体搬移。",
+      image: "图片：从右侧上传，框出要用的区域，生成后铺满整块面板。",
     };
     setStatus(messages[nextTool]);
   };
@@ -728,56 +748,100 @@ export function CanvasWorkspace({
         image.src = url;
       });
       const temporaryCanvas = document.createElement("canvas");
-      temporaryCanvas.width = image.naturalWidth;
-      temporaryCanvas.height = image.naturalHeight;
+      const natural = { width: image.naturalWidth, height: image.naturalHeight };
+      const scale = Math.min(1, DECODE_MAX_EDGE / Math.max(natural.width, natural.height, 1));
+      temporaryCanvas.width = Math.max(1, Math.round(natural.width * scale));
+      temporaryCanvas.height = Math.max(1, Math.round(natural.height * scale));
       const context = temporaryCanvas.getContext("2d", { willReadFrequently: true });
       if (!context) throw new Error("canvas unavailable");
-      context.drawImage(image, 0, 0);
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, 0, 0, temporaryCanvas.width, temporaryCanvas.height);
       const data = context.getImageData(0, 0, temporaryCanvas.width, temporaryCanvas.height);
       if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
       imageUrlRef.current = url;
+      const view = { width: data.width, height: data.height, data: data.data };
       setImageUrl(url);
       setImageName(file.name);
-      setImageView({ width: data.width, height: data.height, data: data.data });
+      setImageView(view);
+      // Framed before the user touches anything, so "just pixelize it" already
+      // has an answer — the widest panel-shaped rectangle this picture holds.
+      setCrop(defaultCrop(view));
       setTool("image");
       applySelection(null);
-      setStatus("图片已读取；在右侧调整像素化参数，然后生成到画布。");
+      const resized = scale < 1 ? `，已缩到 ${data.width}×${data.height} 处理` : "";
+      setStatus(`图片已读取（${natural.width}×${natural.height}${resized}）；拖动方框选好区域，生成后铺满整块面板。`);
     } catch {
       URL.revokeObjectURL(url);
       toast.error("图片读取失败");
     }
   };
 
+  // Pointer position in source-image pixels. The stage element is sized by the
+  // <img> itself, so its box is the picture's box — no letterbox maths needed.
+  const cropPoint = (event: ReactPointerEvent<HTMLDivElement>, view: PixelView): [number, number] => {
+    const rectangle = event.currentTarget.getBoundingClientRect();
+    if (rectangle.width <= 0 || rectangle.height <= 0) return [0, 0];
+    return [
+      (event.clientX - rectangle.left) / rectangle.width * view.width,
+      (event.clientY - rectangle.top) / rectangle.height * view.height,
+    ];
+  };
+
+  const beginCropAction = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!imageView || !crop) return;
+    const [x, y] = cropPoint(event, imageView);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const handle = (event.target as HTMLElement).dataset.handle as CropHandle | undefined;
+    const started = beginCropDrag(imageView, crop, handle ?? null, x, y);
+    cropDragRef.current = started.drag;
+    setCrop(started.rect);
+  };
+
+  const continueCropAction = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = cropDragRef.current;
+    if (!drag || !imageView) return;
+    const [x, y] = cropPoint(event, imageView);
+    // Measured from the box as it stood at pointerdown, never from the box on
+    // screen: feeding a drag its own output moves the corner it is pinning.
+    setCrop(applyCropDrag(imageView, drag, x, y));
+  };
+
+  const nudgeCrop = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!imageView || !crop) return;
+    // A tenth of the crop per press, so one keystroke is visible on a 4000px
+    // photo and still fine-grained on a 200px sprite.
+    const step = (event.shiftKey ? 0.3 : 0.1) * crop.width;
+    if (event.key === "ArrowLeft") setCrop(moveCrop(imageView, crop, crop.x - step, crop.y));
+    else if (event.key === "ArrowRight") setCrop(moveCrop(imageView, crop, crop.x + step, crop.y));
+    else if (event.key === "ArrowUp") setCrop(moveCrop(imageView, crop, crop.x, crop.y - step));
+    else if (event.key === "ArrowDown") setCrop(moveCrop(imageView, crop, crop.x, crop.y + step));
+    else if (event.key === "+" || event.key === "=") {
+      setCrop(resizeCrop(imageView, crop, "se", crop.x + crop.width * 1.15, crop.y + crop.height * 1.15));
+    } else if (event.key === "-" || event.key === "_") {
+      setCrop(resizeCrop(imageView, crop, "se", crop.x + crop.width * 0.85, crop.y + crop.height * 0.85));
+    } else return;
+    event.preventDefault();
+  };
+
   const generateImage = () => {
-    if (!imageView) {
+    if (!imageView || !crop) {
       toast.error("请先上传一张图片");
       return;
     }
-    const block = pixelizeImage(imageView, {
-      size: imageSize,
-      method: imageMethod,
-      snap: snapPalette,
-      invert: invertImage,
-      palette: PALETTE,
-    });
-    if (!block) {
-      toast.error("没有识别到主体", { description: "可以换一张图，或开启「暗色作为主体」。" });
+    const pixelized = pixelizeCrop(imageView, crop);
+    if (!pixelized) {
+      // A crop over nothing but transparency reduces to 832 black cells, which
+      // would look like a successful generate while wiping the board. Refuse
+      // before snapshot() so neither the canvas nor the history is touched.
+      toast.error("框选区域是空的，挪一下方框再生成");
       return;
     }
     snapshot();
-    setPixels((current) => {
-      const next = current.slice();
-      block.pixels.forEach((pixel, index) => {
-        if (pixel === null) return;
-        const x = index % block.width;
-        const y = Math.floor(index / block.width);
-        if (x < WIDTH && y < HEIGHT) next[y * WIDTH + x] = pixel;
-      });
-      return next;
-    });
-    setTool("select");
-    applySelection({ x: 0, y: 0, width: block.width, height: block.height });
-    setStatus(`已生成 ${block.width}×${block.height} 像素块；拖动绿色选区可搬移。`);
+    setPixels(pixelized);
+    // The crop *is* the panel now, so there is no block left to place and
+    // nothing for a selection to point at.
+    applySelection(null);
+    setStatus(`已把 ${Math.round(crop.width)}×${Math.round(crop.height)} 的框选区域铺满整块 ${WIDTH}×${HEIGHT} 面板；不满意就挪一下方框再生成。`);
   };
 
   const exportCanvas = () => {
@@ -854,7 +918,7 @@ export function CanvasWorkspace({
       return;
     }
     if (tool === "image") {
-      toast.error("请先从右侧的图片工具生成像素块");
+      toast.error("请先在右侧框好区域并生成到画布");
       return;
     }
 
@@ -1145,7 +1209,7 @@ export function CanvasWorkspace({
           <section className={cn("canvas-inspector-section", tool === "image" && "is-active")}>
             <div className="canvas-tool-heading">
               <ImagePlus aria-hidden="true" />
-              <div><h3>图片像素化</h3><p>自动裁切主体，生成后可整体搬移。</p></div>
+              <div><h3>图片像素化</h3><p>框出要用的那块，生成后铺满整块面板。</p></div>
             </div>
             <Button as="label" className="file-trigger" htmlFor="canvas-image"><ImagePlus />选择图片</Button>
             <input
@@ -1160,48 +1224,52 @@ export function CanvasWorkspace({
               }}
             />
             <div className={cn("canvas-image-preview", !imageUrl && "is-empty")}>
-              {imageUrl ? <img src={imageUrl} alt="待像素化图片预览" /> : <span>尚未选择图片</span>}
+              {imageUrl && imageView && crop ? (
+                <div
+                  className="canvas-crop-stage"
+                  role="application"
+                  tabIndex={0}
+                  aria-label={`裁切框，当前 ${Math.round(crop.width)} 乘 ${Math.round(crop.height)} 像素；方向键移动，加减号缩放`}
+                  onPointerDown={beginCropAction}
+                  onPointerMove={continueCropAction}
+                  onPointerUp={() => { cropDragRef.current = null; }}
+                  onPointerCancel={() => { cropDragRef.current = null; }}
+                  onLostPointerCapture={() => { cropDragRef.current = null; }}
+                  onKeyDown={nudgeCrop}
+                >
+                  <img src={imageUrl} alt="待像素化图片预览" draggable={false} />
+                  <div
+                    className="canvas-crop-box"
+                    style={{
+                      left: `${crop.x / imageView.width * 100}%`,
+                      top: `${crop.y / imageView.height * 100}%`,
+                      width: `${crop.width / imageView.width * 100}%`,
+                      height: `${crop.height / imageView.height * 100}%`,
+                    }}
+                  >
+                    {CROP_HANDLES.map((handle) => (
+                      <span key={handle} className={`canvas-crop-handle is-${handle}`} data-handle={handle} />
+                    ))}
+                  </div>
+                </div>
+              ) : <span>尚未选择图片</span>}
             </div>
             {imageName && <span className="canvas-file-name" title={imageName}>{imageName}</span>}
-            <label className="canvas-field" htmlFor="canvas-image-size">
-              <span>输出高度</span>
-              <NumberScrubber
-                id="canvas-image-size"
-                className="number-scrubber canvas-number-scrubber"
-                contentClassName="number-scrubber__content"
-                inputClassName="number-scrubber__input"
-                value={imageSize}
-                min={8}
-                max={16}
-                step={1}
-                aria-label="输出高度，可左右拖动或点击输入"
-                title="左右拖动调整，点击输入"
-                color="neutral"
-                displayValue={(value) => `${Math.round(value)} px`}
-                onChange={(value) => setImageSize(Math.round(value))}
-              />
-            </label>
-            <label className="canvas-field" htmlFor="canvas-image-method">
-              <span>采样方法</span>
-              <Select
-                id="canvas-image-method"
-                aria-label="图片像素化采样方法"
-                value={imageMethod}
-                options={Object.keys(IMAGE_METHODS)}
-                renderOption={({ value }) => IMAGE_METHODS[value as PixelizeMethod]}
-                onChange={(value) => setImageMethod(value as PixelizeMethod)}
-              >
-                {IMAGE_METHODS[imageMethod]}
-              </Select>
-            </label>
-            <label className="canvas-switch-row">
-              <span><strong>吸附纯色</strong><small>匹配设备调色板</small></span>
-              <Switch as="span" input checked={snapPalette} onChange={setSnapPalette} />
-            </label>
-            <label className="canvas-switch-row">
-              <span><strong>暗色作为主体</strong><small>适合纯黑 Logo</small></span>
-              <Switch as="span" input checked={invertImage} onChange={setInvertImage} />
-            </label>
+            {/* The reduction factor is the one number that predicts whether the
+                result will read: 8× keeps a cat's eye, 50× keeps nothing. */}
+            {imageView && crop && (
+              <div className="flex flex-wrap items-center gap-1">
+                <Chip size="sm" variant="transparent" color="neutral">
+                  裁切 {Math.round(crop.width)}×{Math.round(crop.height)}
+                </Chip>
+                <Chip size="sm" variant="transparent" color="neutral">
+                  缩小 {(crop.width / WIDTH).toFixed(1)}× → {WIDTH}×{HEIGHT}
+                </Chip>
+              </div>
+            )}
+            <p className="m-0 text-[0.6rem] leading-[1.5] text-cladd-fg-softer">
+              方框锁定成面板的 52:16，拖内部挪位置、拖四角改大小，空白处按下可以重新框。框得越小画面越清楚。
+            </p>
             <Button type="button" color="brand" disabled={!imageView} onClick={generateImage}><ImagePlus />生成到画布</Button>
           </section>
 

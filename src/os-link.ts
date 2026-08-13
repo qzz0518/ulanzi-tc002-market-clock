@@ -311,6 +311,10 @@ export class OsLinkHub {
   private menu: OsMenuEntry[] = [];
   private display: OsDisplayCommand = { focus: null, pinned: false };
   private telemetry: OsTelemetry | null = null;
+  // Counts reports, not changes: a caller asking "has the device spoken since I
+  // did X" needs a number that moves on every heartbeat, including one that
+  // carries byte-identical telemetry.
+  private reportSeq = 0;
   private mirror: OsMirrorFrame | null = null;
   private mirrorRequestedAt = 0;
   // Sticky, because the fact outlives the report. Sideloading music or arcade
@@ -587,7 +591,21 @@ export class OsLinkHub {
     const changed = proto !== this.deviceProto;
     this.deviceProto = proto;
     this.telemetry = { ...telemetry, proto, receivedAt: this.now() };
+    this.reportSeq += 1;
     if (changed) this.bump();
+  }
+
+  /**
+   * How many reports have arrived, ever. Monotonic and never reset.
+   *
+   * `isDeviceLive()` alone cannot answer "did the clock come back", because the
+   * clock that is being re-provisioned was usually online when the flow started
+   * and its last report is still inside the liveness window. A caller that
+   * remembers this number before it acts can require a report that arrived
+   * after — which is a witness, where "live" is only a memory.
+   */
+  reportCount(): number {
+    return this.reportSeq;
   }
 
   /** The document revision the device last said it understands; 0 before any report. */

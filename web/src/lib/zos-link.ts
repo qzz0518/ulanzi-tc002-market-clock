@@ -377,22 +377,6 @@ export function zosKeyCaptured(
   return false;
 }
 
-const SCREEN_LABELS: Record<string, string> = {
-  launcher: "启动器",
-  channel: "频道",
-  music: "音乐",
-  // The firmware reports the game list and a running game as two screens; both
-  // are reachable from the one 游戏 menu entry, and the readout says which.
-  games: "游戏列表",
-  game: "游戏中",
-  settings: "设置",
-  boot: "开机中",
-};
-
-export function screenLabel(screen: string): string {
-  return SCREEN_LABELS[screen] ?? (screen || "—");
-}
-
 /**
  * The screens a menu entry can legitimately be showing, as the firmware names
  * them in its telemetry (`osLogic.cc`, screenName block).
@@ -549,8 +533,10 @@ export function describeResidency(state: ZosState | null): ZosReadoutRow {
 }
 
 /**
- * The detail block, resolved to text. Battery / Wi-Fi / uptime moved to the
- * vitals strip; what remains here is the seldom-read remainder.
+ * The diagnostics block, resolved to text — the facts you only read while
+ * something is wrong. Battery / Wi-Fi / uptime live in the status strip, and
+ * what the device is showing is the mirror's job: a screen name here would be
+ * the same fact twice, in the firmware's vocabulary instead of the picture.
  *
  * Offline means offline: every field collapses to 离线 rather than showing the
  * last numbers the device happened to send, because a stale IP and uptime read
@@ -563,7 +549,6 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
   const offline = (key: string, label: string): ZosReadoutRow => ({ key, label, value: "离线" });
   if (!telemetry) {
     return [
-      offline("screen", "当前界面"),
       offline("ip", "IP 地址"),
       offline("free", "空闲内存"),
       offline("supplicant", "Wi-Fi 重连"),
@@ -574,7 +559,6 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
     ? Math.max(0, telemetry.ageMs)
     : Math.max(0, now - telemetry.receivedAt);
   return [
-    { key: "screen", label: "当前界面", value: screenLabel(telemetry.screen) },
     { key: "ip", label: "IP 地址", value: telemetry.ip || "—" },
     { key: "free", label: "空闲内存", value: `${telemetry.freeKb} KB` },
     {
@@ -593,18 +577,32 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
   ];
 }
 
+// Volume and brightness are write-only on purpose: a sequence number lets the
+// device's own knob and side buttons win, and the price of that is that the
+// console cannot read the current value back. So these are not readouts with a
+// missing number — they are controls, and the only honest thing to report is
+// what this console has sent.
+export const ZOS_VOLUME_MIN = 0;
+export const ZOS_VOLUME_MAX = 6;
+export const ZOS_BRIGHTNESS_MIN = 1;
+export const ZOS_BRIGHTNESS_MAX = 10;
+/** Where the steppers start before anything has been sent — mid-scale, so the
+ * first press is a nudge in a direction rather than a jump to an extreme. */
+export const ZOS_VOLUME_START = 3;
+export const ZOS_BRIGHTNESS_START = 5;
+
 /**
  * The device's own volume scale is 0..6 notches; 0 is genuinely mute, not
  * merely quiet, so it gets the word rather than a number.
  */
 export function volumeText(level: number | null): string {
-  if (level === null) return "未知";
+  if (level === null) return "未下发";
   return level === 0 ? "静音" : `${level} 级`;
 }
 
 /** Brightness is 1..10 — the firmware never lets the panel go fully dark. */
 export function brightnessText(level: number | null): string {
-  return level === null ? "未知" : `${level} / 10`;
+  return level === null ? "未下发" : `${level} / ${ZOS_BRIGHTNESS_MAX}`;
 }
 
 /**
@@ -622,6 +620,20 @@ export const ZOS_GAME_SHORTCUTS: readonly { id: string; label: string }[] = [
   { id: "shooter", label: "射击" },
   { id: "tetris", label: "俄罗斯方块" },
 ];
+
+/**
+ * The engine behind a `game:<id>` focus, if it is one.
+ *
+ * These ids exist only on this side: the service's pull document lists the 游戏
+ * ring and nothing under it, so a menu lookup can never name one — and telling
+ * the user 「已要求设备固定在「game:snake」」 is the console reading its own wire
+ * format out loud.
+ */
+function gameShortcut(focus: string): { id: string; label: string } | null {
+  if (!focus.startsWith("game:")) return null;
+  const id = focus.slice("game:".length);
+  return ZOS_GAME_SHORTCUTS.find((game) => game.id === id) ?? null;
+}
 
 export interface ZosDriverStatus {
   pinned: boolean;
@@ -653,11 +665,20 @@ export function describeDriver(
     };
   }
   const entry = menu.find((candidate) => candidate.id === display.focus);
-  const name = entry?.label ?? display.focus;
+  const game = gameShortcut(display.focus);
+  const name = entry?.label ?? game?.label ?? display.focus;
   // Confirmation has to read the same field the firmware moves for this kind of
   // entry — see entryOnScreen. An unknown id (menu not loaded yet) stays
   // unconfirmed rather than being guessed at.
-  const confirmed = live && entry !== undefined && entryOnScreen(entry, telemetry);
+  //
+  // `game:<id>` is the one focus with no menu entry to check: the pull document
+  // carries only the 游戏 ring, and the firmware reports `screen: "game"`
+  // without naming the engine. Being in a game is therefore all the confirmation
+  // that exists for a game pin — and since this console asked for that engine,
+  // it is confirmation enough.
+  const confirmed = live && (game !== null
+    ? telemetry?.screen === "game"
+    : entry !== undefined && entryOnScreen(entry, telemetry));
   return {
     pinned: true,
     label: "控制台接管",

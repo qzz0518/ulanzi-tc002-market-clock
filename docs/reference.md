@@ -292,6 +292,8 @@ lyricuntil	26000
 lyricw	0,300,300,180,480,240,…
 menu	3
 item	channel	btc	市场轮播
+rev	btc	e90a8dc5b287
+ttl	btc	30000
 item	music	music	音乐
 item	settings	settings	设置
 ```
@@ -308,6 +310,30 @@ item	settings	settings	设置
 加上「这个位置在何时为真」，固件本地外推。同理，遥测是设备 → 控制台方向的，也从不 bump。
 文档被送出的那一刻还会把播放头按停留时长补正，否则一份在长轮询里躺了八秒的文档一到手就
 是八秒前的进度。
+
+每个频道的 `item` 后面跟着两条**自己的键**：`rev` 是这个频道渲染结果的指纹（内容改了才变，
+改名和改刷新间隔都不变），`ttl` 是这份渲染还能算数多久（`max(刷新间隔, 动画时长)`）。设备
+拉一次帧包就把它缓存住，而 `item` 的种类、id、标签在任何一次内容编辑后都完全相同——所以在
+这两条之前，「灯牌换了个颜色」在协议上根本无法表达：菜单比对相等、`seq` 不动、挂起的长轮询
+不释放，唯一能看到新像素的办法是把旋钮转到别的频道再转回来。`ttl` 管的是另一半：大字天气钟
+是十秒钟的时钟帧，没人编辑任何东西，`rev` 永远不动，但它显示的那一分钟正在越来越旧。
+
+它们是**新键而不是 `item` 上的第五、第六个字段**：已部署固件对 `item` 的匹配是严格的四字段，
+多一个字段会让它丢掉整份菜单连同频道环；而未知键本来就会被忽略，所以新键可以发给任何一版
+固件。每条记录都重复一遍 id，固件因此按 id 索引而不是靠行序。设备侧对 `ttl` 还有自己的下限
+（5 秒）：一次刷新是最多 ~900KB 走在同一条正扛着长轮询的无线链路上，而服务端的渲染缓存本身
+就有 5 秒，比这更勤只会拉回一模一样的字节。`GET /api/os/frames` 的应答带 `X-Os-Rev`，设备
+记下的是**实际拿到**的版本而不是文档当初广告的那个——保存动作正好落在这两个时刻之间时，
+不至于让刚下载完的帧包立刻被判为过期。
+
+**ZOS 在位时，推送这一步会停，渲染这一步不会。** ZOS 顶替了官方 app，`POST /api/custom` 随之
+消失；而它的配网页对**任何未知路径**都回配置页加 HTTP 200，于是每一次推送都「成功」：
+`updateCount` 在涨、`lastError` 干净、控制台显示频道健康，像素却进了一个伪装成 200 的 404。
+所以设备一旦上报过 `flashed`（只有设备自己知道闪存里是什么），`pushChannel` 就跳过那次设备
+写入——**只跳过它**。定时渲染必须照旧按频道的刷新间隔跑：`renderChannel(channel, true)` 是
+唯一一处周期性带 `forceRefresh` 的调用，而 `forceRefresh` 是 `getMarket` / `getWeather` 唯一
+的联网触发条件；设备自己拉帧走的是 `forceRefresh=false`，只读缓存、不设年龄上限。把整个循环
+停掉，行情和天气就停在服务启动那一刻，而面板看上去还在动——因为时钟数字读的是实时 `nowMs`。
 
 **帧包**（`GET /api/os/frames?app=`）是原始 RGB 而不是 GIF：官方固件会解 GIF，我们不会，
 为已经是像素的东西在这台设备上加一个 GIF 解码器纯属倒贴。头 8 字节固定：
@@ -517,7 +543,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq） |
 | `POST` | `/api/os/mirror` | ZOS 回传面板实拍帧（正文即 2496 字节原始 RGB，免同源）；应答 `{wanted}` 告诉设备是否继续推 |
 | `GET` | `/api/os/mirror` | 控制台取最新一帧，**取本身就是订阅**：10 秒不取设备自动停流 |
-| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live） |
+| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
 | `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值 |

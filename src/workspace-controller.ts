@@ -85,6 +85,8 @@ export interface WorkspaceRuntimeSnapshot {
   degraded: boolean;
   pushing: boolean;
   deviceReachable: boolean;
+  /** The channels are still rendered on schedule; only the device write is off. */
+  devicePushSuspended: boolean;
   deviceVersions?: { mcu?: string; app?: string };
   workspace: WorkspaceSettings;
   channels: ChannelRuntimeSnapshot[];
@@ -115,6 +117,20 @@ export interface WorkspaceControllerOptions {
   marketIconStore?: MarketIconStore;
   dynamicMarketClient?: DynamicMarketDataClient;
   weatherClient?: WeatherClient;
+  /**
+   * True while the device serves itself and must not be written to.
+   *
+   * A flashed ZOS replaced the official app and with it `POST /api/custom`;
+   * what answers now is a setup portal that returns the config page and HTTP
+   * 200 for every unknown path, so a push cannot even fail honestly. What must
+   * NOT stop is the render: `renderChannel(channel, true)` is the only periodic
+   * caller that passes forceRefresh, and forceRefresh is the only thing that
+   * sends getMarket/getWeather to the network. Skip the whole schedule and
+   * every quote and temperature freezes at whatever was true when the service
+   * started, while the device keeps pulling a bundle that looks current because
+   * its clock digits advance.
+   */
+  devicePushSuspended?: () => boolean;
   now?: () => number;
 }
 
@@ -155,6 +171,7 @@ export class WorkspaceController {
   private readonly marketIconStore?: MarketIconStore;
   private readonly dynamicMarketClient: DynamicMarketDataClient;
   private readonly weatherClient?: WeatherClient;
+  private readonly devicePushSuspended: () => boolean;
   private readonly now: () => number;
   private readonly startedAt: string;
   private workspace: WorkspaceSettings;
@@ -190,6 +207,7 @@ export class WorkspaceController {
       timeoutMs: options.config.requestTimeoutMs,
     });
     this.weatherClient = options.weatherClient;
+    this.devicePushSuspended = options.devicePushSuspended ?? (() => false);
     this.now = options.now ?? Date.now;
     this.startedAt = new Date(this.now()).toISOString();
     this.workspace = this.validateKnownContent(options.workspace, true);
@@ -317,6 +335,12 @@ export class WorkspaceController {
         .map((channel) => channel.appName),
     );
     for (const appName of staleApps) {
+      // Same rule as the push: a flashed ZOS has no Custom Apps to delete, so
+      // the DELETE would land on the setup portal and come back 200 either way.
+      if (this.devicePushSuspended()) {
+        delete this.cleanupErrors[appName];
+        continue;
+      }
       try {
         await this.queueDeviceWrite(() => this.deleteApp(appName));
         delete this.cleanupErrors[appName];
@@ -403,6 +427,7 @@ export class WorkspaceController {
         || channels.some((channel) => channel.degraded || Boolean(channel.lastError)),
       pushing: this.activePushCount > 0,
       deviceReachable: this.deviceReachable,
+      devicePushSuspended: this.devicePushSuspended(),
       ...(this.deviceVersions ? { deviceVersions: this.deviceVersions } : {}),
       workspace: this.getWorkspace(),
       channels,
@@ -673,27 +698,37 @@ export class WorkspaceController {
     runtime.pushing = true;
     runtime.lastAttemptAt = new Date(this.now()).toISOString();
     this.activePushCount += 1;
+    // Suspension takes away the device write and NOTHING else. The render below
+    // is what refreshes the market and weather caches that the device's own
+    // /api/os/frames pull then reads out of, so it has to keep running on the
+    // channel's interval whether or not anybody is listening on /api/custom.
+    const suspended = this.devicePushSuspended();
     try {
       const rendered = await this.renderChannel(channel, true);
-      const durationSeconds = Math.min(
-        86_400,
-        Math.max(
-          this.config.displayDurationSeconds,
-          Math.ceil(rendered.animationDurationMs / 1_000) + 30,
-        ),
-      );
-      await this.queueDeviceWrite(() =>
-        this.pushPayload(
-          channel.appName,
-          buildImagePayload(rendered.image, rendered.mimeType, durationSeconds),
-        )
-      );
+      if (!suspended) {
+        const durationSeconds = Math.min(
+          86_400,
+          Math.max(
+            this.config.displayDurationSeconds,
+            Math.ceil(rendered.animationDurationMs / 1_000) + 30,
+          ),
+        );
+        await this.queueDeviceWrite(() =>
+          this.pushPayload(
+            channel.appName,
+            buildImagePayload(rendered.image, rendered.mimeType, durationSeconds),
+          )
+        );
+      }
       runtime.animationDurationMs = rendered.animationDurationMs;
       runtime.contentErrors = rendered.contentErrors;
       runtime.assetIds = [...rendered.assetIds];
       runtime.lastPushAt = new Date(this.now()).toISOString();
       runtime.lastError = undefined;
       runtime.updateCount += 1;
+      // Under suspension we did not talk to the device, so we cannot claim to
+      // have reached it — but we do not have to guess either: the only thing
+      // that ever sets the suspension is the device's own POST /api/os/report.
       this.deviceReachable = true;
     } catch (error) {
       runtime.lastError = errorMessage(error);
@@ -740,6 +775,12 @@ export class WorkspaceController {
   }
 
   private async retryCleanup(): Promise<void> {
+    // Nothing left to clean up: the receiver those apps lived in went with the
+    // official firmware, and retrying would only feed the captive portal.
+    if (this.devicePushSuspended()) {
+      this.cleanupErrors = {};
+      return;
+    }
     const retainedApps = new Set(
       this.workspace.channels.filter((channel) => channel.enabled).map((channel) => channel.appName),
     );

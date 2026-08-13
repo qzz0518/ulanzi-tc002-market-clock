@@ -1,34 +1,37 @@
-/* 系统（ZOS）控制台。镜像是重心，遥控甲板紧贴其下，右侧是菜单 / 音量亮度 / 详情。
+/* 系统（ZOS）控制台。一块面板分三段：状态条、主体（左镜像+遥控、右设备菜单）、
+   诊断抽屉。这里只放布局——尺寸、栅格、断点；颜色、圆角、控件形状全部由 cladd
+   组件和 token 负责，本文件不重画任何一个 cladd 组件。
    类名用 zc- 前缀：globals.css 里还留着旧版 zos- 规则（那份文件不归本组件管），
    新旧选择器必须零交集，样式才不会隔着文件打架。 */
 
 .zc-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
 
-.zc-topbar {
+/* --- 面板 ------------------------------------------------------------------ */
+
+.zc-panel { width: min(100%, 72rem); margin-inline: auto; border-radius: 0.85rem; }
+
+/* 状态条：一行说完「谁在开、设备怎么样」。设备离线时概况整段消失，不留旧数字。 */
+.zc-strip {
   display: flex;
-  width: min(100%, 72rem);
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 0.75rem 1rem;
   flex-wrap: wrap;
-  margin-inline: auto;
-  padding-bottom: 0.8rem;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  padding: 0.6rem 1.1rem;
   border-bottom: 1px solid var(--border);
 }
-.zc-topbar__driver { display: grid; min-width: 0; gap: 0.14rem; }
-.zc-topbar__driver > span { color: var(--primary); font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.1em; }
-.zc-topbar__driver > strong { font-size: 0.95rem; font-weight: 620; letter-spacing: -0.01em; }
-.zc-topbar__driver > small { color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.45; }
-.zc-topbar__status { display: inline-flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.zc-driver { display: inline-flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.zc-driver__icon { flex: none; width: 1rem; height: 1rem; color: var(--primary); }
+.zc-driver__text { display: grid; gap: 0.05rem; min-width: 0; }
+.zc-driver__text strong { font-size: 0.8rem; font-weight: 620; letter-spacing: -0.01em; line-height: 1.2; }
+.zc-driver__text small { color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.35; }
+.zc-strip__vitals { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-left: auto; }
 
 .zc-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(19rem, 22rem);
-  width: min(100%, 72rem);
-  gap: 1.1rem;
-  margin-inline: auto;
-  padding-top: 1rem;
+  grid-template-columns: minmax(0, 1fr) minmax(19rem, 21.5rem);
+  gap: 0.6rem 1.4rem;
   align-items: start;
+  padding: 1rem 1.1rem 1.1rem;
 }
 
 /* 整数倍放大：一个 LED 像素恒等于 N × N 个屏幕像素，边缘不会出现半像素糊边。
@@ -44,10 +47,6 @@
 @media (max-width: 36rem) { .zc-device { --zc-pixel: 8px; } }
 @media (max-width: 30rem) { .zc-device { --zc-pixel: 6px; } }
 @media (max-width: 23rem) { .zc-device { --zc-pixel: 4px; } }
-
-.zc-side { display: grid; gap: 0.8rem; min-width: 0; }
-.zc-card { border-radius: 0.6rem; }
-.zc-cardtitle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 0.5rem; }
 
 /* --- LED 镜像 ------------------------------------------------------------- */
 
@@ -112,10 +111,6 @@
   font-size: 0.58rem;
 }
 .zc-screen__state.is-live { color: var(--primary); }
-
-/* --- 概况条 ---------------------------------------------------------------- */
-
-.zc-vitals { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.7rem; margin-top: 0.55rem; }
 
 /* --- 遥控甲板 -------------------------------------------------------------- */
 
@@ -277,42 +272,89 @@
   text-wrap: pretty;
 }
 
-/* --- 侧栏 ------------------------------------------------------------------ */
+/* --- 设备菜单 -------------------------------------------------------------- */
 
-/* 直达游戏：挂在「游戏」条目下面的一排小按钮，缩进对齐条目文字。 */
-.zc-games {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  padding: 0.15rem 0.75rem 0.5rem 2.35rem;
-}
+/* 右列与设备根环同构：四个目的地，内容挂在下一层的手风琴里。 */
+.zc-menu { display: flex; flex-direction: column; min-width: 0; }
+.zc-menu > .cladd-section-title { padding: 0.15rem 0.5rem 0.1rem; }
+.zc-menu__title { padding-top: 0.7rem; }
+/* List 自带 p-2，这里只收掉横向内缩，让行与上面的小标题左对齐。 */
+.zc-menu__list { padding-inline: 0; }
+.zc-menu__after { display: inline-flex; align-items: center; gap: 0.4rem; }
+/* 子项缩进到与父项文字对齐——「下一层」要看得见。 */
+.zc-sub { display: flex; flex-direction: column; padding: 0.1rem 0 0.35rem 1.75rem; }
 
-.zc-setting {
+/* --- 下发（音量 / 亮度） --------------------------------------------------- */
+
+.zc-out { display: grid; gap: 0.5rem; padding: 0.35rem 0.5rem 0; }
+.zc-out__row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 3.3rem minmax(0, 1fr) 3rem;
   align-items: center;
   gap: 0.6rem;
-  width: 100%;
 }
-.zc-setting__label {
+.zc-out__label {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.32rem;
   color: var(--muted-foreground);
   font-size: 0.72rem;
   white-space: nowrap;
 }
-.zc-setting__label svg { width: 0.85rem; height: 0.85rem; }
-.zc-setting__slider { display: block; min-width: 0; }
-/* 服务里还没有任何请求值时滑轨压暗：位置是占位，不是设备读数。 */
-.zc-setting__slider.is-unset { opacity: 0.45; }
-.zc-setting__value {
-  min-width: 3.2rem;
+.zc-out__label svg { width: 0.85rem; height: 0.85rem; }
+.zc-out__slider { display: block; min-width: 0; }
+/* 还没下发过任何值时把控件压暗：滑块的位置是「按下去会从这里开始」，
+   不是设备读数。满色的填充条会被当成「亮度就是这么高」。 */
+.zc-out__row.is-unsent .cladd-number-field,
+.zc-out__row.is-unsent .zc-out__slider { opacity: 0.5; }
+.zc-out__value {
   color: var(--muted-foreground);
   font-family: var(--mono);
   font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
   text-align: right;
 }
+
+/* --- 诊断抽屉 -------------------------------------------------------------- */
+
+.zc-diag { border-top: 1px solid var(--border); }
+.zc-diag__trigger { width: 100%; border-radius: 0; padding-inline: 1.1rem; }
+.zc-diag__hint { color: var(--color-cladd-fg-softer); font-weight: 400; font-size: 0.62rem; }
+.zc-diag__inner { display: grid; gap: 0.6rem; padding: 0.15rem 1.1rem 1rem; }
+.zc-facts { border-radius: 0.55rem; }
+.zc-facts__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 列间距要大到一列的值和下一列的标签不会读成一句话。 */
+  gap: 0 1.4rem;
+  padding: 0.25rem 0.35rem;
+}
+.zc-fact {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  min-height: 1.75rem;
+  padding: 0 0.55rem;
+  font-size: 0.72rem;
+}
+.zc-fact > span:first-child { color: var(--color-cladd-fg-soft); white-space: nowrap; }
+.zc-fact > span:last-child {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+.zc-diag__foot { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.zc-diag__note {
+  flex: 1 1 16rem;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.62rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+/* --- 其它 ------------------------------------------------------------------ */
 
 .zc-note {
   display: flex;
@@ -333,10 +375,11 @@
 @media (max-width: 80rem) {
   .zc-body { grid-template-columns: minmax(0, 1fr) minmax(17rem, 19rem); }
 }
-@media (max-width: 52rem) {
+@media (max-width: 60rem) {
   .zc-shell { padding-top: 0.65rem; }
   .zc-body { grid-template-columns: minmax(0, 1fr); }
-  .zc-side { margin-top: 0.2rem; }
+  .zc-strip__vitals { margin-left: 0; }
+  .zc-facts__grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 36rem) {
   .zc-knob { width: 7rem; }
@@ -353,4 +396,8 @@
     white-space: normal;
     text-align: center;
   }
+  .zc-strip { padding-inline: 0.8rem; }
+  .zc-body { padding-inline: 0.8rem; }
+  .zc-diag__trigger { padding-inline: 0.8rem; }
+  .zc-diag__inner { padding-inline: 0.8rem; }
 }

@@ -65,6 +65,26 @@ function noticeWorkspace(options: Record<string, unknown>): WorkspaceSettings {
   };
 }
 
+/** A channel whose only volatile input comes off the network, on a 30 s interval. */
+function tickerWorkspace(): WorkspaceSettings {
+  return {
+    version: 3,
+    channels: [{
+      id: "btc",
+      name: "比特币",
+      appName: "ticker",
+      enabled: true,
+      refreshIntervalMs: 30_000,
+      items: [{
+        id: "price",
+        contentId: "market:btc",
+        durationMs: 15_000,
+        options: { showChange: true, changeDurationMs: 2_500 },
+      }],
+    }],
+  };
+}
+
 /** The pixels of frame 0, exactly as the firmware's FrameBundle would read them. */
 function firstFramePixels(bundle: Uint8Array): Uint8Array {
   expect(String.fromCharCode(...bundle.slice(0, 4))).toBe("TCF1");
@@ -281,6 +301,93 @@ describe("an options edit reaches the panel", () => {
     const after = revs();
     expect(after.notice_board).not.toBe(before.notice_board);
     expect(after.second_board).toBe(before.second_board);
+  });
+
+  test("a flashed ZOS takes away the device write and nothing else", async () => {
+    // Two failures live here, and they pull in opposite directions.
+    //
+    // ZOS replaced the official app and with it `POST /api/custom`; what
+    // answers now is a setup portal that returns the config page and HTTP 200
+    // for EVERY unknown path. So every push "worked": updateCount climbed,
+    // lastError stayed clear, the console showed a healthy channel — and the
+    // pixels went into a captive-portal 404.
+    //
+    // The obvious fix — stop running the loop — is worse, and silently. The
+    // scheduled push is the ONLY periodic caller that renders with
+    // forceRefresh, and forceRefresh is the only thing that sends getMarket and
+    // getWeather to the network; the device's own /api/os/frames pull renders
+    // out of those caches with forceRefresh=false and no age bound. Skip the
+    // schedule and BTC is fetched once, at startup, and never again — while the
+    // panel keeps redrawing because the clock digits read a live nowMs.
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-os-suspend-"));
+    directories.push(directory);
+    let nowMs = Date.parse("2026-01-01T00:00:00.000Z");
+    const osLink = new OsLinkHub();
+    const quotes: number[] = [];
+    const marketClient = {
+      getAsset: async (assetId: string) => {
+        const price = 20_000 + quotes.length * 1_000;
+        quotes.push(price);
+        return {
+          assetId,
+          provider: "coinbase",
+          price,
+          rawPrice: String(price),
+          fetchedAt: new Date(nowMs).toISOString(),
+          changePercent: 1.5,
+          changePeriod: "24H",
+        };
+      },
+    };
+    const pushedApps: string[] = [];
+    const controller = new WorkspaceController({
+      config: loadConfig({ CLOCK_HOST: "tc002.test" }),
+      workspace: tickerWorkspace(),
+      workspaceStore: new WorkspaceStore(join(directory, "workspace.json")),
+      marketClient: marketClient as never,
+      pushPayload: async (appName) => {
+        pushedApps.push(appName);
+        return { status: 200 };
+      },
+      deleteApp: async () => ({ status: 200 }),
+      devicePushSuspended: () => osLink.zosFlashed(),
+      now: () => nowMs,
+    });
+
+    // Stock firmware: the loop pushes, and the quote is refreshed with it.
+    await controller.pushDue();
+    expect(pushedApps).toEqual(["ticker"]);
+    expect(quotes.length).toBe(1);
+
+    const report = (flashed: boolean) => osLink.report({
+      screen: "channel", focus: "ticker", wifi: "home", ip: "192.168.8.240",
+      uptimeMs: 60_000, freeKb: 900, supplicantRestarts: 0, proto: 0,
+      batteryPercent: 87, charging: false, flashed,
+    });
+    report(true);
+    expect(osLink.zosFlashed()).toBe(true);
+    // Sticky on purpose: sideloading the music or arcade firmware over a flashed
+    // ZOS takes ZOS off the air, and resuming pushes then would resume writing
+    // into nothing while claiming it worked.
+    report(false);
+    expect(osLink.zosFlashed()).toBe(true);
+    expect(controller.getState().devicePushSuspended).toBe(true);
+
+    // One interval later: no write reached the device...
+    nowMs += 31_000;
+    await controller.pushDue();
+    expect(pushedApps).toEqual(["ticker"]);
+    // ...and the price moved anyway. This is the assertion the whole test
+    // exists for: a second trip to the quote source after the interval elapsed.
+    expect(quotes.length).toBe(2);
+
+    // And the device, pulling with forceRefresh=false, reads the NEW number out
+    // of the cache that scheduled render just refreshed rather than the startup
+    // one — without a network trip of its own. previewChannel is the code path
+    // behind /api/os/frames.
+    expect(controller.getState().assets[0]!.price).toBe(21_000);
+    await controller.previewChannel(controller.getWorkspace().channels[0]!.id);
+    expect(quotes.length).toBe(2);
   });
 
   test("a revision survives a restart, so a reconnect does not re-download everything", async () => {

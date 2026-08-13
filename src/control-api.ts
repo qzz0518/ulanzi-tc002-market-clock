@@ -1932,9 +1932,16 @@ export function createControlHandler(
           // Same reason as the mirror's ageMs: the console must not have to
           // compare a service timestamp against its own clock to decide how old
           // this is.
+          // `seq` counts reports and never resets, so a caller can require one
+          // that arrived after it acted rather than trusting `live`, which is
+          // still true of a clock that has not moved network at all.
           telemetry: telemetry === null
             ? null
-            : { ...telemetry, ageMs: Date.now() - telemetry.receivedAt },
+            : {
+              ...telemetry,
+              ageMs: Date.now() - telemetry.receivedAt,
+              seq: options.osLink.reportCount(),
+            },
           live: options.osLink.isDeviceLive(),
           mirrorWanted: options.osLink.mirrorWanted(),
           // Sticky and independent of `live`: what a power cycle restores does

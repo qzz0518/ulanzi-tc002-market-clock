@@ -909,13 +909,9 @@ export function App() {
     );
   }
 
-  const pageCopy = view === "zos"
-    ? {
-        kicker: "TC002 ZOS CONSOLE",
-        title: "系统固件控制台",
-        description: "远程转动旋钮、接管正在显示的频道，并同步镜像固件真正送上面板的每一帧。",
-      }
-    : view === "music"
+  // 系统页没有 pageCopy：那一页的第一屏本身就是一块带状态条的面板，页头的
+  // Tab 已经写着「系统」，再叠一层眉题 + 大标题 + 一句话就是同一件事说三遍。
+  const pageCopy = view === "music"
     ? {
         kicker: "TC002 PIXEL RADIO",
         title: "音乐歌词播放器",
@@ -979,13 +975,15 @@ export function App() {
         firmwareLocked={firmwareOnline}
         firmwareKind={firmwareKind}
       />
-      <div className="page-heading">
-        <div>
-          <span>{pageCopy.kicker}</span>
-          <h1>{pageCopy.title}</h1>
-          <p>{pageCopy.description}</p>
+      {view !== "zos" && (
+        <div className="page-heading">
+          <div>
+            <span>{pageCopy.kicker}</span>
+            <h1>{pageCopy.title}</h1>
+            <p>{pageCopy.description}</p>
+          </div>
         </div>
-      </div>
+      )}
 
       {view === "canvas" && (
         <section className="canvas-orientation-gate" aria-labelledby="canvas-orientation-title">

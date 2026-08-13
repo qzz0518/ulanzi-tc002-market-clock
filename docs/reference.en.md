@@ -343,6 +343,8 @@ lyricuntil	26000
 lyricw	0,300,300,180,480,240,…
 menu	3
 item	channel	btc	市场轮播
+rev	btc	e90a8dc5b287
+ttl	btc	30000
 item	music	music	音乐
 item	settings	settings	设置
 ```
@@ -364,6 +366,41 @@ and every bump releases every parked poll, so the document carries a position pl
 it was true and the firmware advances it locally. Telemetry flows device→console and never
 bumps either. The document also advances the playhead to the instant it is served, or one
 that parked for eight seconds would hand over a playhead eight seconds stale on arrival.
+
+Each channel's `item` is followed by two records **of its own keys**: `rev` fingerprints what
+that channel would render to (it moves when the content does, and not when the name or the
+refresh interval does), and `ttl` says how long that render stays true (`max(refresh interval,
+animation length)`). The device fetches a channel's frames once and caches them, and an
+`item`'s kind, id and label are all identical after any content edit — so before these two,
+"the sign changed colour" was not expressible on the wire at all: the menu compared equal,
+`seq` never moved, the parked poll was never released, and the only way to reach new pixels
+was to turn the knob to another channel and back. `ttl` covers the other half: 大字天气钟 is
+ten seconds of clock frames, nobody edits anything, no `rev` ever moves, and the minute it is
+showing recedes further into the past every second.
+
+They are **new keys rather than a fifth and sixth field on `item`**: deployed firmware matches
+`item` on a strict arity of four and would drop the whole menu — and with it the channel ring
+— if that line grew, whereas unknown keys are ignored by design and so can ship to any build.
+Each record repeats its id, so the firmware indexes by id rather than trusting line order. The
+device applies its own floor to `ttl` (5 s): a refresh costs it up to ~900 KB over the same
+radio that is carrying the long poll, and the service holds a render in a 5 s cache, so
+anything faster can only fetch bytes it already has. `GET /api/os/frames` answers with
+`X-Os-Rev`, so the device records the revision it **actually received** rather than the one
+the document advertised when it decided to ask — a save landing between those two moments
+would otherwise make a brand-new bundle look stale on arrival.
+
+**While ZOS is resident the push stops; the render does not.** ZOS replaced the official app and
+`POST /api/custom` went with it; what answers now is a setup portal that returns the config
+page and HTTP 200 for **every** unknown path, so each push "succeeded": `updateCount` climbed,
+`lastError` stayed clear, the console showed a healthy channel, and the pixels went into a 404
+wearing a 200. Once the device has reported `flashed` — a fact only the device can know —
+`pushChannel` skips the device write, and **skips nothing else**. The scheduled render has to
+keep its interval: `renderChannel(channel, true)` is the only periodic call that passes
+`forceRefresh`, and `forceRefresh` is the only thing that sends `getMarket` / `getWeather` to
+the network. The device's own frame pull renders with `forceRefresh=false`, straight out of
+those caches and with no age bound — so suspending the loop freezes every quote and temperature
+at whatever was true when the service started, on a panel that still looks alive because the
+clock digits read a live `nowMs`.
 
 The **frame bundle** (`GET /api/os/frames?app=`) is raw RGB rather than GIF: the official
 firmware decodes a GIF, ours does not, and adding a GIF decoder to re-encode pixels we already
@@ -623,7 +660,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto}` (strings truncated at 64 chars, cross-origin; bumps seq only when `proto` changes) |
 | `POST` | `/api/os/mirror` | ZOS uploads a captured panel frame (body is 2496 raw RGB bytes, cross-origin); the reply `{wanted}` tells the device whether to keep streaming |
 | `GET` | `/api/os/mirror` | Console reads the latest frame — **asking is the subscription**: stop polling and the device stops streaming 10 s later |
-| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}` (live means a report arrived within 15 s) |
+| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned |

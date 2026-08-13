@@ -1,38 +1,44 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   BatteryCharging,
   BatteryFull,
   BatteryLow,
   BatteryWarning,
-  Gamepad2,
-  LayoutGrid,
-  Music2,
+  Bluetooth,
+  BluetoothOff,
+  ChevronRight,
+  CircleDot,
   Pin,
   PinOff,
   Radio,
   RefreshCw,
-  Settings2,
   SunMedium,
   Timer,
   TriangleAlert,
   Volume2,
   Wifi,
   WifiOff,
-  type LucideIcon,
 } from "lucide-react";
 import {
   Button,
   Chip,
-  List,
-  ListButton,
-  ListItem,
-  ListSeparator,
-  ListTitle,
+  CollapsibleIndicator,
+  CollapsiblePanel,
+  CollapsibleRoot,
+  CollapsibleTrigger,
+  NumberField,
+  SectionTitle,
   Slider,
   Surface,
+  SurfaceCut,
 } from "@cladd-ui/react";
 import {
-  ZOS_GAME_SHORTCUTS,
+  ZOS_BRIGHTNESS_MAX,
+  ZOS_BRIGHTNESS_MIN,
+  ZOS_BRIGHTNESS_START,
+  ZOS_VOLUME_MAX,
+  ZOS_VOLUME_MIN,
+  ZOS_VOLUME_START,
   brightnessText,
   createZosLink,
   describeDriver,
@@ -40,20 +46,24 @@ import {
   describeResidency,
   describeTelemetry,
   describeVitals,
-  entryOnScreen,
   volumeText,
-  zosGameFocus,
-  zosPinnedOn,
-  zosToggleFocus,
   type ZosInputAction,
   type ZosInputEvent,
   type ZosLink,
-  type ZosMenuEntry,
   type ZosMirrorFrame,
   type ZosState,
 } from "@/lib/zos-link";
+import {
+  defaultOpenSection,
+  describeSections,
+  pinIntent,
+  type ZosSection,
+} from "@/lib/zos-sections";
+import type { BleSupport } from "@/lib/ble-provisioning";
+import { ZosMenu, type ZosPinTarget } from "@/components/zos/zos-menu";
 import { ZosMirrorScreen } from "@/components/zos/zos-mirror-screen";
 import { ZosInputDeck } from "@/components/zos/zos-input-deck";
+import { ZosProvisionDialog, useBleSupport } from "@/components/zos/zos-provision-dialog";
 import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
 import "./zos-console.css";
@@ -63,23 +73,11 @@ import "./zos-console.css";
 // updated when a frame arrived could never say "the frames stopped arriving".
 const AGE_TICK_MS = 500;
 
-// Slider drags fire per-notch; one PUT per notch would race itself. A quarter
-// second of quiet coalesces a drag into the value the user actually settled on.
-const SETTINGS_DEBOUNCE_MS = 250;
-
-const KIND_ICONS: Record<ZosMenuEntry["kind"], LucideIcon> = {
-  channel: LayoutGrid,
-  music: Music2,
-  game: Gamepad2,
-  settings: Settings2,
-};
-
-const KIND_LABELS: Record<ZosMenuEntry["kind"], string> = {
-  channel: "频道",
-  music: "音乐",
-  game: "游戏",
-  settings: "设置",
-};
+// A brightness drag fires per notch, and one PUT per notch would race itself.
+// The Slider's own throttle coalesces the drag: the first notch goes out at
+// once (so a click on the track feels immediate), then at most one write per
+// interval, with a guaranteed trailing write for wherever the user settled.
+const BRIGHTNESS_THROTTLE_MS = 250;
 
 const BATTERY_ICONS = {
   ok: BatteryFull,
@@ -100,15 +98,20 @@ export function ZosPanel() {
   const [frame, setFrame] = useState<ZosMirrorFrame | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [busyId, setBusyId] = useState<string | null>(null);
+  // One display write at a time, and while it is in flight the menu stops
+  // taking commands: the service keeps a single focus, so a second click would
+  // only race the first.
+  const [busy, setBusy] = useState(false);
+  const [provisionOpen, setProvisionOpen] = useState(false);
+  // The gate is read here, not only in the dialog: a browser that cannot do
+  // Web Bluetooth must never be offered the row in the first place.
+  const bleSupport = useBleSupport();
 
   // Local drafts win the display until the service echoes the same value back;
   // without them every 2 s state poll would snap a mid-drag slider to the old
   // number.
   const [volumeDraft, setVolumeDraft] = useState<number | null>(null);
   const [brightnessDraft, setBrightnessDraft] = useState<number | null>(null);
-  const settingsTimerRef = useRef<number | null>(null);
-  const settingsPatchRef = useRef<{ volume?: number; brightness?: number }>({});
 
   useEffect(() => {
     const link = createZosLink({
@@ -132,10 +135,6 @@ export function ZosPanel() {
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => () => {
-    if (settingsTimerRef.current !== null) window.clearTimeout(settingsTimerRef.current);
-  }, []);
-
   const applyDisplay = useCallback(async (
     focus: string | null,
     pinned: boolean,
@@ -144,7 +143,7 @@ export function ZosPanel() {
   ) => {
     const link = linkRef.current;
     if (!link) return;
-    setBusyId(focus ?? "__release__");
+    setBusy(true);
     try {
       const display = await link.setDisplay(focus, pinned);
       // Echo the service's own answer instead of the click's intent: it is the
@@ -155,7 +154,7 @@ export function ZosPanel() {
     } catch (error) {
       toast.error("设备控制失败", { description: errorMessage(error) });
     } finally {
-      setBusyId(null);
+      setBusy(false);
     }
   }, [toast]);
 
@@ -170,24 +169,17 @@ export function ZosPanel() {
     }
   }, [toast]);
 
-  const commitSettings = useCallback((patch: { volume?: number; brightness?: number }) => {
-    settingsPatchRef.current = { ...settingsPatchRef.current, ...patch };
-    if (settingsTimerRef.current !== null) window.clearTimeout(settingsTimerRef.current);
-    settingsTimerRef.current = window.setTimeout(() => {
-      settingsTimerRef.current = null;
-      const payload = settingsPatchRef.current;
-      settingsPatchRef.current = {};
-      void (async () => {
-        const link = linkRef.current;
-        if (!link) return;
-        try {
-          const requested = await link.setSettings(payload);
-          setState((current) => current === null ? current : { ...current, requestedSettings: requested });
-        } catch (error) {
-          toast.error("设置下发失败", { description: errorMessage(error) });
-        }
-      })();
-    }, SETTINGS_DEBOUNCE_MS);
+  // No debounce of our own: the volume stepper writes once per deliberate press,
+  // and the brightness slider does its own coalescing (BRIGHTNESS_THROTTLE_MS).
+  const sendSettings = useCallback(async (patch: { volume?: number; brightness?: number }) => {
+    const link = linkRef.current;
+    if (!link) return;
+    try {
+      const requested = await link.setSettings(patch);
+      setState((current) => current === null ? current : { ...current, requestedSettings: requested });
+    } catch (error) {
+      toast.error("设置下发失败", { description: errorMessage(error) });
+    }
   }, [toast]);
 
   const live = state?.live === true;
@@ -201,10 +193,34 @@ export function ZosPanel() {
     now,
   });
   const vitals = describeVitals(state);
-  const details = describeTelemetry(state, now);
+  const facts = describeTelemetry(state, now);
   const residency = describeResidency(state);
   const driver = describeDriver(display, menu, state?.telemetry ?? null, live);
-  const supplicantNote = details.find((row) => row.key === "supplicant")?.note;
+  const supplicantNote = facts.find((row) => row.key === "supplicant")?.note;
+
+  // The device's own root ring: four destinations, content one level down.
+  const sections = describeSections({
+    menu,
+    display,
+    telemetry: state?.telemetry ?? null,
+    live,
+    bleAvailable: bleSupport.ok,
+  });
+
+  // The accordion is controlled so the first non-empty menu can pick what is
+  // open (the menu arrives a poll after mount, which an uncontrolled
+  // defaultValue would miss). After that the user owns it, "all closed"
+  // included — hence the ref rather than a re-derive on every render.
+  const [openSection, setOpenSection] = useState<string | undefined>(undefined);
+  const openChosenRef = useRef(false);
+  const sectionsRef = useRef<ZosSection[]>(sections);
+  sectionsRef.current = sections;
+  const sectionsReady = sections.length > 0;
+  useEffect(() => {
+    if (!sectionsReady || openChosenRef.current) return;
+    openChosenRef.current = true;
+    setOpenSection(defaultOpenSection(sectionsRef.current));
+  }, [sectionsReady]);
 
   // Drafts retire once the service echoes them; until then they own the display.
   const volumeShown = volumeDraft ?? requested?.volume ?? null;
@@ -220,48 +236,45 @@ export function ZosPanel() {
       ? { color: "brand" as const, icon: Radio, label: "设备在线" }
       : { color: "neutral" as const, icon: WifiOff, label: "设备离线" };
 
+  const release = () => void applyDisplay(null, false, "已交还旋钮");
+
+  // 点一行菜单：固定，或者——同一行再点一次——交还。指令和回执由 pinIntent 决定。
+  const pin = (target: ZosPinTarget) => {
+    const intent = pinIntent(target);
+    void applyDisplay(intent.focus, intent.pinned, intent.title, intent.detail ?? undefined);
+  };
+
   return (
     <main className="zc-shell">
-      <div className="zc-topbar">
-        <div className="zc-topbar__driver">
-          {/* The page header above already says ZOS CONSOLE; this labels who is
-              driving the panel, which is the thing that changes. */}
-          <span>DISPLAY CONTROL</span>
-          <strong>{driver.label}</strong>
-          <small>{driver.detail}</small>
-        </div>
-        <div className="zc-topbar__status">
+      {/* 页头已经写着「系统」，面板本身就是这一页——标题只留给读屏器。 */}
+      <h1 className="sr-only">ZOS 系统控制台</h1>
+
+      <Surface variant="solid" outline className="zc-panel" contentClassName="flex flex-col">
+        {/* ── 状态条：此刻为真的事实，各说一次 ── */}
+        <div className="zc-strip">
           <Chip
             size="md"
             color={deviceChip.color}
             variant="transparent"
             icon={deviceChip.icon}
             iconProps={{ "aria-hidden": true }}
-            aria-live="polite"
           >
             {deviceChip.label}
           </Chip>
-          <Chip
-            size="md"
-            color={mirror.phase === "live" ? "brand" : "neutral"}
-            variant="transparent"
-            icon={mirror.phase === "live" ? Radio : WifiOff}
-            iconProps={{ "aria-hidden": true }}
-            aria-live="polite"
-          >
-            {mirror.label}
-          </Chip>
-        </div>
-      </div>
-
-      <div className="zc-body">
-        <section className="zc-device" aria-label="设备镜像与遥控">
-          <ZosMirrorScreen rgbBase64={frame?.rgbBase64 ?? null} status={mirror} />
-
-          {/* Battery / Wi-Fi / uptime are glanceable facts, not table rows.
-              Offline they vanish entirely — the chip above already says why. */}
+          {/* 只有「谁在开」这一行播报：运行时长每分钟变一次，整条都设成 live
+              区域的话读屏器会跟着报时。 */}
+          <span className="zc-driver" role="status" aria-live="polite">
+            {driver.pinned
+              ? <Pin aria-hidden="true" className="zc-driver__icon" />
+              : <CircleDot aria-hidden="true" className="zc-driver__icon" />}
+            <span className="zc-driver__text">
+              <strong>{driver.label}</strong>
+              <small>{driver.detail}</small>
+            </span>
+          </span>
+          {/* 每个 chip 自己说清是什么：图标是装饰，读屏器只拿得到文字。 */}
           {live && (
-            <div className="zc-vitals" aria-label="设备概况">
+            <span className="zc-strip__vitals">
               {vitals.battery && (
                 <Chip
                   size="md"
@@ -269,12 +282,20 @@ export function ZosPanel() {
                   color={BATTERY_COLORS[vitals.battery.tone]}
                   icon={vitals.battery.charging ? BatteryCharging : BATTERY_ICONS[vitals.battery.tone]}
                   iconProps={{ "aria-hidden": true }}
+                  aria-label={`电量 ${vitals.battery.label}${vitals.battery.charging ? "，充电中" : ""}`}
                 >
                   {vitals.battery.label}{vitals.battery.charging ? " · 充电中" : ""}
                 </Chip>
               )}
               {vitals.wifi && (
-                <Chip size="md" variant="transparent" color="neutral" icon={Wifi} iconProps={{ "aria-hidden": true }}>
+                <Chip
+                  size="md"
+                  variant="transparent"
+                  color="neutral"
+                  icon={Wifi}
+                  iconProps={{ "aria-hidden": true }}
+                  aria-label={`Wi-Fi ${vitals.wifi}`}
+                >
                   {vitals.wifi}
                 </Chip>
               )}
@@ -283,233 +304,261 @@ export function ZosPanel() {
                   已运行 {vitals.uptime}
                 </Chip>
               )}
-            </div>
+            </span>
           )}
+        </div>
 
-          <ZosInputDeck live={live} onSend={sendInput} />
+        {/* ── 主体：左＝设备（镜像 + 遥控甲板），右＝设备菜单与下发 ── */}
+        <div className="zc-body">
+          <section className="zc-device" aria-label="设备镜像与遥控">
+            <ZosMirrorScreen rgbBase64={frame?.rgbBase64 ?? null} status={mirror} />
 
-          {linkError && (
-            <p className="zc-note zc-note--error" role="alert">
-              读取设备状态失败：{linkError}
-            </p>
-          )}
-          {!live && !linkError && (
-            <p className="zc-note" role="status">
-              <WifiOff aria-hidden="true" />
-              时钟当前没有在跑 ZOS 固件。频道固定与音量亮度会保存在服务里，固件上线后第一次拉取即生效；远程按键则不会离线排队。
-            </p>
-          )}
-        </section>
+            <ZosInputDeck live={live} onSend={sendInput} />
 
-        <aside className="zc-side">
-          <Surface className="zc-card" variant="solid" outline>
-            <List>
-              {/* 频道之外还有音乐 / 游戏 / 设置三项，都是设备菜单里的真实条目。 */}
-              <ListTitle>
-                <span className="zc-cardtitle">
-                  设备菜单
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="transparent"
-                    color="brand"
-                    disabled={!display.pinned || busyId !== null}
-                    onClick={() => void applyDisplay(null, false, "已交还旋钮")}
-                  >
-                    <PinOff aria-hidden="true" />交还旋钮
-                  </Button>
-                </span>
-              </ListTitle>
-              {menu.length === 0 && (
-                <ListItem>
-                  <span className="text-cladd-fg-soft">
-                    {linkError ? "菜单不可用" : "正在读取设备菜单…"}
-                  </span>
-                </ListItem>
+            {linkError && (
+              <p className="zc-note zc-note--error" role="alert">
+                读取设备状态失败：{linkError}
+              </p>
+            )}
+            {!live && !linkError && (
+              <ZosOfflineNotice
+                zosFlashed={state?.zosFlashed === true}
+                support={bleSupport}
+                onProvision={() => setProvisionOpen(true)}
+              />
+            )}
+          </section>
+
+          <aside className="zc-menu">
+            <SectionTitle>
+              设备菜单
+              {display.pinned && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="transparent"
+                  color="brand"
+                  className="ml-auto normal-case"
+                  disabled={busy}
+                  onClick={release}
+                >
+                  <PinOff aria-hidden="true" />交还旋钮
+                </Button>
               )}
-              {menu.map((entry) => {
-                const Icon = KIND_ICONS[entry.kind];
-                const pinnedHere = display.pinned && display.focus === entry.id;
-                return (
-                  <div key={entry.id}>
-                    <ListButton
-                      size="md"
-                      color="brand"
-                      selected={pinnedHere}
-                      disabled={busyId !== null}
-                      icon={<Icon aria-hidden="true" />}
-                      footer={entryOnScreenLabel(entry, state)}
-                      after={pinnedHere
-                        ? <Chip size="sm" color="brand" icon={Pin} iconProps={{ "aria-hidden": true }}>已固定</Chip>
-                        : <Chip size="sm" color="neutral" variant="transparent">{KIND_LABELS[entry.kind]}</Chip>}
-                      aria-label={`把设备固定在${entry.label}`}
-                      onClick={() => {
-                        if (pinnedHere) {
-                          void applyDisplay(null, false, "已交还旋钮");
-                          return;
-                        }
-                        // 「设备已固定在…」说早了：PUT 只到服务，设备要等自己下一次
-                        // 拉取状态才切（真机实测 2–7 秒）。顶部的「控制台接管」一行
-                        // 会在心跳确认后改口，这里只承诺已经发生的事。
-                        void applyDisplay(
-                          entry.id,
-                          true,
-                          `已固定「${entry.label}」`,
-                          "时钟下次拉取状态时切过去，通常几秒内。",
-                        );
-                      }}
-                    >
-                      {entry.label}
-                    </ListButton>
-                    {/* game:<id> 直达某个游戏；纯 "game" 只到游戏列表（真机实测）。 */}
-                    {entry.kind === "game" && (
-                      <div className="zc-games" role="group" aria-label="直达游戏">
-                        {ZOS_GAME_SHORTCUTS.map((game) => {
-                          const focus = zosGameFocus(game.id);
-                          const pinnedGame = zosPinnedOn(display, focus);
-                          return (
-                            <Button
-                              key={game.id}
-                              type="button"
-                              size="sm"
-                              variant={pinnedGame ? "gradient" : "transparent"}
-                              color="brand"
-                              outline
-                              disabled={busyId !== null}
-                              onClick={() => {
-                                const next = zosToggleFocus(display, focus);
-                                if (next === null) {
-                                  void applyDisplay(null, false, "已交还旋钮");
-                                } else {
-                                  void applyDisplay(
-                                    next,
-                                    true,
-                                    `已固定「${game.label}」`,
-                                    "时钟下次拉取状态时直接进入游戏。",
-                                  );
-                                }
-                              }}
-                            >
-                              {game.label}
-                            </Button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              <ListSeparator />
-              <ListItem>
-                <span className="text-cladd-fg-soft">
-                  固定后旋钮暂时不切台；再点一次同一项，或按「交还旋钮」即可放开。
-                </span>
-              </ListItem>
-            </List>
-          </Surface>
+            </SectionTitle>
 
-          <Surface className="zc-card" variant="solid" outline>
-            <List>
-              <ListTitle>音量与亮度</ListTitle>
-              <ListItem>
-                <div className="zc-setting">
-                  <span className="zc-setting__label">
-                    <Volume2 aria-hidden="true" />音量
-                  </span>
-                  <label className={volumeShown === null ? "zc-setting__slider is-unset" : "zc-setting__slider"}>
-                    <span className="sr-only">音量（0 到 6 级）</span>
-                    <Slider
-                      value={volumeShown ?? 0}
-                      min={0}
-                      max={6}
-                      step={1}
-                      color="brand"
-                      onChange={(value: number) => {
-                        setVolumeDraft(value);
-                        commitSettings({ volume: value });
-                      }}
-                    />
-                  </label>
-                  <span className="zc-setting__value">{volumeText(volumeShown)}</span>
-                </div>
-              </ListItem>
-              <ListItem>
-                <div className="zc-setting">
-                  <span className="zc-setting__label">
-                    <SunMedium aria-hidden="true" />亮度
-                  </span>
-                  <label className={brightnessShown === null ? "zc-setting__slider is-unset" : "zc-setting__slider"}>
-                    <span className="sr-only">亮度（1 到 10 级）</span>
-                    <Slider
-                      value={brightnessShown ?? 1}
-                      min={1}
-                      max={10}
-                      step={1}
-                      color="brand"
-                      onChange={(value: number) => {
-                        setBrightnessDraft(value);
-                        commitSettings({ brightness: value });
-                      }}
-                    />
-                  </label>
-                  <span className="zc-setting__value">{brightnessText(brightnessShown)}</span>
-                </div>
-              </ListItem>
-              <ListItem>
-                <span className="text-cladd-fg-softer">
-                  这里显示的是控制台最近一次请求；设备上旋钮侧键也能调，那边的改动不会回读到这里。
-                </span>
-              </ListItem>
-            </List>
-          </Surface>
+            <ZosMenu
+              sections={sections}
+              open={openSection}
+              onOpenChange={setOpenSection}
+              busy={busy}
+              emptyLabel={linkError ? "菜单不可用" : "正在读取设备菜单…"}
+              bleNote={bleSupport.ok ? undefined : <BleUnavailableNote support={bleSupport} />}
+              onPin={pin}
+              onProvision={() => setProvisionOpen(true)}
+            />
 
-          <Surface className="zc-card" variant="solid" outline>
-            <List>
-              <ListTitle>
-                <span className="zc-cardtitle">
-                  详细状态
+            {/* 音量亮度不回读——设备旋钮和侧键要能压过控制台，代价就是这里
+                只知道自己发过什么。所以它们是「下发」，不是「读数」。 */}
+            <SectionTitle className="zc-menu__title">下发到设备</SectionTitle>
+            <div className="zc-out">
+              <div className={volumeShown === null ? "zc-out__row is-unsent" : "zc-out__row"}>
+                <span className="zc-out__label"><Volume2 aria-hidden="true" />音量</span>
+                {/* 0–6 共七格，人一次只动一格：官方文档里这正是 NumberField
+                    而不是 Slider 的场景。 */}
+                <NumberField
+                  size="md"
+                  color="brand"
+                  input={false}
+                  min={ZOS_VOLUME_MIN}
+                  max={ZOS_VOLUME_MAX}
+                  value={volumeShown ?? ZOS_VOLUME_START}
+                  role="group"
+                  aria-label={`音量，${ZOS_VOLUME_MIN} 到 ${ZOS_VOLUME_MAX} 级`}
+                  onChange={(value: number) => {
+                    setVolumeDraft(value);
+                    void sendSettings({ volume: value });
+                  }}
+                />
+                <span className="zc-out__value">{volumeText(volumeShown)}</span>
+              </div>
+              <div className={brightnessShown === null ? "zc-out__row is-unsent" : "zc-out__row"}>
+                <span className="zc-out__label"><SunMedium aria-hidden="true" />亮度</span>
+                {/* Slider 拿不到 aria-label，label 包住原生 range 才有名字。 */}
+                <label className="zc-out__slider">
+                  <span className="sr-only">亮度（{ZOS_BRIGHTNESS_MIN} 到 {ZOS_BRIGHTNESS_MAX} 级）</span>
+                  <Slider
+                    variant="track"
+                    rangeFill
+                    rounded
+                    size="sm"
+                    color="brand"
+                    min={ZOS_BRIGHTNESS_MIN}
+                    max={ZOS_BRIGHTNESS_MAX}
+                    step={1}
+                    throttle={BRIGHTNESS_THROTTLE_MS}
+                    value={brightnessShown ?? ZOS_BRIGHTNESS_START}
+                    onChange={(value: number) => {
+                      setBrightnessDraft(value);
+                      void sendSettings({ brightness: value });
+                    }}
+                  />
+                </label>
+                <span className="zc-out__value">{brightnessText(brightnessShown)}</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        {/* ── 诊断：排障才看的事实，默认收起 ── */}
+        <CollapsibleRoot>
+          <div className="zc-diag">
+            <CollapsibleTrigger>
+              <Button
+                type="button"
+                variant="transparent"
+                outline={false}
+                size="md"
+                className="zc-diag__trigger"
+                contentClassName="justify-start gap-2 px-0"
+              >
+                <CollapsibleIndicator className="text-cladd-fg-softer transition-transform data-[open]:rotate-90">
+                  <ChevronRight className="size-3.5" />
+                </CollapsibleIndicator>
+                诊断
+                <span className="zc-diag__hint">IP · 内存 · 心跳 · 固件驻留</span>
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsiblePanel>
+              <div className="zc-diag__inner">
+                {/* 只读事实做成「刻进去」的槽，而不是又一张卡片。 */}
+                <SurfaceCut className="zc-facts" contentClassName="zc-facts__grid">
+                  {facts.map((row) => (
+                    <span key={row.key} className="zc-fact">
+                      <span>{row.label}</span>
+                      <span>{row.value}</span>
+                    </span>
+                  ))}
+                  <span className="zc-fact">
+                    <span>{residency.label}</span>
+                    <span>{residency.value}</span>
+                  </span>
+                </SurfaceCut>
+                <div className="zc-diag__foot">
                   <Button
                     type="button"
-                    size="sm"
+                    size="md"
                     variant="transparent"
-                    disabled={busyId !== null}
-                    aria-label="立即刷新设备状态"
+                    outline
+                    disabled={busy}
                     onClick={() => void linkRef.current?.refreshState()}
                   >
                     <RefreshCw aria-hidden="true" />刷新
                   </Button>
-                </span>
-              </ListTitle>
-              {details.map((row) => (
-                <ListItem key={row.key}>
-                  <span className="text-cladd-fg-soft">{row.label}</span>
-                  <span className="ml-auto font-mono">{row.value}</span>
-                </ListItem>
-              ))}
-              <ListItem>
-                <span className="text-cladd-fg-soft">{residency.label}</span>
-                <span className="ml-auto font-mono">{residency.value}</span>
-              </ListItem>
-              {(supplicantNote ?? residency.note) && (
-                <ListItem>
-                  <span className="text-cladd-fg-softer">
-                    {supplicantNote}{supplicantNote && residency.note ? " " : ""}{residency.note}
-                  </span>
-                </ListItem>
-              )}
-            </List>
-          </Surface>
-        </aside>
-      </div>
+                  {(supplicantNote ?? residency.note) && (
+                    <p className="zc-diag__note">
+                      {supplicantNote}{supplicantNote && residency.note ? "；" : ""}{residency.note}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </CollapsiblePanel>
+          </div>
+        </CollapsibleRoot>
+      </Surface>
+
+      <ZosProvisionDialog
+        open={provisionOpen}
+        onOpenChange={setProvisionOpen}
+        // The device comes back on the LAN before the 2 s state loop notices;
+        // asking once immediately is what makes the panel agree with the dialog.
+        onProvisioned={() => void linkRef.current?.refreshState()}
+      />
     </main>
   );
 }
 
+interface ZosOfflineNoticeProps {
+  /** ZOS is in flash, so the clock is still running it — it is just off the air. */
+  zosFlashed: boolean;
+  support: BleSupport;
+  onProvision: () => void;
+}
+
 /**
- * Footer line for a menu row, from the device's last report only. Offline no
- * row may claim the device is showing anything.
+ * What to say when nothing is reporting.
+ *
+ * Three different situations hide behind one silence, and the console can tell
+ * two of them apart: a flashed ZOS that dropped off the network is a clock that
+ * needs configuring, not a clock that might be running someone else's firmware.
+ * Saying "时钟当前没有在跑 ZOS 固件" to that user is simply wrong, and it hides
+ * the one action that would fix it.
+ *
+ * This is the second home of the BLE wizard, and the loud one: online it is a
+ * row under 设置 because it is a setting, but offline it is the only thing
+ * worth doing, so it gets a card of its own next to the dead mirror.
  */
-function entryOnScreenLabel(entry: ZosMenuEntry, state: ZosState | null): string | undefined {
-  if (state?.live !== true || !state.telemetry) return undefined;
-  return entryOnScreen(entry, state.telemetry) ? "设备正在显示" : undefined;
+function ZosOfflineNotice({ zosFlashed, support, onProvision }: ZosOfflineNoticeProps) {
+  if (zosFlashed) {
+    return (
+      <Surface
+        variant="solid"
+        outline
+        color="brand"
+        className="mt-3"
+        contentClassName="flex flex-col gap-2 p-4"
+      >
+        <span className="flex items-center gap-2 text-cladd-fg">
+          <WifiOff aria-hidden="true" className="size-4" />
+          <strong>时钟掉线了</strong>
+        </span>
+        <span className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
+          ZOS 已经刷进闪存，所以它还在跑，只是没有在网上。
+          最常见的原因是换了路由器或改了 Wi-Fi 密码——用蓝牙给它重新配一次就行，不用拆机也不用接线。
+        </span>
+        {support.ok ? (
+          <div>
+            <Button type="button" size="lg" color="brand" onClick={onProvision}>
+              <Bluetooth />蓝牙配网
+            </Button>
+          </div>
+        ) : (
+          <BleUnavailableNote support={support} />
+        )}
+      </Surface>
+    );
+  }
+
+  return (
+    <>
+      <p className="zc-note" role="status">
+        <WifiOff aria-hidden="true" />
+        时钟当前没有在跑 ZOS 固件。频道固定与音量亮度会保存在服务里，固件上线后第一次拉取即生效；远程按键则不会离线排队。
+      </p>
+      <p className="zc-note">
+        {/* 服务只知道「没人上报」。这三种情况在局域网这一侧长得一模一样，
+            所以把假设写出来，而不是让按钮替它断言。 */}
+        没上报也可能是「刷了 ZOS 但掉线了」。如果时钟面板上确实是 ZOS 的界面，可以直接走蓝牙配网。
+      </p>
+      {support.ok ? (
+        <div className="mt-2">
+          <Button type="button" size="md" color="neutral" onClick={onProvision}>
+            <Bluetooth />蓝牙配网
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-2"><BleUnavailableNote support={support} /></div>
+      )}
+    </>
+  );
+}
+
+/** Why there is no button here, in the same words the dialog would have used. */
+function BleUnavailableNote({ support }: { support: BleSupport }): ReactNode {
+  return (
+    <p className="flex items-start gap-2 text-cladd-fg-softer text-cladd-xs leading-relaxed" role="status">
+      <BluetoothOff aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+      <span><strong className="text-cladd-fg-soft">{support.title}</strong>：{support.detail}</span>
+    </p>
+  );
 }

@@ -205,11 +205,17 @@ describe("tc002-os host link", () => {
     // self-check. Without this assertion the two sides could drift: the encoder
     // would change, the fixture would keep passing on the firmware side, and the
     // mismatch would only appear on hardware as a menu that silently went empty.
+    //
+    // The channels carry a revision and a ttl because that is the shape a
+    // current service actually emits, and because the placement of those two
+    // records — their own keys, after their item, each repeating its id — is
+    // what the firmware's parser is written against. A fifth field on `item`
+    // instead would make a deployed build drop every menu entry.
     const hub = new OsLinkHub();
     hub.setMenu([
-      entry("btc", "市场轮播"),
-      entry("matrixclock", "数字雨时钟"),
-      entry("notice", "通知板"),
+      { ...entry("btc", "市场轮播"), rev: "9f14c0b2ae31", ttlMs: 60_000 },
+      { ...entry("matrixclock", "数字雨时钟"), rev: "e90a8dc5b287", ttlMs: 10_000 },
+      { ...entry("notice", "通知板"), rev: "0c33d18a7b45", ttlMs: 30_000 },
       entry("music", "音乐", "music"),
       entry("game", "游戏", "game"),
       entry("settings", "设置", "settings"),

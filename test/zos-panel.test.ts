@@ -24,29 +24,59 @@ describe("zos panel", () => {
     expect(html).toContain("设备离线");
     expect(html).toContain("时钟没有在跑 ZOS 固件");
     expect(html).toContain("正在读取设备菜单…");
-    // 接管状态与三张侧栏卡。
+    // 谁在开面板,是状态条上唯一会变的那一行。
     expect(html).toContain("旋钮自由");
     expect(html).toContain("设备菜单");
-    expect(html).toContain("音量与亮度");
-    expect(html).toContain("详细状态");
-    expect(html).toContain("交还旋钮");
-    // Wi-Fi 重连次数是安全属性,不是花絮:0 次代表固件没动过无线链路。
-    expect(html).toContain("Wi-Fi 重连");
-    // 固件驻留说的是「断电重启回到什么」;没有任何记录时必须承认未知。
-    expect(html).toContain("固件驻留");
-    expect(html).toContain("未知");
+    expect(html).toContain("下发到设备");
   });
 
-  test("shows 离线 for every telemetry detail instead of stale numbers", () => {
+  test("the page carries one heading, and it is not visible chrome", () => {
     const html = markup(createElement(ZosPanel));
-    for (const label of ["当前界面", "IP 地址", "空闲内存", "最近心跳"]) {
-      expect(html).toContain(label);
+    // 页头的 Tab 已经写着「系统」,面板自己再叠一层眉题 + 大标题 + 一句话
+    // 就是同一件事说三遍——标题只留给读屏器。
+    expect(html).toContain('<h1 class="sr-only">ZOS 系统控制台</h1>');
+    expect(html).not.toContain("DISPLAY CONTROL");
+    expect(html).not.toContain("系统固件控制台");
+    // 一整块面板,不是三张各带标题的卡。
+    expect(html).not.toContain("音量与亮度");
+    expect(html).not.toContain("详细状态");
+    expect(html.match(/<h1/g)?.length ?? 0).toBe(1);
+  });
+
+  test("nothing is pinned, so there is nothing to hand back", () => {
+    const html = markup(createElement(ZosPanel));
+    // 旧版常驻一个永远禁用的「交还旋钮」;没接管过就没有交还这回事。
+    expect(html).not.toContain("交还旋钮");
+  });
+
+  test("the read-only facts sit behind a disclosure, not in the first screen", () => {
+    const html = markup(createElement(ZosPanel));
+    // 抽屉标题说清里面有什么,内容默认不占版面——排障才看的事实不该和
+    // 「现在能按什么」抢同一块地方。
+    expect(html).toContain("诊断");
+    expect(html).toContain("IP · 内存 · 心跳 · 固件驻留");
+    for (const label of ["IP 地址", "空闲内存", "Wi-Fi 重连", "最近心跳"]) {
+      expect(html).not.toContain(label);
     }
-    // 详情行离线时全部塌成「离线」。
-    expect(html.match(/离线/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
+    // 固件驻留在抽屉里的取值(离线时是「未知」)同样不该出现在第一屏。
+    expect(html).not.toContain("未知");
     // 概况条（电量 / Wi-Fi / 运行时长）离线时整条消失,而不是展示旧数字。
-    expect(html).not.toContain("zc-vitals");
+    expect(html).not.toContain("zc-strip__vitals");
     expect(html).not.toContain("已运行");
+  });
+
+  test("volume steps and brightness slides — both are sends, not readouts", () => {
+    const html = markup(createElement(ZosPanel));
+    // 0–6 共七格,一次动一格:NumberField 的 ± 就是设备侧键的那一步。
+    expect(html).toContain("cladd-number-field");
+    expect(html).toContain('aria-label="音量，0 到 6 级"');
+    // 亮度是比例,滑轨的填充量本身就是读数。
+    expect(html).toContain('type="range"');
+    expect(html).toContain("亮度（1 到 10 级）");
+    // 读不回来不是缺陷,是序列号让设备旋钮压过控制台的代价——所以说「未下发」,
+    // 不说「未知」,也不用一整段话解释自己。
+    expect(html.match(/未下发/g)?.length ?? 0).toBe(2);
+    expect(html).not.toContain("那边的改动不会回读到这里");
   });
 
   test("the remote deck is present but inert on the offline first paint", () => {
@@ -152,6 +182,9 @@ describe("zos panel", () => {
     expect(appSource).toContain("<ZosPanel />");
     expect(appSource).toContain('nextView !== "zos"');
     expect(headerSource).toContain('value="zos"><MonitorCog />系统</Tab>');
+    // 系统页不要页级标题块:面板自带状态条,再来一层就是第二个页头。
+    expect(appSource).toContain('{view !== "zos" && (');
+    expect(appSource).not.toContain("TC002 ZOS CONSOLE");
 
     // 整数倍放大:尺寸给在画布上(边框往外包),五个断点都是整数 px。
     // 反过来让边框盒去凑 52:16,扣掉边框剩下的内容宽就不再是 52 的整数倍。
@@ -166,6 +199,41 @@ describe("zos panel", () => {
     expect(css).toMatch(/\.zc-screen__frame canvas\s*\{[^}]*image-rendering:\s*pixelated;/s);
     expect(css).toMatch(/\.zc-screen__frame::after\s*\{[^}]*background-size:\s*calc\(100% \/ 52\)/s);
     expect(css).toMatch(/\.zc-screen__notice\s*\{[^}]*z-index:\s*2;/s);
+  });
+
+  test("the right column is built from the kit, not from divs dressed up as it", () => {
+    // 结构本身由 zos-menu.test.ts 真渲染出来看(四个触发器、单开、标记只出现
+    // 一次)。这里只留 markup 里看不见的那几条:组件的取舍,以及不该复活的旧写法。
+    const html = markup(createElement(ZosPanel));
+    // 分组小标题全 app 一个样,所以用 SectionTitle 而不是自己写一层眉题。
+    expect(html).toContain("cladd-section-title");
+    expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(2);
+    // 离散、一次一格 → NumberField;连续比例 → Slider。
+    expect(html).toContain("cladd-number-field");
+    expect(html).toContain("cladd-slider");
+  });
+
+  test("no hand-rolled facsimile of a kit component crept back in", async () => {
+    const [panelSource, menuSource] = await Promise.all([
+      Bun.file(new URL("../web/src/components/zos/zos-panel.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/zos/zos-menu.tsx", import.meta.url)).text(),
+    ]);
+
+    // 防抖用组件自带的,不再手搓 setTimeout——旧版那个 250ms debounce 加两个
+    // ref 就是这么长出来的。
+    expect(panelSource).toContain("throttle={BRIGHTNESS_THROTTLE_MS}");
+    expect(panelSource).not.toContain("setTimeout");
+    // 只读事实是「刻进去」的槽,不是又一张卡片。抽屉默认收起,渲染不出来,
+    // 所以这一条只能在源码上盯。
+    expect(panelSource).toContain("<SurfaceCut");
+    // multiple 不传:一次开一个,与设备一次只显示一环同构。
+    expect(menuSource).not.toContain("multiple");
+    // 独立 Chip 不下探到 xs/2xs——那两档是给嵌套用的,单独站一行读不出来。
+    for (const source of [panelSource, menuSource]) {
+      expect(source).not.toMatch(/<Chip[^>]*size="(2xs|xs)"/);
+    }
+    // Surface 的 className 管盒子、contentClassName 管里面,别把布局写反。
+    expect(panelSource).toMatch(/contentClassName="flex flex-col"/);
   });
 
   test("keeps the system tab reachable while a sideload firmware holds the device", () => {

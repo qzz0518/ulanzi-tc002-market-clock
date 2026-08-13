@@ -26,7 +26,6 @@ import {
   formatUptime,
   nextPollDelayMs,
   pointerAngleDeg,
-  screenLabel,
   volumeText,
   zosGameFocus,
   zosInputForKey,
@@ -165,7 +164,9 @@ describe("zos telemetry readout", () => {
   test("a live device renders the numbers plus the heartbeat age", () => {
     const rows = describeTelemetry(state(), 1_006_000);
     const byKey = new Map(rows.map((row) => [row.key, row]));
-    expect(byKey.get("screen")?.value).toBe("启动器");
+    // 「当前界面」被砍掉了:镜像就是那块面板的实况,再用固件的内部词汇复述一遍
+    // (launcher / games)只是同一件事换个说法,而且是更难懂的那个说法。
+    expect(byKey.has("screen")).toBe(false);
     expect(byKey.get("ip")?.value).toBe("192.168.8.240");
     expect(byKey.get("free")?.value).toBe("16568 KB");
     expect(byKey.get("heartbeat")?.value).toBe("6 秒前");
@@ -231,12 +232,6 @@ describe("which menu entry the device is actually showing", () => {
     expect(entryOnScreen(entry("music"), null)).toBe(false);
   });
 
-  test("every screen the firmware reports has a label", () => {
-    // osLogic.cc 的 screenName 分支穷举;漏一个就会把 games 这种原样打到界面上。
-    for (const screen of ["launcher", "channel", "music", "settings", "game", "games", "boot"]) {
-      expect(screenLabel(screen)).not.toBe(screen);
-    }
-  });
 });
 
 describe("zos driver status", () => {
@@ -294,6 +289,34 @@ describe("zos driver status", () => {
   test("an id missing from the menu still names something", () => {
     const driver = describeDriver({ focus: "gone", pinned: true }, MENU, null, true);
     expect(driver.detail).toContain("gone");
+  });
+
+  test("a game shortcut is named by its engine, not by the wire format", () => {
+    // 拉取文档里只有 游戏 这一环,七个引擎的 id 是控制台自己拼的——所以也只有
+    // 控制台能把 game:snake 说成人话。
+    const driver = describeDriver({ focus: "game:snake", pinned: true }, MENU, null, true);
+    expect(driver.detail).toContain("贪吃蛇");
+    expect(driver.detail).not.toContain("game:snake");
+  });
+
+  test("being in a game is all the confirmation a game pin can get", () => {
+    // 固件报 screen: "game" 时不说是哪一个引擎;而这一台是控制台自己点进去的,
+    // 所以「在游戏里」就足以确认。否则这一行会永远停在「等下一次心跳确认」。
+    const playing = describeDriver(
+      { focus: "game:snake", pinned: true },
+      MENU,
+      telemetry({ screen: "game" }),
+      true,
+    );
+    expect(playing.detail).toContain("已锁定");
+
+    const notYet = describeDriver(
+      { focus: "game:snake", pinned: true },
+      MENU,
+      telemetry({ screen: "launcher" }),
+      true,
+    );
+    expect(notYet.detail).toContain("等下一次心跳确认");
   });
 });
 
@@ -797,14 +820,16 @@ describe("zos firmware residency", () => {
 });
 
 describe("zos settings text", () => {
-  test("volume names mute and the unknown state", () => {
-    expect(volumeText(null)).toBe("未知");
+  // 音量亮度是只写的:序列号让设备旋钮和侧键压过控制台,代价就是读不回来。
+  // 所以「没有值」不是「未知」——是这台控制台还没下发过。
+  test("volume names mute and the not-yet-sent state", () => {
+    expect(volumeText(null)).toBe("未下发");
     expect(volumeText(0)).toBe("静音");
     expect(volumeText(4)).toBe("4 级");
   });
 
   test("brightness shows the device's own 1..10 scale", () => {
-    expect(brightnessText(null)).toBe("未知");
+    expect(brightnessText(null)).toBe("未下发");
     expect(brightnessText(7)).toBe("7 / 10");
   });
 });
