@@ -321,7 +321,7 @@
   white-space: nowrap;
 }
 .mini-player__title { font-size: 0.74rem; line-height: 1.25; }
-.mini-player__artist { color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.25; }
+.mini-player__artist { font-size: 0.64rem; line-height: 1.25; }
 .mini-player__rule { flex: none; }
 
 /* 右端八根条。纯 CSS 动画，不接 Web Audio —— 见组件里的说明。 */
@@ -658,9 +658,12 @@
   padding: 0.72rem 0 0.68rem;
 }
 .page-heading > div:first-child { min-width: 0; }
-.page-heading span { color: var(--primary); font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.1em; }
+/* Scoped to the copy block: the mini player shares this row, and a bare
+   `.page-heading span` painted its artist line and cladd's inner button spans
+   brand green at (0,1,1) — over every (0,1,0) rule the widget itself carries. */
+.page-heading > div:first-child > span { color: var(--primary); font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.1em; }
 .page-heading h1 { margin: 0.12rem 0 0; font-size: clamp(1.65rem, 2.4vw, 2.15rem); font-weight: 600; letter-spacing: -0.05em; line-height: 1.05; }
-.page-heading p { max-width: 42rem; margin: 0.3rem 0 0; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.45; text-wrap: pretty; }
+.page-heading > div:first-child > p { max-width: 42rem; margin: 0.3rem 0 0; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.45; text-wrap: pretty; }
 
 .studio-layout {
   display: grid;
@@ -1180,9 +1183,11 @@
   .brand-device { display: none; }
   .device-settings-trigger { min-width: 2.75rem; }
   .page-heading { display: block; padding: 0.7rem 0 0.55rem; }
-  .page-heading span { display: none; }
+  /* Same scoping as the base rule: unscoped, this display:none would erase the
+     mini player's artist line and the spans cladd wraps its icons in. */
+  .page-heading > div:first-child > span { display: none; }
   .page-heading h1 { font-size: 1.12rem; letter-spacing: -0.02em; }
-  .page-heading p { display: none; }
+  .page-heading > div:first-child > p { display: none; }
   .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library, .studio-layout.is-game { display: block; padding-top: 0; }
   .studio-layout.is-zos { display: block; padding-top: 0; }
   .game-shell { padding-top: 0.65rem; }
