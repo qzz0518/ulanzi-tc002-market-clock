@@ -1601,21 +1601,12 @@ export function MusicPlayer({
                 </div>
               )}
 
-              {zos && (
-                // 两条喂法，取决于播放器在哪儿：Spotify 在 Connect 设备上，
-                // service.ts 的 publishOsNowPlaying 轮询得到；网易云的播放器就是
-                // 这个浏览器，只有它知道音箱里出来的是什么，所以由本组件 PUT
-                // /api/os/now-playing 上报。旧文案说「只跟随 Spotify Connect」，
-                // 在网易云也能推上去之后就成了假话。
-                <div className="music-sync-hint" role="status">
-                  <span aria-hidden="true"><MonitorCog /></span>
-                  <span>
-                    {remoteMode
-                      ? "时钟的「音乐」页会跟随 Spotify Connect 正在播放的歌曲逐句显示歌词，由服务端轮询，关掉这个页面也不影响。"
-                      : "时钟的「音乐」页会跟随这里正在播放的歌曲逐句显示歌词——网页就是网易云的播放器，所以这一页得开着。"}
-                  </span>
-                </div>
-              )}
+              {/* The sync hint that used to sit here explained which side owns
+                  playback and warned that the NetEase path needed this page kept
+                  open. Playback now lives in a module-level store, so leaving the
+                  tab no longer stops it and the warning had become false. The
+                  true half — that the clock follows whatever is playing — is
+                  something the panel demonstrates by doing it. */}
 
               {zos && zosFocus.error && (
                 <p className="music-inline-error" role="alert">切换时钟界面失败：{zosFocus.error}</p>

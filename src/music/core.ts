@@ -207,6 +207,38 @@ export function safeHttpsUrl(value: unknown): string | undefined {
   }
 }
 
+/**
+ * A cover URL, upgraded from http to https when the host is one we already
+ * proxy for.
+ *
+ * NetEase hands out `http://p3.music.126.net/…` for every search result and
+ * every daily recommendation — plain http, on hosts that serve the identical
+ * image over https. Running those through safeHttpsUrl dropped the field
+ * entirely, so a whole search page fell back to index tiles while the playlist
+ * page, whose covers happen to arrive as https, showed real art. That split is
+ * what made it look like a rendering bug rather than a dropped field.
+ *
+ * This is not a hole in the guard. The upgrade only applies to hosts already on
+ * the art allowlist, the proxy still refuses anything that is not https on an
+ * allowlisted host, and nothing here is ever fetched by the browser — the page
+ * CSP stays `img-src 'self'` and the request is made by the service.
+ *
+ * An https URL is passed through exactly as safeHttpsUrl would, allowlisted or
+ * not. Rejecting a non-allowlisted https host here would be a second, stricter
+ * copy of a rule the proxy already enforces, and this function's job is the
+ * upgrade, not the policy.
+ */
+export function musicArtUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" && isMusicArtHost(url)) url.protocol = "https:";
+    return url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Track and playlist IDs travel through URL paths and the tab-delimited device
 // protocol, so they stay restricted to characters that are safe in both.
 const SAFE_MEDIA_ID = /^[A-Za-z0-9_-]{1,64}$/;

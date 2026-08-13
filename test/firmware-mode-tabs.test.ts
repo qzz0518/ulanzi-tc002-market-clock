@@ -429,11 +429,11 @@ describe("音乐 under ZOS", () => {
 
     // 同屏走 /api/music/mirror → live frames → Custom App,ZOS 上是 503。
     expect(html).not.toContain("设备同屏");
-    // 网易云也能推上去了：本组件 PUT /api/os/now-playing 上报浏览器里正在播的
-    // 东西,所以旧的「只跟随 Spotify Connect」是假话,必须消失。默认来源是网易云,
-    // 说清楚的是「这一页得开着」——那才是这条路真正的约束。
+    // 这条同步提示整条删掉了,两句都必须不在。「只跟随 Spotify Connect」在网易云
+    // 也能上报之后就是假话;而「这一页得开着」在播放搬进模块级 store、切 tab 不再
+    // 中断之后同样成了假话。一句会过期两次的说明,不如让面板自己演示。
     expect(html).not.toContain("时钟的「音乐」页只跟随 Spotify Connect");
-    expect(html).toContain("网页就是网易云的播放器，所以这一页得开着");
+    expect(html).not.toContain("所以这一页得开着");
 
     // 主题设置在 ZOS 下是真的推到设备的：ZOS 从 /api/os/pull 读同一份
     // sDeviceState（ADR 0007）。这颗芯片说「仅影响预览」正是用户报的第二个问题。

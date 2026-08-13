@@ -55,7 +55,10 @@ export function PlayModeButton({ order, onCycle, size = "md" }: PlayModeButtonPr
         variant="transparent"
         outline={false}
         tightFocusRing
-        color={order === "sequence" ? undefined : "brand"}
+        // One colour for every mode, the same as the 上一首 / 下一首 buttons it
+        // sits beside. Tinting the two non-default modes made the transport row
+        // read as "something is switched on" rather than as three peers, and the
+        // icon already says which mode this is.
         aria-label={`播放模式：${label}`}
         onClick={onCycle}
       >

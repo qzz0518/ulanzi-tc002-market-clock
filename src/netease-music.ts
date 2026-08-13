@@ -9,7 +9,7 @@ import {
   numberValue,
   proxyProfileImage,
   recordAt,
-  safeHttpsUrl,
+  musicArtUrl,
   stringAt,
   type MusicPlaylist,
   type MusicProfile,
@@ -523,7 +523,7 @@ function parsePlaylist(value: unknown): MusicPlaylist | null {
   const trackCount = numberValue(record.trackCount);
   const name = typeof record.name === "string" ? record.name.trim() : "";
   if (!id || id <= 0 || !name) return null;
-  const coverUrl = safeHttpsUrl(record.coverImgUrl);
+  const coverUrl = musicArtUrl(record.coverImgUrl);
   return {
     id: String(id),
     name,
@@ -549,7 +549,7 @@ function parseTrack(value: unknown): MusicTrack | null {
   const albumRecord = asRecord(record.al ?? record.album);
   const album = typeof albumRecord.name === "string" ? albumRecord.name.trim() : "";
   const durationMs = Math.max(0, Math.floor(numberValue(record.dt ?? record.duration) ?? 0));
-  const coverUrl = safeHttpsUrl(albumRecord.picUrl ?? albumRecord.blurPicUrl);
+  const coverUrl = musicArtUrl(albumRecord.picUrl ?? albumRecord.blurPicUrl);
   return {
     id: String(id),
     title,
