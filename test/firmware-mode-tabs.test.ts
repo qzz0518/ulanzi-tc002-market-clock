@@ -632,7 +632,9 @@ describe("常规设置 under ZOS", () => {
     expect(html).not.toContain("请在下方确认它的局域网地址");
     // 地址表单是服务端的,照常留着——只是说清 ZOS 不走它。
     expect(html).toContain("时钟地址");
-    expect(html).toContain("ZOS 由时钟主动来拉内容");
+    // The field stays, and says what it means FOR THE USER — that touching it
+    // does nothing today — rather than explaining that the device pulls.
+    expect(html).toContain("ZOS 用不到这个地址");
   });
 
   test("before the first report it says so, instead of painting a row of 离线", () => {

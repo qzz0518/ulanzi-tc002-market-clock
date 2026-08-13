@@ -265,11 +265,10 @@ export function DeviceHostPanel({
           <span>01</span>
           <div>
             <h3 id="settings-info-title">{zos ? "设备状态" : "设备信息"}</h3>
-            <p>
-              {zos
-                ? "时钟每 10 秒上报一次；掉线后这里不留旧数字。"
-                : "与时钟本机的「设备信息」页一致。"}
-            </p>
+            {/* Under ZOS the section needs no blurb: every row below is a
+                labelled value, and explaining the reporting cadence is telling
+                the user about the protocol rather than about their clock. */}
+            {zos ? null : <p>与时钟本机的「设备信息」页一致。</p>}
           </div>
         </div>
         {zos ? (
@@ -330,11 +329,14 @@ export function DeviceHostPanel({
           <span>02</span>
           <div>
             <h3 id="settings-host-title">时钟地址</h3>
+            {/* The address is not how ZOS is reached — the device pulls — but
+                saying so here explains our architecture to someone who only
+                wants to know whether to touch the field. What they need is the
+                consequence: under ZOS it changes nothing today, and it is what
+                the stock firmware would use. */}
             <p>
               {zos
-                // 服务不靠这个地址找 ZOS：设备自己来拉（src/os-link.ts 的开头就是
-                // 这么设计的）。留着它是因为它仍然是服务的配置，换回官方固件立刻用得上。
-                ? "ZOS 由时钟主动来拉内容，不走这个地址；它留给官方固件的推送通道。"
+                ? "ZOS 用不到这个地址；换回官方固件时才会用它。"
                 : "时钟换了 IP 就在这里改，立即生效，重启后仍然有效。"}
             </p>
           </div>
@@ -772,8 +774,12 @@ export function DeviceSettingsDialog({
         </div>
       )}
       text={zos
+        // Online, the rows speak for themselves and a sentence saying "these are
+        // the ones ZOS provides" is us describing our own scoping decision.
+        // Offline it earns its place: it explains why the values are missing and
+        // that provisioning still works, which is the one thing the user needs.
         ? zosLive
-          ? "时钟正在跑 ZOS。这里能设的、能看的，都是 ZOS 自己提供的那些。"
+          ? "时钟正在跑 ZOS。"
           : "时钟刷的是 ZOS，此刻没有在上报。配网走蓝牙，不需要它在网上。"
         : surface === "sideload"
           ? "这里读写的是 Ulanzi 官方固件的设备接口；侧载固件正占着时钟。"

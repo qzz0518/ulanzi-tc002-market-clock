@@ -565,13 +565,14 @@ export function describeTelemetry(state: ZosState | null, now: number): ZosReado
       key: "supplicant",
       label: "Wi-Fi 重连",
       value: `${telemetry.supplicantRestarts} 次`,
-      // Zero is the interesting value: it means the firmware adopted the link
-      // the official app had already brought up instead of restarting
-      // wpa_supplicant, which is what keeps a sideload from costing the user
-      // their Wi-Fi config.
+      // Zero needs no note: the count already says it, and the reason it is
+      // zero — the firmware adopted the link rather than restarting
+      // wpa_supplicant — is our implementation, not the user's business. A
+      // non-zero count does earn one, because it is the only warning they get
+      // that the stored Wi-Fi credentials may have been rewritten.
       note: telemetry.supplicantRestarts === 0
-        ? "固件沿用了现有无线链路，没有重启过 supplicant"
-        : "固件重启过无线链路，留意 Wi-Fi 配置是否仍然正确",
+        ? undefined
+        : "无线链路重启过，建议确认 Wi-Fi 设置仍然正确",
     },
     { key: "heartbeat", label: "最近心跳", value: `${Math.round(heartbeatAgeMs / 1000)} 秒前` },
   ];

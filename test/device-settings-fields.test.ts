@@ -244,8 +244,8 @@ describe("the ZOS 设备状态 rows", () => {
     expect(rows.get("supplicant")?.value).toBe("0 次");
     // 心跳按服务自己量的 ageMs 算,不拿浏览器时钟去减设备时间。
     expect(rows.get("heartbeat")?.value).toBe("3 秒前");
-    // 0 次重连是有意义的那个值,所以它带一句解释。
-    expect(rows.get("supplicant")?.note).toContain("沿用了现有无线链路");
+    // 0 次不带注解:数字本身已经说完了,而它为什么是 0 是我们的实现细节。
+    expect(rows.get("supplicant")?.note).toBeUndefined();
   });
 
   test("充电中 is said on the row, not left to a colour", () => {

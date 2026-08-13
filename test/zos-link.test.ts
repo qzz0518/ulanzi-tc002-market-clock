@@ -175,19 +175,22 @@ describe("zos telemetry readout", () => {
     expect(byKey.has("uptime")).toBe(false);
   });
 
-  test("zero supplicant restarts is reported as the safety property it is", () => {
-    // Zero means the firmware adopted the link the official app had already
-    // brought up — that is why a sideload does not cost the user their Wi-Fi.
+  test("only a non-zero restart count earns a note", () => {
+    // Zero is the good case and the count says so on its own. Explaining WHY it
+    // is zero — the firmware adopted the link instead of restarting
+    // wpa_supplicant — is our implementation talking to the user, which is what
+    // this row used to do. A non-zero count keeps its note: it is the only
+    // warning that the stored Wi-Fi credentials may have been rewritten.
     const quiet = describeTelemetry(state(), 1_000_000).find((row) => row.key === "supplicant")!;
     expect(quiet.value).toBe("0 次");
-    expect(quiet.note).toContain("没有重启过 supplicant");
+    expect(quiet.note).toBeUndefined();
 
     const noisy = describeTelemetry(
       state({ telemetry: telemetry({ supplicantRestarts: 3 }) }),
       1_000_000,
     ).find((row) => row.key === "supplicant")!;
     expect(noisy.value).toBe("3 次");
-    expect(noisy.note).toContain("留意 Wi-Fi 配置");
+    expect(noisy.note).toContain("确认 Wi-Fi 设置");
   });
 
   test("formats uptime at the scale it is actually read at", () => {
