@@ -1703,7 +1703,11 @@ static bool onUI_Timer(int id) {
 		sMusic.setNowPlaying(sLink.nowPlaying, sLink.track, sLink.artist, sLink.lyric,
 		                     sLink.playing, sLink.positionMs, sLink.durationMs,
 		                     (int)(sLink.stampMonoMs - sStartMs),
-		                     sLink.lyricStartMs, sLink.lyricEndMs);
+		                     sLink.lyricStartMs, sLink.lyricEndMs, sLink.lyricUntilMs,
+		                     // The per-glyph table, whose count is 0 for the ~80% of
+		                     // tracks with no word timings — the screen falls back to
+		                     // the even sweep on its own.
+		                     sLink.lyricCells.cells, sLink.lyricCells.count);
 		switch (sMusic.takeAction()) {
 		case tcos::MusicScreen::kToggle:
 			hostLink().sendMusicAction(sLink.playing ? "pause" : "play");

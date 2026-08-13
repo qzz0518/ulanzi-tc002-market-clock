@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "core/LyricTiming.h"
+
 namespace tcos {
 
 /**
@@ -129,6 +131,8 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
  *   lyric\tHer Majesty's a pretty nice girl
  *   lyricat\t18000
  *   lyricend\t21500
+ *   lyricuntil\t34800
+ *   lyricw\t0,420,420,380,800,300,…
  *
  * Parsing is total: any line it does not recognise is skipped rather than
  * failing the document. A firmware that refuses to parse a response it half
@@ -137,6 +141,24 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
  */
 class StateDoc {
  public:
+  /**
+   * The document revision THIS parser implements, sent to the service as `proto`
+   * in every telemetry report and gating what it sends back.
+   *
+   * 2 means "`lyricend` is the SUNG end, and I read `lyricuntil` and `lyricw`".
+   * Builds before it sent no `proto` at all, which the service reads as 0 and
+   * answers with the older encoding — `lyricend` carrying the display window —
+   * because feeding a tighter end to a cascade choreography built on the wider
+   * one flies the line off the panel the instant the singer stops and leaves 升降
+   * blank for the whole instrumental (ADR 0008, OS_PROTO_LYRIC_WINDOW in
+   * src/os-link.ts). ZOS is flashed rather than sideloaded, so the two halves
+   * genuinely do move independently and that is not a hypothetical.
+   *
+   * Raising this number is a promise about THIS FILE and ui/MusicScreen, and
+   * nothing else: bump it only once both can read what the bump asks for.
+   */
+  static const int kProtocol = 2;
+
   enum Kind { kChannel, kMusic, kGame, kSettings };
 
   struct Item {
@@ -268,6 +290,30 @@ class StateDoc {
   int lyricEndMs() const { return mLyricEndMs; }
 
   /**
+   * When the NEXT line takes over, or -1 for "this line is not held".
+   *
+   * ABSENCE CARRIES MEANING and is the common case: the service emits this key
+   * only when the line really does stay up past its singing, so -1 means the two
+   * clocks coincide and `lyricEndMs` answers both questions. It also means an
+   * older service, which is the same situation from the panel's side.
+   *
+   * Only the 升降 choreography may read it. Every other part of the screen —
+   * colouring, focus glyph, fill bar, beat, scroll — runs on the sung clock.
+   */
+  int lyricUntilMs() const { return mLyricUntilMs; }
+
+  /**
+   * `lyricw` decoded: one cell per glyph of `lyric()`, in absolute track ms.
+   *
+   * EMPTY IS A DESIGNED STATE, not a failure. Roughly four fifths of tracks have
+   * no word timings at all, and a line whose words do not rebuild its text is
+   * refused service-side rather than shipped one cell out of step — so an empty
+   * table means "sweep the line evenly", which is exactly what this firmware did
+   * before the key existed.
+   */
+  const LyricCellTable& lyricCells() const { return mLyricCells; }
+
+  /**
    * The console's 主题设置, as wire integers.
    *
    * Mapped here rather than in the screen for two reasons: it keeps string
@@ -308,6 +354,8 @@ class StateDoc {
   std::string mLyric;
   int mLyricStartMs;
   int mLyricEndMs;
+  int mLyricUntilMs;
+  LyricCellTable mLyricCells;
   int mLyricMode;
   int mLyricSkin;
   uint32_t mAccentRgb;

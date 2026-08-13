@@ -308,41 +308,82 @@ void HostLink::runWorker() {
       const bool sleepClockSynced = mTelSleepClockSynced;
       ::pthread_mutex_unlock(&mLock);
 
-      // 1024, not 512. snprintf TRUNCATES silently, and a truncated JSON body
-      // makes the service's readJson answer 400 — which would not break the
-      // sleep block, it would kill telemetry entirely. The six fields below are
-      // ~110 bytes; the two 64-byte strings plus the SSID and IP already sat
-      // close enough to 512 that adding anything at all needed the headroom.
-      char body[1024];
-      ::snprintf(body, sizeof(body),
-                 "{\"screen\":\"%s\",\"focus\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
-                 "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d,"
-                 // -1 until the first successful MCU reading; the console shows
-                 // nothing rather than a plausible-looking zero.
-                 "\"batteryPercent\":%d,\"charging\":%s,"
-                 // Only the device knows this, and the console needs it to say
-                 // what a power cycle will bring back. Getting it wrong is the
-                 // dangerous direction: promising the official firmware to
-                 // someone whose flash holds ZOS.
-                 "\"flashed\":%s,"
-                 // 夜间休眠. `asleep` is what lets the console say 休眠中 rather
-                 // than show a black rectangle; the config is the EFFECTIVE one,
-                 // which is the only truth a settings form should render.
-                 "\"sleep\":{\"on\":%s,\"startMin\":%d,\"endMin\":%d,\"idleSec\":%d,"
-                 "\"asleep\":%s,\"clockSynced\":%s}}",
-                 jsonEscape(screen).c_str(), jsonEscape(focus).c_str(),
-                 jsonEscape(wifi).c_str(), jsonEscape(ip).c_str(),
-                 static_cast<unsigned long long>(now - startedMs), freeKb(), restarts,
-                 battery, charging ? "true" : "false", flashed ? "true" : "false",
-                 sleepOn ? "true" : "false", sleepStartMin, sleepEndMin, sleepIdleSec,
-                 sleepAsleep ? "true" : "false", sleepClockSynced ? "true" : "false");
+      Report report;
+      report.screen = screen;
+      report.focus = focus;
+      report.wifi = wifi;
+      report.ip = ip;
+      report.uptimeMs = now - startedMs;
+      report.freeKb = freeKb();
+      report.supplicantRestarts = restarts;
+      report.batteryPercent = battery;
+      report.charging = charging;
+      report.flashed = flashed;
+      report.sleepOn = sleepOn;
+      report.sleepStartMin = sleepStartMin;
+      report.sleepEndMin = sleepEndMin;
+      report.sleepIdleSec = sleepIdleSec;
+      report.sleepAsleep = sleepAsleep;
+      report.sleepClockSynced = sleepClockSynced;
+
       HttpClient::Response response;
       HttpClient::perform(mBaseUrl + "/api/os/report", "POST", "application/json",
-                          body, &response, 4000);
+                          reportBody(report), &response, 4000);
     }
 
     ::usleep(30000);  // 30 ms: fine enough to hit the 100 ms mirror cadence
   }
+}
+
+std::string HostLink::reportBody(const Report& report) {
+  const std::string screen = jsonEscape(report.screen);
+  const std::string focus = jsonEscape(report.focus);
+  const std::string wifi = jsonEscape(report.wifi);
+  const std::string ip = jsonEscape(report.ip);
+  // Sized from the escaped strings rather than fixed, so this cannot truncate.
+  // The literal skeleton is ~210 bytes and the fifteen numbers and booleans
+  // below cannot exceed ~130 together, which 512 clears with room to spare — and
+  // the next field added does not have to re-derive that, because the only
+  // unbounded parts are already measured.
+  //
+  // A std::string rather than a std::vector<char> for the buffer: strings are
+  // instantiated all over this firmware and a second container template is not,
+  // and the .so has a size budget to live inside (hostcheck/link-audit.sh).
+  // `&buffer[0]` addresses size() + 1 writable bytes (the terminator included),
+  // so passing size() to snprintf stays in bounds.
+  std::string buffer(screen.size() + focus.size() + wifi.size() + ip.size() + 512, '\0');
+  ::snprintf(&buffer[0], buffer.size(),
+             "{\"screen\":\"%s\",\"focus\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
+             "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d,"
+             // -1 until the first successful MCU reading; the console shows
+             // nothing rather than a plausible-looking zero.
+             "\"batteryPercent\":%d,\"charging\":%s,"
+             // Only the device knows this, and the console needs it to say
+             // what a power cycle will bring back. Getting it wrong is the
+             // dangerous direction: promising the official firmware to
+             // someone whose flash holds ZOS.
+             "\"flashed\":%s,"
+             // Which state document this build can read. Without it the service
+             // assumes 0 and keeps sending the pre-ADR-0008 encoding, which is
+             // exactly what a device that never said so needs — and exactly what
+             // makes the karaoke timing invisible on one that can read it.
+             "\"proto\":%d,"
+             // 夜间休眠. `asleep` is what lets the console say 休眠中 rather
+             // than show a black rectangle; the config is the EFFECTIVE one,
+             // which is the only truth a settings form should render.
+             "\"sleep\":{\"on\":%s,\"startMin\":%d,\"endMin\":%d,\"idleSec\":%d,"
+             "\"asleep\":%s,\"clockSynced\":%s}}",
+             screen.c_str(), focus.c_str(), wifi.c_str(), ip.c_str(),
+             static_cast<unsigned long long>(report.uptimeMs), report.freeKb,
+             report.supplicantRestarts, report.batteryPercent,
+             report.charging ? "true" : "false", report.flashed ? "true" : "false",
+             StateDoc::kProtocol,
+             report.sleepOn ? "true" : "false", report.sleepStartMin, report.sleepEndMin,
+             report.sleepIdleSec, report.sleepAsleep ? "true" : "false",
+             report.sleepClockSynced ? "true" : "false");
+  // Rebuilt from the C string so the result ends at the terminator rather than
+  // carrying the buffer's slack as trailing NULs.
+  return std::string(buffer.c_str());
 }
 
 void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
@@ -367,6 +408,8 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   mSnapshot.durationMs = doc.durationMs();
   mSnapshot.lyricStartMs = doc.lyricStartMs();
   mSnapshot.lyricEndMs = doc.lyricEndMs();
+  mSnapshot.lyricUntilMs = doc.lyricUntilMs();
+  mSnapshot.lyricCells = doc.lyricCells();
   mSnapshot.stampMonoMs = stampMonoMs;
   // The theme, copied with everything else. StateDoc has already resolved an
   // absent or unrecognised value to the default, so there is nothing to guard

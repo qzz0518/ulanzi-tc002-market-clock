@@ -61,6 +61,23 @@ struct FrameCtx {
   int n;
   int totalW;
   float prog;   // progress within the current line, 0..1
+  // Progress through the line's DISPLAY window, which is later than `prog`
+  // whenever an instrumental follows the line. ONLY the cascade choreography may
+  // read it; colouring, focus glyph, fill bar, beat and scroll all run on the
+  // sung clock. Equal to `prog` unless the service sent a `lyricuntil`, which is
+  // what keeps an old service's frames unchanged.
+  float windowProg;
+  // Where the singer is, per glyph. Without a cell table this is the scalar
+  // `prog` re-expressed — floor(p*n) and p, bit for bit — so the painters below
+  // read one field instead of branching.
+  LyricCursor cursor;
+  // The cursor came from a real per-glyph table rather than from the even sweep.
+  bool timedCells;
+  // The service separates the sung end from the display window for this line, so
+  // "sung out and holding" is a state the panel can distinguish at all. Without
+  // it, past-the-end means the next line is due right now — which is what this
+  // firmware has always drawn, and must keep drawing.
+  bool split;
   float track;  // progress through the whole track, 0..1
   float animMs;
   bool playing;
@@ -71,6 +88,43 @@ struct FrameCtx {
   // 播放中 / 已暂停 fallback under it, and those are text too.
   bool hasLyric;
 };
+
+// The glyph to light, or -1 for "nothing is being sung right now".
+//
+// -1 covers the two ends of a line the wire can only name since ADR 0008: before
+// its first word, and during the hold after its last. The painters draw both the
+// same way — the whole row in the sung tier, no focus glyph — which is what the
+// browser preview does when it has no focus span, and what makes a finished line
+// read as finished rather than as one character stuck glowing for thirteen
+// seconds.
+int focusCell(const FrameCtx& f) {
+  if (f.split && f.cursor.phase != kLyricSinging) return -1;
+  return f.cursor.index;
+}
+
+// The beat has something to snap to only while a glyph is actually in progress.
+// In a gap between words, and through the hold at the end of a line, the cursor
+// is pinned at the end of a cell and beatKick's per-glyph term would sit at full
+// scale — a spectrum slammed to maximum for the whole instrumental. Falling back
+// to its free-running 120 BPM pulse there is what the flag is for.
+//
+// THE HOLD IS CHECKED BEFORE THE TABLE, and that order is the whole of it. The
+// commonest proto-2 shape is a `lyricuntil` with NO `lyricw` — four fifths of
+// tracks carry no word timings — and there the cursor is the even sweep, pinned
+// at progress 1 for the entire hold. beatKick's per-glyph term is
+// 1 - fract(1 * n), which is 1 for any integer glyph count: maximum energy, for
+// as long as the line stays up. Consulting `timedCells` first would skip
+// straight past that, which is exactly the failure this function exists to
+// prevent, on the wire shape it will meet most often. `split` is the guard
+// because only a service that separates the two clocks can tell a hold from
+// "the next line is due right now"; it is false on every legacy frame, so those
+// keep the beat they always had.
+bool beatIsTimed(const FrameCtx& f) {
+  if (!f.hasLyric) return false;
+  if (f.split && f.cursor.phase != kLyricSinging) return false;
+  if (!f.timedCells) return true;  // the even sweep: unchanged from before
+  return f.cursor.frac < 1.f;
+}
 
 // ---- UTF-8 layout ----------------------------------------------------------
 
@@ -150,18 +204,32 @@ void cueRow(Surface& s, const Palette& pal, int y, float progress, int trailPx) 
 
 // ---- per-mode painters -----------------------------------------------------
 
+// LyricsPage's karaokeColorAt: sung glyphs behind the cursor, the focus glyph
+// lit, the rest waiting — and, when NO glyph is being sung, the whole row in the
+// sung tier. That last case is only reachable once the service separates the two
+// clocks, and it is what a held line looks like: complete, not frozen mid-wipe.
+const Color& karaokeColor(const Palette& pal, int index, int focus) {
+  if (focus < 0 || index < focus) return pal.secondary;
+  return index == focus ? pal.primary : pal.context;
+}
+
 // 走带: karaoke colouring, in-line cue on row 0, whole-track cue on row 15.
+//
+// The cue on row 0 and the 12 px scroll both ride the sung progress, so they
+// speed up and slow down with the singer. The scroll quantises to whole cells,
+// which makes it nearly indifferent to where inside a glyph the cursor is; the
+// COLOURING is not indifferent at all, and it is the reason this mode reads as
+// karaoke rather than as a marquee.
 void paintTicker(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
   cueRow(s, pal, 0, f.prog, 2);
   cueRow(s, pal, 15, f.track, 1);
-  int focus = (int)(f.prog * f.n);
-  if (focus >= f.n) focus = f.n - 1;
+  const int focus = focusCell(f);
   int startX = f.totalW <= kViewW ? (kPanelWidth - f.totalW) / 2
                                   : kViewX - scrollOffsetFor(f.totalW, f.prog, MusicScreen::kModeTicker);
   for (int i = 0; i < f.n; ++i) {
-    const Color& c = (i < focus) ? pal.secondary : (i == focus ? pal.primary : pal.context);
-    blitGlyph(s, f.cells[i], startX + f.cells[i].startX, 2, c, kViewX, kViewW);
+    blitGlyph(s, f.cells[i], startX + f.cells[i].startX, 2, karaokeColor(pal, i, focus),
+              kViewX, kViewW);
   }
 }
 
@@ -169,6 +237,12 @@ void paintTicker(Surface& s, const FrameCtx& f) {
 // 13..15 with row 12 as the gutter — never a panel beside the text. That
 // distinction is the whole of the reported bug: a 12 px equaliser at x=0 leaves
 // 38 of 52 columns for the lyric and covers the rest of it.
+//
+// Word timings reach it twice: the karaoke colouring, exactly as in 走带, and the
+// BEAT, which snaps on each glyph the singer actually starts instead of on a
+// twelfth of the line every twelfth of its window. On a line whose first word is
+// held for 1.4 s the difference is audible-looking — the bars settle for the held
+// note and then rattle through the run that follows.
 void paintSkyline(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
   // Three levels, always, and the text is always drawn.
@@ -187,7 +261,7 @@ void paintSkyline(Surface& s, const FrameCtx& f) {
   // therefore woke the dead branch and answered "频谱动画挡字" with a stronger
   // version of it — a 12-row spectrum and not one word.
   const int maxLevel = 3;
-  float kick = beatKick(f.playing, f.hasLyric, f.prog, f.n, f.animMs);
+  float kick = beatKick(f.playing, beatIsTimed(f), f.prog, f.n, f.animMs);
   for (int bar = 0; bar < SKYLINE_BARS; ++bar) {
     int x = 1 + bar * 3;
     int level = skylineBarLevel(bar, f.animMs, f.playing, kick, maxLevel);
@@ -200,35 +274,77 @@ void paintSkyline(Surface& s, const FrameCtx& f) {
       s.setPixel(x + 1, 15 - (step - 1), c);
     }
   }
-  int focus = (int)(f.prog * f.n);
-  if (focus >= f.n) focus = f.n - 1;
+  const int focus = focusCell(f);
   int startX = f.totalW <= kViewW ? (kPanelWidth - f.totalW) / 2
                                   : kViewX - scrollOffsetFor(f.totalW, f.prog, MusicScreen::kModeSkyline);
   for (int i = 0; i < f.n; ++i) {
-    const Color& c = (i < focus) ? pal.secondary : (i == focus ? pal.primary : pal.context);
-    blitGlyph(s, f.cells[i], startX + f.cells[i].startX, 0, c, kViewX, kViewW);
+    blitGlyph(s, f.cells[i], startX + f.cells[i].startX, 0, karaokeColor(pal, i, focus),
+              kViewX, kViewW);
   }
 }
 
 // 聚光: the sung pixel column is locked to x=26 and the line slides under it.
 // The asymmetry is deliberate — brackets at 19/32, fill meter spanning 20..31.
+//
+// THIS IS THE MODE THE WORD TIMINGS ARE FOR. Every other mode can be read as an
+// even wipe that happens to be paced badly; here the panel makes a claim about a
+// single pixel column — "the singer is on THIS character, this far into it" — and
+// `progress * textWidth` only finds that column when time is spread evenly over
+// the row. It is not: the singer holds one glyph for a second and then races
+// through four. So the focus pixel comes from the cell table when there is one,
+// and the line stops gliding while a held note is held.
 void paintSpotlight(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
   s.setPixel(19, 1, pal.muted);
   s.setPixel(32, 1, pal.muted);
   cueRow(s, pal, 15, f.track, 1);
-  float focusPx = lm_unit(f.prog) * f.totalW;
+
+  // The sung column, in bitmap pixels. Without a table this is the old
+  // arithmetic untouched; with one it is the cursor's own cell, walked at the
+  // rate the words were sung (the browser's focusPixelAt).
+  float focusPx;
+  if (f.timedCells) {
+    int at = f.cursor.index;
+    if (at < 0) at = 0;
+    if (at >= f.n) at = f.n - 1;
+    const Cell& cell = f.cells[at];
+    focusPx = (float)cell.startX;
+    if (f.cursor.index >= 0) focusPx += lm_unit(f.cursor.frac) * (float)cell.width;
+  } else {
+    focusPx = lm_unit(f.prog) * f.totalW;
+  }
+
   int spanStarts[kMaxCells];
   int limit = f.n < kMaxCells ? f.n : kMaxCells;
   for (int i = 0; i < limit; ++i) spanStarts[i] = f.cells[i].startX;
-  int focusIndex = spanIndexAtPx(spanStarts, limit, (int)focusPx);
-  int offset = spotlightOffsetPx(f.totalW, f.prog);  // screen x of the bitmap's left edge
+  // With a table the cursor already knows which glyph it is on; without one the
+  // index is still recovered from the pixel column, and that is NOT the same
+  // index on a row mixing 6 px and 12 px cells — so the legacy path keeps its own
+  // lookup rather than borrowing floor(progress * n).
+  int focusIndex = f.timedCells ? f.cursor.index : spanIndexAtPx(spanStarts, limit, (int)focusPx);
+  if (f.split && f.cursor.phase != kLyricSinging) focusIndex = -1;
+
+  // Screen x of the bitmap's left edge. The lock is the same 26 - focusPx either
+  // way; the legacy branch keeps the literal expression it always had so no float
+  // round trip can move a rounded pixel.
+  const int offset = f.timedCells && f.totalW > 0
+                         ? spotlightOffsetPx(f.totalW, focusPx / (float)f.totalW)
+                         : spotlightOffsetPx(f.totalW, f.prog);
   for (int i = 0; i < f.n; ++i) {
-    int dist = i - focusIndex;
-    if (dist < 0) dist = -dist;
-    const Color& c = dist == 0 ? pal.primary : (dist == 1 ? pal.secondary : pal.context);
+    Color c;
+    if (focusIndex < 0) {
+      // Sung out, or not started. The whole line in the sung tier, still locked
+      // under the spotlight — the alternative is one character glowing alone for
+      // the length of an instrumental, which reads as a stuck panel.
+      c = pal.secondary;
+    } else {
+      int dist = i - focusIndex;
+      if (dist < 0) dist = -dist;
+      c = dist == 0 ? pal.primary : (dist == 1 ? pal.secondary : pal.context);
+    }
     blitGlyph(s, f.cells[i], offset + f.cells[i].startX, 2, c, 0, kPanelWidth);
   }
+  // A finished line has no glyph in progress, so it gets no fill meter either.
   if (focusIndex < 0 || focusIndex >= f.n) return;
   const Cell& span = f.cells[focusIndex];
   float frac = lm_unit((focusPx - span.startX) / (float)(span.width > 0 ? span.width : 1));
@@ -238,6 +354,15 @@ void paintSpotlight(Surface& s, const FrameCtx& f) {
 
 // 升降: the whole line rises in, holds, and lifts out the top; the track bar is
 // the right edge column, which is outside the [2,50) text window by design.
+//
+// TWO CLOCKS, and this is the only mode that needs both. The choreography rides
+// the DISPLAY window and the colouring rides the singing. They were one number
+// until the sung end became real; keyed on the sung progress, cascadeBandY's exit
+// ramp starts at 0.86 of the SINGING, so the last line of a verse would fly off
+// the panel the instant the voice stopped and leave 升降 blank for the whole
+// 13.3 s instrumental that follows (ADR 0008). The line has to stay up until its
+// successor is due — that is what the window means — while the karaoke wipe
+// finishes when the singer does.
 void paintCascade(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
   int fill = (int)lroundf(lm_unit(f.track) * 16.f);
@@ -245,17 +370,16 @@ void paintCascade(Surface& s, const FrameCtx& f) {
     const Color& c = (step == fill - 1) ? pal.primary : pal.muted;
     s.setPixel(51, 15 - step, c);
   }
-  int phase = cascadePhase(f.prog, false);
-  int bandY = cascadeBandY(f.prog, false);
-  int focus = (int)(f.prog * f.n);
-  if (focus >= f.n) focus = f.n - 1;
+  int phase = cascadePhase(f.windowProg, false);
+  int bandY = cascadeBandY(f.windowProg, false);
+  const int focus = focusCell(f);
   int startX = f.totalW <= kViewW ? (kPanelWidth - f.totalW) / 2
                                   : kViewX - scrollOffsetFor(f.totalW, f.prog, MusicScreen::kModeCascade);
   for (int i = 0; i < f.n; ++i) {
     Color c;
     if (phase == CASCADE_ENTER) c = pal.secondary;
     else if (phase == CASCADE_EXIT) c = pal.context;
-    else c = (i < focus) ? pal.secondary : (i == focus ? pal.primary : pal.context);
+    else c = karaokeColor(pal, i, focus);
     blitGlyph(s, f.cells[i], startX + f.cells[i].startX, bandY, c, kViewX, kViewW);
   }
 }
@@ -305,6 +429,7 @@ void paintIdle(Surface& s, const Palette& pal, float animMs, const char* word, f
 MusicScreen::MusicScreen()
     : mPresent(false), mLinkConfigured(true), mLinkOnline(true), mPlaying(false),
       mPositionMs(0), mDurationMs(0), mStampMs(0), mLyricStartMs(-1), mLyricEndMs(-1),
+      mLyricUntilMs(-1),
       mEnteredMs(0), mLyricChangedMs(0), mFlashMs(-1), mAction(kNone),
       mMode(kModeSpotlight), mSkin(kSkinSignal), mAccentRgb(0), mHasAccent(false),
       mOptimisticUntilMs(-1), mOptimisticPlaying(false) {}
@@ -324,7 +449,9 @@ void MusicScreen::setTheme(int mode, int skin, uint32_t accentRgb, bool hasAccen
 void MusicScreen::setNowPlaying(bool present, const std::string& track,
                                 const std::string& artist, const std::string& lyric,
                                 bool playing, int positionMs, int durationMs,
-                                int stampMs, int lyricStartMs, int lyricEndMs) {
+                                int stampMs, int lyricStartMs, int lyricEndMs,
+                                int lyricUntilMs, const LyricCell* cells,
+                                int cellCount) {
   // Keyed on the window when there is one, on the text only when there is not.
   // A chorus that repeats a line verbatim leaves `lyric` unchanged, so keying on
   // equality alone would keep animating the previous line's window with progress
@@ -341,6 +468,12 @@ void MusicScreen::setNowPlaying(bool present, const std::string& track,
   mStampMs = stampMs;
   mLyricStartMs = lyricStartMs;
   mLyricEndMs = lyricEndMs;
+  mLyricUntilMs = lyricUntilMs;
+  // Assigned every time, including to nothing. The table belongs to ONE line, so
+  // keeping the previous one through a document that carries none would walk the
+  // new line's glyphs at the old line's rate — the wrong-character failure, with
+  // no way to see it in a screenshot.
+  mLyricCells.assign(cells, cellCount);
 }
 
 void MusicScreen::onEnter(int nowMs) {
@@ -375,6 +508,31 @@ float MusicScreen::lineProgress(int nowMs) const {
   int since = nowMs - mLyricChangedMs;
   if (since < 0) since = 0;
   return lm_unit((float)since / (float)kUntimedLineMs);
+}
+
+bool MusicScreen::timedLine(int glyphCount, bool hasLyric) const {
+  // Every clause is load-bearing. `hasLyric` because the row is also the
+  // title/artist rotation, which has no line window at all; the window because
+  // the offsets are relative to it; and the exact cell count because a table one
+  // entry out of step against THIS row lights the wrong character for the whole
+  // song. Service-side the two are truncated together by construction, so a
+  // mismatch here means something went wrong on the wire — fall back, do not
+  // trim.
+  if (!hasLyric || glyphCount <= 0) return false;
+  if (mLyricStartMs < 0 || mLyricEndMs <= mLyricStartMs) return false;
+  return mLyricCells.count == glyphCount;
+}
+
+LyricCursor MusicScreen::lyricCursor(int nowMs, int glyphCount, bool hasLyric,
+                                     float sweepProgress) const {
+  if (timedLine(glyphCount, hasLyric)) {
+    return lyricCursorAt(mLyricCells.cells, mLyricCells.count, mLyricStartMs,
+                         mLyricEndMs, glyphCount, playheadMs(nowMs));
+  }
+  // No table, or a row that is not a lyric at all — the title/artist rotation
+  // supplies its own sweep. Either way the cursor is that scalar re-expressed,
+  // index for index, so nothing downstream has to branch.
+  return lyricCursorFromProgress(sweepProgress, glyphCount);
 }
 
 bool MusicScreen::onInput(Input input, int nowMs) {
@@ -492,12 +650,50 @@ void MusicScreen::render(Surface& out, int nowMs) {
   int totalW = 0;
   const int n = layoutRow(line.c_str(), cells, kMaxCells, totalW);
 
+  // Where the singer is. With a per-glyph table this walks the words at the rate
+  // they were actually sung; without one it is the scalar every mode has always
+  // shared, so `cursor.progress == prog` and nothing below can tell the two
+  // apart. That equality is the whole compatibility argument, and the host check
+  // asserts it in pixels.
+  //
+  // NOTE FOR ANYONE COMPARING THE THREE RENDERERS: after this change the browser
+  // preview and ZOS walk word-level timings and the SIDELOADED lyrics player
+  // (device/tc002-lyrics-player) still sweeps its lines evenly. NONE of the three
+  // is broken. That player pulls a different endpoint on a different transport —
+  // lyricsLogic.cc asks for /api/music/device/now with no `?v`, and the service
+  // answers those bytes verbatim, by design, because its deployed parser treats
+  // any key that is not `DUR` as a start time. The `?v=2` encoding carrying `L`
+  // and `W` records exists on the service and that firmware does not yet ask for
+  // it; the two firmwares are mutually exclusive anyway (ADR 0004), so no user
+  // sees both at once. The 主题设置 parity claim in this file's header is about
+  // geometry and colour, which are unchanged, not about timing.
+  const LyricCursor cursor = lyricCursor(nowMs, n, hasLyric, prog);
+  const bool timedCells = timedLine(n, hasLyric);
+  // "The service told us these two clocks differ." Both fields only exist from
+  // proto 2, so this is also "the service is new enough to have an opinion"; when
+  // it is false every branch below collapses to the frame this firmware has
+  // always drawn.
+  const bool windowed = hasLyric && mLyricStartMs >= 0 && mLyricEndMs > mLyricStartMs;
+  const bool split = timedCells || (windowed && mLyricUntilMs > mLyricEndMs);
+  float windowProg = cursor.progress;
+  if (split && windowed) {
+    windowProg = lyricWindowProgress(mLyricStartMs, mLyricEndMs, mLyricUntilMs,
+                                     playheadMs(nowMs));
+  }
+
   FrameCtx f;
   f.pal = &pal;
   f.cells = cells;
   f.n = n;
   f.totalW = totalW;
-  f.prog = prog;
+  // The cursor's own progress rather than `prog`: identical without a table, and
+  // the non-uniform one with it, which is what makes the scroll and the cue row
+  // follow the singer instead of the clock.
+  f.prog = cursor.progress;
+  f.windowProg = windowProg;
+  f.cursor = cursor;
+  f.timedCells = timedCells;
+  f.split = split;
   f.track = track;
   f.animMs = animMs;
   f.playing = playing;

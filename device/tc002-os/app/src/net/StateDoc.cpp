@@ -130,8 +130,8 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
 StateDoc::StateDoc()
     : mSeq(-1), mPinned(false), mMirror(false), mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
-      mLyricEndMs(-1), mLyricMode(kDefaultMode), mLyricSkin(kDefaultSkin),
-      mAccentRgb(0), mHasAccent(false) {}
+      mLyricEndMs(-1), mLyricUntilMs(-1), mLyricMode(kDefaultMode),
+      mLyricSkin(kDefaultSkin), mAccentRgb(0), mHasAccent(false) {}
 
 bool StateDoc::parse(const std::string& body) {
   mSeq = -1;
@@ -151,6 +151,8 @@ bool StateDoc::parse(const std::string& body) {
   mLyric.clear();
   mLyricStartMs = -1;
   mLyricEndMs = -1;
+  mLyricUntilMs = -1;
+  mLyricCells.clear();
   // Reset to the defaults rather than to "keep the last": a document is a whole
   // picture, and a service that stopped sending a theme (an older build, or a
   // rollback) must land the panel somewhere predictable instead of on whatever
@@ -161,6 +163,12 @@ bool StateDoc::parse(const std::string& body) {
   mHasAccent = false;
 
   std::vector<Annotation> annotations;
+  // Held raw and decoded after the walk, because the offsets in it are relative
+  // to `lyricat` and a parser that depended on `lyricat` arriving first would be
+  // keying off line ORDER — the same dependency `rev`/`ttl` repeat their id to
+  // avoid. The service happens to emit them in that order today; it never agreed
+  // to keep doing so.
+  std::string lyricTable;
 
   size_t start = 0;
   while (start <= body.size()) {
@@ -236,6 +244,17 @@ bool StateDoc::parse(const std::string& body) {
       mLyricStartMs = atoi(fields[1].c_str());
     } else if (fields[0] == "lyricend") {
       mLyricEndMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "lyricuntil") {
+      // Sent only when the line is genuinely held past its singing, so its
+      // absence is the statement "these two clocks coincide" rather than a gap
+      // in the document. -1 keeps that distinguishable from a zero.
+      mLyricUntilMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "lyricw") {
+      // ONE comma-separated field, not tab-separated columns: splitTabs above
+      // stops after three tabs and would hand this loop a truncated table. That
+      // is why the service encodes it this way — see encodeLyricCells in
+      // src/music/lyric-timing.ts.
+      lyricTable = fields[1];
     } else if (fields[0] == "mode") {
       mLyricMode = indexOfName(fields[1], kModeNames, 4, kDefaultMode);
     } else if (fields[0] == "skin") {
@@ -274,6 +293,13 @@ bool StateDoc::parse(const std::string& body) {
     // Everything else — including `menu`, which is only a hint — is ignored on
     // purpose, so the service can add fields without bricking deployed firmware.
     if (end >= body.size()) break;
+  }
+
+  if (!lyricTable.empty()) {
+    // A refusal leaves the table empty, which is the same shape as a track with
+    // no word timings at all — so the panel sweeps the line evenly instead of
+    // lighting glyphs at times nobody sang.
+    if (!decodeLyricCells(lyricTable, mLyricStartMs, &mLyricCells)) mLyricCells.clear();
   }
 
   for (size_t a = 0; a < annotations.size(); ++a) {

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "core/Ease.h"
+#include "core/LyricTiming.h"
 #include "core/RingModel.h"
 #include "core/Shell.h"
 #include "core/Surface.h"
@@ -144,12 +145,69 @@ int tierPixels(const Surface& s, uint32_t rgb) {
   return n;
 }
 
+// Lit pixels inside a rectangle. Needed beside litPixelsInRows because 升降 puts
+// its whole-track fill in column 51, outside the [2,50) text window — a check
+// asking "is the line still on the panel" must not be satisfied by the fill bar.
+int litPixelsInBox(const Surface& s, int x0, int x1, int y0, int y1) {
+  int n = 0;
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      const Color c = s.getPixel(x, y);
+      if (c.r || c.g || c.b) ++n;
+    }
+  }
+  return n;
+}
+
+// FNV-1a over every pixel of a frame. Only used to compare a frame against one
+// rendered by a DIFFERENT BUILD, which is the one comparison no other helper here
+// can make — see checkLyricLegacyFrames.
+uint32_t frameHash(const Surface& s) {
+  uint32_t h = 2166136261u;
+  for (int y = 0; y < s.getHeight(); ++y) {
+    for (int x = 0; x < s.getWidth(); ++x) {
+      const uint32_t rgb = s.getPixel(x, y).toRGB888();
+      for (int shift = 0; shift < 32; shift += 8) {
+        h ^= (rgb >> shift) & 0xffu;
+        h *= 16777619u;
+      }
+    }
+  }
+  return h;
+}
+
+// The nth codepoint of a UTF-8 string, so a check can name a glyph by its
+// position in the line rather than by a hand-transcribed hex value.
+uint32_t codepointAt(const char* utf8, int index) {
+  const char* p = utf8;
+  uint32_t cp = 0;
+  for (int i = 0; i <= index && *p != 0; ++i) cp = tcos::text::utf8Next(p);
+  return cp;
+}
+
 int litPixelsInRows(const Surface& s, int y0, int y1) {
   int n = 0;
   for (int y = y0; y <= y1; ++y) {
     for (int x = 0; x < s.getWidth(); ++x) {
       const Color c = s.getPixel(x, y);
       if (c.r || c.g || c.b) ++n;
+    }
+  }
+  return n;
+}
+
+// Pixels of one palette tier inside a rectangle. The karaoke wipe lights exactly
+// one glyph in the primary tier, so counting it over a mode's TEXT WINDOW is how
+// a check can say WHICH character the panel thinks is being sung rather than
+// merely that something is lit — but the window has to be the real one. Every
+// mode also spends primary on chrome: the cue rows (excluded by the row band),
+// skyline's tallest bar (likewise), and 升降's whole-track fill, which climbs
+// column 51 THROUGH the text rows and is only excluded by the columns.
+int tierPixelsInBox(const Surface& s, uint32_t rgb, int x0, int x1, int y0, int y1) {
+  int n = 0;
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      if (s.getPixel(x, y).toRGB888() == rgb) ++n;
     }
   }
   return n;
@@ -4579,6 +4637,742 @@ void checkMusicPath() {
         "and clears the snapshot rather than keeping a track nobody is playing");
 }
 
+// ---- word-level lyric timing (ADR 0008) ------------------------------------
+//
+// The line every case below is built on, and it is not a hypothetical: 孤勇者's
+// "谁说站在光里的才算英雄" is the line the ADR was measured on. It is sung from
+// 110330 for 5.29 s and the next line does not begin until 128880, so the naive
+// rule handed eleven glyphs an 18.55 s window — 1686 ms per character against the
+// singer's actual 481. Every number here comes from the real encoder, run on the
+// REAL yrc — the `GUYONGZHE` fixture at the head of test/lyric-timing.test.ts,
+// which is verbatim from NetEase's `lyric_new` response for track 1901371647.
+//
+// Regenerate by running the service's own encoder over that string —
+// parseYrc -> buildLyricLines -> lyricCells -> encodeLyricCells for the table,
+// OsLinkHub.setNowPlaying + serialize() for the document. Nothing in this file
+// may hand-write the table, and nothing may push an INVENTED yrc through the
+// real encoder either: both produce a second idealisation of the format, and a
+// self-check agreeing with one of those proves nothing about the wire. The shape
+// of this particular line is the argument — its long note is the FINAL glyph
+// (雄, 1280 ms, running right up to `lyricend`) and its opening 谁 is 350 ms, so
+// a fixture whose durations decay from a slow start has the song backwards.
+const char* const kWordLine =
+    "\xE8\xB0\x81\xE8\xAF\xB4\xE7\xAB\x99\xE5\x9C\xA8\xE5\x85\x89\xE9\x87\x8C"
+    "\xE7\x9A\x84\xE6\x89\x8D\xE7\xAE\x97\xE8\x8B\xB1\xE9\x9B\x84";  // 谁说站在光里的才算英雄
+const char* const kWordTrack = "\xE5\xAD\xA4\xE5\x8B\x87\xE8\x80\x85";   // 孤勇者
+const char* const kWordArtist = "\xE9\x99\x88\xE5\xA5\x95\xE8\xBF\x85";  // 陈奕迅
+
+// The `lyricw` field of that document, on its own.
+const char* const kWordTable =
+    "0,350,350,250,600,460,1060,400,1460,400,1860,400,2260,640,2900,380,"
+    "3280,390,3670,340,4010,1280";
+
+const int kWordLineStartMs = 110330;
+const int kWordSungEndMs = 115620;   // the last word's end — what `lyricend` now means
+const int kWordUntilMs = 128880;     // the next line's start — the old meaning of `lyricend`
+const int kWordGlyphs = 11;
+
+// The proto-2 document, verbatim. `lyricend` is the sung end, `lyricuntil` is the
+// display window, and `lyricw` is the per-glyph table — none of which a device
+// reporting no `proto` is ever sent.
+const char* const kWordDoc =
+    "seq\t4\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
+    "np\t1\ntrack\t\xE5\xAD\xA4\xE5\x8B\x87\xE8\x80\x85\n"
+    "artist\t\xE9\x99\x88\xE5\xA5\x95\xE8\xBF\x85\nplaying\t1\n"
+    "pos\t112000\ndur\t260000\n"
+    "lyric\t\xE8\xB0\x81\xE8\xAF\xB4\xE7\xAB\x99\xE5\x9C\xA8\xE5\x85\x89\xE9\x87\x8C"
+    "\xE7\x9A\x84\xE6\x89\x8D\xE7\xAE\x97\xE8\x8B\xB1\xE9\x9B\x84\n"
+    "lyricat\t110330\nlyricend\t115620\nlyricuntil\t128880\n"
+    "lyricw\t0,350,350,250,600,460,1060,400,1460,400,1860,400,2260,640,2900,380,"
+    "3280,390,3670,340,4010,1280\n"
+    "menu\t2\n"
+    "item\tmusic\tmusic\t\xE9\x9F\xB3\xE4\xB9\x90\n"
+    "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+
+// The SAME session as a device reporting no `proto` is served — also verbatim
+// from the encoder. One key differs and it is the whole compatibility argument:
+// `lyricend` carries 128880, the display window, because that is what an
+// un-upgraded 升降 keys its exit ramp on.
+const char* const kLegacyDoc =
+    "seq\t3\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
+    "np\t1\ntrack\t\xE5\xAD\xA4\xE5\x8B\x87\xE8\x80\x85\n"
+    "artist\t\xE9\x99\x88\xE5\xA5\x95\xE8\xBF\x85\nplaying\t1\n"
+    "pos\t112000\ndur\t260000\n"
+    "lyric\t\xE8\xB0\x81\xE8\xAF\xB4\xE7\xAB\x99\xE5\x9C\xA8\xE5\x85\x89\xE9\x87\x8C"
+    "\xE7\x9A\x84\xE6\x89\x8D\xE7\xAE\x97\xE8\x8B\xB1\xE9\x9B\x84\n"
+    "lyricat\t110330\nlyricend\t128880\n"
+    "menu\t2\n"
+    "item\tmusic\tmusic\t\xE9\x9F\xB3\xE4\xB9\x90\n"
+    "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+
+// The decode, the cursor, and the document keys that carry them.
+void checkLyricTiming() {
+  using tcos::LyricCell;
+  using tcos::LyricCursor;
+  using tcos::StateDoc;
+
+  // --- the real table ------------------------------------------------------
+  tcos::LyricCellTable cells;
+  check(tcos::decodeLyricCells(kWordTable, kWordLineStartMs, &cells),
+        "the service's own encodeLyricCells output decodes");
+  check(cells.count == kWordGlyphs,
+        "into exactly one cell per glyph of the line it belongs to");
+  if (cells.count == kWordGlyphs) {
+    // Every boundary, not a spot check: an offset read as a width (or the pair
+    // read one field out of step) still produces a plausible-looking table.
+    static const int kStarts[11] = {110330, 110680, 110930, 111390, 111790, 112190,
+                                    112590, 113230, 113610, 114000, 114340};
+    static const int kEnds[11] = {110680, 110930, 111390, 111790, 112190, 112590,
+                                  113230, 113610, 114000, 114340, 115620};
+    for (int i = 0; i < 11; ++i) {
+      char label[80];
+      std::snprintf(label, sizeof(label), "cell %d spans the milliseconds it was sung", i);
+      check(cells.cells[i].startMs == kStarts[i] && cells.cells[i].endMs == kEnds[i],
+            label);
+    }
+    check(cells.cells[10].endMs == kWordSungEndMs,
+          "and the last cell ends exactly where `lyricend` says the singing did");
+  }
+
+  // --- everything malformed ------------------------------------------------
+  // All of these leave the table EMPTY, which is the same shape as a track with
+  // no word timings — so the panel sweeps evenly instead of lighting glyphs at
+  // times nobody sang. A half-read table is the one failure invisible on a photo.
+  static const char* const kBadTables[8] = {
+      "0,100,200",      // odd count: one number was lost in flight
+      "0,100,,200",     // an empty field
+      "0,10x,20,30",    // a digit that is not one; atoi would read 10 and carry on
+      "-5,100",         // a sign, which encodeLyricCells clamps away before writing
+      "0,100,20 ,30",   // trailing space
+      "0,100,",         // trailing separator
+      " 0,100",         // leading space
+      "0,1000000000000",  // a number no lyric can justify, and no int can hold
+  };
+  for (int i = 0; i < 8; ++i) {
+    tcos::LyricCellTable bad;
+    bad.count = 3;  // pre-filled, so "left empty" is a claim and not the default
+    char label[96];
+    std::snprintf(label, sizeof(label), "table \"%s\" is refused outright", kBadTables[i]);
+    check(!tcos::decodeLyricCells(kBadTables[i], 1000, &bad) && bad.empty(), label);
+  }
+  {
+    tcos::LyricCellTable none;
+    check(!tcos::decodeLyricCells("", 1000, &none) && none.empty(),
+          "an empty table is refused rather than decoded as zero cells");
+    check(!tcos::decodeLyricCells("0,100", -1, &none) && none.empty(),
+          "and so is a table with no `lyricat` to be relative to");
+  }
+  {
+    // The ceiling, from both sides. 96 is MusicScreen's own kMaxCells; the
+    // service clamps a label to 24, so anything near this is already malformed.
+    std::string big;
+    for (int i = 0; i < tcos::kMaxLyricCells; ++i) big += (i == 0 ? "0,10" : ",0,10");
+    tcos::LyricCellTable at;
+    check(tcos::decodeLyricCells(big, 0, &at) && at.count == tcos::kMaxLyricCells,
+          "a table at the cell ceiling decodes");
+    big += ",0,10";
+    tcos::LyricCellTable over;
+    check(!tcos::decodeLyricCells(big, 0, &over) && over.empty(),
+          "one cell past it is refused rather than allowed to grow a vector");
+  }
+
+  // --- the cursor, on the real table ---------------------------------------
+  // The index at several instants, each one chosen for what it proves.
+  const LyricCell* table = cells.cells;
+  struct Sample {
+    int atMs;
+    int index;
+    const char* what;
+  };
+  static const Sample kSamples[7] = {
+      {110330, 0, "the line's first millisecond is its first glyph"},
+      {110679, 0, "the last millisecond of a cell still belongs to it"},
+      {110680, 1, "and the next one belongs to the next"},
+      {113000, 6, "mid-line the cursor is on the glyph being sung"},
+      {114340, 10, "the final glyph starts exactly when its word does"},
+      {114980, 10, "640 ms into that 1280 ms held note it is STILL that glyph"},
+      {115619, 10, "and it holds until the singing stops"},
+  };
+  for (int i = 0; i < 7; ++i) {
+    const LyricCursor cursor = tcos::lyricCursorAt(table, kWordGlyphs, kWordLineStartMs,
+                                                   kWordSungEndMs, kWordGlyphs,
+                                                   kSamples[i].atMs);
+    check(cursor.index == kSamples[i].index && cursor.phase == tcos::kLyricSinging,
+          kSamples[i].what);
+  }
+  {
+    // Inside a cell the fraction runs across that cell's OWN span, which is the
+    // whole point: 640 ms into 雄's 1280 ms note is half of THAT NOTE, where the
+    // same instant is 4650/5290 — 88% — of the line.
+    const LyricCursor cursor = tcos::lyricCursorAt(table, kWordGlyphs, kWordLineStartMs,
+                                                   kWordSungEndMs, kWordGlyphs, 114980);
+    check(cursor.index == 10 && cursor.frac > 0.49f && cursor.frac < 0.51f,
+          "the fraction is measured inside the glyph, not across the line");
+  }
+  {
+    // The even sweep over the same window reaches a DIFFERENT glyph at the same
+    // instant, and the old 18.55 s window a different one again. That gap is the
+    // defect: at 113000 the singer is on 的 and the naive panel is still on 说.
+    const LyricCursor sweptSung = tcos::lyricCursorAt(0, 0, kWordLineStartMs,
+                                                      kWordSungEndMs, kWordGlyphs, 113000);
+    const LyricCursor sweptWindow = tcos::lyricCursorAt(0, 0, kWordLineStartMs,
+                                                        kWordUntilMs, kWordGlyphs, 113000);
+    check(sweptSung.index == 5, "an even sweep of the sung span lands a glyph late");
+    check(sweptWindow.index == 1,
+          "and an even sweep of the old display window lands five glyphs late");
+  }
+
+  // --- held ----------------------------------------------------------------
+  for (int i = 0; i < 3; ++i) {
+    const int atMs = kWordSungEndMs + i * 4000;  // the moment it ends, and deep into the break
+    const LyricCursor cursor = tcos::lyricCursorAt(table, kWordGlyphs, kWordLineStartMs,
+                                                   kWordSungEndMs, kWordGlyphs, atMs);
+    char label[96];
+    std::snprintf(label, sizeof(label), "%d ms past the last cell the line reads as held",
+                  i * 4000);
+    check(cursor.phase == tcos::kLyricHeld && cursor.index == kWordGlyphs - 1 &&
+              cursor.frac == 1.f && cursor.progress == 1.f,
+          label);
+  }
+  {
+    const LyricCursor before = tcos::lyricCursorAt(table, kWordGlyphs, kWordLineStartMs,
+                                                   kWordSungEndMs, kWordGlyphs, 110329);
+    check(before.phase == tcos::kLyricPending && before.index == -1,
+          "a playhead before the first word has no glyph, rather than glyph 0");
+  }
+
+  // --- a table that does not match the row ---------------------------------
+  // Truncated together with the label service-side, so a mismatch means something
+  // went wrong on the wire. Refused rather than trimmed: the two can only differ
+  // by whole glyphs, and being one character out of step for a whole song is
+  // worse than not walking the words at all.
+  for (int delta = -1; delta <= 1; delta += 2) {
+    const LyricCursor cursor = tcos::lyricCursorAt(table, kWordGlyphs, kWordLineStartMs,
+                                                   kWordSungEndMs, kWordGlyphs + delta,
+                                                   113000);
+    const LyricCursor swept = tcos::lyricCursorAt(0, 0, kWordLineStartMs, kWordSungEndMs,
+                                                  kWordGlyphs + delta, 113000);
+    char label[112];
+    std::snprintf(label, sizeof(label),
+                  "a table %s than the row falls back to the even sweep",
+                  delta < 0 ? "longer" : "shorter");
+    check(cursor.index == swept.index && cursor.frac == swept.frac, label);
+  }
+
+  // --- gaps and whitespace -------------------------------------------------
+  // Hand-built, because the corpus line above has neither: 1.2% of yrc words do
+  // not butt up against their successor, and every line with a space has a
+  // zero-width cell holding its index.
+  {
+    tcos::LyricCellTable gapped;
+    // c0 lit, c1 a space, c2 lit, then a 300 ms gap, then c3 lit.
+    check(tcos::decodeLyricCells("0,300,300,0,300,300,900,300", 1000, &gapped),
+          "a table with a zero-width cell and a gap decodes");
+    const LyricCell* g = gapped.cells;
+    const int kEnd = 2200;
+    check(tcos::lyricCursorAt(g, 4, 1000, kEnd, 4, 1300).index == 2,
+          "the cursor steps over a whitespace cell rather than resting on it");
+    const LyricCursor inGap = tcos::lyricCursorAt(g, 4, 1000, kEnd, 4, 1700);
+    check(inGap.index == 2 && inGap.frac == 1.f && inGap.phase == tcos::kLyricSinging,
+          "between two words it holds the glyph that just finished, and does not hold");
+    check(tcos::lyricCursorAt(g, 4, 1000, kEnd, 4, 2200).phase == tcos::kLyricHeld,
+          "and only reads as held once the last cell AND the line are over");
+  }
+
+  // --- the display window --------------------------------------------------
+  check(tcos::lyricWindowProgress(kWordLineStartMs, kWordSungEndMs, kWordUntilMs,
+                                  kWordSungEndMs) < 0.31f,
+        "the display window is barely a third gone when the singing ends");
+  check(tcos::lyricWindowProgress(kWordLineStartMs, kWordSungEndMs, kWordUntilMs,
+                                  kWordUntilMs) == 1.f,
+        "and reaches 1 exactly when the next line is due");
+  check(tcos::lyricWindowProgress(kWordLineStartMs, kWordSungEndMs, -1, 113000) ==
+            tcos::lyricWindowProgress(kWordLineStartMs, kWordSungEndMs, kWordSungEndMs,
+                                      113000),
+        "an absent `lyricuntil` means the window IS the sung span");
+
+  // --- the document --------------------------------------------------------
+  StateDoc doc;
+  check(doc.parse(kWordDoc), "the proto-2 document parses");
+  check(doc.lyricStartMs() == kWordLineStartMs && doc.lyricEndMs() == kWordSungEndMs,
+        "`lyricend` is read as the SUNG end");
+  check(doc.lyricUntilMs() == kWordUntilMs, "and `lyricuntil` as the display window");
+  check(doc.lyricCells().count == cells.count,
+        "and `lyricw` survives splitTabs' three-tab cap as one comma-separated field");
+  if (doc.lyricCells().count == cells.count) {
+    bool same = true;
+    for (int i = 0; i < cells.count; ++i) {
+      if (doc.lyricCells().cells[i].startMs != cells.cells[i].startMs ||
+          doc.lyricCells().cells[i].endMs != cells.cells[i].endMs) {
+        same = false;
+      }
+    }
+    check(same, "with every cell landing on the same milliseconds the encoder wrote");
+  }
+
+  // The keys are order-independent, because nothing in the format promises
+  // `lyricat` arrives before the table it scales. Same rule `rev`/`ttl` follow by
+  // repeating their id.
+  StateDoc reordered;
+  reordered.parse("seq\t5\nnp\t1\ntrack\tX\nplaying\t1\npos\t0\ndur\t9\n"
+                  "lyric\tab\nlyricw\t0,300,300,300\nlyricat\t1000\nlyricend\t1600\n"
+                  "menu\t0\n");
+  check(reordered.lyricCells().count == 2 && reordered.lyricCells().cells[0].startMs == 1000,
+        "`lyricw` before `lyricat` still lands on the right milliseconds");
+
+  // An OLDER service: neither key, which has to stay distinguishable from a zero.
+  check(doc.parse(kLegacyDoc), "the legacy document parses");
+  check(doc.lyricEndMs() == kWordUntilMs,
+        "where `lyricend` still carries the display window, as that build's 升降 needs");
+  check(doc.lyricUntilMs() == -1 && doc.lyricCells().empty(),
+        "and the absence of the two new keys is the message, not a gap");
+
+  // A malformed table must not take the rest of the document with it, and must
+  // not leave half a table behind: the panel falls back to the even sweep.
+  StateDoc broken;
+  check(broken.parse("seq\t6\nnp\t1\ntrack\tX\nplaying\t1\npos\t0\ndur\t9\n"
+                     "lyric\tab\nlyricat\t1000\nlyricend\t1600\nlyricw\t0,300,300\n"
+                     "menu\t1\nitem\tmusic\tmusic\tM\n"),
+        "a document with an odd-length table still parses");
+  check(broken.lyricCells().empty(), "with no table rather than half of one");
+  check(broken.lyricStartMs() == 1000 && broken.items().size() == 1,
+        "and every other field intact");
+
+  // Reparsing is a full reset. A track that goes from word-level to line-level —
+  // a NetEase song followed by a Spotify one — must not keep the old table.
+  broken.parse(kWordDoc);
+  check(!broken.lyricCells().empty(), "a table arrives");
+  broken.parse("seq\t7\nnp\t1\ntrack\tX\nplaying\t1\npos\t0\ndur\t9\nmenu\t0\n");
+  check(broken.lyricCells().empty() && broken.lyricUntilMs() == -1,
+        "and is dropped by the next document rather than outliving its line");
+}
+
+// The frames a device reporting no `proto` must still get, PINNED TO THE BUILD
+// BEFORE THIS CHANGE.
+//
+// Every other check in this file asserts the new code against the new code, which
+// cannot notice a rendering that moved. These hashes were produced by rendering
+// ui/MusicScreen.cpp AS OF e5a543f — the last commit before word timings reached
+// this firmware — against the same core/ and visual/ sources, so a difference
+// here is a legacy frame that is no longer what it was. That matters more than
+// anything else in this file: roughly four fifths
+// of tracks have no word timings, and every device is served this encoding until
+// it reports a `proto`.
+//
+// Regenerate only when a legacy frame is MEANT to change — check out the old
+// MusicScreen, render the three shapes below, and paste the hashes.
+void checkLyricLegacyFrames() {
+  using tcos::MusicScreen;
+
+  const int kStampMs = 4000;
+
+  // 1. A legacy line window: `lyricend` is the next line's start, the old
+  //    meaning, and neither new key is present.
+  static const int kDeltas[7] = {0, 2000, 5000, 9000, 14000, 16550, 20000};
+  static const uint32_t kWindowed[4][7] = {
+      {0xbf51ae8bu, 0xae2ec251u, 0x8757c041u, 0x1a93d2c8u, 0x3096b10cu, 0x5d9f7eecu, 0x14926341u},
+      {0x1d3fbf14u, 0x3a9862dau, 0xca99a7cau, 0x353c55bbu, 0x70c4f70au, 0x97a1c9fau, 0x98d37faau},
+      {0xd80ea5b3u, 0xc0b44af2u, 0x85f540bdu, 0x5d5f5dbbu, 0x706a221cu, 0x79b3f6ebu, 0x435a40a7u},
+      {0x7a5b4debu, 0x3727b46bu, 0x76a2bb47u, 0xffe5bccau, 0x8d0527fau, 0x92813d4du, 0x6a4a8249u},
+  };
+  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+    for (int i = 0; i < 7; ++i) {
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(mode, MusicScreen::kSkinSignal, 0, false);
+      screen.setNowPlaying(true, kWordTrack, kWordArtist, kWordLine, true, 112000, 260000,
+                           kStampMs, kWordLineStartMs, kWordUntilMs);
+      screen.render(frame, kStampMs + kDeltas[i]);
+      char label[128];
+      std::snprintf(label, sizeof(label),
+                    "mode %d at +%d ms is the frame the pre-change build drew", mode,
+                    kDeltas[i]);
+      check(frameHash(frame) == kWindowed[mode][i], label);
+    }
+  }
+
+  // 2. No window at all — `lyric` with no `lyricat`, which is the shape a service
+  //    older still produces. The 4 s sweep runs off the moment the line changed.
+  static const uint32_t kSwept[4][4] = {
+      {0xde8b3ad2u, 0xc945101cu, 0x0a38cdf8u, 0x1c0d9103u},
+      {0x433ae328u, 0xbde5c328u, 0x6d49d588u, 0xe4c7259du},
+      {0x01abf30bu, 0x2ca45852u, 0xaf42f793u, 0x17794d2au},
+      {0x3f44ebb5u, 0x4f919085u, 0xdd22d0cdu, 0xc7f36200u},
+  };
+  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+    for (int i = 0; i < 4; ++i) {
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(mode, MusicScreen::kSkinBlueprint, 0, false);
+      screen.setNowPlaying(true, kWordTrack, kWordArtist, kWordLine, true, 112000, 260000,
+                          kStampMs);
+      screen.render(frame, kStampMs + i * 1500);
+      char label[128];
+      std::snprintf(label, sizeof(label),
+                    "mode %d untimed at +%d ms is unchanged", mode, i * 1500);
+      check(frameHash(frame) == kSwept[mode][i], label);
+    }
+  }
+
+  // 3. No lyric at all: the title/artist rotation, whose sweep is the rotation
+  //    slot. It is not a sung row and must not acquire a cursor of its own — the
+  //    accent is on so the palette override rides along.
+  static const uint32_t kRotating[4][4] = {
+      {0xf777e55eu, 0x874e4e8eu, 0x03dc585au, 0xcec15b66u},
+      {0x3b4bc00du, 0xb3b7f345u, 0x0b373e01u, 0x81e42e05u},
+      {0xddf7fbbau, 0x86c608a1u, 0x18c32ac6u, 0xf5ed2e8fu},
+      {0xaf451f5eu, 0x89bb7516u, 0x7ebcea26u, 0x0f1ba5e6u},
+  };
+  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+    for (int i = 0; i < 4; ++i) {
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(mode, MusicScreen::kSkinArcade, 0xff8844u, true);
+      screen.setNowPlaying(true, kWordTrack, kWordArtist, "", true, 112000, 260000, kStampMs);
+      screen.render(frame, kStampMs + i * 1700);
+      char label[128];
+      std::snprintf(label, sizeof(label),
+                    "mode %d title rotation at +%d ms is unchanged", mode, i * 1700);
+      check(frameHash(frame) == kRotating[mode][i], label);
+    }
+  }
+
+  // And the fields' ABSENCE is what does it: the same line, explicitly told the
+  // two clocks coincide and given no table, is the same picture. This is the
+  // shape a proto-2 service produces for a line with no gap after it and no word
+  // timings — most of the catalogue, most of the time.
+  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+    MusicScreen absent;
+    MusicScreen explicitly;
+    Surface a(52, 16);
+    Surface b(52, 16);
+    absent.onEnter(0);
+    explicitly.onEnter(0);
+    absent.setTheme(mode, MusicScreen::kSkinSignal, 0, false);
+    explicitly.setTheme(mode, MusicScreen::kSkinSignal, 0, false);
+    absent.setNowPlaying(true, kWordTrack, kWordArtist, kWordLine, true, 112000, 260000,
+                         kStampMs, kWordLineStartMs, kWordUntilMs);
+    explicitly.setNowPlaying(true, kWordTrack, kWordArtist, kWordLine, true, 112000, 260000,
+                             kStampMs, kWordLineStartMs, kWordUntilMs, -1, 0, 0);
+    absent.render(a, kStampMs + 5000);
+    explicitly.render(b, kStampMs + 5000);
+    char label[112];
+    std::snprintf(label, sizeof(label),
+                  "mode %d is untouched by a document that carries neither new key", mode);
+    check(!surfacesDiffer(a, b), label);
+  }
+}
+
+// What the four 显示形式 do with a per-glyph table, in pixels, and the telemetry
+// that makes the service send one at all.
+void checkWordLyricScreen() {
+  using tcos::HostLink;
+  using tcos::MusicScreen;
+  using tcos::StateDoc;
+
+  // --- the capability report ----------------------------------------------
+  // Without this the whole change is invisible: the service gates every new key
+  // on `proto`, and a firmware that never sends one is served the legacy
+  // encoding forever. Verified live on the user's unit as proto = 0.
+  {
+    HostLink::Report report;
+    report.screen = "music";
+    report.focus = "btc";
+    report.wifi = "home-2g";
+    report.ip = "192.168.8.240";
+    report.uptimeMs = 987654321ull;
+    report.freeKb = 812;
+    report.batteryPercent = 88;
+    report.flashed = true;
+    const std::string body = HostLink::reportBody(report);
+    check(body.find("\"proto\":2") != std::string::npos,
+          "telemetry reports the document revision this build implements");
+    check(StateDoc::kProtocol == 2,
+          "and it is the 2 that OS_PROTO_LYRIC_WINDOW in src/os-link.ts gates on");
+    check(!body.empty() && body[body.size() - 1] == '}',
+          "the report is a complete JSON object");
+    check(body.find("\"flashed\":true") != std::string::npos &&
+              body.find("\"asleep\":false") != std::string::npos,
+          "with every field that was already there still in it");
+
+    // The truncation hazard, from the direction that used to bite. A silently cut
+    // body is not degraded telemetry, it is a 400 — no battery, no 已息屏, and no
+    // `proto`, so the device would drop back to the legacy encoding by way of a
+    // buffer size. jsonEscape doubles a string of quotes, which is the worst case.
+    HostLink::Report fat;
+    fat.screen = std::string(64, '"');
+    fat.focus = std::string(64, '\\');
+    fat.wifi = std::string(64, '"');
+    fat.ip = std::string(64, '"');
+    fat.uptimeMs = 18446744073709551615ull;
+    fat.freeKb = -2147483647;
+    fat.supplicantRestarts = -2147483647;
+    fat.sleepStartMin = -2147483647;
+    fat.sleepEndMin = -2147483647;
+    fat.sleepIdleSec = -2147483647;
+    const std::string big = HostLink::reportBody(fat);
+    check(!big.empty() && big[big.size() - 1] == '}',
+          "and cannot be truncated by a hostile SSID, however long");
+    check(big.find("\"proto\":2") != std::string::npos,
+          "which is what keeps `proto` from being the field that falls off the end");
+  }
+
+  // --- the document, through the real parser and the real snapshot ---------
+  StateDoc doc;
+  check(doc.parse(kWordDoc), "the proto-2 document parses on the path the screen uses");
+  HostLink link;
+  link.adoptDocument(doc, 1250000ull);
+  const HostLink::Snapshot snap = link.snapshot();
+  check(snap.lyricUntilMs == kWordUntilMs && snap.lyricCells.count == kWordGlyphs,
+        "and the held window and the table survive the copy into the snapshot");
+
+  // Every screen below is fed through osLogic's own call, argument for argument,
+  // so a field that reaches the snapshot and not the panel cannot hide.
+  const int kStampMs = 4000;
+  // playhead(now) = pos + (now - stamp), so this is the nowMs at a track time.
+  const int kAt113000 = kStampMs + (113000 - snap.positionMs);
+  const int kAt114500 = kStampMs + (114500 - snap.positionMs);
+  const int kAt116000 = kStampMs + (116000 - snap.positionMs);
+  const int kAt120000 = kStampMs + (120000 - snap.positionMs);
+
+  // 的 is the seventh glyph and the one actually being sung at 113000 (its word
+  // runs 112590..113230); 里 is the sixth, which is where an even sweep of the
+  // same span puts the highlight.
+  const uint32_t kSung = codepointAt(kWordLine, 6);
+  const uint32_t kSwept = codepointAt(kWordLine, 5);
+  check(glyphBits(kSung) != glyphBits(kSwept),
+        "the two candidate glyphs differ in ink, so counting it can tell them apart");
+
+  const uint32_t primary = kSkinTiers[0].primary;
+
+  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+    // 天际 hangs its line from row 0 to leave the spectrum a floor; the other
+    // three sit it at row 2. Either way the band is twelve rows of glyph ink and
+    // excludes every cue row, the fill meter and the bars. The COLUMNS are each
+    // mode's own clip — 聚光 bleeds off both edges, the other three hold the
+    // [2,50) margin — which is also what keeps 升降's column-51 fill out of it.
+    const int bandY = mode == MusicScreen::kModeSkyline ? 0 : 2;
+    const int bandX0 = mode == MusicScreen::kModeSpotlight ? 0 : 2;
+    const int bandX1 = mode == MusicScreen::kModeSpotlight ? 51 : 49;
+    char label[160];
+
+    MusicScreen walked;
+    MusicScreen sweptScreen;
+    Surface withCells(52, 16);
+    Surface withoutCells(52, 16);
+    walked.onEnter(0);
+    sweptScreen.onEnter(0);
+    walked.setTheme(mode, MusicScreen::kSkinSignal, 0, false);
+    sweptScreen.setTheme(mode, MusicScreen::kSkinSignal, 0, false);
+    walked.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                         snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                         snap.lyricUntilMs, snap.lyricCells.cells,
+                         snap.lyricCells.count);
+    // The same line and the same two windows, with the table withheld — the
+    // line-level shape, which is ~80% of tracks.
+    sweptScreen.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true,
+                              snap.positionMs, snap.durationMs, kStampMs, snap.lyricStartMs,
+                              snap.lyricEndMs, snap.lyricUntilMs);
+    walked.render(withCells, kAt113000);
+    sweptScreen.render(withoutCells, kAt113000);
+
+    std::snprintf(label, sizeof(label),
+                  "mode %d lights the glyph being SUNG at 113000, not the one an even "
+                  "sweep would", mode);
+    check(tierPixelsInBox(withCells, primary, bandX0, bandX1, bandY, bandY + 11) ==
+              glyphBits(kSung),
+          label);
+    std::snprintf(label, sizeof(label),
+                  "mode %d without a table still lights the swept glyph, unchanged", mode);
+    check(tierPixelsInBox(withoutCells, primary, bandX0, bandX1, bandY, bandY + 11) ==
+              glyphBits(kSwept),
+          label);
+    std::snprintf(label, sizeof(label), "mode %d therefore draws a different panel", mode);
+    check(surfacesDiffer(withCells, withoutCells), label);
+
+    // A mismatched table is refused, not trimmed: feeding one cell too few or too
+    // many has to produce the frame the sweep produces, to the pixel.
+    for (int delta = -1; delta <= 1; delta += 2) {
+      MusicScreen ragged;
+      Surface frame(52, 16);
+      ragged.onEnter(0);
+      ragged.setTheme(mode, MusicScreen::kSkinSignal, 0, false);
+      ragged.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                           snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                           snap.lyricUntilMs, snap.lyricCells.cells, kWordGlyphs + delta);
+      ragged.render(frame, kAt113000);
+      std::snprintf(label, sizeof(label),
+                    "mode %d falls back to the sweep on a table %s than the row", mode,
+                    delta < 0 ? "shorter" : "longer");
+      check(!surfacesDiffer(frame, withoutCells), label);
+    }
+
+    // --- sung out and holding ---------------------------------------------
+    // 4.4 s past the last word, with 13 s of instrumental still to run. The line
+    // stays up, complete, with no glyph left glowing — and the panel is not
+    // frozen: the whole-track cue keeps moving under it.
+    Surface held(52, 16);
+    Surface laterHeld(52, 16);
+    walked.render(held, kAt120000);
+    walked.render(laterHeld, kAt120000 + 6000);
+    std::snprintf(label, sizeof(label), "mode %d keeps the finished line on the panel", mode);
+    check(litPixelsInRows(held, bandY, bandY + 11) > 0, label);
+    std::snprintf(label, sizeof(label),
+                  "mode %d stops lighting a focus glyph once the line is sung out", mode);
+    check(tierPixelsInBox(held, primary, bandX0, bandX1, bandY, bandY + 11) == 0, label);
+    std::snprintf(label, sizeof(label), "mode %d is still animating while it holds", mode);
+    check(surfacesDiffer(held, laterHeld), label);
+  }
+
+  // --- 聚光 specifically ---------------------------------------------------
+  // The mode this change is for: it locks the SUNG PIXEL COLUMN to x=26, a claim
+  // no other mode makes about a single column, and `progress * textWidth` only
+  // finds that column when time is spread evenly over the row.
+  {
+    MusicScreen spot;
+    Surface frame(52, 16);
+    spot.onEnter(0);
+    spot.setTheme(MusicScreen::kModeSpotlight, MusicScreen::kSkinSignal, 0, false);
+    spot.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                       snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                       snap.lyricUntilMs, snap.lyricCells.cells, snap.lyricCells.count);
+    spot.render(frame, kAt113000);
+    int lowest = 52;
+    int highest = -1;
+    for (int y = 2; y <= 13; ++y) {
+      for (int x = 0; x < 52; ++x) {
+        if (frame.getPixel(x, y).toRGB888() != kSkinTiers[0].primary) continue;
+        if (x < lowest) lowest = x;
+        if (x > highest) highest = x;
+      }
+    }
+    check(lowest <= 26 && highest >= 26,
+          "聚光 puts the glyph being sung across the panel's centre column");
+
+    // The fill meter measures progress through THAT GLYPH, and the last note of
+    // this line is where the two answers separate furthest. At 114500 the singer
+    // is 160 ms into 雄's 1280 ms note — an eighth of it, two pixels of a twelve
+    // pixel meter — while the LINE is 79% gone, which is what an even sweep of
+    // the same instant reports (it lands in the ninth cell, two thirds through
+    // it, and fills two thirds of the bar). A single number cannot be both.
+    Surface late(52, 16);
+    spot.render(late, kAt114500);
+    const int meter = tierPixelsInBox(late, kSkinTiers[0].secondary, 0, 51, 14, 14);
+    check(meter >= 1 && meter <= 3,
+          "and a fill meter measuring how far into that glyph, not how far into the line");
+
+    MusicScreen sweptSpot;
+    Surface sweptLate(52, 16);
+    sweptSpot.onEnter(0);
+    sweptSpot.setTheme(MusicScreen::kModeSpotlight, MusicScreen::kSkinSignal, 0, false);
+    sweptSpot.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                            snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                            snap.lyricUntilMs);
+    sweptSpot.render(sweptLate, kAt114500);
+    check(tierPixelsInBox(sweptLate, kSkinTiers[0].secondary, 0, 51, 14, 14) >= meter + 4,
+          "where the line-level sweep of the same instant fills a visibly fuller bar");
+
+    Surface heldFrame(52, 16);
+    spot.render(heldFrame, kAt120000);
+    check(tierPixelsInBox(heldFrame, kSkinTiers[0].secondary, 0, 51, 14, 14) == 0,
+          "a finished line has no glyph in progress, so 聚光 draws no meter at all");
+  }
+
+  // --- 天际 specifically ---------------------------------------------------
+  // The BEAT is the second place word timings land in this mode, and the hold is
+  // where the choice shows. beatKick's per-glyph term is (1 - frac)^2, so a
+  // cursor parked at the end of a cell — a gap between words, or the whole
+  // instrumental after the last one — would sit at FULL scale and pin the
+  // spectrum to maximum for thirteen seconds. There is nothing being sung to
+  // snap to, so it falls back to the free-running pulse instead.
+  {
+    MusicScreen sungOut;
+    MusicScreen pinned;
+    Surface calm(52, 16);
+    Surface loud(52, 16);
+    sungOut.onEnter(0);
+    pinned.onEnter(0);
+    sungOut.setTheme(MusicScreen::kModeSkyline, MusicScreen::kSkinSignal, 0, false);
+    pinned.setTheme(MusicScreen::kModeSkyline, MusicScreen::kSkinSignal, 0, false);
+    sungOut.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                          snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                          snap.lyricUntilMs, snap.lyricCells.cells,
+                          snap.lyricCells.count);
+    // The same instant on the legacy encoding, where a line past its window keeps
+    // the per-glyph term at 1 — which is what this build must NOT do once it can
+    // tell "sung out" from "the next line is due".
+    pinned.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                         snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs);
+    sungOut.render(calm, kAt120000);
+    pinned.render(loud, kAt120000);
+    bool barsDiffer = false;
+    for (int y = 13; y <= 15 && !barsDiffer; ++y) {
+      for (int x = 0; x < 52; ++x) {
+        if (calm.getPixel(x, y).toRGB888() != loud.getPixel(x, y).toRGB888()) {
+          barsDiffer = true;
+          break;
+        }
+      }
+    }
+    check(barsDiffer, "天际's spectrum stops snapping on a glyph once there is none");
+
+    // AND THE SAME HOLDS WITHOUT WORD TIMINGS, which is the shape four fifths of
+    // tracks arrive in: `lyricuntil` present, `lyricw` absent. There the cursor
+    // is the even sweep pinned at progress 1 for the whole hold, and
+    // beatKick's per-glyph term is 1 - fract(1 * n) — exactly 1 for any glyph
+    // count, i.e. the spectrum slammed to maximum for thirteen seconds, on the
+    // commonest wire shape there is. A held line is a held line however the
+    // service timed it, so this frame must be the tabled one to the pixel.
+    MusicScreen wordless;
+    Surface untimedHold(52, 16);
+    wordless.onEnter(0);
+    wordless.setTheme(MusicScreen::kModeSkyline, MusicScreen::kSkinSignal, 0, false);
+    wordless.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                           snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                           snap.lyricUntilMs);
+    wordless.render(untimedHold, kAt120000);
+    check(!surfacesDiffer(untimedHold, calm),
+          "and a proto-2 line with no word timings holds exactly like one with them");
+  }
+
+  // --- 升降 specifically ---------------------------------------------------
+  // TWO CLOCKS. cascadeBandY's exit ramp reaches y = -16 at progress 1, so a
+  // choreography keyed on the SUNG progress flies the line off the panel the
+  // instant the voice stops — 13.3 s of black screen on this very line. The
+  // window is what keeps it up; the karaoke wipe still finishes with the singer.
+  {
+    MusicScreen windowed;
+    MusicScreen sungOnly;
+    Surface up(52, 16);
+    Surface gone(52, 16);
+    windowed.onEnter(0);
+    sungOnly.onEnter(0);
+    windowed.setTheme(MusicScreen::kModeCascade, MusicScreen::kSkinSignal, 0, false);
+    sungOnly.setTheme(MusicScreen::kModeCascade, MusicScreen::kSkinSignal, 0, false);
+    windowed.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                           snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                           snap.lyricUntilMs, snap.lyricCells.cells,
+                           snap.lyricCells.count);
+    // The same line and the same table, with the held window withheld.
+    sungOnly.setNowPlaying(true, snap.track, snap.artist, snap.lyric, true, snap.positionMs,
+                           snap.durationMs, kStampMs, snap.lyricStartMs, snap.lyricEndMs,
+                           -1, snap.lyricCells.cells, snap.lyricCells.count);
+    windowed.render(up, kAt116000);
+    sungOnly.render(gone, kAt116000);
+    // Columns 2..49 only: 升降's whole-track fill lives in column 51 and would
+    // satisfy a looser count on an empty panel.
+    check(litPixelsInBox(up, 2, 49, 0, 15) > 0,
+          "升降 holds the line on the panel through the instrumental after it");
+    check(litPixelsInBox(gone, 2, 49, 0, 15) == 0,
+          "and would have flown it off the top without `lyricuntil` — which is exactly "
+          "what an un-upgraded build would do if the service tightened `lyricend` "
+          "underneath it");
+  }
+}
+
 // A server's reply, assembled by hand. Everything a real one carries that this
 // client reads is a parameter, so each rule can be broken one at a time.
 std::string makeNtpReply(uint64_t nonce, uint32_t seconds, uint32_t fraction) {
@@ -6761,6 +7555,12 @@ int main() {
   std::printf("  music theme ok\n");
   checkMusicPath();
   std::printf("  music path ok\n");
+  checkLyricTiming();
+  std::printf("  lyric timing ok\n");
+  checkLyricLegacyFrames();
+  std::printf("  lyric legacy frames ok\n");
+  checkWordLyricScreen();
+  std::printf("  word lyric screen ok\n");
   checkNavigationFlow();
   std::printf("  navigation flow ok\n");
   checkLevelOverlay();

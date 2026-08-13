@@ -390,8 +390,8 @@ seq+1 起步等于凭空造出一个没人要求的上升沿，会把控制台�
            "asleep": false, "clockSynced": true }
 ```
 
-**这个块在不在，就是能力探测本身**——不走 `proto`：这一版固件根本不发 `proto`，把它抬上去会
-同时宣称一份它并没有的 lyric window 支持，还会翻转歌词编码。`asleep` 是「黑屏有歧义」的全部
+**这个块在不在，就是能力探测本身**，而且在 `proto` 出现之后依然是：它是在一版根本不发 `proto`
+的固件上发出去的，谁要是改成按版本号判断，那些设备就会被当成不支持夜间息屏。`asleep` 是「黑屏有歧义」的全部
 答案：控制台据此说「已息屏」，而**绝不从像素推断息屏**——全黑和一台死掉的时钟在屏幕上一模
 一样，这正是 `describeMirror` 对离线情形早就写死的规矩。四个配置字段是**设备实际生效的值**，
 只要有人拧过旋钮它就和控制台请求的不同，表单该渲染的是它。`clockSynced` 让控制台能解释
@@ -609,6 +609,8 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `POST` | `/api/music/remote` | Connect 播放控制：播放/暂停/上下曲/seek/音量/转移设备 |
 | `GET` | `/api/music/search`、`/api/music/playlists`、`/api/music/playlists/:id/tracks` | 按当前音源搜索歌曲、读取歌单及曲目 |
 | `GET` | `/api/music/tracks/:id`、`/api/music/tracks/:id/stream` | 歌曲信息与逐行歌词；同源音频代理（支持 Range，仅网易云） |
+| `GET` | `/api/music/netease/daily` | 网易云每日推荐歌曲（需登录 Cookie；上游报错按错误返回，不会渲染成空列表） |
+| `GET` | `/api/music/netease/liked/random` | 从「喜欢的歌曲」里随机取一首可播放的（需登录 Cookie；抽 8 首用一次 `song_detail` 过滤掉已下架的） |
 | `GET` / `POST` | `/api/music/device-app/*` | 校验固件包、检测真机、侧载固件与恢复官方固件（内存盘会话） |
 | `GET` / `POST` | `/api/arcade/device-app/*` | 游戏固件的同一套侧载生命周期（与音乐共用一个参数化安装器） |
 | `POST` | `/api/arcade/heartbeat` | 游戏固件 5 秒心跳（免同源；`{game, phase, score, uptimeMs}` 校验后记内存） |

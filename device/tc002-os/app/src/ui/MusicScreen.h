@@ -4,7 +4,9 @@
 #include <stdint.h>
 
 #include <string>
+#include <vector>
 
+#include "core/LyricTiming.h"
 #include "ui/Screen.h"
 
 namespace tcos {
@@ -21,6 +23,13 @@ namespace tcos {
  * the four 像素配色 and the accent override come from the lyrics player's own
  * visual/LyricModes.h and visual/Palette.h via visual/LyricVisuals.h, and the
  * painters here are ports of LyricsPage's, geometry and rounding included.
+ *
+ * That parity is about GEOMETRY AND COLOUR, and since ADR 0008 it is no longer
+ * about timing. This screen walks the per-glyph table the service sends on
+ * `lyricw`; the sideloaded player asks for the unversioned
+ * /api/music/device/now and still sweeps its lines evenly. Neither is broken —
+ * see the note in render() — and the two firmwares are mutually exclusive, so
+ * nobody is looking at both panels at once.
  *
  * What this screen owns on top of that surface, because the reference has no
  * opinion about any of it: the three distinct empty states, the optimistic
@@ -75,11 +84,24 @@ class MusicScreen : public Screen {
    * has neither a start nor an end. They are optional so a service that does not
    * send them yet still renders — see lineProgress() for what happens then — but
    * an untimed line only ever sweeps once, which is not the same screen.
+   *
+   * `lyricEndMs` is when the line stopped being SUNG; `lyricUntilMs` is when the
+   * next line takes over, or -1 when the two coincide and the line is therefore
+   * not held. `cells` is one entry per glyph of `lyric`, when the source really
+   * carries word timings — with it the highlight advances at the rate the words
+   * were sung instead of spreading the line evenly across its window.
+   *
+   * ALL THREE DEFAULT TO ABSENT, and absent has to keep meaning exactly what it
+   * meant before they existed: a service older than this build sends none of
+   * them, and every mode must then render byte for byte the frame it always did.
+   * That is the compatibility direction that actually ships, since ZOS is
+   * flashed by hand while the service updates itself.
    */
   void setNowPlaying(bool present, const std::string& track, const std::string& artist,
                      const std::string& lyric, bool playing, int positionMs,
                      int durationMs, int stampMs, int lyricStartMs = -1,
-                     int lyricEndMs = -1);
+                     int lyricEndMs = -1, int lyricUntilMs = -1,
+                     const LyricCell* cells = 0, int cellCount = 0);
 
   /**
    * The console's 主题设置, applied unconditionally on every document.
@@ -131,6 +153,24 @@ class MusicScreen : public Screen {
  private:
   int playheadMs(int nowMs) const;
   float lineProgress(int nowMs) const;
+  /**
+   * Where the singer is on the row being drawn, given how many glyphs it laid
+   * out.
+   *
+   * `glyphCount` rather than a member because the row is not always the lyric:
+   * it is also the title/artist rotation and the 播放中 / 已暂停 fallback, and
+   * those are laid out per frame. A cell table is used only when it has exactly
+   * one entry per glyph of THIS row — a table one cell out of step lights the
+   * wrong character for the rest of the song and is invisible on a screenshot.
+   *
+   * `sweepProgress` is what to fall back to when there is no usable table: the
+   * line window's own scalar, or the title/artist rotation's, which the caller
+   * already has and this cannot recover.
+   */
+  LyricCursor lyricCursor(int nowMs, int glyphCount, bool hasLyric,
+                          float sweepProgress) const;
+  /** True when this row has a per-glyph table that matches it exactly. */
+  bool timedLine(int glyphCount, bool hasLyric) const;
 
   bool mPresent;
   bool mLinkConfigured;
@@ -144,6 +184,10 @@ class MusicScreen : public Screen {
   int mStampMs;
   int mLyricStartMs;
   int mLyricEndMs;
+  // -1 for "not held", which is the ordinary case and also what an older service
+  // looks like. See StateDoc::lyricUntilMs: the absence is the message.
+  int mLyricUntilMs;
+  LyricCellTable mLyricCells;
   int mEnteredMs;
   int mLyricChangedMs;
   int mFlashMs;

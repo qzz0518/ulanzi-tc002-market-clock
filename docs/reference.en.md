@@ -472,9 +472,9 @@ The device answers on `/api/os/report` with a `sleep` block:
            "asleep": false, "clockSynced": true }
 ```
 
-**The presence of the block is the capability signal** — deliberately not a `proto` bump: this
-build does not send `proto` at all, and raising it would simultaneously claim a lyric-window
-support the firmware does not have and flip the lyric encoding. `asleep` is the whole answer to
+**The presence of the block is the capability signal**, and stays one now that `proto` exists
+beside it: it went out on a build that sent no `proto` at all, so a service reading night-sleep
+support off the version number would think every such device lacked it. `asleep` is the whole answer to
 "a black panel is ambiguous": the console says 已息屏 from this flag and **never infers sleep
 from the pixels**, because black is indistinguishable from a dead clock — the rule
 `describeMirror` already encodes for the offline case. The four config fields are the
@@ -747,6 +747,8 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `POST` | `/api/music/remote` | Connect transport: play/pause/next/previous/seek/volume/transfer |
 | `GET` | `/api/music/search`, `/api/music/playlists`, `/api/music/playlists/:id/tracks` | Search tracks, read playlists and their tracks on the live source |
 | `GET` | `/api/music/tracks/:id`, `/api/music/tracks/:id/stream` | Track metadata + timed lyrics; same-origin audio proxy (Range, NetEase only) |
+| `GET` | `/api/music/netease/daily` | NetEase 每日推荐 (daily recommendations; needs the login cookie — an upstream failure is reported, never rendered as an empty list) |
+| `GET` | `/api/music/netease/liked/random` | One random playable song from 喜欢的歌曲 (needs the login cookie; draws 8 and uses a single `song_detail` to skip ones taken down) |
 | `GET` / `POST` | `/api/music/device-app/*` | Validate the firmware bundle, probe the device, sideload / restore (tmpfs session) |
 | `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤400) to a stock-firmware Custom App (device mirror) |
 | `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |

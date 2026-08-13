@@ -114,14 +114,31 @@ fi
 # 36 MB box, and an unstripped .so has OOM-rebooted this device before.
 size_bytes="$(wc -c < "$SO" | tr -d ' ')"
 echo "  size: $size_bytes bytes"
-# 1.2 MB. The original 600 KB was a design target, not a hardware limit: the
-# arcade firmware runs on this unit at 1,766,760 bytes and the lyrics player at
+# The original 600 KB was a design target, not a hardware limit: the arcade
+# firmware runs on this unit at 1,766,760 bytes and the lyrics player at
 # 1,840,452. Sound costs ~438 KB (base::AudioPlayer pulls the resampler, the
-# mixer and the MI_AO glue) and is worth it. The cap still catches the failure
-# that matters — accidentally linking the full ffmpeg decode path, measured at
-# roughly 1.9 MB — while leaving real headroom below the two shipping firmwares.
-if [ "$size_bytes" -gt 1258291 ]; then
-  echo "  FAIL over the 1.2 MB budget for tc002-os" >&2
+# mixer and the MI_AO glue) and is worth it. What this cap has to catch is a
+# MISTAKE, and the mistakes are large: accidentally linking the full ffmpeg
+# decode path, measured at roughly 1.9 MB, and shipping the .so unstripped.
+#
+# NOT A ROUND MiB, and that is the point. This used to be 1258291 (1.2 MiB),
+# picked as a round number when the binary was 1,255,160 bytes — apparently
+# 3,131 bytes of headroom. It was not: ld pads the read-only segment so the
+# writable one keeps its page congruence, so THE FILE SIZE ONLY EVER MOVES IN
+# 4,096 BYTE STEPS. Measured on the baseline by padding it with known amounts of
+# .rodata: +200 bytes -> 1,255,160; +500 -> 1,259,256; +3,000 -> 1,259,256;
+# +4,524 -> 1,263,352. The very next attainable size above the baseline was
+# already 965 bytes over the old cap, so the real budget was the ~200-500 bytes
+# that fit in the existing padding, and any feature at all failed the audit —
+# which is what happened to the word-level lyric timing (ADR 0008): 3,096 bytes
+# of compiled code spread evenly over four files, with no single item to remove.
+#
+# 1,400,000 restores what the number was for. It is 136 KB — 33 of those 4 KB
+# steps — above the current binary, so a real change can be paid for; it is
+# 366 KB below the smaller of the two firmwares this device already runs; and it
+# is 500 KB below a measured ffmpeg link, which is the failure being guarded.
+if [ "$size_bytes" -gt 1400000 ]; then
+  echo "  FAIL over the 1,400,000 byte budget for tc002-os" >&2
   fail=1
 fi
 

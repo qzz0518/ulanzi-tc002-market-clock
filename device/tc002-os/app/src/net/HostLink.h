@@ -57,8 +57,19 @@ class HostLink {
     // The current lyric line's window, or -1/-1 when the service does not send
     // one. Every display mode animates within the line, so this travels with
     // the lyric rather than being derived from pos/dur.
+    //
+    // `lyricEndMs` is when the line stopped being SUNG and `lyricUntilMs` is
+    // when the next one takes over; they are the same number on a line followed
+    // immediately by another and ten or more seconds apart on the last line of a
+    // verse. `lyricUntilMs` is -1 when the line is not held — see
+    // StateDoc::lyricUntilMs, where the absence is the message.
     int lyricStartMs;
     int lyricEndMs;
+    int lyricUntilMs;
+    // One entry per glyph of `lyric`, when the source really carries word
+    // timings. Empty for the ~80% of tracks that do not, which is the shape the
+    // panel has always rendered.
+    LyricCellTable lyricCells;
 
     // Console -> device. See StateDoc for why each carries a sequence, and why
     // the settings block carries three of them rather than one.
@@ -78,7 +89,7 @@ class HostLink {
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
                  consecutiveFailures(0), nowPlaying(false), playing(false),
                  positionMs(0), durationMs(0), stampMonoMs(0),
-                 lyricStartMs(-1), lyricEndMs(-1),
+                 lyricStartMs(-1), lyricEndMs(-1), lyricUntilMs(-1),
                  lyricMode(StateDoc::kDefaultMode), lyricSkin(StateDoc::kDefaultSkin),
                  accentRgb(0), hasAccent(false) {}
   };
@@ -189,15 +200,57 @@ class HostLink {
    * config fields are the EFFECTIVE values, which differ from what the console
    * asked for whenever the knob moved them.
    *
-   * The presence of the block is also the capability signal. Deliberately not a
-   * `proto` bump: this build does not send `proto` at all, and raising it would
-   * simultaneously claim the lyric-window support the firmware does not have.
+   * The presence of the block is its OWN capability signal, and stays one even
+   * now that `proto` exists beside it: it went out on a build that sent no
+   * `proto` at all, so a service reading it off the version number would think
+   * every such device lacked 夜间息屏.
    */
   void setTelemetry(const std::string& screen, const std::string& focus,
                     const std::string& wifi, const std::string& ip,
                     int supplicantRestarts, int batteryPercent, bool charging,
                     bool flashed, bool sleepOn, int sleepStartMin, int sleepEndMin,
                     int sleepIdleSec, bool sleepAsleep, bool sleepClockSynced);
+
+  /** Everything POST /api/os/report carries, as one value. */
+  struct Report {
+    std::string screen;
+    std::string focus;
+    std::string wifi;
+    std::string ip;
+    uint64_t uptimeMs;
+    int freeKb;
+    int supplicantRestarts;
+    int batteryPercent;
+    bool charging;
+    bool flashed;
+    bool sleepOn;
+    int sleepStartMin;
+    int sleepEndMin;
+    int sleepIdleSec;
+    bool sleepAsleep;
+    bool sleepClockSynced;
+
+    Report()
+        : uptimeMs(0), freeKb(0), supplicantRestarts(0), batteryPercent(-1),
+          charging(false), flashed(false), sleepOn(false), sleepStartMin(0),
+          sleepEndMin(0), sleepIdleSec(0), sleepAsleep(false),
+          sleepClockSynced(false) {}
+  };
+
+  /**
+   * The JSON body of that report, INCLUDING `proto`.
+   *
+   * Static and public because it used to be a snprintf into a fixed char[] in
+   * the middle of runWorker — a thread body no host check can reach — and
+   * snprintf TRUNCATES SILENTLY. A truncated body is invalid JSON, which the
+   * service's readJson answers with a 400, which does not degrade telemetry but
+   * kills it outright: no battery, no 已息屏, no `proto`, so the device silently
+   * drops back to the legacy lyric encoding. The buffer had already been grown
+   * from 512 to 1024 once for the sleep block; rather than audit that headroom
+   * again for every new field, the body is now sized from its own inputs and
+   * cannot be truncated at all.
+   */
+  static std::string reportBody(const Report& report);
 
   // 10 fps rather than the panel's 25: the console preview is a monitor, not a
   // video feed, and each frame is a separate HTTP exchange on a device whose
