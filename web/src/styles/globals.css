@@ -172,6 +172,14 @@
 
 .header-actions {
   display: inline-flex;
+  /* justify-self:end sizes this to max-content, so before the mini player
+     arrived nothing here could ever be asked to give way. Now something in it
+     can grow with the track title, and a row that cannot be told "you have this
+     much" would simply run into the tab strip. These two let the flex line
+     shrink inside its grid track instead — the chips and buttons are flex:none,
+     so all of the give comes out of the title. */
+  max-width: 100%;
+  min-width: 0;
   justify-self: end;
   align-items: center;
   gap: 0.55rem;
@@ -180,6 +188,122 @@
 /* 固件身份 + 电量：只排版，颜色和尺度全在 cladd Chip 自己身上。 */
 .firmware-status { display: inline-flex; align-items: center; gap: 0.35rem; }
 .firmware-chip { white-space: nowrap; }
+
+/* 顶栏迷你播放器（除音乐页外每一页都在）。壳体、按钮、分隔线全是 cladd
+   Toolbar/ToolbarButton/ToolbarSeparator，这里只负责排版和逐级收窄。
+
+   It has to earn its place in a row that already carries a firmware chip, a
+   battery chip and the settings button, so the room was measured rather than
+   guessed — .runtime/verify-mini-player.mjs sweeps the live console from 1680
+   down to 360 in both shapes this row takes, and reports the gap between the
+   widget and whatever sits to its left. Empty header, before any of this:
+
+     1600px → 381px   1280px → 269px   960px → 117px
+     1440px → 349px   1100px → 179px   ≤832px → tabs leave the header
+
+   At 52rem the tab strip becomes the fixed bottom bar and the header goes
+   two-column, which hands the left 1fr back — that is why room comes *back*
+   under 52rem instead of running out. Between 70rem and 52rem is the real
+   pinch: six tabs plus two 16rem side columns leave barely 117px, and the
+   widget must fit that or it runs into the tabs. So each tier drops the least
+   load-bearing part first (artist line → title → previous and next), and the
+   artwork is last out: it is identity and the way back at once. Worst measured
+   gap after all of it is 17px, at 880–960px on official firmware. */
+.mini-player {
+  min-width: 0;
+  flex: 0 1 auto;
+  /* 页头是一行，不是一页：标题永远单行截断，完整曲名交给 tooltip 和 aria-label。 */
+  max-width: min(22rem, 34vw);
+}
+.mini-player__content { min-width: 0; gap: 0.1rem; }
+
+/* 只有曲名那一格会被压缩，按钮和封面绝不。 */
+.mini-player__content > * { flex: none; }
+.mini-player__track { min-width: 0; flex: 0 1 auto; }
+.mini-player__track-content { min-width: 0; gap: 0.45rem; }
+
+.mini-player__cover {
+  display: grid;
+  overflow: hidden;
+  width: 1.55rem;
+  height: 1.55rem;
+  flex: none;
+  place-items: center;
+  border-radius: calc(var(--cladd-radius) - 2px);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+}
+.mini-player__cover-fallback,
+.mini-player__cover-image { grid-area: 1 / 1; }
+/* 图片盖在字上：网格子项不用定位也认 z-index。 */
+.mini-player__cover-image { z-index: 1; width: 100%; height: 100%; object-fit: cover; }
+
+.mini-player__copy {
+  display: grid;
+  min-width: 0;
+  max-width: 8.5rem;
+  gap: 0.05rem;
+  text-align: left;
+}
+.mini-player__title,
+.mini-player__artist {
+  overflow: hidden;
+  font-weight: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-player__title { font-size: 0.72rem; line-height: 1.25; }
+.mini-player__artist { color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.25; }
+.mini-player__rule { flex: none; }
+
+/* 收窄顺序（宽→窄，后面的规则覆盖前面的）。 */
+@media (max-width: 88rem) {
+  .mini-player__copy { max-width: 6rem; }
+  .mini-player__artist { display: none; }
+}
+
+@media (max-width: 80rem) {
+  .mini-player__copy { display: none; }
+}
+
+/* 最挤的一档：标签栏还在页头里占着 415px，右列只剩 117px 左右。 */
+@media (max-width: 70rem) {
+  .mini-player__rule,
+  .mini-player__skip { display: none; }
+}
+
+/* 官方固件那句状态文字在场时，这一档连播放键都放不下了（实测 960px 下带播放键
+   正好贴上标签栏，去掉后还剩 17px）。留封面：它既是「还在放这首」的凭据，也是
+   回音乐页的入口——一个会压到标签栏上的播放键不如没有。
+   下界卡在 52rem：再窄标签栏就移到屏底了，房间又回来了。 */
+@media (max-width: 70rem) and (min-width: 52.01rem) {
+  .studio-header.has-wide-actions .mini-player__toggle { display: none; }
+  .studio-header.has-wide-actions .mini-player__content { padding-inline: 0.15rem; }
+}
+
+/* 标签栏在 52rem 移到屏底（见下方那段手机布局），左列整条空了出来，
+   曲名和上一首/下一首可以回来。 */
+@media (max-width: 52rem) {
+  .mini-player { max-width: min(20rem, 52vw); }
+  .mini-player__copy { display: grid; max-width: 7rem; }
+  .mini-player__rule,
+  .mini-player__skip { display: inline-flex; }
+}
+
+@media (max-width: 44rem) {
+  .mini-player__copy { display: none; }
+  /* 手机上「Pixel Market」是装饰，正在播的歌是信息：有歌在播时把这段字的位置
+     让出来，品牌点阵留着。没歌在播时页头一个像素都不变。 */
+  .studio-header:has(.mini-player) .brand-name { display: none; }
+}
+
+/* 手机竖屏：品牌点阵 + 两枚 Chip + 设置按钮之后只剩不到 100px，够封面加一个播放键。 */
+@media (max-width: 38rem) {
+  .mini-player__rule,
+  .mini-player__skip { display: none; }
+}
 
 /* 侧载抽屉正文的纵向节奏（<FirmwarePanelBody>，音乐页与游戏页共用）。
    Every section used to carry its own margin-top, so the rhythm was whatever

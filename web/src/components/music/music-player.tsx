@@ -16,6 +16,8 @@ import {
   Radio,
   RefreshCw,
   Search,
+  Shuffle,
+  Sparkles,
   Speaker,
   Wifi,
 } from "lucide-react";
@@ -45,6 +47,7 @@ import {
   isMusicMode,
   type MusicMode,
 } from "@/components/music/pixel-lyric-modes";
+import { PlayModeButton } from "@/components/music/play-mode-button";
 import {
   isMusicSkin,
   MusicThemePanel,
@@ -53,11 +56,20 @@ import {
   type PixelLyricLine,
 } from "@/components/music/pixel-lyrics-preview";
 import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
-import { lyricCells } from "@/lib/lyric-cursor";
 import { api, jsonApi } from "@/lib/api";
 import { createLatestTaskRunner, type LatestTaskRunner } from "@/lib/latest-task-runner";
-import { clampPlaybackPositionMs } from "@/lib/music-playback";
+import { activeLyricIndexAt, lyricWindowAt } from "@/lib/music-playback";
+import {
+  deviceIsLoadingTrack,
+  effectiveDurationMs as playbackDurationMs,
+  musicPlaybackStore,
+} from "@/lib/music-playback-store";
+import { useMusicPlayback } from "@/lib/use-music-playback";
 import { renderMirrorFrames, type MirrorFrame } from "@/lib/music-mirror";
+import {
+  loadDailyRecommendations,
+  playRandomLikedTrack,
+} from "@/lib/netease-discovery";
 import { spectrumForTrack, type SpectrumLookup } from "@/lib/spectrum-timeline";
 import { useZosFocus } from "@/lib/use-zos-focus";
 import { ZOS_MUSIC_FOCUS } from "@/lib/zos-link";
@@ -71,7 +83,6 @@ import type {
   MusicRemoteDevice,
   MusicSessionStatus,
   MusicTrack,
-  MusicTrackDetail,
   SpotifyAppStatus,
 } from "@/types";
 
@@ -199,8 +210,21 @@ export function MusicPlayer({
   // 所以「时钟音乐页」是一个真的导航动作，而不是一句状态说明。
   const zosFocus = useZosFocus(zos);
   const zosMusicPinned = zosFocus.pinnedOn(ZOS_MUSIC_FOCUS);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const pendingSeekMsRef = useRef<number | null>(null);
+  // Playback lives above the tabs (lib/music-playback-store.ts): this view is a
+  // window onto it, not its owner. Switching to 内容 used to unmount the audio
+  // element along with this component, which did not "forget" the session — it
+  // demolished the player. `retain` keeps the device-state poll running while
+  // this view is on screen even before a track is chosen.
+  const playback = useMusicPlayback(true);
+  const store = musicPlaybackStore();
+  const selected = playback.detail;
+  const tracks = playback.queue;
+  const sourceLabel = playback.queueLabel;
+  const currentMs = playback.positionMs;
+  const playing = playback.playing;
+  const trackBusy = playback.loading;
+  const playbackError = playback.error;
+  const deviceOnline = playback.deviceOnline;
   const [overview, setOverview] = useState<MusicOverview | null>(null);
   const [providerBusy, setProviderBusy] = useState(false);
   const [spotifyApp, setSpotifyApp] = useState<SpotifyAppStatus | null>(null);
@@ -218,22 +242,16 @@ export function MusicPlayer({
   const [qrState, setQrState] = useState<QrState>("waiting");
   const [qrBusy, setQrBusy] = useState(false);
   const [query, setQuery] = useState("");
-  const [tracks, setTracks] = useState<MusicTrack[]>([]);
   const [playlists, setPlaylists] = useState<MusicPlaylist[]>([]);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | "">("");
   const [trackPage, setTrackPage] = useState(0);
-  const [sourceLabel, setSourceLabel] = useState("搜索结果");
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [searchBusy, setSearchBusy] = useState(false);
+  // 哪一个发现按钮正在跑——两个按钮各转各的圈，而不是一起变灰。
+  const [discoveryBusy, setDiscoveryBusy] = useState<"random" | "daily" | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [playlistReloadKey, setPlaylistReloadKey] = useState(0);
   const playlistRetryRef = useRef(0);
-  const [selected, setSelected] = useState<MusicTrackDetail | null>(null);
-  const [trackBusy, setTrackBusy] = useState(false);
-  const [currentMs, setCurrentMs] = useState(0);
-  const [durationMs, setDurationMs] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
   // 固件侧载的状态、动作与抽屉都在共享面板里（音乐/游戏两页同一套流程）。
   const firmwarePanel = useFirmwarePanel({
     apiPrefix: "/api/music",
@@ -256,56 +274,29 @@ export function MusicPlayer({
   const [skin, setSkin] = useState<MusicSkin>("signal");
   const [mode, setMode] = useState<MusicMode>("spotlight");
   const [accent, setAccent] = useState<string | null>(null);
-  const lastLocalSeqRef = useRef(0);
-  const lastSeenSeqRef = useRef(0);
-  // Whether the served theme has been adopted yet. The service persists
-  // sDeviceState now (ADR 0007), so IT is the store and localStorage is only a
-  // paint cache for the 0–2.5 s before the first poll answers. The first poll
-  // usually does not advance the sequence at all, so the echo below never fires
-  // on it and this flag is what makes that one poll count.
-  const themeAdoptedRef = useRef(false);
-  const [deviceOnline, setDeviceOnline] = useState(false);
-  const deviceOnlineRef = useRef(false);
-  const deviceClockRef = useRef<{
-    playheadMs: number;
-    fetchedAt: number;
-    playing: boolean;
-    trackId: string | null;
-  }>({ playheadMs: 0, fetchedAt: 0, playing: false, trackId: null });
-  const [deviceTrackId, setDeviceTrackId] = useState<string | null>(null);
-  // Remote (Spotify Connect) transport state, refreshed by the same /state poll.
-  const [remoteLive, setRemoteLive] = useState(false);
-  const remoteTrackIdRef = useRef<string | null>(null);
-  // Set once the loader below exists; the poll effect owns no dependencies so it
-  // reaches the current loader through this ref.
-  const adoptRemoteTrackRef = useRef<((trackId: string) => Promise<void>) | null>(null);
-  const loadingTrackRef = useRef(false);
   const [dragMs, setDragMs] = useState<number | null>(null);
   // Mirrors dragMs so the pointer-up commit never reads a stale value while a
   // continuous slider onChange is still flushing through React state.
   const dragMsRef = useRef<number | null>(null);
   const draggingRef = useRef(false);
-  // A device seek that heartbeats haven't confirmed yet: hold the optimistic
-  // preview anchor until DPLAY lands near the target (or the wait times out),
-  // so a stale pre-seek heartbeat can't yank the scrubber back.
-  const pendingSeekRef = useRef<{ targetMs: number; at: number } | null>(null);
-  const lastSentSeekRef = useRef<number | null>(null);
-  const durationRef = useRef(0);
-  const selectedTrackIdRef = useRef<string | null>(null);
-  selectedTrackIdRef.current = selected?.track.id ?? null;
 
   const activeProviderId: MusicProviderId = overview?.active ?? "netease";
   const activeProvider = overview?.providers.find((entry) => entry.id === activeProviderId);
   // Remote mode = the audio lives on a Spotify Connect player, so the studio and
   // the TC002 are both remotes with a mirrored playhead instead of players.
   const remoteMode = activeProvider?.playbackMode === "remote";
-  const remoteModeRef = useRef(false);
-  remoteModeRef.current = remoteMode;
   const providerCopy = PROVIDER_COPY[activeProviderId];
-  // The /state poll below runs without dependencies; it reads the live source
-  // through this ref to notice when the server and the page have drifted apart.
+  // The device-state subscription below owns no dependencies; it reads the live
+  // source through this ref to notice when the server and the page have drifted.
   const activeProviderIdRef = useRef<MusicProviderId>("netease");
   activeProviderIdRef.current = activeProviderId;
+
+  // Which source the transport belongs to. The store cannot ask — the provider
+  // overview is this view's request — so the routing decision is pushed down
+  // rather than duplicated.
+  useEffect(() => {
+    store.setSource(activeProviderId, remoteMode ? "remote" : "device-audio");
+  }, [activeProviderId, remoteMode, store]);
 
   // 真 FFT 只在「这个浏览器就是播放器、且屏幕只归预览管」的时候才取。两个排除
   // 项是同一条规则的两半：`deviceOnline` 是侧载歌词固件的心跳，`zos` 是时钟上跑
@@ -391,198 +382,40 @@ export function MusicPlayer({
     }
   }, []);
 
-  // Poll device state so the TC002's own key presses (play/pause, skin, mode)
-  // reflect back into the web UI. Our own changes are skipped via the seq we
-  // last sent, so this only applies device-originated changes.
-  useEffect(() => {
-    let cancelled = false;
-    const parseState = (text: string): Record<string, string> => {
-      const fields: Record<string, string> = {};
-      for (const line of text.split("\n")) {
-        const tab = line.indexOf("\t");
-        if (tab > 0) fields[line.slice(0, tab)] = line.slice(tab + 1).trim();
-      }
-      return fields;
-    };
-    const poll = async () => {
-      try {
-        const response = await fetch("/api/music/device/state?viewer=web", { cache: "no-store" });
-        if (!response.ok || cancelled) return;
-        const fields = parseState(await response.text());
-
-        // The service owns which source is live. If the page drifted from it —
-        // another tab switched sources, or a re-authorization widened what
-        // Spotify allows — pull the truth instead of sitting on a stale screen.
-        if (fields.SRC && fields.SRC !== activeProviderIdRef.current) {
-          void loadSession();
-        }
-
-        // Remote (Connect) transport — processed every poll. The Spotify player
-        // is the clock here: RPOS anchors the preview and TID follows whatever
-        // the user started, even when they started it from their phone.
-        const remoteSource = fields.RMT === "1";
-        const remotePositionMs = Number(fields.RPOS);
-        // RPOS is -1 when the service could not read the Connect player: keep the
-        // last known position rather than snapping the preview to zero.
-        const remoteActive = remoteSource
-          && Number.isFinite(remotePositionMs) && remotePositionMs >= 0;
-        setRemoteLive(remoteActive);
-        if (remoteActive) {
-          const remotePlaying = fields.RPLAY === "1";
-          const remoteDurationMs = Number(fields.RDUR);
-          const remoteTrackId = fields.TID && fields.TID !== "-" ? fields.TID : null;
-          deviceClockRef.current = {
-            playheadMs: remotePositionMs,
-            fetchedAt: performance.now(),
-            playing: remotePlaying,
-            trackId: remoteTrackId,
-          };
-          if (Number.isFinite(remoteDurationMs) && remoteDurationMs > 0) {
-            setDurationMs(remoteDurationMs);
-          }
-          setPlaying(remotePlaying);
-          if (remoteTrackId !== remoteTrackIdRef.current) {
-            remoteTrackIdRef.current = remoteTrackId;
-            if (remoteTrackId) void adoptRemoteTrackRef.current?.(remoteTrackId);
-          }
-        }
-
-        // Heartbeat — processed every poll (independent of seq). Detects that the
-        // music firmware is live and anchors its playback clock for preview sync.
-        const hbAge = Number(fields.HBAGE);
-        // The firmware polls /state every 2s from boot — long before the first
-        // heartbeat (which only starts once a track is selected) — so FWPOLL is
-        // what flips the page into remote mode right after a sideload.
-        const fwPollAge = Number(fields.FWPOLL);
-        const firmwareAlive = Number.isFinite(fwPollAge) && fwPollAge >= 0 && fwPollAge < 8000;
-        // 10s window: the device pauses heartbeats while it blocks on a ~5-7s
-        // track download, and we must not flip it to "offline" during that.
-        const online = firmwareAlive || (Number.isFinite(hbAge) && hbAge >= 0 && hbAge < 10000);
-        setDeviceOnline(online);
-        deviceOnlineRef.current = online;
-        // In remote mode the Connect player above is the authority; the device's
-        // own heartbeat only mirrors it, so it must not re-anchor the clock.
-        if (online && !remoteActive) {
-          const devicePlaying = fields.DPLAYING === "1";
-          const dplayMs = Number(fields.DPLAY) || 0;
-          const heartbeatTrackId = fields.DTRACK && fields.DTRACK !== "-" ? fields.DTRACK : null;
-          // A just-sent seek: the device applies it on its own 2s poll, so a
-          // heartbeat can still carry the pre-seek playhead. Keep the optimistic
-          // anchor until DPLAY lands near the target, or give up after 8s.
-          const pending = pendingSeekRef.current;
-          const holdAnchor = pending !== null
-            && performance.now() - pending.at < 8_000
-            && Math.abs(dplayMs - pending.targetMs) > 3_000;
-          if (pending && !holdAnchor) pendingSeekRef.current = null;
-          if (holdAnchor) {
-            deviceClockRef.current = {
-              ...deviceClockRef.current,
-              playing: devicePlaying,
-              trackId: heartbeatTrackId,
-            };
-          } else {
-            deviceClockRef.current = {
-              // Anchor = device playhead when we received this response. Add the
-              // heartbeat-age compensation ONLY while playing — when paused the
-              // device playhead is frozen, so adding the (varying 0..2000ms)
-              // heartbeat age would make the displayed time jitter back and forth.
-              playheadMs: dplayMs + (devicePlaying ? Math.max(0, hbAge) : 0),
-              fetchedAt: performance.now(),
-              playing: devicePlaying,
-              trackId: heartbeatTrackId,
-            };
-          }
-          setPlaying(devicePlaying);
-          setDeviceTrackId(heartbeatTrackId);
-        }
-
-        // The theme the SERVICE holds wins, and the first poll is where it lands.
-        // The echo below is gated on the sequence advancing, and the first poll
-        // of a freshly started service usually carries seq 0 — the same value the
-        // page starts on — so without this the panel and the preview would sit on
-        // whatever this browser happened to remember until the next click. The
-        // service persists the theme (ADR 0007), so this is adopting a store, not
-        // guessing at one.
-        if (!themeAdoptedRef.current) {
-          themeAdoptedRef.current = true;
-          if (isMusicSkin(fields.SKIN ?? null)) setSkin(fields.SKIN as MusicSkin);
-          if (isMusicMode(fields.MODE ?? null)) setMode(fields.MODE as MusicMode);
-          setAccent(fields.ACCENT && fields.ACCENT !== "-" ? fields.ACCENT : null);
-        }
-
-        // Control echo — only when seq advances and it wasn't our own change.
-        const seq = Number(fields.SEQ);
-        if (!Number.isFinite(seq) || seq === lastSeenSeqRef.current) return;
-        lastSeenSeqRef.current = seq;
-        if (seq === lastLocalSeqRef.current) return;
-        if (isMusicSkin(fields.SKIN ?? null)) setSkin(fields.SKIN as MusicSkin);
-        if (isMusicMode(fields.MODE ?? null)) setMode(fields.MODE as MusicMode);
-        setAccent(fields.ACCENT && fields.ACCENT !== "-" ? fields.ACCENT : null);
-        // Playback echo only matters in native mode; music-firmware playback is
-        // driven by the heartbeat above and local audio stays silent.
-        if (!online && !remoteActive) {
-          const devicePlaying = fields.PLAY === "1";
-          setPlaying(devicePlaying);
-          const audio = audioRef.current;
-          if (audio) {
-            if (devicePlaying && audio.paused) void audio.play().catch(() => {});
-            else if (!devicePlaying && !audio.paused) audio.pause();
-          }
-        }
-      } catch {
-        // Network hiccup; retry on the next tick.
-      }
-    };
-    const timer = window.setInterval(() => void poll(), 2500);
-    void poll();
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [loadSession]);
-
-  // Follow a track the Connect player moved to on its own (someone hit next on
-  // their phone) so the lyric view keeps up without a click in the studio.
-  const adoptRemoteTrack = useCallback(async (trackId: string) => {
-    if (selectedTrackIdRef.current === trackId) return;
-    try {
-      const result = await jsonApi<{ detail: MusicTrackDetail }>(`/api/music/tracks/${trackId}`);
-      setSelected(result.detail);
-      setDurationMs(result.detail.track.durationMs);
-      setPlaybackError(null);
-    } catch (error) {
-      setPlaybackError(errorMessage(error));
+  // The device-state document, as parsed by the store's poll.
+  //
+  // Everything about the transport (remote playhead, firmware heartbeat, the
+  // play/pause echo) is applied there, because it has to keep being applied
+  // when this view is not on screen. What is left here is what only a view can
+  // answer: which source the page believes is live, and the theme the panel and
+  // the preview paint with.
+  useEffect(() => store.onDeviceState((fields, meta) => {
+    // The service owns which source is live. If the page drifted from it —
+    // another tab switched sources, or a re-authorization widened what Spotify
+    // allows — pull the truth instead of sitting on a stale screen.
+    if (fields.SRC && fields.SRC !== activeProviderIdRef.current) {
+      void loadSession();
     }
-  }, []);
-  adoptRemoteTrackRef.current = adoptRemoteTrack;
+    // The theme the SERVICE holds wins, and the first delivery is where it
+    // lands. The echo is gated on the sequence advancing, and a freshly started
+    // service usually serves seq 0 — the same value the store starts on — so
+    // without the initial delivery the panel and the preview would sit on
+    // whatever this browser happened to remember until the next click. The
+    // service persists the theme (ADR 0007), so this adopts a store, not a
+    // guess.
+    if (!meta.initial && !meta.themeEcho) return;
+    if (isMusicSkin(fields.SKIN ?? null)) setSkin(fields.SKIN as MusicSkin);
+    if (isMusicMode(fields.MODE ?? null)) setMode(fields.MODE as MusicMode);
+    setAccent(fields.ACCENT && fields.ACCENT !== "-" ? fields.ACCENT : null);
+  }), [loadSession, store]);
 
-  // Music-firmware mode: drive the preview clock off the device's reported
-  // playhead — anchor from each heartbeat, interpolate locally between them — so
-  // the on-screen animation tracks the device's real playback instead of racing
-  // ahead of the push + download + play latency. Remote mode uses the same
-  // machinery, anchored on the Connect player's position instead.
+  // Keep the library list on the page holding whatever is playing — the store
+  // moves the queue index (mini player, device key press, Connect skip) and the
+  // pager follows it.
   useEffect(() => {
-    if (!deviceOnline && !remoteLive) return;
-    let raf = 0;
-    let lastSet = 0;
-    const tick = (now: number) => {
-      // While the device is still fetching a just-selected track, hold the clock
-      // instead of surfacing the previous track's stale playhead.
-      // Hold the clock while the track is still loading, or while the user is
-      // dragging the scrubber (so their drag isn't yanked back). Clamp to the
-      // track length so the estimate never runs past the end.
-      if (!loadingTrackRef.current && !draggingRef.current) {
-        const clk = deviceClockRef.current;
-        let estimate = clk.playheadMs + (clk.playing ? Math.max(0, now - clk.fetchedAt) : 0);
-        const dur = durationRef.current;
-        if (dur > 0 && estimate > dur) estimate = dur;
-        if (now - lastSet > 120) {
-          setCurrentMs(estimate);
-          lastSet = now;
-        }
-      }
-      raf = window.requestAnimationFrame(tick);
-    };
-    raf = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(raf);
-  }, [deviceOnline, remoteLive]);
+    if (playback.queueIndex < 0) return;
+    setTrackPage(Math.floor(playback.queueIndex / TRACKS_PER_PAGE));
+  }, [playback.queueIndex]);
 
   useEffect(() => {
     const runner = createLatestTaskRunner<{ frames: MirrorFrame[] }, void>({
@@ -672,68 +505,23 @@ export function MusicPlayer({
     };
   }, [qrLogin, qrState]);
 
-  const activeLyricIndex = useMemo(() => {
-    if (!selected?.lyrics.length) return -1;
-    for (let index = selected.lyrics.length - 1; index >= 0; index -= 1) {
-      if (currentMs >= selected.lyrics[index]!.startMs) return index;
-    }
-    return -1;
-  }, [currentMs, selected]);
+  // Memoised on the index rather than on the playhead: the window is stable
+  // while a line holds, which is what keeps the mirror effect below from
+  // re-rendering the same frames ten times a second. The derivation itself is
+  // shared with the store's now-playing report (lib/music-playback.ts), so the
+  // panel and the preview cannot drift apart.
+  const activeLyricIndex = useMemo(
+    () => activeLyricIndexAt(selected?.lyrics, currentMs),
+    [currentMs, selected],
+  );
 
   const activeLyric = activeLyricIndex >= 0 ? selected?.lyrics[activeLyricIndex] : undefined;
 
-  /**
-   * The active line as a window plus a cell table — the one shape every
-   * consumer here needs, computed once.
-   *
-   * `untilMs` is the next line's start (or the end of the track); `endMs` is
-   * what the provider decided the line's SINGING end was, and the two are the
-   * same number only when one line follows another immediately. `endMs` is
-   * clamped to the window because a Spotify Connect snapshot can be a different
-   * master than the NetEase timeline the lyrics came from.
-   */
-  const activeLine = useMemo<PixelLyricLine>(() => {
-    // All zeros means "no window", and every consumer reads it that way: the
-    // hub omits lyricat/lyricend rather than sending a degenerate one, and
-    // `pixelLyricCursor` answers with its idle cursor rather than inventing a
-    // window. Nothing downstream may synthesise a substitute — see the comment
-    // on pixelLyricCursor for what both directions of that mistake look like.
-    if (!activeLyric || !selected) return { startMs: 0, endMs: 0, untilMs: 0 };
-    const next = selected.lyrics[activeLyricIndex + 1];
-    const trackMs = selected.track.durationMs;
-    const untilMs = next
-      ? next.startMs
-      : (trackMs > activeLyric.startMs ? trackMs : activeLyric.startMs + 4_000);
-    const endMs = activeLyric.endMs > activeLyric.startMs
-      ? Math.min(activeLyric.endMs, untilMs)
-      : untilMs;
-    // Built from the raw line, not from what the panel happens to show: the
-    // table's index IS the glyph index, and lyricCells returns nothing at all
-    // rather than a table that would light the wrong character.
-    const cells = lyricCells({ startMs: activeLyric.startMs, endMs, text: activeLyric.text, words: activeLyric.words });
-    return {
-      startMs: activeLyric.startMs,
-      endMs,
-      untilMs,
-      ...(cells.length > 0 ? { cells } : {}),
-    };
-  }, [activeLyric, activeLyricIndex, selected]);
+  const activeLine = useMemo<PixelLyricLine>(
+    () => lyricWindowAt(selected, activeLyricIndex),
+    [activeLyricIndex, selected],
+  );
 
-  /**
-   * The lyric half of the now-playing report.
-   *
-   * The panel cannot look any of this up: the service polls Spotify but nothing
-   * can poll a browser, so for a device-audio provider this component is the
-   * only thing in the system that knows what is coming out of the speakers.
-   *
-   * Four fields rather than two, because the panel needs to tell three moments
-   * apart — when the line starts, when the SINGING stops, and when the next
-   * line takes over. `lyricEndMs` used to be the third of those, which is what
-   * made the highlight crawl through every instrumental. The words are sent
-   * when the source has them; the service turns them into the per-glyph table
-   * (after its own truncation, so the indices cannot drift) and the panel walks
-   * the line at the rate it was actually sung.
-   */
   /**
    * How the current line's end was decided, in the user's words.
    *
@@ -754,86 +542,12 @@ export function MusicPlayer({
     return null;
   }, [activeLyric]);
 
-  const lyricReport = useMemo(() => ({
-    lyric: activeLyric?.text ?? "",
-    lyricStartMs: activeLine.startMs,
-    lyricEndMs: activeLine.endMs,
-    lyricUntilMs: activeLine.untilMs,
-    ...(activeLyric?.words?.length ? { lyricWords: activeLyric.words } : {}),
-  }), [activeLine, activeLyric]);
-
-  // Tell the clock what is playing HERE.
-  //
-  // On ZOS the panel is a lyric display, not a speaker: audio stays in this
-  // browser (NetEase) or on the Connect device (Spotify), and the clock only
-  // shows the line. The service can poll Spotify for that, but nothing can poll
-  // a browser — so for a device-audio provider this component is the only thing
-  // in the system that knows what is coming out of the speakers, and it has to
-  // say so.
-  //
-  // Every 4 s while playing, and immediately whenever the line changes. Four
-  // seconds sits well inside the hub's 15 s staleness window, so a tab that
-  // dies without firing pagehide releases the panel on its own rather than
-  // pinning the last lyric there forever.
-  useEffect(() => {
-    if (!zos) return;
-    const report = (body: unknown) => {
-      void fetch("/api/os/now-playing", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).catch(() => {});
-    };
-    if (!selected || !playing) {
-      // Paused is still "this song", so the clock keeps the title and stops the
-      // playhead; only losing the track entirely clears the panel.
-      report(selected
-        ? {
-          track: selected.track.title,
-          artist: selected.track.artists.join(" / "),
-          playing: false,
-          positionMs: Math.round(currentMs),
-          durationMs: selected.track.durationMs,
-          ...lyricReport,
-        }
-        : null);
-      return;
-    }
-    const send = () => report({
-      track: selected.track.title,
-      artist: selected.track.artists.join(" / "),
-      playing: true,
-      positionMs: Math.round(currentMs),
-      durationMs: selected.track.durationMs,
-      ...lyricReport,
-    });
-    send();
-    const timer = window.setInterval(send, 4_000);
-    return () => window.clearInterval(timer);
-    // currentMs ticks every frame; the lyric report is what actually changes
-    // the panel, so the effect is keyed on it rather than on the playhead. It
-    // covers the word table too — a report can arrive before the timings do.
-  }, [zos, selected, playing, lyricReport]);
-
-  // A closed tab must not leave the last lyric on the clock. keepalive, because
-  // a normal fetch is cancelled the moment the page goes away — the same reason
-  // lib/live-screen.ts uses it for its own teardown.
-  useEffect(() => {
-    if (!zos) return;
-    const release = () => {
-      void fetch("/api/os/now-playing", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: "null",
-        keepalive: true,
-      }).catch(() => {});
-    };
-    window.addEventListener("pagehide", release);
-    return () => {
-      window.removeEventListener("pagehide", release);
-      release();
-    };
-  }, [zos]);
+  // Telling the clock what is playing HERE is the store's job now, not this
+  // view's (lib/music-playback-store.ts). It has to be: on ZOS the panel is a
+  // lyric display fed by this console, and this component unmounting no longer
+  // means the music stopped — it means the user went to look at 内容. Reporting
+  // stops when the page closes or when the clock stops running ZOS, both of
+  // which App answers for.
 
   useEffect(() => {
     // ZOS never gets mirror frames: the endpoint answers 503 (measured), and the
@@ -856,12 +570,9 @@ export function MusicPlayer({
     });
     if (frames.length > 0) void mirrorRunnerRef.current?.enqueue({ frames });
   }, [activeLine, activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin, zos]);
-  const effectiveDurationMs = durationMs > 0 ? durationMs : selected?.track.durationMs ?? 0;
-  durationRef.current = effectiveDurationMs;
+  const effectiveDurationMs = playbackDurationMs(playback);
   const timelineDisplayMs = Math.min(dragMs ?? currentMs, effectiveDurationMs);
-  const selectedTrackIndex = selected
-    ? tracks.findIndex((track) => track.id === selected.track.id)
-    : -1;
+  const selectedTrackIndex = playback.queueIndex;
   const trackProgress = effectiveDurationMs > 0 ? Math.min(1, currentMs / effectiveDurationMs) : 0;
   trackProgressRef.current = trackProgress;
 
@@ -881,26 +592,16 @@ export function MusicPlayer({
 
   // Everything a source change has to forget: the previous provider's tracks,
   // selection, playlists and pending seeks all belong to IDs the new source
-  // cannot resolve.
+  // cannot resolve. The queue and the playhead belong to the store, so it does
+  // its own half — including stopping the audio.
   const clearLibrary = useCallback(() => {
-    setTracks([]);
     setTrackPage(0);
     setSelectedPlaylistId("");
     setPlaylists([]);
-    setSelected(null);
-    setCurrentMs(0);
-    setDurationMs(0);
-    setPlaying(false);
-    setSourceLabel("搜索结果");
     setLibraryError(null);
-    setPlaybackError(null);
     playlistRetryRef.current = 0;
-    pendingSeekMsRef.current = null;
-    pendingSeekRef.current = null;
-    lastSentSeekRef.current = null;
-    remoteTrackIdRef.current = null;
-    audioRef.current?.pause();
-  }, []);
+    store.clear();
+  }, [store]);
 
   const logout = async () => {
     setQrBusy(true);
@@ -1011,13 +712,15 @@ export function MusicPlayer({
       setSpotifyDevices(result.devices);
       return result.devices;
     } catch (error) {
-      setPlaybackError(errorMessage(error));
+      store.setError(errorMessage(error));
       return null;
     }
-  }, []);
+  }, [store]);
 
+  // Only the Connect target picker still posts from here; every transport
+  // command goes through the store so it keeps working from the mini player.
   const postRemote = useCallback(async (patch: Record<string, unknown>) => {
-    setPlaybackError(null);
+    store.setError(null);
     try {
       await jsonApi("/api/music/remote", {
         method: "POST",
@@ -1025,9 +728,9 @@ export function MusicPlayer({
         body: JSON.stringify(patch),
       });
     } catch (error) {
-      setPlaybackError(errorMessage(error));
+      store.setError(errorMessage(error));
     }
-  }, []);
+  }, [store]);
 
   const runSearch = async (event?: { preventDefault?: () => void }) => {
     event?.preventDefault?.();
@@ -1040,10 +743,9 @@ export function MusicPlayer({
       const result = await jsonApi<{ tracks: MusicTrack[] }>(
         `/api/music/search?query=${encodeURIComponent(normalized)}`,
       );
-      setTracks(result.tracks);
+      store.setQueue(result.tracks, `“${normalized}”`);
       setTrackPage(0);
       setSelectedPlaylistId("");
-      setSourceLabel(`“${normalized}”`);
     } catch (error) {
       setLibraryError(errorMessage(error));
     } finally {
@@ -1060,9 +762,8 @@ export function MusicPlayer({
       const result = await jsonApi<{ tracks: MusicTrack[] }>(
         `/api/music/playlists/${playlist.id}/tracks`,
       );
-      setTracks(result.tracks);
+      store.setQueue(result.tracks, playlist.name);
       setTrackPage(0);
-      setSourceLabel(playlist.name);
     } catch (error) {
       setLibraryError(errorMessage(error));
     } finally {
@@ -1070,153 +771,34 @@ export function MusicPlayer({
     }
   };
 
-  const selectTrack = async (track: MusicTrack) => {
-    setTrackBusy(true);
-    setPlaybackError(null);
-    pendingSeekMsRef.current = null;
-    pendingSeekRef.current = null;
-    lastSentSeekRef.current = null;
-    audioRef.current?.pause();
+  // 每日推荐与随机播放：两个都要登录 Cookie，动作本身（取数 → 入队 → 起播）在
+  // lib/netease-discovery.ts 里，这里只负责忙碌态和错误横幅。
+  const runDiscovery = async (action: "random" | "daily") => {
+    if (discoveryBusy) return;
+    setDiscoveryBusy(action);
+    setLibraryBusy(true);
+    setLibraryError(null);
+    setSelectedPlaylistId("");
+    setTrackPage(0);
     try {
-      const result = await jsonApi<{ detail: MusicTrackDetail }>(`/api/music/tracks/${track.id}`);
-      setSelected(result.detail);
-      setCurrentMs(0);
-      setDurationMs(result.detail.track.durationMs);
-      setPlaying(false);
-      remoteTrackIdRef.current = track.id;
-      // Tell the device which track is current so it fetches the matching
-      // audio + lyrics. In remote mode this is also the command that starts the
-      // track on the Connect player, so its failures have to be visible.
-      const select = jsonApi("/api/music/device/select", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trackId: track.id }),
-      });
-      if (remoteMode) await select;
-      else void select.catch(() => {});
+      const ports = { requestJson: jsonApi, store };
+      if (action === "daily") await loadDailyRecommendations(ports);
+      else await playRandomLikedTrack(ports);
     } catch (error) {
-      setPlaybackError(errorMessage(error));
+      setLibraryError(errorMessage(error));
     } finally {
-      setTrackBusy(false);
+      setLibraryBusy(false);
+      setDiscoveryBusy(null);
     }
   };
 
-  const togglePlayback = async () => {
-    if (remoteMode) {
-      // The Connect player owns playback; the studio only sends the command and
-      // waits for the next poll to report what actually happened.
-      const willPlay = !playing;
-      setPlaying(willPlay);
-      await postRemote({ action: willPlay ? "play" : "pause" });
-      return;
-    }
-    if (!selected) return;
-    setPlaybackError(null);
-    if (deviceOnline) {
-      // Music-firmware mode: the TC002 is the player. The web is a silent remote
-      // — don't touch local audio, just flip state and push the command.
-      const willPlay = !playing;
-      setPlaying(willPlay);
-      postControl({ playing: willPlay });
-      return;
-    }
-    const audio = audioRef.current;
-    if (!audio) return;
-    const willPlay = audio.paused;
-    try {
-      if (willPlay) await audio.play();
-      else audio.pause();
-      postControl({ playing: willPlay });
-    } catch (error) {
-      setPlaybackError(errorMessage(error));
-    }
-  };
-
-  const seekToMs = useCallback((requestedMs: number) => {
-    if (!selected) return;
-    const audio = audioRef.current;
-    const loadedDurationMs = audio && Number.isFinite(audio.duration) && audio.duration > 0
-      ? audio.duration * 1_000
-      : effectiveDurationMs;
-    const targetMs = clampPlaybackPositionMs(requestedMs, loadedDurationMs);
-    setCurrentMs(targetMs);
-    setPlaybackError(null);
-
-    if (!audio || audio.readyState < HTMLMediaElement.HAVE_METADATA || !Number.isFinite(audio.duration)) {
-      pendingSeekMsRef.current = targetMs;
-      return;
-    }
-
-    audio.currentTime = targetMs / 1_000;
-    pendingSeekMsRef.current = null;
-  }, [effectiveDurationMs, selected]);
-
-  const handleLoadedMetadata = useCallback((audio: HTMLAudioElement) => {
-    const loadedDurationMs = Number.isFinite(audio.duration) && audio.duration > 0
-      ? audio.duration * 1_000
-      : selected?.track.durationMs ?? 0;
-    setDurationMs(loadedDurationMs);
-    const pendingSeekMs = pendingSeekMsRef.current;
-    if (pendingSeekMs === null) return;
-    const targetMs = clampPlaybackPositionMs(pendingSeekMs, loadedDurationMs);
-    audio.currentTime = targetMs / 1_000;
-    setCurrentMs(targetMs);
-    pendingSeekMsRef.current = null;
-  }, [selected?.track.durationMs]);
-
-  // Push a control patch to the device (fire-and-forget). The device polls
-  // /state and applies it; we remember the resulting seq so our own /state poll
-  // doesn't echo our own change back onto us.
-  const postControl = useCallback((patch: Record<string, unknown>) => {
-    void fetch("/api/music/device/control", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
-    })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: { seq?: number } | null) => {
-        if (data && typeof data.seq === "number") {
-          lastLocalSeqRef.current = data.seq;
-          lastSeenSeqRef.current = data.seq;
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  // Seek: native-firmware mode drives local audio; music-firmware mode sends the
-  // device a seek command and optimistically re-anchors the preview clock so it
-  // doesn't snap back before the next heartbeat confirms the new position.
-  const handleSeek = useCallback((targetMs: number) => {
-    const clamped = Math.max(0, Math.min(targetMs, durationRef.current || targetMs));
-    if (remoteModeRef.current) {
-      deviceClockRef.current = {
-        ...deviceClockRef.current,
-        playheadMs: clamped,
-        fetchedAt: performance.now(),
-      };
-      setCurrentMs(clamped);
-      void postRemote({ action: "seek", positionMs: Math.round(clamped) });
-      return;
-    }
-    if (deviceOnline) {
-      let sendMs = Math.round(clamped);
-      // The firmware dedups consecutive seeks by value, so seeking to the exact
-      // same spot again (double-clicking a lyric line) would be silently
-      // dropped — nudge repeats by 1ms to keep every command distinct.
-      if (lastSentSeekRef.current === sendMs) sendMs = Math.max(0, sendMs - 1) || sendMs + 1;
-      lastSentSeekRef.current = sendMs;
-      postControl({ seekMs: sendMs });
-      pendingSeekRef.current = { targetMs: clamped, at: performance.now() };
-      deviceClockRef.current = {
-        ...deviceClockRef.current,
-        playheadMs: clamped,
-        fetchedAt: performance.now(),
-      };
-      setCurrentMs(clamped);
-    } else {
-      seekToMs(clamped);
-    }
-  }, [deviceOnline, postControl, postRemote, seekToMs]);
+  // The transport itself lives in the store: selecting, play/pause and seeking
+  // all have to keep working from the header's mini player, which is not inside
+  // this component's tree.
+  const selectTrack = (track: MusicTrack) => store.select(track);
+  const togglePlayback = () => store.toggle();
+  const handleSeek = useCallback((targetMs: number) => store.seek(targetMs), [store]);
+  const postControl = store.postControl;
 
   const chooseSkin = useCallback((nextSkin: MusicSkin) => {
     setSkin(nextSkin);
@@ -1249,23 +831,9 @@ export function MusicPlayer({
     postControl({ accent: hex });
   }, [postControl]);
 
-  const skipTrack = (direction: -1 | 1) => {
-    if (remoteMode) {
-      // Skipping means skipping the Connect queue, not the studio's list.
-      void postRemote({ action: direction === 1 ? "next" : "previous" });
-      return;
-    }
-    if (!selected || tracks.length === 0) return;
-    const index = tracks.findIndex((track) => track.id === selected.track.id);
-    // Selected track not in the current list (e.g. a fresh search): restart
-    // from the top instead of letting "prev" land on the last track.
-    const nextIndex = index === -1 ? 0 : (index + direction + tracks.length) % tracks.length;
-    const next = tracks[nextIndex];
-    if (!next) return;
-    // Keep the list in view sync: flip to the page holding the new track.
-    setTrackPage(Math.floor(nextIndex / TRACKS_PER_PAGE));
-    void selectTrack(next);
-  };
+  // The pager follows the store's queue index (see the effect above), so this
+  // is the same skip the mini player performs.
+  const skipTrack = (direction: -1 | 1) => store.skip(direction);
 
   const toggleMirror = async () => {
     const next = !mirrorOn;
@@ -1283,12 +851,9 @@ export function MusicPlayer({
   const displayCurrent = activeLyric?.text ?? selected?.track.title ?? "选择歌曲";
   // Music firmware is online but the track it reports playing isn't the one we
   // just selected yet — it's still downloading. Show a loading state, not the
-  // old track's progress.
-  // Only the device-audio path has a download to wait for; in remote mode the
-  // Connect player is already playing while the clock fetches lyrics.
-  const loadingTrack = !remoteMode && deviceOnline && selected != null
-    && deviceTrackId !== selected.track.id;
-  loadingTrackRef.current = loadingTrack;
+  // old track's progress. (The store holds the same rule: it is what stops the
+  // interpolated clock from surfacing the previous track's playhead.)
+  const loadingTrack = deviceIsLoadingTrack(playback);
   // If the track changes (or starts loading) mid-drag the slider gets disabled
   // under the pointer and the release event may never commit — drop any
   // half-finished drag instead of letting draggingRef wedge the preview clock.
@@ -1371,6 +936,9 @@ export function MusicPlayer({
   const visibleLyrics = selected?.lyrics.length
     ? selected.lyrics.slice(Math.max(0, activeLyricIndex - 1), activeLyricIndex + 4)
     : [];
+  // 两个入口都读账号私有数据（每日推荐按 Cookie 计算、喜欢的歌曲按 uid 取），
+  // 所以 Spotify 之下和未登录时都不该出现——按不动的按钮不如没有。
+  const neteaseSignedIn = activeProviderId === "netease" && session?.loggedIn === true;
   const selectedPlaylist = selectedPlaylistId === ""
     ? undefined
     : playlists.find((playlist) => playlist.id === selectedPlaylistId);
@@ -1609,6 +1177,37 @@ export function MusicPlayer({
           </div>
         )}
 
+        {neteaseSignedIn && (
+          <div className="music-discovery">
+            <Button
+              type="button"
+              size="md"
+              variant="transparent"
+              outline
+              tightFocusRing
+              aria-label="随机播放一首我喜欢的音乐"
+              loading={discoveryBusy === "random"}
+              disabled={discoveryBusy !== null || trackBusy}
+              onClick={() => void runDiscovery("random")}
+            >
+              <Shuffle aria-hidden="true" />随机播放
+            </Button>
+            <Button
+              type="button"
+              size="md"
+              variant="transparent"
+              outline
+              tightFocusRing
+              aria-label="载入今天的每日推荐歌曲"
+              loading={discoveryBusy === "daily"}
+              disabled={discoveryBusy !== null}
+              onClick={() => void runDiscovery("daily")}
+            >
+              <Sparkles aria-hidden="true" />每日推荐
+            </Button>
+          </div>
+        )}
+
         <div className="music-track-list">
           <div className="music-track-list__heading"><span>{sourceLabel}</span><small>{tracks.length} 首</small></div>
           {libraryError && <p className="music-inline-error" role="alert">{libraryError}</p>}
@@ -1742,6 +1341,11 @@ export function MusicPlayer({
                     <p>{artistLabel(selected.track)} · {selected.track.album || "未知专辑"}</p>
                   </div>
                   <div className="music-transport" aria-label={remoteMode ? "Spotify Connect 控制" : deviceOnline ? "设备播放控制" : "网页试听控制"}>
+                    {/* Connect brings its own repeat/shuffle and its own queue —
+                        a 播放模式 here would govern a list it does not play. */}
+                    {!remoteMode && (
+                      <PlayModeButton order={playback.playOrder} onCycle={() => store.cyclePlayOrder()} />
+                    )}
                     <Button type="button" size="md" square variant="transparent" outline={false} tightFocusRing aria-label="上一首" disabled={!remoteMode && tracks.length < 2} onClick={() => skipTrack(-1)}><ChevronLeft /></Button>
                     <Button
                       type="button"
@@ -1876,32 +1480,11 @@ export function MusicPlayer({
             )}
 
             {playbackError && <p className="music-inline-error" role="alert">{playbackError}</p>}
-            {/* Spotify audio never reaches this origin, so remote mode has no
-                audio element at all — the Connect player is the output. */}
-            {selected && !remoteMode && (
-              <audio
-                ref={audioRef}
-                src={"/api/music/tracks/" + selected.track.id + "/stream"}
-                preload="metadata"
-                onPlay={(event) => {
-                  setCurrentMs(event.currentTarget.currentTime * 1_000);
-                  setPlaying(true);
-                }}
-                onPause={(event) => {
-                  setCurrentMs(event.currentTarget.currentTime * 1_000);
-                  setPlaying(false);
-                }}
-                onEnded={() => setPlaying(false)}
-                onTimeUpdate={(event) => setCurrentMs(event.currentTarget.currentTime * 1_000)}
-                onLoadedMetadata={(event) => handleLoadedMetadata(event.currentTarget)}
-                onDurationChange={(event) => {
-                  if (Number.isFinite(event.currentTarget.duration) && event.currentTarget.duration > 0) {
-                    setDurationMs(event.currentTarget.duration * 1_000);
-                  }
-                }}
-                onError={() => setPlaybackError("音频没有载入。歌曲可能受版权、会员或地区限制。")}
-              />
-            )}
+            {/* No <audio> here on purpose. The element used to hang off this
+                section, so leaving the 音乐 tab destroyed the player mid-song;
+                it belongs to the page now (lib/music-playback-store.ts). Spotify
+                audio never reaches this origin either way — in remote mode the
+                Connect player is the output and no element exists at all. */}
           </section>
 
           {/* The device screen and the timed lyrics form one band: both are

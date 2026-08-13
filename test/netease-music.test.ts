@@ -40,8 +40,27 @@ function fakeGateway(overrides: Partial<NeteaseGateway> = {}): NeteaseGateway {
     songDetail: async () => ({ body: { songs: [] } }),
     lyric: async () => ({ body: {} }),
     songUrl: async () => ({ body: { data: [] } }),
+    recommendSongs: async () => ({ body: { code: 200, data: { dailySongs: [] } } }),
+    likedSongIds: async () => ({ body: { code: 200, ids: [] } }),
     ...overrides,
   };
+}
+
+// A service whose session file already holds a signed-in account, which both
+// 每日推荐 and 喜欢的歌曲 require.
+async function signedInService(
+  gateway: NeteaseGateway,
+  extra: { random?: () => number } = {},
+): Promise<NeteaseMusicService> {
+  const { store } = await sessionStore();
+  await store.save("MUSIC_U=secret-value; os=pc", {
+    provider: "netease",
+    id: "42",
+    nickname: "像素听众",
+  });
+  const service = new NeteaseMusicService({ gateway, sessionStore: store, ...extra });
+  await service.initialize();
+  return service;
 }
 
 describe("NetEase music service", () => {
@@ -169,6 +188,195 @@ describe("NetEase music service", () => {
     expect(JSON.stringify(lyrics)).not.toContain("WRONG TIMELINE");
     // …and the credit blob is not a lyric line.
     expect(lyrics.some((line) => line.text.includes("作词"))).toBe(false);
+  });
+
+  test("reads 每日推荐 from the account's own list and refuses to answer signed out", async () => {
+    const daily = [
+      { id: 3345803350, name: "361°", ar: [{ name: "水中スピカ" }], al: { name: "361°" }, dt: 331_533 },
+      { id: 2, name: "第二首", ar: [{ name: "乐队" }], al: { name: "专辑" }, dt: 200_000 },
+      // Not a song: the parser drops it rather than showing a nameless row.
+      { id: 0, name: "" },
+    ];
+    let observedCookie = "";
+    const service = await signedInService(fakeGateway({
+      recommendSongs: async (input) => {
+        observedCookie = input.cookie;
+        return { body: { code: 200, data: { dailySongs: daily } } };
+      },
+    }));
+
+    expect(await service.dailyRecommendations()).toEqual([
+      { id: "3345803350", title: "361°", artists: ["水中スピカ"], album: "361°", durationMs: 331_533 },
+      { id: "2", title: "第二首", artists: ["乐队"], album: "专辑", durationMs: 200_000 },
+    ]);
+    // 推荐是按登录 Cookie 算的，不带凭据就不是这个账号的推荐。
+    expect(observedCookie).toBe("MUSIC_U=secret-value; os=pc");
+
+    const { store } = await sessionStore();
+    const signedOut = new NeteaseMusicService({ gateway: fakeGateway(), sessionStore: store });
+    await signedOut.initialize();
+    await expect(signedOut.dailyRecommendations()).rejects.toMatchObject({
+      status: 401,
+      message: "请先使用网易云音乐扫码登录",
+    });
+  });
+
+  // NetEase answers a failed call with HTTP 200 and a non-200 body code — a
+  // transient `code: 400` from user_playlist was measured on a healthy session.
+  // Reading such a body for its list field yields [], and rendering that is a
+  // claim about the account ("you have no recommendations") we cannot support.
+  test("reports a NetEase failure instead of rendering it as an empty library", async () => {
+    const failing = await signedInService(fakeGateway({
+      recommendSongs: async () => ({ body: { code: 400, message: "请求过于频繁" } }),
+    }));
+    await expect(failing.dailyRecommendations()).rejects.toMatchObject({
+      status: 502,
+      message: "网易云每日推荐接口返回 400：请求过于频繁",
+    });
+
+    // An expired cookie is a different instruction to the user, so it gets its
+    // own status and its own words.
+    const expired = await signedInService(fakeGateway({
+      likedSongIds: async () => ({ body: { code: 301 } }),
+    }));
+    await expect(expired.randomLikedTrack()).rejects.toMatchObject({
+      status: 401,
+      message: "网易云登录已失效，请重新扫码登录",
+    });
+
+    // 200 with nothing in it is a delivery that failed, not an empty account.
+    const empty = await signedInService(fakeGateway());
+    await expect(empty.dailyRecommendations()).rejects.toMatchObject({ status: 502 });
+  });
+
+  test("draws a random liked song from the whole like list, then makes it playable", async () => {
+    const ids = [562594185, 1938019211, 560693602, 757761, 2048604695];
+    let observedUid = 0;
+    let requestedIds = "";
+    let detailCalls = 0;
+    const gateway = fakeGateway({
+      likedSongIds: async (input) => {
+        observedUid = input.uid;
+        return { body: { code: 200, ids } };
+      },
+      songDetail: async (input) => {
+        detailCalls += 1;
+        requestedIds = input.ids;
+        const requested = input.ids.split(",").map(Number);
+        return {
+          body: {
+            code: 200,
+            songs: requested.map((id) => ({
+              id,
+              name: `曲目 ${id}`,
+              ar: [{ name: "像素乐队" }],
+              al: { name: "十六行", picUrl: "https://p.example/cover.jpg" },
+              dt: 180_000,
+            })),
+            privileges: requested.map((id) => ({ id, pl: 320_000 })),
+          },
+        };
+      },
+    });
+
+    // likelist returns IDs only, so the draw still has to be resolved — in ONE
+    // song_detail, which is what makes drawing several free.
+    const middle = await signedInService(gateway, { random: () => 0.5 });
+    expect(await middle.randomLikedTrack()).toEqual({
+      id: "560693602",
+      title: "曲目 560693602",
+      artists: ["像素乐队"],
+      album: "十六行",
+      durationMs: 180_000,
+      coverUrl: "https://p.example/cover.jpg",
+    });
+    expect(observedUid).toBe(42);
+    expect(requestedIds).toBe("560693602");
+    expect(detailCalls).toBe(1);
+
+    const first = await signedInService(gateway, { random: () => 0 });
+    expect((await first.randomLikedTrack()).id).toBe("562594185");
+    // Math.random() is [0, 1), but a value of 1 must not index past the end.
+    const last = await signedInService(gateway, { random: () => 1 });
+    expect((await last.randomLikedTrack()).id).toBe("2048604695");
+
+    // A walking draw resolves several ids at once and still returns the FIRST
+    // one drawn — the pick has to stay random, not "whichever NetEase listed
+    // first".
+    let step = 0;
+    const walking = await signedInService(gateway, { random: () => [0.6, 0, 0.2][step++ % 3]! });
+    expect((await walking.randomLikedTrack()).id).toBe("757761");
+    expect(requestedIds.split(",")).toEqual(["757761", "562594185", "1938019211"]);
+  });
+
+  // The button promises playback, not a track. A like list this old holds songs
+  // that have since been taken down — the first real click landed on 729638,
+  // whose stream 404s — and song_detail already says so in `privileges.pl`.
+  test("skips liked songs this account can no longer play", async () => {
+    const ids = [729638, 26092657, 28287116];
+    let step = 0;
+    const gateway = fakeGateway({
+      likedSongIds: async () => ({ body: { code: 200, ids } }),
+      songDetail: async (input) => {
+        const requested = input.ids.split(",").map(Number);
+        return {
+          body: {
+            code: 200,
+            songs: requested.map((id) => ({ id, name: `曲目 ${id}`, ar: [], al: {}, dt: 1_000 })),
+            // 729638 measured on the real account: st -200, pl 0.
+            privileges: requested.map((id) => ({ id, pl: id === 729638 ? 0 : 999_000 })),
+          },
+        };
+      },
+    });
+    const service = await signedInService(gateway, {
+      random: () => [0, 0.4, 0.9][step++ % 3]!,
+    });
+    expect((await service.randomLikedTrack()).id).toBe("26092657");
+
+    // Everything drawn is dead: say so, rather than handing back a track that
+    // will fail to stream a second later.
+    const allDead = await signedInService(fakeGateway({
+      likedSongIds: async () => ({ body: { code: 200, ids: [729638] } }),
+      songDetail: async () => ({
+        body: {
+          code: 200,
+          songs: [{ id: 729638, name: "鉱山町マインツ", ar: [], al: {}, dt: 1_000 }],
+          privileges: [{ id: 729638, pl: 0 }],
+        },
+      }),
+    }));
+    await expect(allDead.randomLikedTrack()).rejects.toThrow(/都无法播放/);
+
+    // No privileges at all is "not stated", not "nothing is playable".
+    const silent = await signedInService(fakeGateway({
+      likedSongIds: async () => ({ body: { code: 200, ids: [757761] } }),
+      songDetail: async () => ({
+        body: { code: 200, songs: [{ id: 757761, name: "无版权信息", ar: [], al: {}, dt: 1_000 }] },
+      }),
+    }));
+    expect((await silent.randomLikedTrack()).id).toBe("757761");
+  });
+
+  test("says the account has no liked songs rather than playing nothing", async () => {
+    const service = await signedInService(fakeGateway({
+      likedSongIds: async () => ({ body: { code: 200, ids: [] } }),
+    }));
+    await expect(service.randomLikedTrack()).rejects.toMatchObject({ status: 404 });
+    await expect(service.randomLikedTrack()).rejects.toThrow(/还没有喜欢的歌曲/);
+
+    // The ID exists but NetEase would not describe it: still an error, never a
+    // half-built track.
+    const unresolvable = await signedInService(fakeGateway({
+      likedSongIds: async () => ({ body: { code: 200, ids: [757761] } }),
+      songDetail: async () => ({ body: { code: 200, songs: [] } }),
+    }));
+    await expect(unresolvable.randomLikedTrack()).rejects.toBeInstanceOf(MusicServiceError);
+
+    const { store } = await sessionStore();
+    const signedOut = new NeteaseMusicService({ gateway: fakeGateway(), sessionStore: store });
+    await signedOut.initialize();
+    await expect(signedOut.randomLikedTrack()).rejects.toMatchObject({ status: 401 });
   });
 
   test("proxies only trusted NetEase media hosts and preserves byte ranges", async () => {

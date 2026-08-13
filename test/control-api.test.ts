@@ -397,6 +397,70 @@ describe("local control API", () => {
     expect(active).toBe("spotify");
   });
 
+  test("answers 每日推荐 and 随机一首 from NetEase itself, and passes its failures through", async () => {
+    const track = {
+      id: "560693602",
+      title: "夜航",
+      artists: ["像素乐队"],
+      album: "十六行",
+      durationMs: 180_000,
+    };
+    // Both routes name `netease` rather than the active provider: they ask a
+    // question only NetEase has an answer to. Spotify being the live source
+    // must not change who is asked — so it is, and its stubs throw.
+    const music = fakeMusicHub({
+      dailyRecommendations: async () => [track],
+      randomLikedTrack: async () => track,
+    });
+    const spotifyProvider = {
+      id: "spotify",
+      playbackMode: "remote",
+      status: () => ({ loggedIn: false }),
+      dailyRecommendations: async () => {
+        throw new Error("asked Spotify for a NetEase-only list");
+      },
+      randomLikedTrack: async () => {
+        throw new Error("asked Spotify for a NetEase-only list");
+      },
+    };
+    (music as unknown as Record<string, unknown>).spotify = spotifyProvider;
+    (music as unknown as Record<string, unknown>).activeProvider = () => spotifyProvider;
+    const handler = createControlHandler(fakeWorkspaceController(), { music });
+
+    const daily = await handler(new Request("http://127.0.0.1:43820/api/music/netease/daily"));
+    expect(daily.status).toBe(200);
+    expect(await daily.json()).toEqual({ tracks: [track] });
+
+    const random = await handler(
+      new Request("http://127.0.0.1:43820/api/music/netease/liked/random"),
+    );
+    expect(random.status).toBe(200);
+    expect(await random.json()).toEqual({ track });
+
+    // Signed out: the user is told to scan, not handed an empty list.
+    const signedOut = createControlHandler(fakeWorkspaceController(), {
+      music: fakeMusicHub({
+        dailyRecommendations: async () => {
+          throw new MusicServiceError("请先使用网易云音乐扫码登录", 401);
+        },
+        randomLikedTrack: async () => {
+          throw new MusicServiceError("这个网易云账号还没有喜欢的歌曲", 404);
+        },
+      }),
+    });
+    const denied = await signedOut(
+      new Request("http://127.0.0.1:43820/api/music/netease/daily"),
+    );
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ error: "请先使用网易云音乐扫码登录" });
+
+    const noLikes = await signedOut(
+      new Request("http://127.0.0.1:43820/api/music/netease/liked/random"),
+    );
+    expect(noLikes.status).toBe(404);
+    expect((await noLikes.json()).error).toContain("还没有喜欢的歌曲");
+  });
+
   test("publishes the Connect player's position to the device and relays transport commands", async () => {
     const commands: string[] = [];
     let snapshot = {

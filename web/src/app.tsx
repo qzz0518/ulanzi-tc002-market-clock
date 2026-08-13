@@ -4,6 +4,7 @@ import { Button, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
 import { api, jsonApi } from "@/lib/api";
 import { describeFirmware, type FirmwareOsState } from "@/lib/firmware-mode";
 import { createLatestTaskRunner } from "@/lib/latest-task-runner";
+import { musicPlaybackStore } from "@/lib/music-playback-store";
 import {
   channelForPreview,
   channelRuntime,
@@ -779,6 +780,15 @@ export function App() {
   // 见 lib/firmware-mode.ts）。整份控制台只有这一处判定。
   const firmwareStatus = describeFirmware({ osState, musicFirmwareOnline, arcadeOnline });
   const firmwareMode = firmwareStatus.mode;
+
+  // ZOS 的音乐页是一块由控制台喂的歌词显示器：网页就是网易云的播放器，除了它没人
+  // 知道音箱里出来的是什么。所以「该不该上报」是整页的判断，不是音乐页的——音乐页
+  // 卸载现在只意味着用户去看别的标签页了，歌照放。
+  //
+  // 这里刻意不订阅播放快照：App 是根组件，跟着播放头每秒重渲十次会把整棵树拖下水。
+  useEffect(() => {
+    musicPlaybackStore().setNowPlayingReporting(firmwareMode === "zos");
+  }, [firmwareMode]);
 
   const changeView = (nextView: StudioView) => {
     // 系统固件页与音乐/游戏页一样不受侧载锁定影响：它读的是 tc002-os 自己的

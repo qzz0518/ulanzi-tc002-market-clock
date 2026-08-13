@@ -33,6 +33,13 @@ export type {
   MusicTrackDetail,
 } from "./music/core.ts";
 
+/**
+ * How many liked songs 随机播放 draws before choosing one. They all resolve in a
+ * single `song_detail`, so the only reason not to draw more is that the request
+ * URL carries every ID.
+ */
+const RANDOM_LIKED_CANDIDATES = 8;
+
 export type MusicQrState = "waiting" | "scanned" | "confirmed" | "expired";
 
 export interface MusicQrLogin {
@@ -62,6 +69,10 @@ export interface NeteaseGateway {
   songDetail(input: { ids: string; cookie?: string }): Promise<GatewayResponse>;
   lyric(input: { id: number; cookie?: string }): Promise<GatewayResponse>;
   songUrl(input: { id: number; level: "standard"; cookie?: string }): Promise<GatewayResponse>;
+  // 每日推荐歌曲。没有 uid 参数——推荐是按登录 Cookie 算的，所以它必须带凭据。
+  recommendSongs(input: { cookie: string }): Promise<GatewayResponse>;
+  // 喜欢的歌曲(无序)，只回 ID 列表，要拿到可播放的曲目还得再走一次 songDetail。
+  likedSongIds(input: { uid: number; cookie: string }): Promise<GatewayResponse>;
 }
 
 export const defaultNeteaseGateway: NeteaseGateway = {
@@ -77,6 +88,8 @@ export const defaultNeteaseGateway: NeteaseGateway = {
   songUrl: (input) => neteaseApi.song_url_v1(
     input as Parameters<typeof neteaseApi.song_url_v1>[0],
   ),
+  recommendSongs: (input) => neteaseApi.recommend_songs(input),
+  likedSongIds: (input) => neteaseApi.likelist(input),
 };
 
 interface StoredMusicSession {
@@ -141,6 +154,9 @@ export class NeteaseMusicService implements MusicProvider {
       sessionStore: MusicSessionStore;
       now?: () => number;
       fetcher?: typeof fetch;
+      // Injected so "pick one of the liked songs" can be asserted instead of
+      // being a coin flip the test has to tolerate.
+      random?: () => number;
     },
   ) {}
 
@@ -150,6 +166,10 @@ export class NeteaseMusicService implements MusicProvider {
 
   private get now(): number {
     return (this.options.now ?? Date.now)();
+  }
+
+  private get random(): number {
+    return (this.options.random ?? Math.random)();
   }
 
   async initialize(): Promise<void> {
@@ -265,6 +285,93 @@ export class NeteaseMusicService implements MusicProvider {
     return arrayAt(asRecord(response.body), ["result", "songs"])
       .map(parseTrack)
       .filter((item): item is MusicTrack => item !== null);
+  }
+
+  /**
+   * 每日推荐歌曲 — the account's own list, so it needs the login cookie and has
+   * no signed-out form. An empty `dailySongs` with a 200 is treated as a failed
+   * delivery rather than "you have no recommendations": NetEase always returns
+   * ~30 for a real account, and claiming otherwise would be inventing an answer.
+   */
+  async dailyRecommendations(): Promise<MusicTrack[]> {
+    this.requireProfile();
+    const response = await this.gateway.recommendSongs({ cookie: this.cookie! });
+    const body = assertNeteaseOk(asRecord(response.body), "每日推荐");
+    const tracks = arrayAt(body, ["data", "dailySongs"])
+      .map(parseTrack)
+      .filter((item): item is MusicTrack => item !== null);
+    if (tracks.length === 0) {
+      throw new MusicServiceError("网易云没有返回今天的推荐歌曲，请稍后重试", 502);
+    }
+    return tracks;
+  }
+
+  /**
+   * One random song out of 喜欢的歌曲.
+   *
+   * The source is `likelist`, not the 我喜欢的音乐 playlist, because the playlist
+   * route is capped (`playlistTracks` asks for 200) while `likelist` returns the
+   * complete ID set — measured at 1972 on the developer's account. Drawing from
+   * the first 200 would make "random" mean "random among the most recently
+   * liked". The price is one extra call: IDs alone are not playable, so the
+   * draw still goes through `song_detail`.
+   *
+   * That second call is also why a handful is drawn instead of one. A like list
+   * that old contains songs since taken down, and the button promises playback,
+   * not a track: the first real click landed on 729638, whose stream 404s. One
+   * `song_detail` resolves every candidate and says which of them this account
+   * can still play, so the cost of not landing on silence is zero extra calls.
+   */
+  async randomLikedTrack(): Promise<MusicTrack> {
+    const profile = this.requireProfile();
+    const response = await this.gateway.likedSongIds({
+      uid: neteaseId(profile.id, "用户"),
+      cookie: this.cookie!,
+    });
+    const body = assertNeteaseOk(asRecord(response.body), "喜欢的歌曲");
+    const ids = arrayAt(body, ["ids"])
+      .map((value) => numberValue(value))
+      .filter((id): id is number => id !== undefined && Number.isSafeInteger(id) && id > 0);
+    if (ids.length === 0) {
+      throw new MusicServiceError("这个网易云账号还没有喜欢的歌曲，先在网易云里红心几首吧", 404);
+    }
+
+    const candidates = this.drawIds(ids, RANDOM_LIKED_CANDIDATES);
+    const detailBody = assertNeteaseOk(
+      asRecord((await this.gateway.songDetail({
+        ids: candidates.join(","),
+        cookie: this.cookie!,
+      })).body),
+      "歌曲详情",
+    );
+    const songs = arrayAt(detailBody, ["songs"]);
+    const playable = playableSongIds(detailBody);
+    // Walk the draw in order so the pick stays the random one, not whichever
+    // song NetEase happened to list first.
+    for (const id of candidates) {
+      if (playable && !playable.has(id)) continue;
+      const track = parseTrack(songs.find((song) => numberValue(asRecord(song).id) === id));
+      if (track) return track;
+    }
+    throw new MusicServiceError(
+      "随机抽到的几首歌当前都无法播放（版权或会员限制），再点一次试试",
+      502,
+    );
+  }
+
+  /** `count` distinct IDs at random, or fewer when the list is short. */
+  private drawIds(ids: readonly number[], count: number): number[] {
+    const drawn: number[] = [];
+    const seen = new Set<number>();
+    // Math.random() is [0, 1), but a stub returning 1 must not index past the
+    // end. The attempt cap keeps a constant stub (or a tiny list) from spinning.
+    for (let attempt = 0; attempt < count * 4 && drawn.length < count; attempt += 1) {
+      const id = ids[Math.min(ids.length - 1, Math.floor(this.random * ids.length))]!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      drawn.push(id);
+    }
+    return drawn;
   }
 
   async trackDetail(id: string): Promise<MusicTrackDetail> {
@@ -484,6 +591,53 @@ function parseLyricResponse(body: UnknownRecord, trackDurationMs: number): Music
     // were downgraded from word-level upstream.
     endMarkersMs: parseLrcEndMarkers(stringAt(body, ["lrc", "lyric"])),
   });
+}
+
+/**
+ * The IDs NetEase says this account can actually play right now.
+ *
+ * `song_detail` answers with a `privileges` entry per song, whose `pl` is the
+ * bitrate this account may stream at — 0 for a track that has since been taken
+ * down. Returns null when the response carries no privileges at all: that means
+ * "not stated", not "nothing is playable", and the caller must not read it as a
+ * verdict.
+ */
+function playableSongIds(body: UnknownRecord): Set<number> | null {
+  const privileges = arrayAt(body, ["privileges"]);
+  if (privileges.length === 0) return null;
+  const ids = new Set<number>();
+  for (const entry of privileges) {
+    const record = asRecord(entry);
+    const id = numberValue(record.id);
+    if (id !== undefined && (numberValue(record.pl) ?? 0) > 0) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * NetEase reports failure as HTTP 200 with a non-200 `code` in the body — a
+ * transient `code: 400` on `user_playlist` was observed on a healthy session
+ * while this was being written. Reading such a body for its list field yields
+ * `[]`, which the console would render as "you have no recommendations". So
+ * every call that answers a private question checks the code first and says
+ * that the request failed.
+ *
+ * A body with no `code` at all is left alone: several endpoints simply omit it.
+ */
+function assertNeteaseOk(body: UnknownRecord, label: string): UnknownRecord {
+  const code = numberValue(body.code);
+  if (code === undefined || code === 200) return body;
+  // 301 需要登录 / 302 需要验证——凭据过期，重新扫码是唯一出路。
+  if (code === 301 || code === 302) {
+    throw new MusicServiceError("网易云登录已失效，请重新扫码登录", 401);
+  }
+  const message = typeof body.message === "string"
+    ? body.message
+    : typeof body.msg === "string" ? body.msg : "";
+  throw new MusicServiceError(
+    `网易云${label}接口返回 ${code}${message ? `：${message}` : ""}`,
+    502,
+  );
 }
 
 function validCookie(value: string): boolean {

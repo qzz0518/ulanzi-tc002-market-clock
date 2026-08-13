@@ -108,9 +108,10 @@ describe("music player UI", () => {
   });
 
   test("offers both music sources and keeps Spotify a remote, not a player", async () => {
-    const source = await Bun.file(
-      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
-    ).text();
+    const [source, storeSource] = await Promise.all([
+      Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/lib/music-playback-store.ts", import.meta.url)).text(),
+    ]);
 
     // The switch itself, and the two sources it moves between.
     expect(source).toContain('className="music-source-switch"');
@@ -122,8 +123,20 @@ describe("music player UI", () => {
     // and the picker can move playback to another Connect device.
     expect(source).toContain("/api/music/remote");
     expect(source).toContain('action: "transfer"');
-    expect(source).toContain("selected && !remoteMode && (");
     expect(source).toContain("/api/music/spotify/devices");
+
+    // The element itself is no longer this view's to own — it hung off the
+    // now-playing section, so leaving 音乐 destroyed the player mid-song. The
+    // rule it enforced survives the move: remote mode attaches no source to it
+    // at all, because Spotify audio never reaches this origin.
+    // A rendered element (`<audio ` with attributes) and the ref + media
+    // handlers that made it this component's property. The prose comment
+    // explaining its absence deliberately still says the word.
+    expect(source).not.toMatch(/<audio\s/);
+    expect(source).not.toContain("audioRef");
+    expect(source).not.toMatch(/onTimeUpdate|onLoadedMetadata|onDurationChange/);
+    expect(storeSource).toContain('if (state.playbackMode !== "remote") {');
+    expect(storeSource).toContain("/api/music/tracks/${track.id}/stream");
 
     // PKCE setup guidance has to name the exact redirect URI Spotify demands.
     expect(source).toContain("/api/music/spotify/callback");
@@ -134,19 +147,55 @@ describe("music player UI", () => {
     expect(html).toContain("Spotify");
   });
 
+  test("puts 随机播放 and 每日推荐 under the playlist picker, gated on a signed-in NetEase", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
+    ).text();
+
+    // 两个按钮在歌单选择器之后、歌曲列表之前——用户要的就是「歌单选择下面」。
+    const playlistAt = source.indexOf('className="music-playlist-select"');
+    const discoveryAt = source.indexOf('className="music-discovery"');
+    const listAt = source.indexOf('className="music-track-list"');
+    expect(playlistAt).toBeGreaterThan(-1);
+    expect(discoveryAt).toBeGreaterThan(playlistAt);
+    expect(listAt).toBeGreaterThan(discoveryAt);
+    expect(source).toContain("随机播放");
+    expect(source).toContain("每日推荐");
+
+    // 两条数据都是账号私有的，Spotify 之下和未登录时不该出现一个按不动的按钮。
+    expect(source).toContain(
+      'const neteaseSignedIn = activeProviderId === "netease" && session?.loggedIn === true;',
+    );
+    expect(source).toContain("{neteaseSignedIn && (");
+
+    // 动作本身在 lib 里（test/netease-discovery.ts 逐条核对顺序与守卫），
+    // 视图不自己拼取数 → 入队 → 起播这段序列。
+    expect(source).toContain("loadDailyRecommendations");
+    expect(source).toContain("playRandomLikedTrack");
+    expect(source).not.toContain("/api/music/netease/");
+
+    // 未登录时渲染的是登录引导，不是这两个按钮。
+    const html = renderToStaticMarkup(createElement(MusicPlayer));
+    expect(html).not.toContain("随机播放");
+    expect(html).not.toContain("每日推荐");
+  });
+
   test("keeps the guarded sideload session flow in the secondary drawer", async () => {
     // 抽屉本体抽成了两页共用的 FirmwarePanel；音乐页保留触发按钮、口令与
     // 固件轮询，流程细节在共享组件里检查。
-    const [source, panelSource] = await Promise.all([
+    const [source, panelSource, storeSource] = await Promise.all([
       Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
       Bun.file(new URL("../web/src/components/firmware-panel.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/lib/music-playback-store.ts", import.meta.url)).text(),
     ]);
 
     expect(source).toContain('dialogClassName="music-firmware-dialog"');
     expect(source).toContain("侧载音乐固件");
-    expect(source).toContain("/api/music/device/state?viewer=web");
-    expect(source).toContain("FWPOLL");
     expect(source).toContain("START_TC002_MUSIC_SESSION");
+    // 固件轮询跟着播放走，不跟着这个视图走：切到别的标签页时设备心跳仍要被
+    // 读到，否则回到音乐页会有 2.5 s 认不出已侧载的固件。
+    expect(storeSource).toContain("/api/music/device/state?viewer=web");
+    expect(storeSource).toContain("FWPOLL");
     expect(source).not.toContain("刷入");
     expect(source).not.toContain("update.img");
 

@@ -1233,6 +1233,22 @@ export function createControlHandler(
         return await provider.stream(musicStreamMatch[1]!, request.headers.get("Range"));
       }
 
+      /* ------------------------------ NetEase ------------------------------ */
+
+      // 每日推荐和「随机一首喜欢的歌」问的都是账号私有数据：只有网易云有这两个
+      // 概念，而且两者都要登录 Cookie。所以它们和扫码登录一样直接指名 netease，
+      // 而不是走 activeProvider——否则在 Spotify 之下点这两个按钮，错误会变成
+      // 「Spotify 未登录」这种答非所问的话。未登录时服务层回 401 并说清楚要扫码。
+      if (request.method === "GET" && url.pathname === "/api/music/netease/daily") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        return jsonResponse({ tracks: await options.music.netease.dailyRecommendations() });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/music/netease/liked/random") {
+        if (!options.music) return jsonResponse({ error: "music service is unavailable" }, 404);
+        return jsonResponse({ track: await options.music.netease.randomLikedTrack() });
+      }
+
       /* ------------------------------ Spotify ------------------------------ */
 
       if (request.method === "GET" && url.pathname === "/api/music/spotify/app") {

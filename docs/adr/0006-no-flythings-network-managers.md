@@ -74,5 +74,5 @@ bad network call removes the only debug channel the device has.
   Wi-Fi setup page. That is precisely the safety net 固化 (writing the app into `/res`) would remove,
   so persisting ZOS to flash stays gated on the guarded connect path being proven on hardware —
   without a network there is no adb, and no port 5555 either.
-- The audit doubles as the size budget (1.2 MB) and the ffmpeg gate, so one script covers every
+- The audit doubles as the size budget (1,400,000 bytes) and the ffmpeg gate, so one script covers every
   failure whose only symptom on the device is `initLib error: undefined symbol` and a black panel.

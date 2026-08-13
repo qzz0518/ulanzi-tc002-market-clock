@@ -25,6 +25,7 @@ import {
 } from "@/lib/firmware-mode";
 import type { FirmwareKind, RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
+import { MiniPlayer } from "@/components/music/mini-player";
 
 interface StudioHeaderProps {
   view: StudioView;
@@ -96,8 +97,20 @@ export function StudioHeader({
   // 根本不存在，再报「设备离线」就是在说一台正在上报的设备掉线了——固件身份
   // 交给 Chip，这里只在官方固件下发言。
   const showRuntimeStatus = firmwareStatus.mode === "official";
+  // 官方固件那句状态文字（「正在连接时钟…」最长）比电量 Chip 还宽一截，
+  // 顶栏最挤的那一档要为它再让出位置。
+  //
+  // Measured on the live console at every width from 1680 down to 360, in both
+  // shapes this row takes. Between 52rem and 70rem the tab strip is still in
+  // the header and eats 415px, leaving the right column about 117px: with the
+  // ZOS battery chip that still fits the mini player's artwork and one
+  // transport button (30px to spare), but the official status line is ~25px
+  // wider and the button no longer fits. The header is the only place that
+  // knows which of the two is on screen, so it says so rather than leaving the
+  // stylesheet to infer it from the shape of its own children.
+  const wideActions = showRuntimeStatus;
   return (
-    <header className="studio-header">
+    <header className={"studio-header" + (wideActions ? " has-wide-actions" : "")}>
       <div className="brand-lockup" aria-label="Pixel Market，Ulanzi TC002">
         <span className="brand-mark" aria-hidden="true">
           <i /><i /><i /><i />
@@ -120,6 +133,11 @@ export function StudioHeader({
       </Tabs>
 
       <div className="header-actions">
+        {/* 播放不再随音乐页卸载，所以除音乐页外每一页都能看到并操作它。
+            It renders nothing on 音乐 (the full transport is already there) and
+            nothing when no track is loaded, so the row below is unchanged for
+            anyone who has not started playing. */}
+        <MiniPlayer view={view} onOpen={() => onViewChange("music")} />
         <div className="firmware-status" role="status" aria-live="polite">
           <Chip
             className="firmware-chip"
