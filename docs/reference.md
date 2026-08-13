@@ -367,10 +367,20 @@ sleepidle	300
 那套三序列的写法。**控制台从未写过时**一行都不发**：没写过的默认值躺在每份文档里，就是一份
 设备可以照做的请求，而在控制台开口之前这个设置属于设备自己的 设置 页。
 
-**序列变小 = 服务重启了，不是重放。**序列是 Bun 进程里的普通实例状态，`bun start` 之后从 1
-重来，而设备还开着、还记着上次采纳的号。设备侧对**低于**已采纳值的序列会把计数器归零后采纳
-（`applySleepRequest` / `applyConsoleSettings`），否则凌晨两点那次 `{enabled:false}` 会安静地
-什么都不做——路由照样回 200——直到重按够次数为止。重放仍然挡得住：重放是重复同一个号，不是
+**序列会落盘，在 `.runtime/os-sleep-request.json`。**它曾经只是 Bun 进程里的实例状态，
+`bun start` 之后从 1 重来（而每改一次 `web/` 就得重新构建、重启，这是常态），设备却还开着、
+还记着上次采纳的号——凌晨两点那次 `{enabled:false}` 于是安静地什么都不做，路由照样回 200，
+直到重按够次数为止。文件里存的是**控制台最后一次请求了什么**：四个可缺字段，加上它们被写下时
+的序列——不是「这个设置」。生效的配置由设备自己写进 `/data`，那边才是权威。之所以整份请求都
+存而不是只存序列，是因为文档是**拉取**的：设备还没轮询到的字段必须仍然留在文档里；两样一起
+恢复，重启后的第一份文档就和重启前的最后一份一模一样。序列是**接着用，绝不往上跳**——从
+seq+1 起步等于凭空造出一个没人要求的上升沿，会把控制台的旧请求盖到旋钮后来改过的窗口上。
+文件不存在（首次启动）或读不出来都从 0 开始，并分别记 `os_sleep_request_restored` /
+`os_sleep_request_unreadable`。
+
+**序列变小 = 服务重启了，不是重放。**这是设备侧为上面那种情况留的第二道防线——文件丢了的
+服务，或者是比这套持久化更早刷进去的固件。设备对**低于**已采纳值的序列会把计数器归零后采纳
+（`applySleepRequest` / `applyConsoleSettings`）。重放仍然挡得住：重放是重复同一个号，不是
 往回退。
 
 设备侧的 `/api/os/report` 因此多带一个 `sleep` 块：
@@ -613,7 +623,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
 | `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值。只写请求里点名的那一项：另一项也会随 `setvolseq` / `setbriseq` 一起留在文档里，但序列不动，面板因此只为用户真正动过的那一项亮 bar |
-| `PUT` | `/api/os/sleep` | 请求设备采用一套夜间息屏：`{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`，四个都缺则 400，越界也是 400。应答 `{requested:{enabled,startMin,endMin,idleSec,seq}}`，**没写过的字段是 `null`** 而不是默认值——只发出去写过的那几行，一次只改超时的 PUT 不会顺手改掉窗口。`startMin == endMin` 是**全天**而不是零长度窗口，必须接受。**每次写入都推进序列**——设备的 设置 页是第二个写方，只有上升的序列能盖过旋钮。序列上升同时也被设备算作一次「用户操作」，所以 `{enabled:false}` 不只是停止再次息屏，而是**当场点亮面板**：这是黑屏时不在时钟旁边的人唯一的远程逃生口 |
+| `PUT` | `/api/os/sleep` | 请求设备采用一套夜间息屏：`{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`，四个都缺则 400，越界也是 400。应答 `{requested:{enabled,startMin,endMin,idleSec,seq}}`，**没写过的字段是 `null`** 而不是默认值——只发出去写过的那几行，一次只改超时的 PUT 不会顺手改掉窗口。`startMin == endMin` 是**全天**而不是零长度窗口，必须接受。**每次写入都推进序列，序列落盘在 `.runtime/os-sleep-request.json`**——设备的 设置 页是第二个写方，只有上升的序列能盖过旋钮；计数器要是跟着服务重启归零，下一次改动就会被设备拒收。序列上升同时也被设备算作一次「用户操作」，所以 `{enabled:false}` 不只是停止再次息屏，而是**当场点亮面板**：这是黑屏时不在时钟旁边的人唯一的远程逃生口 |
 | `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}`（`lyricEndMs` 是这一句**唱完**的时刻，`lyricUntilMs` 是下一句接手的时刻；`lyricWords` 形如 `[{startMs,endMs,text}]`，最多 64 条、每条 ≤16 字符、合计 ≤200 字符，格式不对就整表丢弃而不是让上报失败），正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |

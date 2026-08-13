@@ -697,3 +697,197 @@ describe("device settings requested from the console", () => {
     expect(hub.serialize()).toContain("lyricw\t");
   });
 });
+
+// --- 夜间休眠 ----------------------------------------------------------------
+//
+// A night window, an idle timeout inside it, and a dark panel. The service's
+// half is three things: carrying the request on the pull document, carrying the
+// device's answer back on telemetry, and — the one that is easy to get wrong —
+// NOT counting its own polling as the user operating the clock.
+
+describe("night sleep on the pull document", () => {
+  const report = (
+    hub: OsLinkHub,
+    sleep?: {
+      on: boolean;
+      startMin: number;
+      endMin: number;
+      idleSec: number;
+      asleep: boolean;
+      clockSynced: boolean;
+    },
+  ) =>
+    hub.report({
+      screen: "launcher",
+      focus: "",
+      wifi: "net",
+      ip: "192.168.8.240",
+      uptimeMs: 1_000,
+      freeKb: 16_000,
+      supplicantRestarts: 0,
+      proto: 0,
+      batteryPercent: 87,
+      charging: false,
+      flashed: true,
+      ...(sleep === undefined ? {} : { sleep }),
+    });
+
+  test("emits nothing until the console has written one, then only what it wrote", () => {
+    const hub = new OsLinkHub();
+    // Withheld before the first write for the same reason the settings block
+    // is: an unwritten default sitting in every document would be a request the
+    // device could act on, and the 设置 rows own this until a console says
+    // otherwise.
+    expect(hub.serialize()).not.toContain("sleep");
+    // NULL, not the firmware's defaults. The hub is not a shadow copy of the
+    // device's config; it carries requests, and "never asked" has to be
+    // representable or it gets sent as an answer.
+    expect(hub.getSleep()).toEqual({
+      enabled: null, startMin: null, endMin: null, idleSec: null, seq: 0,
+    });
+
+    hub.setSleep({ enabled: true });
+    // Order and adjacency, not just presence: the firmware self-check parses
+    // this exact block, so the wire contract is pinned from both sides — and
+    // its "an enable-only request leaves the window alone" case is only
+    // testing something real if THIS is what an enable-only write emits.
+    expect(hub.serialize()).toContain("sleepseq\t1\nsleepon\t1\n");
+    const lines = hub.serialize().split("\n").filter((line) => line.startsWith("sleep"));
+    expect(lines).toEqual(["sleepseq\t1", "sleepon\t1"]);
+
+    // Naming a field keeps it named: the device may coalesce several writes
+    // into one poll, so the document has to keep repeating everything asked
+    // for so far.
+    hub.setSleep({ idleSec: 600 });
+    expect(hub.serialize().split("\n").filter((line) => line.startsWith("sleep"))).toEqual([
+      "sleepseq\t2", "sleepon\t1", "sleepidle\t600",
+    ]);
+  });
+
+  test("one sequence for four fields, bumped on every write", async () => {
+    const hub = new OsLinkHub();
+    const seq = hub.currentSeq();
+    const parked = hub.waitForChange(seq, 40);
+    hub.setSleep({ enabled: true, startMin: 1320, endMin: 450, idleSec: 600 });
+    // A write releases the parked poll: the device has to learn about it before
+    // its 8 s hold expires, or the panel keeps the old window for that long.
+    expect(hub.pendingWaiters()).toBe(0);
+    expect(await parked).toContain("sleepfrom\t1320");
+    expect(hub.getSleep()).toEqual({
+      enabled: true, startMin: 1320, endMin: 450, idleSec: 600, seq: 1,
+    });
+
+    // Re-asking for what the hub already holds STILL bumps. The device's knob
+    // is a second writer, so "did the number change" is the wrong question —
+    // only a rising sequence can overrule a window the knob set.
+    hub.setSleep({ enabled: true, startMin: 1320, endMin: 450, idleSec: 600 });
+    expect(hub.getSleep().seq).toBe(2);
+
+    // ...but a write naming nothing is not a write.
+    const before = hub.currentSeq();
+    hub.setSleep({});
+    expect(hub.currentSeq()).toBe(before);
+    expect(hub.getSleep().seq).toBe(2);
+  });
+
+  test("a partial write leaves the rest of the window alone", () => {
+    const hub = new OsLinkHub();
+    hub.setSleep({ startMin: 90, endMin: 200, idleSec: 1800 });
+    hub.setSleep({ enabled: false });
+    expect(hub.getSleep()).toMatchObject({
+      enabled: false, startMin: 90, endMin: 200, idleSec: 1800,
+    });
+  });
+
+  test("a partial write emits only the field it named, and cannot clobber the device", () => {
+    // THE BUG THIS EXISTS FOR. The hub used to hold concrete defaults and emit
+    // all five keys once the sequence rose, so a console following the spec —
+    // "telemetry.sleep is the truth, send at least one field" — that PUT
+    // {idleSec:600} alone also shipped `sleepon 0 / sleepfrom 1380 /
+    // sleeptill 420`. The firmware reads an absent LINE as "leave this alone",
+    // not a sentinel, so it adopted all four and wrote them to /data: adjusting
+    // the timeout turned 夜间息屏 off and threw away the window. Inspecting
+    // getSleep() could never have caught it — only the wire can.
+    const hub = new OsLinkHub();
+    hub.setSleep({ idleSec: 600 });
+    const lines = hub.serialize().split("\n").filter((line) => line.startsWith("sleep"));
+    expect(lines).toEqual(["sleepseq\t1", "sleepidle\t600"]);
+    expect(hub.serialize()).not.toContain("sleepon");
+    expect(hub.serialize()).not.toContain("sleepfrom");
+    expect(hub.serialize()).not.toContain("sleeptill");
+    expect(hub.getSleep()).toEqual({
+      enabled: null, startMin: null, endMin: null, idleSec: 600, seq: 1,
+    });
+  });
+
+  test("carries the device's own answer back, and its absence means an old firmware", () => {
+    const hub = new OsLinkHub();
+    report(hub);
+    // The PRESENCE of the block is the capability signal. A firmware from
+    // before the feature sends none, and the console must render its controls
+    // disabled rather than guessing from `proto` — which this firmware does not
+    // send at all.
+    expect(hub.getTelemetry()?.sleep).toBeUndefined();
+
+    report(hub, {
+      on: true, startMin: 1380, endMin: 420, idleSec: 300,
+      asleep: true, clockSynced: true,
+    });
+    // `asleep` is the whole answer to "a black panel is ambiguous": the console
+    // says 休眠中 off this flag rather than inferring sleep from black pixels,
+    // which are indistinguishable from a dead clock.
+    expect(hub.getTelemetry()?.sleep).toEqual({
+      on: true, startMin: 1380, endMin: 420, idleSec: 300,
+      asleep: true, clockSynced: true,
+    });
+  });
+
+  test("the device's report is the truth, and may disagree with the request", () => {
+    const hub = new OsLinkHub();
+    hub.setSleep({ enabled: true, startMin: 1380, endMin: 420, idleSec: 300 });
+    // The knob then set something else. Both are readable, and a console that
+    // rendered the request as the truth would show the wrong window for as long
+    // as somebody had used the clock.
+    report(hub, {
+      on: true, startMin: 0, endMin: 480, idleSec: 1800,
+      asleep: false, clockSynced: true,
+    });
+    expect(hub.getSleep()).toMatchObject({ startMin: 1380, idleSec: 300 });
+    expect(hub.getTelemetry()?.sleep).toMatchObject({ startMin: 0, idleSec: 1800 });
+  });
+
+  test("watching is not operating: a console tab left open changes nothing", () => {
+    let now = 1_000_000;
+    const hub = new OsLinkHub(() => now);
+    hub.setSleep({ enabled: true, startMin: 1380, endMin: 420, idleSec: 300 });
+    const seq = hub.getSleep().seq;
+    const sleepLines = (): string[] =>
+      hub.serialize().split("\n").filter((line) => line.startsWith("sleep"));
+    const before = sleepLines();
+    expect(before).toHaveLength(5);
+
+    // The console polls the mirror every 250 ms and the state every 2 s while
+    // its tab is open — which is most of the time. If any of that reached the
+    // device as activity the panel would never sleep for exactly the person
+    // most likely to have configured it. The device-side half (that no `sleep*`
+    // line and no poll touches lastActivityMs) is asserted in the firmware
+    // self-check's eight-hour case.
+    for (let i = 0; i < 200; i += 1) {
+      now += 250;
+      hub.requestMirror();
+      hub.putMirrorFrame("AAAA");
+      hub.getTelemetry();
+      hub.getSleep();
+      report(hub, {
+        on: true, startMin: 1380, endMin: 420, idleSec: 300,
+        asleep: true, clockSynced: true,
+      });
+    }
+    expect(hub.getSleep().seq).toBe(seq);
+    // The mirror lease legitimately moves the DOCUMENT's own sequence — that is
+    // how the device learns to start streaming. What must not move is the sleep
+    // block, because that is the only thing the device reads as a console
+    // request, and a request is the only console traffic it counts as activity.
+    expect(sleepLines()).toEqual(before);
+  });
+});

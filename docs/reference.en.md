@@ -444,13 +444,26 @@ across.** Nothing is emitted at all until the console has written once: an unwri
 sitting in every document would be a request the device could act on, and until a console
 speaks this setting belongs to the device's own 设置 screen.
 
-**A sequence that went backwards means the service restarted, not a replay.** The counter is
-plain instance state in the Bun process and starts again at 1 after `bun start`, while the
-device is still up holding the last number it applied. The device resets its counter and adopts
-(`applySleepRequest` / `applyConsoleSettings`); without that, the 02:00 `{enabled:false}` that
-is the remote escape hatch silently does nothing — the route still answers 200 — until it has
-been pressed as many times as before the restart. Replays are still refused: a replay repeats a
-number, it does not lower it.
+**The sequence is written down, in `.runtime/os-sleep-request.json`.** It was plain instance
+state in the Bun process, so it started again at 1 after `bun start` — routine, since every
+`web/` change needs a rebuild — while the device was still up holding the last number it had
+applied. The 02:00 `{enabled:false}` that is the remote escape hatch then silently did nothing,
+with the route answering 200 in front of it, until it had been pressed as many times as before
+the restart. The file holds **what the console last requested** — the four optional fields and
+the sequence they were named at — not the setting: the device persists the effective config to
+its own `/data` and is the authority on it. The whole request is kept rather than the counter
+alone because the document is *pulled*, so a field the device has not polled yet has to still be
+in it; resuming both makes the first document after a restart identical to the last one before
+it. The sequence is **resumed at, never bumped past** — starting one above it would manufacture
+a rising edge nobody asked for and replay the console's old request over a window the knob had
+since changed. A missing file (first run) or an unreadable one starts at 0 and logs
+`os_sleep_request_restored` / `os_sleep_request_unreadable`.
+
+**A sequence that went backwards means the service restarted, not a replay.** That is the
+device's own second line of defence for the case above — a service whose file was lost, or a
+console talking to firmware flashed before this existed. The device resets its counter and
+adopts (`applySleepRequest` / `applyConsoleSettings`). Replays are still refused: a replay
+repeats a number, it does not lower it.
 
 The device answers on `/api/os/report` with a `sleep` block:
 
@@ -750,7 +763,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned. Only the field named in the request is stamped: the other one stays in the document with its own `setvolseq` / `setbriseq` unmoved, so the panel raises a bar only for the level the user actually touched |
-| `PUT` | `/api/os/sleep` | Ask the device to adopt a night-sleep configuration: `{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`; 400 when all four are absent, and 400 out of range. Replies `{requested:{enabled,startMin,endMin,idleSec,seq}}`, where a field the console has never written is **`null`** rather than a default — only written fields go on the wire, so a timeout-only PUT cannot also move the window. `startMin == endMin` means **the whole day** rather than a zero-length window and must be accepted. **Every write bumps the sequence** — the device's own 设置 rows are a second writer, and only a rising sequence can overrule the knob. A rising sequence also counts as the user operating the clock, so `{enabled:false}` does not merely stop it sleeping again, it **lights the panel now**: the remote escape hatch for a clock that went dark with nobody in the room |
+| `PUT` | `/api/os/sleep` | Ask the device to adopt a night-sleep configuration: `{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`; 400 when all four are absent, and 400 out of range. Replies `{requested:{enabled,startMin,endMin,idleSec,seq}}`, where a field the console has never written is **`null`** rather than a default — only written fields go on the wire, so a timeout-only PUT cannot also move the window. `startMin == endMin` means **the whole day** rather than a zero-length window and must be accepted. **Every write bumps the sequence, and the sequence is persisted to `.runtime/os-sleep-request.json`** — the device's own 设置 rows are a second writer, only a rising sequence can overrule the knob, and a counter that restarted at 0 with the service would have its next change refused. A rising sequence also counts as the user operating the clock, so `{enabled:false}` does not merely stop it sleeping again, it **lights the panel now**: the remote escape hatch for a clock that went dark with nobody in the room |
 | `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing

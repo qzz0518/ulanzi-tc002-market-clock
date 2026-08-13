@@ -1475,3 +1475,213 @@ describe("tc002-os console routes", () => {
     }));
   });
 });
+
+describe("tc002-os night sleep", () => {
+  // The console half of 夜间休眠. Immediate, like /api/os/settings: no draft/save
+  // cycle, because the one thing this endpoint has to be good at is turning the
+  // feature OFF for a user whose clock went dark and who is not in the room.
+  test("accepts a partial write, echoes the request, and refuses nonsense", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+    const put = (body: unknown, headers: Record<string, string> = {}) =>
+      handler(new Request(`${origin}/api/os/sleep`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Origin: origin, ...headers },
+        body: JSON.stringify(body),
+      }));
+
+    const ok = await put({ enabled: true, startMin: 1320, endMin: 450, idleSec: 600 });
+    expect(ok.status).toBe(200);
+    expect((await ok.json() as { requested: unknown }).requested).toEqual({
+      enabled: true, startMin: 1320, endMin: 450, idleSec: 600, seq: 1,
+    });
+
+    // A minute is 0..1439; 1440 is not "the end of the day", it is a value the
+    // firmware would have to wrap, and a console that could send it would make
+    // the two sides disagree about what the user asked for.
+    expect((await put({ startMin: 1440 })).status).toBe(400);
+    expect((await put({ endMin: -1 })).status).toBe(400);
+    // Below 30 s the panel blanks while the user is looking at it.
+    expect((await put({ idleSec: 10 })).status).toBe(400);
+    expect((await put({ idleSec: 7201 })).status).toBe(400);
+    expect((await put({ enabled: "yes" })).status).toBe(400);
+    // A body that names nothing is a no-op dressed as a request.
+    expect((await put({})).status).toBe(400);
+    // Nothing above may have reached the hub.
+    expect(osLink.getSleep()).toMatchObject({ startMin: 1320, endMin: 450, idleSec: 600 });
+
+    // startMin === endMin is 全天, not a zero-length window: the firmware reads
+    // it that way, and rejecting it here would make the whole-day case — the
+    // only way to try this at 15:00 — unreachable from the console.
+    const allDay = await put({ startMin: 0, endMin: 0 });
+    expect(allDay.status).toBe(200);
+
+    // Same-origin, like every other write endpoint (assertSameOrigin refuses
+    // with the shared validation status rather than a 403 of its own).
+    const crossOrigin = await handler(new Request(`${origin}/api/os/sleep`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example" },
+      body: JSON.stringify({ enabled: false }),
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect(osLink.getSleep().enabled).toBe(true);
+  });
+
+  test("a timeout-only PUT reaches the wire as a timeout, not as a whole config", async () => {
+    // The end of the blocker, from the route rather than the hub: the spec this
+    // endpoint ships tells a console it may send one field, so one field is what
+    // the device must receive. Before the hub's fields were nullable, a
+    // {idleSec:600} PUT put `sleepon 0 / sleepfrom 1380 / sleeptill 420` on the
+    // wire, and the firmware — which reads an ABSENT LINE as "leave it alone" —
+    // adopted all four and persisted them to /data. Changing the timeout turned
+    // the feature off and lost the user's window.
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+    const put = await handler(new Request(`${origin}/api/os/sleep`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ idleSec: 600 }),
+    }));
+    expect(put.status).toBe(200);
+    const lines = osLink.serialize().split("\n").filter((line) => line.startsWith("sleep"));
+    expect(lines).toEqual(["sleepseq\t1", "sleepidle\t600"]);
+  });
+
+  // The route is the only caller of setSleep, so this is where the durability
+  // wired in service.ts is actually exercised end to end. Without it the
+  // sequence restarted at 0 on every `bun start` while the device was still up
+  // holding the last number it had applied, and the console's next change was
+  // refused with a 200 in front of it — see test/os-sleep-request.test.ts for
+  // the restart itself.
+  test("a sleep PUT is written down, so the sequence outlives the process", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const { OsSleepRequestStore } = await import("../src/os-sleep-request-store.ts");
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-os-sleep-"));
+    directories.push(directory);
+    const path = join(directory, "os-sleep-request.json");
+    const store = new OsSleepRequestStore(path);
+    const osLink = new OsLinkHub(() => Date.now(), store);
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+
+    const put = await handler(new Request(`${origin}/api/os/sleep`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify({ enabled: true, startMin: 1380, endMin: 420 }),
+    }));
+    expect(put.status).toBe(200);
+    // Fire and forget, so the write is not awaited by the handler: a bedtime
+    // must not be able to fail a route.
+    await store.settled();
+    expect(await Bun.file(path).json()).toMatchObject({
+      version: 1, seq: 1, enabled: true, startMin: 1380, endMin: 420, idleSec: null,
+    });
+  });
+
+  test("state carries the request and the device's own answer separately", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+
+    const before = await handler(new Request("http://127.0.0.1/api/os/state"));
+    const beforeBody = await before.json() as {
+      requestedSleep: { seq: number };
+      telemetry: { sleep?: unknown } | null;
+    };
+    expect(beforeBody.requestedSleep.seq).toBe(0);
+    expect(beforeBody.telemetry).toBeNull();
+
+    osLink.setSleep({ enabled: true });
+    osLink.report({
+      screen: "launcher",
+      focus: "",
+      wifi: "net",
+      ip: "192.168.8.240",
+      uptimeMs: 1_000,
+      freeKb: 16_000,
+      supplicantRestarts: 0,
+      proto: 0,
+      batteryPercent: 87,
+      charging: false,
+      flashed: true,
+      sleep: {
+        on: true, startMin: 0, endMin: 480, idleSec: 1800,
+        asleep: true, clockSynced: false,
+      },
+    });
+    const after = await handler(new Request("http://127.0.0.1/api/os/state"));
+    const body = await after.json() as {
+      requestedSleep: { enabled: boolean | null; startMin: number | null };
+      telemetry: {
+        sleep: { on: boolean; startMin: number; asleep: boolean; clockSynced: boolean };
+      };
+    };
+    // Two different questions: what the console asked for, and what the knob
+    // left the device at. A form that rendered the first would be wrong for as
+    // long as somebody had used the clock.
+    //
+    // `startMin: null` is the point of the shape: the console asked to turn the
+    // feature ON and said nothing about the window, so there is no window here
+    // to render — the device's is in telemetry, and only that one is real.
+    expect(body.requestedSleep).toMatchObject({ enabled: true, startMin: null });
+    expect(body.telemetry.sleep).toMatchObject({ startMin: 0, asleep: true });
+    // ...and the reason a panel that is not sleeping although sleep is on is
+    // not a bug: the clock has not been proven yet.
+    expect(body.telemetry.sleep.clockSynced).toBe(false);
+  });
+
+  test("a device report without a sleep block leaves the capability absent", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+
+    // The firmware calls this one, so it carries no same-origin check.
+    const posted = await handler(new Request(`${origin}/api/os/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ screen: "launcher", uptimeMs: 5, flashed: true }),
+    }));
+    expect(posted.status).toBe(204);
+    // Absence is the capability signal, so a half-understood block must produce
+    // NO block rather than a plausible default: showing 休眠中 for a device that
+    // cannot sleep would be worse than showing the controls disabled.
+    expect(osLink.getTelemetry()?.sleep).toBeUndefined();
+
+    await handler(new Request(`${origin}/api/os/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        screen: "launcher",
+        uptimeMs: 6,
+        flashed: true,
+        sleep: { on: true, startMin: 1380, endMin: 420, idleSec: 300, asleep: false, clockSynced: true },
+      }),
+    }));
+    expect(osLink.getTelemetry()?.sleep).toEqual({
+      on: true, startMin: 1380, endMin: 420, idleSec: 300,
+      asleep: false, clockSynced: true,
+    });
+
+    // A garbled block is clamped rather than failing the heartbeat: telemetry
+    // dying entirely over one out-of-range integer is the worse outcome.
+    await handler(new Request(`${origin}/api/os/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        screen: "launcher",
+        uptimeMs: 7,
+        flashed: true,
+        sleep: { on: true, startMin: 99999, endMin: -4, idleSec: 1e9, asleep: "yes" },
+      }),
+    }));
+    expect(osLink.getTelemetry()?.sleep).toEqual({
+      on: true, startMin: 1439, endMin: 0, idleSec: 7200,
+      asleep: false, clockSynced: false,
+    });
+  });
+});

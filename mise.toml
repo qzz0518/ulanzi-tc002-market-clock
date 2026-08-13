@@ -68,6 +68,17 @@ if [ "$bars" != "device/tc002-os/app/src/ui/LevelControl.cpp" ]; then
   echo "$bars" >&2
   exit 1
 fi
+# Same guard, for the rule that can BLANK THE PANEL. A night window crossing
+# midnight is easy to write and easy to write wrong, and a second copy in
+# logic/osLogic.cc — the file no host check compiles — could be wrong all night
+# while the checks below stayed green against the original. osLogic.cc reads
+# decideSleep()'s four fields and does no window arithmetic of its own.
+sleepowners=$(grep -rl 'insideSleepWindow' device/tc002-os/app/src | sort | xargs)
+if [ "$sleepowners" != "device/tc002-os/app/src/ui/SleepPolicy.cpp device/tc002-os/app/src/ui/SleepPolicy.h" ]; then
+  echo "FAIL the night-sleep window belongs to ui/SleepPolicy.{h,cpp} alone; found:" >&2
+  echo "$sleepowners" >&2
+  exit 1
+fi
 # The seven game engines are compiled in unchanged from the arcade tree, so its
 # src is on the include path AFTER this firmware's own: utils/Surface.h resolves
 # to the bridge here, visual/PixelFont.h falls through to the arcade's.

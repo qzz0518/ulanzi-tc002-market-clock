@@ -84,6 +84,69 @@ export interface OsDeviceSettings {
 }
 
 /**
+ * 夜间息屏 — a night window, an idle timeout inside it, and a dark panel.
+ *
+ * A REQUEST, like OsDeviceSettings: the device's own 设置 screen is a second
+ * writer and the telemetry block is what it actually ended up at. A console
+ * that rendered this as the truth would show the wrong window for as long as
+ * somebody had used the knob.
+ */
+export interface OsSleepConfig {
+  enabled: boolean;
+  /** Minutes since local midnight, 0..1439. */
+  startMin: number;
+  /**
+   * Minutes since local midnight, EXCLUSIVE. Crossing midnight (23:00→07:00) is
+   * the ordinary case; `endMin === startMin` means the whole day, which is the
+   * only way to try the feature without waiting for night.
+   */
+  endMin: number;
+  /** Seconds of no operation before the panel fades out. 30..7200. */
+  idleSec: number;
+}
+
+/**
+ * The same four fields, each `null` until the console has actually written it.
+ *
+ * NULL IS NOT A DEFAULT DRESSED UP. `serialize()` emits only the fields that are
+ * not null, which is the entire reason this type exists: with concrete defaults
+ * in the store, a console that PUT `{idleSec:600}` alone also shipped
+ * `sleepon 0 / sleepfrom 1380 / sleeptill 420`, and the firmware — whose
+ * per-field optionality is keyed on the LINE being absent, not on a sentinel —
+ * dutifully adopted all four and wrote them to /data. Adjusting the timeout
+ * turned the feature off and threw away the window. Exactly the treatment
+ * OsDeviceSettings already gets, and for exactly the same reason: a volume-only
+ * PUT must not carry a brightness the console never named.
+ */
+export interface OsSleepRequest {
+  enabled: boolean | null;
+  startMin: number | null;
+  endMin: number | null;
+  idleSec: number | null;
+}
+
+/** A sleep request together with the sequence the console made it at. */
+export type OsSleepRequestSnapshot = OsSleepRequest & { seq: number };
+
+/**
+ * Where the sleep request is kept so it outlives the process.
+ *
+ * An interface rather than the concrete store, so the hub stays free of node:fs
+ * and every existing test can keep constructing it with no arguments. The one
+ * implementation is OsSleepRequestStore; see its header for why the sequence
+ * cannot live in module memory alone.
+ */
+export interface OsSleepRequestSink {
+  save(request: OsSleepRequestSnapshot): void;
+}
+
+// Bounds shared by the route and the hub. Below 30 s the panel blanks while the
+// user is looking at it; above two hours the window is doing all the work.
+export const OS_SLEEP_MIN_IDLE_SEC = 30;
+export const OS_SLEEP_MAX_IDLE_SEC = 7200;
+export const OS_SLEEP_MAX_MINUTE = 1439;
+
+/**
  * The console's 主题设置, carried to whichever firmware is on the device.
  *
  * These are the same two enums and the same accent the sideloaded lyrics player
@@ -216,6 +279,30 @@ export interface OsTelemetry {
    * back and get the thing they were trying to leave.
    */
   flashed: boolean;
+  /**
+   * 夜间休眠 as the DEVICE has it, plus whether the panel is dark right now.
+   *
+   * ABSENT means the firmware predates the feature — this is the capability
+   * signal, deliberately not a `proto` bump: this build never sends `proto` at
+   * all, and raising it would simultaneously claim the lyric-window support the
+   * firmware does not have and change how lyrics are encoded.
+   *
+   * `asleep` is the whole answer to "a black panel is ambiguous". The console
+   * must never infer sleep from the pixels — black is indistinguishable from a
+   * working dark panel, which is the rule describeMirror already encodes for
+   * the offline case — so the device says so instead.
+   *
+   * `clockSynced` exists so the console can explain a panel that is not
+   * sleeping although sleep is on, rather than leaving it looking like a bug.
+   */
+  sleep?: {
+    on: boolean;
+    startMin: number;
+    endMin: number;
+    idleSec: number;
+    asleep: boolean;
+    clockSynced: boolean;
+  };
   receivedAt: number;
 }
 
@@ -263,6 +350,19 @@ function normalizeRev(value: unknown): string | undefined {
 function normalizeTtl(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   return Math.max(MIN_TTL_MS, Math.min(MAX_TTL_MS, Math.round(value)));
+}
+
+// Shared by setSleep() and restoreSleepRequest(), because a value that came back
+// off disk deserves the same treatment as one that came off the wire. Clamped
+// rather than rejected: this is a hub, not a request handler — the route rejects
+// out-of-range values first, and the firmware clamps again because it does not
+// trust the wire either.
+function clampSleepMinute(value: number): number {
+  return Math.max(0, Math.min(OS_SLEEP_MAX_MINUTE, Math.round(value)));
+}
+
+function clampSleepIdleSec(value: number): number {
+  return Math.max(OS_SLEEP_MIN_IDLE_SEC, Math.min(OS_SLEEP_MAX_IDLE_SEC, Math.round(value)));
 }
 
 function clampLabel(value: string): string {
@@ -349,6 +449,28 @@ export class OsLinkHub {
   // would have to describe a single write, and the poll is free to coalesce.
   private volumeSeq = 0;
   private brightnessSeq = 0;
+  // 夜间息屏. All four start as null — "the console has never said" — rather
+  // than as a copy of SleepConfig's defaults. Holding defaults here looked
+  // harmless because they matched the firmware's, but serialize() emits what
+  // this holds: a console that only moved the timeout also re-sent
+  // `sleepon 0 / sleepfrom 1380 / sleeptill 420`, and since the firmware reads
+  // an ABSENT LINE as "unchanged" rather than a sentinel, it adopted all four
+  // and persisted them. The device is the only place the effective config
+  // lives; the hub's job is to carry requests, not to hold a shadow copy that
+  // can overwrite the knob.
+  private sleep: OsSleepRequest = {
+    enabled: null,
+    startMin: null,
+    endMin: null,
+    idleSec: null,
+  };
+  // ONE sequence for the four fields, not one each. Volume and brightness need
+  // per-field sequences because the panel has a single bar and had to name
+  // which control the user moved; there is no such display here, and the four
+  // fields are always written together by one console form. Nothing is emitted
+  // at all until this rises above 0, so a firmware that has never heard of the
+  // block sees exactly the document it always did.
+  private sleepSeq = 0;
   // A short tail rather than a queue the device drains. The document is pulled,
   // not pushed, so anything the device has not read yet has to still be in it —
   // but a press the device missed by more than a few hundred milliseconds is a
@@ -361,7 +483,13 @@ export class OsLinkHub {
   private nowPlayingSource: OsNowPlayingSource | null = null;
   private readonly waiters = new Set<Waiter>();
 
-  constructor(private readonly now: () => number = () => Date.now()) {}
+  constructor(
+    private readonly now: () => number = () => Date.now(),
+    // Optional so the hub keeps working as pure in-memory state in tests and in
+    // any caller that has no disk. Wired in service.ts, where the counterpart
+    // restoreSleepRequest() call also lives.
+    private readonly sleepStore: OsSleepRequestSink | null = null,
+  ) {}
 
   currentSeq(): number {
     return this.seq;
@@ -551,6 +679,90 @@ export class OsLinkHub {
   }
 
   /**
+   * Asks the device to adopt a 夜间息屏 configuration.
+   *
+   * BUMPS ON EVERY WRITE, exactly like setDeviceSettings and unlike
+   * setLyricTheme. There is no bar to justify here, but there IS a second
+   * writer to overrule: the device's own 设置 rows. A console PUT of values the
+   * hub already holds must still reach a device whose knob had set something
+   * else, so "did the number change" is the wrong question — "did the user ask"
+   * is the right one, and only the sequence can carry that.
+   *
+   * A field the caller does not name stays unnamed FOREVER, not just for this
+   * write: it is never emitted, so the device keeps whatever its own rows hold.
+   * Once named it stays named — the document has to keep repeating it, because
+   * the device may coalesce several writes into one poll.
+   *
+   * Fields are optional so a console can flip the switch without also having to
+   * restate a window it is not showing. Out-of-range values are clamped rather
+   * than thrown: this is a hub, not a request handler — the route rejects them
+   * first, and the firmware clamps again because it does not trust the wire.
+   */
+  setSleep(next: Partial<OsSleepConfig>): void {
+    const named = (value: number | null | undefined) =>
+      typeof value === "number" && Number.isFinite(value) ? value : null;
+    const startMin = named(next.startMin);
+    const endMin = named(next.endMin);
+    const idleSec = named(next.idleSec);
+    const enabled = typeof next.enabled === "boolean" ? next.enabled : null;
+    if (enabled === null && startMin === null && endMin === null && idleSec === null) return;
+    this.sleepSeq += 1;
+    if (enabled !== null) this.sleep.enabled = enabled;
+    if (startMin !== null) this.sleep.startMin = clampSleepMinute(startMin);
+    if (endMin !== null) this.sleep.endMin = clampSleepMinute(endMin);
+    if (idleSec !== null) this.sleep.idleSec = clampSleepIdleSec(idleSec);
+    // Written down BEFORE the bump releases the parked polls, so the number the
+    // device is about to be handed is already the number a restarted service
+    // will resume from. The store swallows its own failures — a bedtime must not
+    // be able to fail a request — and skips a write that would change nothing.
+    this.sleepStore?.save(this.getSleep());
+    this.bump();
+  }
+
+  /**
+   * Resumes the console's last request, and the sequence it was made at, from
+   * disk. Call once at startup, before the first document is served.
+   *
+   * RESUMED AT, NEVER BUMPED PAST. The saved sequence is the highest one this
+   * service ever emitted, so the device has either already applied it — and
+   * refuses it again, which is what keeps the knob's later change alive — or has
+   * not polled since and is owed exactly that document. Starting one above it
+   * would manufacture a rising edge nobody asked for: a device that stayed up
+   * across the restart (the ordinary case, since restarting the service does not
+   * touch the clock) would apply the console's months-old request over whatever
+   * its own 设置 rows now hold, which is precisely what the rising-edge rule
+   * exists to prevent.
+   *
+   * The fields come back with the sequence for the same reason setSleep() keeps
+   * re-emitting them: the document is pulled, so a request the device has not
+   * read yet must still be in it. Restoring both means the first document after
+   * a restart is byte-identical to the last one before it, and a device that had
+   * already applied it has nothing to do.
+   *
+   * Does NOT bump: nothing is listening yet, and a restart is not a change.
+   * Validated again here, as a hub always validates its inputs — the file is
+   * outside this process's control and may have been hand-edited.
+   */
+  restoreSleepRequest(saved: OsSleepRequestSnapshot | null): void {
+    if (saved === null) return;
+    const seq = Number.isFinite(saved.seq) ? Math.max(0, Math.floor(saved.seq)) : 0;
+    // max() rather than assignment: a restore that somehow ran after a write
+    // must not walk the counter backwards, which would hand the device a
+    // sequence it has already refused.
+    this.sleepSeq = Math.max(this.sleepSeq, seq);
+    this.sleep = {
+      enabled: typeof saved.enabled === "boolean" ? saved.enabled : null,
+      startMin: saved.startMin === null ? null : clampSleepMinute(saved.startMin),
+      endMin: saved.endMin === null ? null : clampSleepMinute(saved.endMin),
+      idleSec: saved.idleSec === null ? null : clampSleepIdleSec(saved.idleSec),
+    };
+  }
+
+  getSleep(): OsSleepRequestSnapshot {
+    return { ...this.sleep, seq: this.sleepSeq };
+  }
+
+  /**
    * Adopts the console's 主题设置.
    *
    * NO SEQUENCE, unlike setDeviceSettings, and that is a decision rather than an
@@ -636,7 +848,11 @@ export class OsLinkHub {
   }
 
   getTelemetry(): OsTelemetry | null {
-    return this.telemetry === null ? null : { ...this.telemetry };
+    if (this.telemetry === null) return null;
+    // `sleep` is the one nested object here, so it is cloned rather than
+    // aliased: a caller that mutated it would be editing the device's report.
+    const { sleep, ...rest } = this.telemetry;
+    return sleep === undefined ? { ...rest } : { ...rest, sleep: { ...sleep } };
   }
 
   /**
@@ -724,6 +940,25 @@ export class OsLinkHub {
         lines.push(`setbri\t${this.settings.brightness}`);
         lines.push(`setbriseq\t${this.brightnessSeq}`);
       }
+    }
+    // 夜间息屏, and only once the console has written one. Withheld before that
+    // for the same reason the settings block is: an unwritten default sitting
+    // in every document would be a request the device could act on, and the
+    // device's own 设置 rows own this setting until a console says otherwise.
+    //
+    // FIELD BY FIELD, not the whole block. The firmware's per-field optionality
+    // (`if (request.on >= 0)`) is only reachable if the line can be absent, and
+    // a block that always emitted all four made a `{idleSec:600}` PUT carry an
+    // `enabled:false` nobody asked for — which the device then persisted to
+    // /data. Same withholding as `setvol`/`setbri` above.
+    if (this.sleepSeq > 0) {
+      lines.push(`sleepseq\t${this.sleepSeq}`);
+      if (this.sleep.enabled !== null) lines.push(`sleepon\t${this.sleep.enabled ? 1 : 0}`);
+      if (this.sleep.startMin !== null) lines.push(`sleepfrom\t${this.sleep.startMin}`);
+      if (this.sleep.endMin !== null) lines.push(`sleeptill\t${this.sleep.endMin}`);
+      // SECONDS, not ms: the value is minutes-scale, has no sub-second meaning,
+      // and a short line is cheaper for the firmware's atoi.
+      if (this.sleep.idleSec !== null) lines.push(`sleepidle\t${this.sleep.idleSec}`);
     }
     for (const event of this.inputs) {
       lines.push(`input\t${event.seq}\t${event.action}`);

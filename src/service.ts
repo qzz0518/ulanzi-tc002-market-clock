@@ -16,6 +16,7 @@ import {
   restoreDeviceLyricTheme,
 } from "./control-api.ts";
 import { LyricThemeStore } from "./lyric-theme-store.ts";
+import { OsSleepRequestStore } from "./os-sleep-request-store.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
 import { MusicHub, MusicProviderStore } from "./music/hub.ts";
 import type { MusicLyricLine, MusicLyricWord } from "./music/core.ts";
@@ -279,7 +280,22 @@ function interruptibleSleep(ms: number): Promise<void> {
 // compares equal after every content edit ever made, so the sequence never
 // moved and the parked poll was never released. The revision moves when the
 // pixels would; the ttl says how long a render of a clock face stays true.
-const osLink = new OsLinkHub();
+//
+// The 夜间息屏 request is the one piece of hub state that must outlive the
+// process. The device applies it only on a RISING sequence, and that counter
+// used to restart at 0 on every `bun start` while the clock was still up holding
+// the last number it had applied — so the console's next change was silently
+// refused, and the user had to make as many changes as the old counter had
+// reached before one took. Loaded before the first document is served, because
+// the device polls long before anybody opens a browser.
+const osSleepRequestStore = new OsSleepRequestStore(".runtime/os-sleep-request.json", log);
+const osLink = new OsLinkHub(() => Date.now(), osSleepRequestStore);
+const restoredSleepRequest = await osSleepRequestStore.load();
+osLink.restoreSleepRequest(restoredSleepRequest);
+// Logged even when there is nothing to resume: "which sequence am I at" was
+// unanswerable while this lived in module memory, and the failure it causes is
+// invisible from both ends — the route answers 200 and the panel does nothing.
+log("os_sleep_request_restored", { seq: restoredSleepRequest?.seq ?? 0 });
 function publishOsMenu(): void {
   const entries: OsMenuEntry[] = controller.getWorkspace().channels
     .filter((channel) => channel.enabled)

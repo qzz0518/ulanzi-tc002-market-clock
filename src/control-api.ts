@@ -11,9 +11,13 @@ import { validateDeviceHost, type DeviceHostStatus } from "./device-host.ts";
 import type { ClockDeviceInfo } from "./clock-client.ts";
 import {
   OS_INPUT_ACTIONS,
+  OS_SLEEP_MAX_IDLE_SEC,
+  OS_SLEEP_MAX_MINUTE,
+  OS_SLEEP_MIN_IDLE_SEC,
   type OsInputAction,
   type OsLinkHub,
   type OsLyricTheme,
+  type OsTelemetry,
 } from "./os-link.ts";
 import { encodeFrameBundle, rgbaToRgb } from "./os-frames.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
@@ -635,6 +639,42 @@ function readLyricWords(value: unknown): MusicLyricWord[] | undefined {
     words.push({ startMs: Math.round(startMs), endMs: Math.round(endMs), text });
   }
   return words;
+}
+
+/**
+ * The 夜间休眠 block off a device report, or nothing.
+ *
+ * Nothing is the load-bearing case: its ABSENCE is how a console tells a
+ * firmware that predates the feature from one that has it, so a half-understood
+ * block must produce no block at all rather than a plausible-looking default.
+ * Showing 休眠中 for a device that cannot sleep, or an idle timeout the panel
+ * does not honour, would be worse than showing the controls disabled.
+ *
+ * Clamped rather than rejected once the shape is right: the report is a
+ * heartbeat, and failing it over one out-of-range integer would take the whole
+ * of telemetry down with it.
+ */
+function readOsSleepReport(value: unknown): { sleep?: OsTelemetry["sleep"] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  const minute = (key: string): number => {
+    const raw = record[key];
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+    return Math.max(0, Math.min(OS_SLEEP_MAX_MINUTE, Math.round(raw)));
+  };
+  const idleSec = typeof record.idleSec === "number" && Number.isFinite(record.idleSec)
+    ? Math.max(0, Math.min(OS_SLEEP_MAX_IDLE_SEC, Math.round(record.idleSec)))
+    : 0;
+  return {
+    sleep: {
+      on: record.on === true,
+      startMin: minute("startMin"),
+      endMin: minute("endMin"),
+      idleSec,
+      asleep: record.asleep === true,
+      clockSynced: record.clockSynced === true,
+    },
+  };
 }
 
 // Read the Connect player and fold it into the shared device state. Both the
@@ -1882,6 +1922,11 @@ export function createControlHandler(
             : -1,
           charging: input.charging === true,
           flashed: input.flashed === true,
+          // 夜间休眠, as the device has it. The PRESENCE of this block is the
+          // capability signal — a firmware from before the feature sends none,
+          // and the console renders its controls disabled rather than guessing
+          // from `proto`, which this firmware does not send at all.
+          ...readOsSleepReport(input.sleep),
         });
         return new Response(null, { status: 204 });
       }
@@ -1948,6 +1993,12 @@ export function createControlHandler(
           // not stop being true because the device stopped reporting.
           zosFlashed: options.osLink.zosFlashed(),
           requestedSettings: options.osLink.getDeviceSettings(),
+          // What the console last ASKED for, with `null` for every field it has
+          // never named. The device's own 设置 rows are a second writer, so
+          // `telemetry.sleep` is the truth and this is only the request — the
+          // same relationship requestedSettings already has. A form that renders
+          // this instead would show a window nobody is running.
+          requestedSleep: options.osLink.getSleep(),
           pendingInputs: options.osLink.pendingInputs(),
           // What the device was actually told to paint with, without anyone
           // having to parse the pull document to find out. This is a readback of
@@ -2068,6 +2119,55 @@ export function createControlHandler(
         // The device is the authority on what it ended up at; this only echoes
         // what was asked for, and telemetry reports what actually happened.
         return jsonResponse({ requested: options.osLink.getDeviceSettings() });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/os/sleep") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        const input = await readJson(request) as {
+          enabled?: unknown;
+          startMin?: unknown;
+          endMin?: unknown;
+          idleSec?: unknown;
+        };
+        const number = (value: unknown, name: string, low: number, high: number) => {
+          if (value === undefined) return undefined;
+          if (typeof value !== "number" || !Number.isFinite(value)) {
+            throw new SettingsValidationError(`${name} must be a number`);
+          }
+          if (value < low || value > high) {
+            throw new SettingsValidationError(`${name} must be between ${low} and ${high}`);
+          }
+          return value;
+        };
+        if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+          throw new SettingsValidationError("enabled must be a boolean");
+        }
+        // 0..1439 for both, and startMin === endMin is 全天 rather than a
+        // zero-length window — the firmware reads it that way, and rejecting it
+        // here would make the whole-day case unreachable from the console.
+        const startMin = number(input.startMin, "startMin", 0, OS_SLEEP_MAX_MINUTE);
+        const endMin = number(input.endMin, "endMin", 0, OS_SLEEP_MAX_MINUTE);
+        const idleSec = number(
+          input.idleSec, "idleSec", OS_SLEEP_MIN_IDLE_SEC, OS_SLEEP_MAX_IDLE_SEC,
+        );
+        if (input.enabled === undefined && startMin === undefined && endMin === undefined
+          && idleSec === undefined) {
+          throw new SettingsValidationError(
+            "enabled, startMin, endMin or idleSec is required",
+          );
+        }
+        options.osLink.setSleep({
+          ...(input.enabled === undefined ? {} : { enabled: input.enabled === true }),
+          ...(startMin === undefined ? {} : { startMin }),
+          ...(endMin === undefined ? {} : { endMin }),
+          ...(idleSec === undefined ? {} : { idleSec }),
+        });
+        // Echoes the request, not the device. A rising sequence is also what the
+        // firmware counts as activity, so a PUT of {enabled:false} both stops
+        // the panel sleeping again and lights it now — the remote escape hatch
+        // for a clock that went dark with nobody in the room.
+        return jsonResponse({ requested: options.osLink.getSleep() });
       }
 
       if (request.method === "DELETE" && url.pathname === "/api/device/host") {
