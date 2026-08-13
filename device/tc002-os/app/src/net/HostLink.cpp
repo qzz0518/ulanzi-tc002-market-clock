@@ -79,6 +79,9 @@ int freeKb() {
 HostLink::HostLink()
     : mRunning(false),
       mThreadsStarted(false),
+      mWantSeq(0),
+      mHaveSeq(0),
+      mFetchingSeq(0),
       mFetchFailed(false),
       mPendingReady(false),
       mMirrorDirty(false),
@@ -166,15 +169,24 @@ void HostLink::runWorker() {
   uint64_t lastMirrorMs = 0;
   uint64_t lastReportMs = 0;
   const uint64_t startedMs = monoMs();
+  // Which request last failed, and when it may be tried again. Worker-thread
+  // locals: only this thread reads or writes them, so they need no lock even
+  // though they are consulted inside one.
+  int failedSeq = 0;
+  uint64_t retryAtMs = 0;
 
   while (mRunning) {
+    const uint64_t loopMs = monoMs();
+
     // --- channel frames ----------------------------------------------------
     std::string fetch;
+    int fetchSeq = 0;
     ::pthread_mutex_lock(&mLock);
-    if (!mWantApp.empty() && mWantApp != mHaveApp && mWantApp != mFetchingApp) {
+    if (!mWantApp.empty() && mWantSeq != mHaveSeq && mWantSeq != mFetchingSeq &&
+        (mWantSeq != failedSeq || loopMs >= retryAtMs)) {
       fetch = mWantApp;
-      mFetchingApp = fetch;
-      mFetchFailed = false;
+      fetchSeq = mWantSeq;
+      mFetchingSeq = fetchSeq;
     }
     ::pthread_mutex_unlock(&mLock);
 
@@ -186,20 +198,30 @@ void HostLink::runWorker() {
       FrameBundle bundle;
       const bool ok = HttpClient::get(url, &response, kFrameTimeoutMs) &&
                       response.ok() && bundle.parse(response.body);
+      // What the service says it just served, which outranks what the document
+      // advertised: a save landing between the two would otherwise leave the
+      // device believing its fresh bundle is already stale.
+      const std::string servedRev = ok ? response.header("x-os-rev") : std::string();
 
       ::pthread_mutex_lock(&mLock);
-      mFetchingApp.clear();
+      mFetchingSeq = 0;
       if (ok) {
         // Swap rather than assign: the bundle is up to ~900 KB and this runs on
         // a device with ~1 MB free, so a copy is not merely slow but fatal.
         mPending.swap(bundle);
         mPendingReady = true;
         mHaveApp = fetch;
+        mPendingRev = servedRev.empty() ? mWantRev : servedRev;
+        mHaveSeq = fetchSeq;
         mFetchFailed = false;
       } else {
         mFetchFailed = true;
-        // Leave mHaveApp alone: a failed refresh must not blank a channel that
-        // is already on screen.
+        // Leave mHaveApp and mHaveSeq alone: a failed refresh must not blank a
+        // channel that is already on screen, and the request stays outstanding
+        // so it is retried — but not before kFetchRetryMs, or a service that
+        // refuses the connection turns this into a spin.
+        failedSeq = fetchSeq;
+        retryAtMs = monoMs() + (uint64_t)kFetchRetryMs;
       }
       ::pthread_mutex_unlock(&mLock);
     }
@@ -333,16 +355,28 @@ HostLink::Snapshot HostLink::snapshot() const {
   return copy;
 }
 
-void HostLink::selectChannel(const std::string& appName) {
+void HostLink::wantChannel(const std::string& appName, const std::string& rev, bool force) {
   ::pthread_mutex_lock(&mLock);
-  if (mWantApp != appName) {
+  if (force || mWantApp != appName || mWantRev != rev) {
     mWantApp = appName;
+    mWantRev = rev;
+    mWantSeq += 1;
+    // Cleared on every new request, so the ring leaves 加载失败 as soon as the
+    // user asks for something else rather than sitting on the last failure.
     mFetchFailed = false;
   }
   ::pthread_mutex_unlock(&mLock);
 }
 
-bool HostLink::takeChannelFrames(FrameBundle* out, std::string* appName) {
+void HostLink::selectChannel(const std::string& appName, const std::string& rev) {
+  wantChannel(appName, rev, false);
+}
+
+void HostLink::refreshChannel(const std::string& appName, const std::string& rev) {
+  wantChannel(appName, rev, true);
+}
+
+bool HostLink::takeChannelFrames(FrameBundle* out, std::string* appName, std::string* rev) {
   ::pthread_mutex_lock(&mLock);
   const bool ready = mPendingReady;
   if (ready) {
@@ -350,6 +384,7 @@ bool HostLink::takeChannelFrames(FrameBundle* out, std::string* appName) {
     mPending = FrameBundle();
     mPendingReady = false;
     *appName = mHaveApp;
+    *rev = mPendingRev;
   }
   ::pthread_mutex_unlock(&mLock);
   return ready;
@@ -357,7 +392,7 @@ bool HostLink::takeChannelFrames(FrameBundle* out, std::string* appName) {
 
 bool HostLink::channelLoading() const {
   ::pthread_mutex_lock(&mLock);
-  const bool loading = !mWantApp.empty() && mWantApp != mHaveApp && !mFetchFailed;
+  const bool loading = !mWantApp.empty() && mWantSeq != mHaveSeq && !mFetchFailed;
   ::pthread_mutex_unlock(&mLock);
   return loading;
 }
@@ -367,6 +402,13 @@ bool HostLink::channelFailed() const {
   const bool failed = mFetchFailed;
   ::pthread_mutex_unlock(&mLock);
   return failed;
+}
+
+int HostLink::channelRequestCount() const {
+  ::pthread_mutex_lock(&mLock);
+  const int count = mWantSeq;
+  ::pthread_mutex_unlock(&mLock);
+  return count;
 }
 
 void HostLink::publishMirror(const uint8_t* rgb, int bytes) {

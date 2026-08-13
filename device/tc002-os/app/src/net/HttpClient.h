@@ -26,9 +26,17 @@ class HttpClient {
   struct Response {
     int status;        // -1 when the exchange never produced a status line
     std::string body;
+    // The raw header block, status line included, CRLF separated. Kept because
+    // the frames endpoint answers with the revision it actually served: without
+    // it the device can only record the revision the state document happened to
+    // advertise when it decided to ask, and a save landing between those two
+    // moments costs a redundant ~900 KB round trip.
+    std::string headers;
 
     Response() : status(-1) {}
     bool ok() const { return status >= 200 && status < 300; }
+    /** Case-insensitive lookup; `name` must be lowercase. Empty when absent. */
+    std::string header(const char* name) const;
   };
 
   /**
@@ -61,7 +69,17 @@ class HttpClient {
    * not supposed to chunk an HTTP/1.0 reply, but "not supposed to" is a poor
    * foundation for a firmware that cannot be debugged with a logcat.
    */
-  static bool parseResponse(const std::string& raw, int* status, std::string* body);
+  static bool parseResponse(const std::string& raw, int* status, std::string* body,
+                            std::string* headers = 0);
+
+  /**
+   * Case-insensitive header lookup over a raw header block.
+   *
+   * Header names are not case sensitive and Bun does not spell them the way
+   * this device's other peers do, so comparing them verbatim would pass the
+   * self check and fail on the LAN.
+   */
+  static std::string headerValue(const std::string& headers, const char* lowercaseName);
 
   /** Decodes a chunked body. Returns false on a malformed chunk header. */
   static bool dechunk(const std::string& raw, std::string* out);

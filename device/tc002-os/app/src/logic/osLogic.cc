@@ -9,11 +9,13 @@
 
 #include <os/SystemProperties.h>
 
+#include "net/BleProvisionSession.h"
 #include "net/HostLink.h"
 #include "net/PortalService.h"
 #include "net/WifiPolicy.h"
 #include "net/SetupPortal.h"
 #include "net/TimeSync.h"
+#include "platform/BleService.h"
 #include "platform/DeviceControls.h"
 #include "platform/BatteryMonitor.h"
 #include "platform/DeviceProvisioning.h"
@@ -41,6 +43,7 @@
 #include "ui/LauncherScreen.h"
 #include "ui/LevelOverlay.h"
 #include "ui/MusicScreen.h"
+#include "ui/ProvisionScreen.h"
 #include "ui/Screen.h"
 #include "ui/SettingsScreen.h"
 
@@ -104,6 +107,7 @@ tcos::GameScreen sGameScreen;
 tcos::ChannelRingScreen sChannelRing;  // the channels, one level down
 tcos::MusicScreen sMusic;
 tcos::SettingsScreen sSettings;
+tcos::ProvisionScreen sProvision;
 
 // The console link. A function-local static like the presenter: its threads
 // must not start before the framework is up.
@@ -140,6 +144,21 @@ tcos::WifiPolicy sWifiPolicy(&sWifi);
 tcos::DeviceProvisioning sProvisioning;
 tcos::SetupPortal sPortal(&sProvisioning);
 tcos::PortalService sPortalService;
+
+// BLE provisioning: the transport on its own thread, the state machine on this
+// one. The split is deliberate and is the reason the state machine is pure —
+// every request it produces is executed against sWifi / sWifiPolicy here, on the
+// UI thread, which is the only thread that has ever touched them.
+//
+// It exists because the hotspot path cannot scan. Raising the AP issues
+// `ctl.stop wpa_supplicant`, and a stopped supplicant has no control socket, so
+// the setup page's network list is always the sweep taken BEFORE the radio was
+// taken away. BLE runs on the aic8800's other function over a separate UART
+// attach, so the station radio stays up: the supplicant keeps running, SCAN and
+// SCAN_RESULTS keep working, and the console can offer a live list while the
+// user is looking at it.
+tcos::BleService sBle;
+tcos::BleProvisionSession sBleSession;
 // 80 first, 8080 as the fallback.
 //
 // Port 80 is not a nicety once the hotspot exists: dnsmasq answers every name
@@ -178,6 +197,7 @@ enum {
 // Settings rows that do something when pressed. Zero means inert.
 enum {
 	ACTION_NONE = 0,
+	ACTION_PROVISION = 1,
 };
 
 // The host's channel list, as the second-level ring currently reflects it.
@@ -185,6 +205,12 @@ enum {
 // sequence bumps on things the ring does not care about (a lyric line changes
 // every few seconds), and rebuilding for those would jerk the user's selection
 // back to the first channel every time the song moved on.
+//
+// tcos::menuSignature covers the revision and the ttl as well as the label, and
+// that is the whole reason an edit gets this far — id and label alone compare
+// equal after every content change ever made, so this gate used to swallow the
+// news before the ring ever heard of it. It lives in net/StateDoc.cpp because
+// this file cannot be compiled on the host.
 std::string sMenuSignature;
 // The MCU's reported firmware version, from the handshake at startup. Empty
 // means the MCU never answered — which is the difference between a working
@@ -430,37 +456,318 @@ std::string readHostAddress() {
 	return std::string();
 }
 
-// One line per item, which is exactly what has to change for the ring to be
-// rebuilt: the kind decides the icon, the id decides the route, the label is
-// what is drawn.
-std::string menuSignature(const std::vector<tcos::StateDoc::Item>& items) {
-	std::string out;
-	for (size_t i = 0; i < items.size(); ++i) {
-		char kind[8];
-		snprintf(kind, sizeof(kind), "%d", (int)items[i].kind);
-		out += kind;
-		out += '\x1f';
-		out += items[i].id;
-		out += '\x1f';
-		out += items[i].label;
-		out += '\x1e';
-	}
-	return out;
+void updateChannelRing(const std::vector<tcos::StateDoc::Item>& items, int nowMs) {
+	// The filter and the field mapping live on the ring itself, where the host
+	// self-check can drive them: the revision and the ttl it carries are what
+	// make a saved edit reach the panel, and a field dropped on the way in is a
+	// channel that silently stops refreshing.
+	sChannelRing.setEntries(tcos::ChannelRingScreen::channelEntries(items), nowMs);
 }
 
-void updateChannelRing(const std::vector<tcos::StateDoc::Item>& items, int nowMs) {
-	// Only channels. The root ring is fixed at the four things this device does;
-	// the workspace's content is a level down, where it can be browsed without
-	// pushing music, games and settings off the end of a ten-item ring.
-	std::vector<tcos::ChannelRingScreen::Entry> channels;
-	for (size_t i = 0; i < items.size(); ++i) {
-		if (items[i].kind != tcos::StateDoc::kChannel) continue;
-		tcos::ChannelRingScreen::Entry entry;
-		entry.appName = items[i].id;
-		entry.label = items[i].label;
-		channels.push_back(entry);
+// ---------------------------------------------------------------------------
+// BLE provisioning.
+//
+// Everything below runs on the UI thread at the 160 ms link cadence. The
+// transport's mailboxes are drained here, the pure session is fed, and whatever
+// it asks for is executed against the radio here and nowhere else.
+
+// The SSID and the address, cached. Each costs a socket and an ioctl, and the
+// BLE link wants both six times a second; the telemetry block one function over
+// already throttles for exactly this reason.
+std::string sNetSsid;
+std::string sNetIp;
+uint64_t sNetReadMs = 0;
+
+bool sBleStarted = false;
+// The advertised name, resolved once. netinfo::macAddress() is an ioctl, and
+// the answer changes never.
+std::string sBleName;
+bool sBleScanPending = false;
+int sBleScanStartedMs = 0;
+int sBleScanIssuedMs = 0;
+// Pushed once per offline episode, and never again after the user walks away —
+// a screen that re-pushes itself is a device the user cannot leave.
+bool sProvisionPushed = false;
+// Whether the push was automatic. Only an automatic one auto-pops on success: a
+// user who opened 蓝牙 by hand on a clock that is already online asked to be
+// here, and yanking them out after three seconds would be the panel arguing.
+bool sProvisionAuto = false;
+bool sProvisionDismissed = false;
+int sProvisionOnlineMs = -1;
+// Set by the 配网 row: keeps the advertisement up for a while even on a device
+// that is perfectly online, because "reconfigure the clock" is a thing a user
+// asks for deliberately.
+int sBleForcedUntilMs = -1;
+
+const int kBleForcedMs = 300000;
+// How long an authorised-but-idle session may keep the hotspot suppressed.
+// Long enough that reading a password off the back of a router is not a
+// timeout, bounded so a console that authorises and walks away cannot leave a
+// stranded clock with no station link AND no access point — the one state that
+// needs somebody to physically fetch the device.
+const int kBleHoldIdleMs = 180000;
+int sBleHoldActivityMs = 0;
+// Breadcrumb budget for the two attacker-driven tags. See the drain in pumpBle.
+const int kBleLogBurst = 8;
+const int kBleLogSummaryMs = 60000;
+int sBleAuditLogged = 0;
+int sBleFrameLogged = 0;
+int sBleAuditDropped = 0;
+int sBleFrameDropped = 0;
+int sBleSuppressedLogMs = 0;
+
+void refreshNetInfo() {
+	if (monoMs() - sNetReadMs < 1000 && sNetReadMs != 0) return;
+	sNetReadMs = monoMs();
+	sNetSsid = tcos::netinfo::ssid();
+	sNetIp = tcos::netinfo::ipAddress();
+}
+
+/**
+ * When the Bluetooth radio may be brought up. Read this before changing it.
+ *
+ * Bring-up is `ctl.start hciattach` plus HCIDEVUP on the aic8800 — the same
+ * part that carries wlan0, and therefore adb, and therefore every way this
+ * device can be recovered without a screwdriver. Coexistence is attested by a
+ * stock-firmware `ps` capture and by nothing this firmware has ever done, so
+ * until a bench run says otherwise the rule is: never start it while there is a
+ * working station link to lose.
+ *
+ * That single rule buys the recovery path too. If bring-up does take wlan0
+ * down, a power cycle returns to a booted, online clock that does NOT touch
+ * Bluetooth — adb is back and the build can be replaced. A grace period after
+ * coming online (there used to be one, of two minutes) forfeits exactly that:
+ * every boot would repeat the experiment.
+ *
+ *   forced      设置 → 蓝牙. A physically present person asking by hand, which
+ *               is also the supported way to move an ONLINE clock to another
+ *               network; the console cannot do it unprompted.
+ *   offline     Nothing left to lose: with no station link adb is already gone,
+ *               so BLE can only add a way in. Deferred until the policy has
+ *               stopped working the radio, so the attach never races
+ *               wpa_supplicant's association on the same chip.
+ */
+bool bleWanted(int nowMs) {
+	if (sBleForcedUntilMs > nowMs) return true;
+	if (sWifiPolicy.isOnline()) return false;
+	return sWifiPolicy.settled();
+}
+
+void pumpBle(int nowMs) {
+	refreshNetInfo();
+
+	// Started late rather than in onUI_init, and gated on the MAC: the name on
+	// the panel, in the phone's chooser and in the advertisement is derived from
+	// it, and a MAC that is not readable yet would put ZOS-0000 on the air
+	// permanently — the advertisement is set once, not per connection.
+	if (!sBleStarted) {
+		const std::string mac = tcos::netinfo::macAddress();
+		if (mac.empty() && nowMs < 10000) return;
+		sBleName = tcos::DeviceWifi::apSsidFromMac(mac);
+		sBleSession.configure(sBleName, tcos::ProvisionLog::buildId(), mac);
+		// Wanted BEFORE the worker exists. BleService::mWanted starts false and
+		// the worker decides on its first pass whether to touch the radio, so
+		// setting it after start() would be a race against a bring-up.
+		sBle.setWanted(bleWanted(nowMs));
+		sBle.start(sBleName);
+		sBleStarted = true;
 	}
-	sChannelRing.setEntries(channels, nowMs);
+	sBle.setWanted(bleWanted(nowMs));
+
+	tcos::BleService::Event event;
+	while (sBle.takeEvent(&event)) {
+		switch (event) {
+		case tcos::BleService::kEventAdvertising:
+			// A fresh code per advertising session, minted only once the
+			// controller has said the advertisement is on the air.
+			sBleSession.beginAdvertising(tcos::BleService::randomSeed(), nowMs);
+			break;
+		case tcos::BleService::kEventConnected:
+			sBleSession.onConnect(nowMs);
+			sBleHoldActivityMs = nowMs;
+			// Per connection, so a real session after a flood still leaves
+			// evidence — the budget is against a stream, not against volume.
+			sBleAuditLogged = 0;
+			sBleFrameLogged = 0;
+			break;
+		case tcos::BleService::kEventDisconnected:
+			sBleSession.onDisconnect(nowMs);
+			break;
+		case tcos::BleService::kEventRadioDown:
+		default:
+			break;
+		}
+	}
+
+	std::string inbound;
+	while (sBle.takeInbound(&inbound)) {
+		sBleSession.onMessage(inbound, nowMs);
+		sBleHoldActivityMs = nowMs;
+	}
+	// The message itself never reaches this function's log call — see
+	// BleProvisionSession::takeAudit for why the redaction is structural rather
+	// than a rule someone has to remember.
+	//
+	// Rate limited, and the limit is not tidiness. Both queues are drained every
+	// 160 ms tick and both are fed by an UNAUTHORISED peer: audit() runs on a
+	// parse failure, on no-cmd, on unknown and on a refused scan/join, and
+	// onFrameError is unconditional. ProvisionLog::log is open+write+fsync+close
+	// per line by design, on jffs2, on the one partition a power cycle does not
+	// clear — so a stranger dribbling one malformed 20-byte chunk per connection
+	// interval buys ~16 fsyncs a second, indefinitely, plus a rotation every
+	// ~30 s. Eight lines is enough to diagnose a handshake; after that only a
+	// count, and the count is what says a flood happened at all.
+	std::string audit;
+	while (sBleSession.takeAudit(&audit)) {
+		if (sBleAuditLogged < kBleLogBurst) {
+			++sBleAuditLogged;
+			tcos::ProvisionLog::device().log("BLE_CMD", audit);
+		} else {
+			++sBleAuditDropped;
+		}
+	}
+	std::string frameError;
+	while (sBle.takeFrameError(&frameError)) {
+		sBleSession.onFrameError(frameError.c_str(), nowMs);
+		if (sBleFrameLogged < kBleLogBurst) {
+			++sBleFrameLogged;
+			tcos::ProvisionLog::device().log("BLE_FRAME", "why=" + frameError);
+		} else {
+			++sBleFrameDropped;
+		}
+	}
+	if ((sBleAuditDropped > 0 || sBleFrameDropped > 0) &&
+	    (nowMs - sBleSuppressedLogMs) >= kBleLogSummaryMs) {
+		sBleSuppressedLogMs = nowMs;
+		char fields[64];
+		snprintf(fields, sizeof(fields), "cmd=%d frame=%d", sBleAuditDropped,
+		         sBleFrameDropped);
+		tcos::ProvisionLog::device().log("BLE_SUPPRESSED", fields);
+		sBleAuditDropped = 0;
+		sBleFrameDropped = 0;
+	}
+
+	// Hold the hotspot off while somebody is driving — but only somebody who has
+	// proven they can read the panel. Keyed on a raw L2CAP connection this let
+	// any unauthenticated peer in radio range tear down a running SoftAP and
+	// then suppress the fallback for as long as it kept the socket open, on a
+	// device that by definition has no station link. The listener takes no
+	// pairing (BT_SECURITY_LOW) and the advertisement accepts any central, so
+	// reaching `connected` costs nothing; nothing needs the station radio before
+	// `scan` or `join`, and both of those already require the code.
+	//
+	// A join in flight holds too, and keeps holding after the link drops: that
+	// drop is the EXPECTED shape of success here (both radios are the same part
+	// and this firmware has never had both up at once), and letting it raise an
+	// access point would strand the user halfway through what they asked for.
+	// It is bounded by kJoinBudgetMs; the authorised-and-idle case is bounded by
+	// kBleHoldIdleMs. Neither can leave a stranded clock without a fallback.
+	const bool bleJoining = sBleSession.joining();
+	const bool bleAttended = sBleSession.authorised() &&
+	                         (nowMs - sBleHoldActivityMs) < kBleHoldIdleMs;
+	sWifiPolicy.setHotspotHold(bleJoining || bleAttended, nowMs);
+
+	// Requests BEFORE the link is sampled, and the order is the whole point. A
+	// `cmd join` arriving on this tick has already put the session in kJoining;
+	// the policy is still in kStandby (the console is connected, so the hotspot
+	// hold parked it there) until applyCredentials runs. Sample the link first
+	// and noteLink sees "joining, but the policy is not associating", concludes
+	// the attempt is over before the radio was asked, and the console is told
+	// 找不到网络 on the very tick the user pressed submit — followed seconds
+	// later by the truth. The right diagnosis second is still the wrong
+	// diagnosis first.
+	//
+	// The PSK exists in this scope and nowhere else: it goes straight into the
+	// policy, which hands it to the supplicant and — only once an address has
+	// proven it — to persistCredentials, whose backup-first discipline is what
+	// makes writing /data survivable.
+	{
+		std::string ssid;
+		std::string psk;
+		const tcos::BleProvisionSession::Request request = sBleSession.takeRequest(&ssid, &psk);
+		if (request == tcos::BleProvisionSession::kRequestScan) {
+			sWifi.startScan();
+			sBleScanPending = true;
+			sBleScanStartedMs = nowMs;
+			sBleScanIssuedMs = nowMs;
+		} else if (request == tcos::BleProvisionSession::kRequestJoin) {
+			tcos::ProvisionLog::device().log("BLE_JOIN", "src=ble psk=redacted");
+			sWifiPolicy.applyCredentials(ssid, psk, nowMs);
+		}
+		for (size_t i = 0; i < psk.size(); ++i) psk[i] = '\0';
+	}
+
+	tcos::BleProvisionSession::Link link;
+	link.online = sWifiPolicy.isOnline();
+	const tcos::WifiPolicy::State policyState = sWifiPolicy.state();
+	link.joining = policyState == tcos::WifiPolicy::kConnecting ||
+	               policyState == tcos::WifiPolicy::kObtainingIp ||
+	               policyState == tcos::WifiPolicy::kStartingWpa;
+	link.locked = !tcos::install::linkChangesAllowed();
+	link.ssid = sNetSsid;
+	link.ip = sNetIp;
+	link.wpaState = sWifi.lastWpaState();
+	sBleSession.noteLink(link, nowMs);
+
+	// The scan pump. Same pair WifiPolicy uses — startScan() then scanNetworks()
+	// — because there is one sweep and one contract about what an empty result
+	// means (see DeviceWifi::scanSweepComplete); a second scan path here would be
+	// a second place to get that wrong.
+	if (sBleScanPending) {
+		std::vector<tcos::WpaCtrl::Network> nets;
+		if (sWifi.scanNetworks(&nets)) {
+			std::vector<tcos::BleProvisionSession::Network> found;
+			for (size_t i = 0; i < nets.size(); ++i) {
+				tcos::BleProvisionSession::Network net;
+				net.ssid = nets[i].ssid;
+				net.rssi = nets[i].signalDbm;
+				net.secured = nets[i].secured;
+				found.push_back(net);
+			}
+			sBleSession.deliverScan(found, false, nowMs);
+			sBleScanPending = false;
+		} else if (nowMs - sBleScanStartedMs >= tcos::WifiPolicy::kScanTimeoutMs) {
+			sBleSession.noteScanFailed(nowMs);
+			sBleScanPending = false;
+		} else if (nowMs - sBleScanIssuedMs >= tcos::WifiPolicy::kScanRetryMs) {
+			// The first SCAN of a freshly started supplicant is routinely
+			// answered FAIL-BUSY and swallowed whole; nothing else would ask
+			// again.
+			sBleScanIssuedMs = nowMs;
+			sWifi.startScan();
+		}
+	}
+
+	std::string outbound;
+	while (sBleSession.takeOutbound(&outbound)) sBle.send(outbound);
+
+	// --- the panel -----------------------------------------------------------
+	tcos::ProvisionScreen::Inputs inputs;
+	const tcos::BleService::Stage bleStage = sBle.stage();
+	inputs.bleAdvertising = sBle.advertising();
+	inputs.bleBlocked = bleStage == tcos::BleService::kBlocked;
+	inputs.guardLocked = link.locked;
+	inputs.centralConnected = sBle.connected();
+	inputs.authorised = sBleSession.authorised();
+	inputs.scanning = sBleSession.scanning();
+	inputs.joining = sBleSession.joining();
+	inputs.online = link.online;
+	inputs.failed = sBleSession.failed();
+
+	tcos::ProvisionScreen::State panel;
+	panel.stage = tcos::ProvisionScreen::stageFor(inputs);
+	panel.failure = tcos::ProvisionScreen::failureFor(sBleSession.lastError());
+	panel.name = sBleName;
+	panel.code = sBleSession.code();
+	panel.ssid = sBleSession.targetSsid().empty() ? sNetSsid : sBleSession.targetSsid();
+	panel.ip = sNetIp;
+	if (panel.stage == tcos::ProvisionScreen::kRadioDown && sPortalService.running() &&
+	    !sNetIp.empty()) {
+		char portal[64];
+		snprintf(portal, sizeof(portal), "%s:%d", sNetIp.c_str(), sPortalService.port());
+		panel.portal = portal;
+	}
+	sProvision.setState(panel, nowMs);
 }
 
 std::string formatUptime(uint64_t ms) {
@@ -537,7 +844,12 @@ void rebuildSettings(int nowMs) {
 	// so it is not on the box, not in the manual, and not anywhere else. The
 	// panel asked the user to join a network it would not name. Both fit the
 	// 52 px row without a marquee by construction — see apSsidFromMac.
-	if (sWifiPolicy.isProvisioning()) {
+	//
+	// Gated on hotspotActive() rather than isProvisioning(), which now also
+	// covers kStandby — the state a device sits in while a console drives it
+	// over BLE, where there is no hotspot and printing its SSID and passphrase
+	// would be an invitation to join a network that is not on the air.
+	if (sWifiPolicy.hotspotActive()) {
 		row.label = "\xE7\x83\xAD\xE7\x82\xB9";                              // 热点
 		row.value = tcos::DeviceWifi::apSsidFromMac(mac);
 		rows.push_back(row);
@@ -546,6 +858,30 @@ void rebuildSettings(int nowMs) {
 		row.value = tcos::DeviceWifi::softApPassphrase();
 		rows.push_back(row);
 	}
+
+	// 蓝牙 — and it is the row that opens the provisioning screen, because that
+	// screen is the only place the six-digit code exists. Actionable in every
+	// state including 未启动: a user who wants to reconfigure a working clock has
+	// no other way to ask, and a stack that gave up after kMaxAttempts re-arms on
+	// exactly this press.
+	row.label = "\xE8\x93\x9D\xE7\x89\x99";                                  // 蓝牙
+	{
+		const tcos::BleService::Stage stage = sBle.stage();
+		if (!tcos::install::linkChangesAllowed()) {
+			row.value = "\xE6\x9C\xAA\xE8\xA7\xA3\xE9\x94\x81";            // 未解锁
+		} else if (stage == tcos::BleService::kConnected) {
+			row.value = "\xE5\xB7\xB2\xE8\xBF\x9E\xE6\x8E\xA5";            // 已连接
+		} else if (stage == tcos::BleService::kAdvertising) {
+			row.value = "\xE5\xB9\xBF\xE6\x92\xAD\xE4\xB8\xAD";            // 广播中
+		} else if (stage == tcos::BleService::kRadioDown) {
+			row.value = "\xE6\x9C\xAA\xE5\x90\xAF\xE5\x8A\xA8";            // 未启动
+		} else {
+			row.value = "--";
+		}
+	}
+	row.id = ACTION_PROVISION;
+	rows.push_back(row);
+	row.id = ACTION_NONE;
 
 	// 配网, and the label carries the bad news.
 	//
@@ -779,6 +1115,7 @@ static void onUI_show() {
 	shell().setEntryStyle(&sGameScreen, tcos::Shell::kEntryCartridge);
 	shell().setEntryStyle(&sChannelRing, tcos::Shell::kEntryCrt);
 	shell().setEntryStyle(&sSettings, tcos::Shell::kEntryDrop);
+	shell().setEntryStyle(&sProvision, tcos::Shell::kEntryDrop);
 	// volume/brightness already adopted in onUI_init
 	sHandedOff = false;
 	shell().reset(&sBoot, nowMs);
@@ -856,7 +1193,12 @@ static bool onUI_Timer(int id) {
 			// The network list the page offers is captured on the way INTO
 			// provisioning, because raising the hotspot stops the supplicant and
 			// the radio cannot be asked again for as long as the page is up.
-			if (provisioning && !sWasProvisioning) {
+			//
+			// hotspotActive(), not provisioning: kStandby is also "waiting for a
+			// human" but keeps the supplicant, so there the page can ask the
+			// radio itself and a frozen sweep would be worse than no sweep.
+			const bool hotspot = sWifiPolicy.hotspotActive();
+			if (hotspot && !sWasProvisioning) {
 				sProvisioning.setScannedNetworks(sWifiPolicy.scanned());
 				// The first two lines a coordinator reads after a failed session:
 				// what the sweep produced, and why the hotspot went up at all. A
@@ -871,8 +1213,14 @@ static bool onUI_Timer(int id) {
 				         sWifiPolicy.provisionReason(), scanned);
 				tcos::ProvisionLog::device().log("AP_ENTER", apFields);
 			}
-			sWasProvisioning = provisioning;
+			sWasProvisioning = hotspot;
 		}
+
+		// BLE provisioning, on the same cadence and for the same reason: every
+		// predicate it reads costs a socket or an ioctl, and nothing it decides
+		// changes faster than a person can type.
+		pumpBle(nowMs);
+
 		sLink = hostLink().snapshot();
 
 		// The first document only establishes where the sequences already are.
@@ -947,7 +1295,7 @@ static bool onUI_Timer(int id) {
 				                == tcos::LevelOverlay::kBrightness, +1, nowMs);
 			}
 		}
-		const std::string signature = menuSignature(sLink.items);
+		const std::string signature = tcos::menuSignature(sLink.items);
 		if (!sLink.items.empty() && signature != sMenuSignature) {
 			sMenuSignature = signature;
 			updateChannelRing(sLink.items, nowMs);
@@ -999,6 +1347,44 @@ static bool onUI_Timer(int id) {
 		}
 	}
 
+	// --- the provisioning screen -------------------------------------------
+	//
+	// PUSHED, not made the root. The design calls provisioning 开机前置 and it is
+	// what the user sees, but a device whose BT stack failed and whose network is
+	// gone would then be a panel with nothing behind it: a hold pops back to the
+	// launcher, so the clock is still a clock. Pushed once per offline episode —
+	// walking away has to mean something, or the screen is a trap.
+	{
+		const bool offline = !sWifiPolicy.isOnline();
+		const bool haveStack = sBleStarted && sBle.stage() != tcos::BleService::kStopped;
+		if (!offline) sProvisionDismissed = false;
+		if (sHandedOff && offline && haveStack && !sProvisionDismissed && !sProvisionPushed &&
+		    shell().top() == &sLauncher) {
+			shell().push(&sProvision, nowMs);
+			sProvisionPushed = true;
+			sProvisionAuto = true;
+			sProvisionOnlineMs = -1;
+		}
+		if (sProvisionPushed && shell().top() != &sProvision) {
+			// The user left. Remember that.
+			sProvisionPushed = false;
+			sProvisionDismissed = true;
+		}
+		// The success beat, then out of the way. A user who just watched their
+		// clock join a network does not want to be left staring at the screen
+		// that asked them to.
+		if (sProvisionPushed && sProvisionAuto && !offline) {
+			if (sProvisionOnlineMs < 0) sProvisionOnlineMs = nowMs;
+			if (nowMs - sProvisionOnlineMs >= 3000) {
+				shell().pop(nowMs);
+				sProvisionPushed = false;
+				sProvisionOnlineMs = -1;
+			}
+		} else if (offline) {
+			sProvisionOnlineMs = -1;
+		}
+	}
+
 	// Route activations before rendering, so a press lands on the panel in the
 	// same frame the user made it.
 	const int rootPick = sLauncher.takeActivated();
@@ -1017,18 +1403,40 @@ static bool onUI_Timer(int id) {
 	{
 		tcos::FrameBundle fresh;
 		std::string freshApp;
-		if (hostLink().takeChannelFrames(&fresh, &freshApp)) {
+		std::string freshRev;
+		if (hostLink().takeChannelFrames(&fresh, &freshApp, &freshRev)) {
 			// The ring drops frames that do not belong to the settled channel, so
 			// a slow download landing after the knob moved on cannot paint over
 			// the channel the user is actually looking at.
-			sChannelRing.adoptFrames(fresh, freshApp, nowMs);
+			sChannelRing.adoptFrames(fresh, freshApp, freshRev, nowMs);
 		}
 	}
 	if (shell().top() == &sChannelRing) {
-		// One request per move, not one per frame: the ring reports the change
-		// once and clears it.
-		if (sChannelRing.takeSelectionChanged() && !sChannelRing.currentApp().empty()) {
-			hostLink().selectChannel(sChannelRing.currentApp());
+		// Two different questions, and both have to be asked every tick because
+		// each is answered by a flag the ring raises on its own schedule: has the
+		// SELECTION moved (a detent, a pin, a channel whose content the console
+		// just changed), and do the frames we are holding need fetching again
+		// although it has not (a ttl that expired, or walking back in here).
+		//
+		// Guarded on there being a channel at all rather than consuming the flags
+		// and dropping them: the document can arrive after the user is already
+		// standing in an empty ring, and a request swallowed then is a page that
+		// never loads.
+		if (!sChannelRing.currentApp().empty()) {
+			const bool moved = sChannelRing.takeSelectionChanged();
+			const bool stale = sChannelRing.takeRefreshDue(nowMs);
+			if (stale) {
+				// Forced, because by definition nothing the link keys on has moved.
+				// It also wins when BOTH are up — walking back into the ring on the
+				// same tick a republished menu landed — because a forced refresh
+				// asks for exactly what a select would and asks unconditionally,
+				// while a select can decline. Two flags for one fetch is fine; a
+				// tick where both were raised and neither reached the network is a
+				// page that never loads.
+				hostLink().refreshChannel(sChannelRing.currentApp(), sChannelRing.currentRev());
+			} else if (moved) {
+				hostLink().selectChannel(sChannelRing.currentApp(), sChannelRing.currentRev());
+			}
 		}
 		if (!sLink.online && sChannelRing.status() != tcos::ChannelRingScreen::kReady) {
 			sChannelRing.setStatus(tcos::ChannelRingScreen::kOffline, nowMs);
@@ -1064,7 +1472,17 @@ static bool onUI_Timer(int id) {
 			sSettingsBuiltMs = monoMs();
 			rebuildSettings(nowMs);
 		}
-		sSettings.takeActivated();
+		if (sSettings.takeActivated() == ACTION_PROVISION) {
+			// A deliberate ask, so the advertisement goes back up even on a clock
+			// that is perfectly online, and a stack that had given up re-arms.
+			sBleForcedUntilMs = nowMs + kBleForcedMs;
+			sBle.setWanted(true);
+			sProvisionDismissed = false;
+			shell().push(&sProvision, nowMs);
+			sProvisionPushed = true;
+			sProvisionAuto = false;
+			sProvisionOnlineMs = -1;
+		}
 	}
 	const int gamePick = sGameList.takeActivated();
 	if (gamePick >= ID_GAME_BASE && gamePick < ID_GAME_BASE + 7) {
@@ -1125,6 +1543,7 @@ static bool onUI_Timer(int id) {
 		else if (top == &sGameScreen) screenName = "game";
 		else if (top == &sGameList) screenName = "games";
 		else if (top == &sBoot) screenName = "boot";
+		else if (top == &sProvision) screenName = "provision";
 		// The real count, not a placeholder. It is also the console's only way to
 		// tell an adopted link from one the policy is failing to rebuild: an
 		// adopted link issues no commands at all, so this stays 0 forever, while

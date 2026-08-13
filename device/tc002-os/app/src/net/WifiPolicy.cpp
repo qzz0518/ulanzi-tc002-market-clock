@@ -14,6 +14,7 @@ WifiPolicy::WifiPolicy(Actuator* actuator)
       mSoftApRestarts(0),
       mHaveCredentials(false),
       mAdopted(false),
+      mHotspotHeld(false),
       mPendingPersist(false) {}
 
 void WifiPolicy::enter(State state, int nowMs) {
@@ -71,10 +72,45 @@ void WifiPolicy::applyCredentials(const std::string& ssid, const std::string& ps
   beginConnect(nowMs);
 }
 
+void WifiPolicy::setHotspotHold(bool held, int nowMs) {
+  if (mHotspotHeld == held) return;
+  mHotspotHeld = held;
+  if (mActuator == 0) return;
+
+  if (held) {
+    if (mState == kProvisioning) {
+      // The one trip nothing else in this firmware can make: back off the
+      // hotspot and onto the station radio. Safe to do exactly here and nowhere
+      // else, because the person whose session it would interrupt is the person
+      // asking — they are on the BLE link, not on the hotspot's web page.
+      mActuator->stopSoftAp();
+      mActuator->startSupplicant();
+      enter(kStartingWpa, nowMs);
+    } else if (mState == kScanning) {
+      // The sweep was gathered for a hotspot that is now not going up.
+      mLastRetryMs = nowMs;
+      enter(kStandby, nowMs);
+    }
+    return;
+  }
+
+  // Released. A device parked in standby has nobody driving it any more, so the
+  // hotspot fallback is owed to whoever comes next.
+  if (mState == kStandby) beginProvisioning(nowMs, mProvisionReason);
+}
+
 // Scan first, hotspot second. Always in that order — see Actuator::startScan.
 void WifiPolicy::beginProvisioning(int nowMs, const char* reason) {
   mProvisionReason = reason;
   mScanned.clear();
+  if (mHotspotHeld) {
+    // No sweep either: the console does its own, on demand, over a link that
+    // does not cost the radio. Gathering one here would only be a SCAN nobody
+    // reads.
+    mLastRetryMs = nowMs;
+    enter(kStandby, nowMs);
+    return;
+  }
   mActuator->startScan();
   mLastScanIssueMs = nowMs;
   enter(kScanning, nowMs);
@@ -106,7 +142,13 @@ void WifiPolicy::tick(int nowMs) {
   // init will not respawn a `oneshot` service, and when the supplicant dies
   // libzknet's event thread exits, leaving WifiManager blind rather than
   // reporting an error. Nothing else would ever notice.
-  if (mState == kConnecting || mState == kObtainingIp || mState == kOnline) {
+  //
+  // kStandby is in the list and kProvisioning is not, and that difference is the
+  // whole point of the two states: standby keeps the station radio because a
+  // console is about to ask it to scan, while a real hotspot has deliberately
+  // stopped the supplicant and reviving it there would fight hostapd for wlan0.
+  if (mState == kConnecting || mState == kObtainingIp || mState == kOnline ||
+      mState == kStandby) {
     if (!mActuator->supplicantRunning()) {
       ++mSupplicantRestarts;
       mActuator->startSupplicant();
@@ -240,6 +282,20 @@ void WifiPolicy::tick(int nowMs) {
             mActuator->stopSoftAp();
             enter(kObtainingIp, nowMs);
           }
+        }
+      }
+      break;
+
+    case kStandby:
+      // kProvisioning's background retry, without the hotspot to supervise. The
+      // guard on supplicantRunning() that kProvisioning needs is gone too: in
+      // this state the supplicant is supposed to be up, and the block above has
+      // already revived it if it was not.
+      if (mHaveCredentials && (nowMs - mLastRetryMs) >= kBackgroundRetryMs) {
+        mLastRetryMs = nowMs;
+        if (mActuator->connect(mSsid, mPsk) && mActuator->associated()) {
+          mActuator->requestDhcp();
+          enter(kObtainingIp, nowMs);
         }
       }
       break;

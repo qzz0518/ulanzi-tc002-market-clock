@@ -36,6 +36,23 @@ class WifiPolicy {
     kOnline,        // has an address
     kScanning,      // sweeping for networks BEFORE the hotspot goes up
     kProvisioning,  // SoftAP up, waiting for the user
+    /**
+     * Waiting for the user with the STATION radio still alive.
+     *
+     * kProvisioning's hotspot is one-way on this hardware: bringUpSoftAp()
+     * issues `ctl.stop wpa_supplicant`, /etc/init.rc declares that service
+     * `disabled` + `oneshot`, and the radio has no concurrent AP+station mode —
+     * so the moment the AP goes up the device can no longer scan, cannot be
+     * asked to join anything, and cannot get back without a power cycle.
+     *
+     * A console connected over BLE is a user who is already talking to us on a
+     * link the WiFi radio does not carry (the aic8800's BT function is a
+     * separate UART-attached HCI). Raising the hotspot under them would take
+     * away the scanning that made BLE provisioning worth building. So while the
+     * hold is set this state replaces kProvisioning: same background retry of
+     * the stored network, same "waiting for a human", no hotspot.
+     */
+    kStandby,
   };
 
   // Injected side effects. The adapter that implements this is the only code in
@@ -211,9 +228,48 @@ class WifiPolicy {
   // Credentials from the provisioning page.
   void applyCredentials(const std::string& ssid, const std::string& psk, int nowMs);
 
+  /**
+   * Keep the radio in station mode while somebody is provisioning over BLE.
+   *
+   * The caller decides who counts as "somebody", and the answer is an
+   * AUTHORISED session — one that has read the six digits off the panel — not
+   * merely a connected central. This link takes no pairing and accepts any
+   * central, so a raw connection proves only proximity, and what the hold does
+   * is take the hotspot away: on a device with no station link that is the last
+   * remaining way in. A device nobody has authorised must still fall back to
+   * the hotspot, which is also the only path a Safari or Firefox user has (Web
+   * Bluetooth exists in neither and is not planned in either).
+   *
+   * Setting it while the hotspot is already up is the interesting direction and
+   * the one that closes a documented gap: it tears the AP down and restarts the
+   * supplicant, so a user who connects over BLE to a device that had already
+   * given up gets a device that can scan again. Nothing else in this firmware
+   * can make that trip — which is exactly why the premise it rests on (the
+   * person whose session it interrupts is the person asking) has to be true.
+   */
+  void setHotspotHold(bool held, int nowMs);
+  bool hotspotHeld() const { return mHotspotHeld; }
+
   State state() const { return mState; }
   bool isOnline() const { return mState == kOnline; }
-  bool isProvisioning() const { return mState == kProvisioning; }
+  /**
+   * True once this episode has stopped working the radio.
+   *
+   * The states left out are the ones where the policy is mid-command:
+   * kAdopting is waiting to see whether the framework's own association lands,
+   * kStartingWpa / kConnecting / kObtainingIp are a supplicant being driven,
+   * kScanning is a sweep in flight. Anything that shares the chip — the BLE
+   * bring-up is the only such thing — has to wait for this, or the HCI attach
+   * races an association on the same part.
+   */
+  bool settled() const {
+    return mState == kOnline || mState == kProvisioning || mState == kStandby;
+  }
+  /** Waiting for a human, hotspot or not. */
+  bool isProvisioning() const { return mState == kProvisioning || mState == kStandby; }
+  /** The hotspot is actually the way in — the only state whose SSID and
+   *  passphrase are worth putting on the panel. */
+  bool hotspotActive() const { return mState == kProvisioning; }
   const std::string& ssid() const { return mSsid; }
 
   /** Networks found by the last sweep, for the provisioning page to offer. */
@@ -264,6 +320,8 @@ class WifiPolicy {
   std::string mPsk;
   bool mHaveCredentials;
   bool mAdopted;
+  // True while a BLE console is connected; see setHotspotHold.
+  bool mHotspotHeld;
   // True while credentials that came from the user are still unproven. Set by
   // applyCredentials and cleared the moment an address lands, which is the only
   // point at which they are worth writing to flash. Credentials that came out

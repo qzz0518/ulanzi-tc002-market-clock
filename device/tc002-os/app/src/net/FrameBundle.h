@@ -53,7 +53,13 @@ class FrameBundle {
   void swap(FrameBundle& other);
 
   // Guard rails, exposed so the host self-check asserts the real values.
-  static const int kMaxFrames = 600;
+  //
+  // 360 is WORKSPACE_LIMITS.maxFramesPerChannel in src/workspace.ts, not a
+  // round number: the accepted worst case should be the produced worst case.
+  // At 600 this side agreed to a 1.5 MB bundle that the service will never
+  // send, and since a ttl refresh downloads while the previous bundle is still
+  // held, that ceiling was ~1.5 MB of headroom the device does not have.
+  static const int kMaxFrames = 360;
   static const int kMinDelayMs = 20;
 
  private:

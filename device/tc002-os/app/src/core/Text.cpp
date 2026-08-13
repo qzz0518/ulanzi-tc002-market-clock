@@ -141,6 +141,14 @@ void drawCentered(Surface& out, const char* utf8, int y, const Color& color,
   draw(out, utf8, x, y, color, clipX, clipW);
 }
 
+int marqueeCycleMs(int widthPx, int viewW) {
+  const int travel = widthPx - viewW;
+  if (travel <= 0) return 0;
+  const int legMs = (travel * 1000) / kMarqueePxPerSecond;
+  if (legMs <= 0) return 0;
+  return kMarqueeDwellMs + legMs + kMarqueeDwellMs + legMs;
+}
+
 int marqueeOffset(int widthPx, int viewW, int elapsedMs) {
   const int travel = widthPx - viewW;
   if (travel <= 0) return 0;

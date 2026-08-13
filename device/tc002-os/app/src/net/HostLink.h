@@ -108,23 +108,60 @@ class HostLink {
   void adoptDocument(const StateDoc& doc, uint64_t stampMonoMs);
 
   /**
-   * Ask for a channel's frames. Idempotent for the same app: asking again while
-   * that app's frames are already loaded does nothing, so a screen can call it
-   * every tick without thinking about it.
+   * Ask for a channel's frames at a given content revision.
+   *
+   * Idempotent for the same (app, rev) pair, so a screen can call it every tick
+   * without thinking about it — but NOT for the same app alone, which is the
+   * distinction this whole class was missing. Keyed on the name only, a
+   * re-select of the channel already loaded was a permanent no-op: an edit
+   * leaves the name exactly where it was, so nothing downstream ever ran and
+   * turning the knob away and back was the only way to reach new pixels.
+   *
+   * An empty `rev` is what an older service produces. It compares equal to
+   * itself, so such a device keeps the behaviour it has always had: one fetch
+   * per channel change and no content-driven refresh.
    */
-  void selectChannel(const std::string& appName);
+  void selectChannel(const std::string& appName, const std::string& rev);
+
+  /**
+   * Fetch the channel again even though nothing about it changed.
+   *
+   * For the two cases a revision cannot express: a bundle that has outlived its
+   * ttl (a clock face renders a time, and the time moves without anyone editing
+   * anything), and walking back into the ring after minutes away. Both are
+   * rate-limited by the caller — see ChannelRingScreen::takeRefreshDue — because
+   * this bypasses every gate that would otherwise stop a loop.
+   */
+  void refreshChannel(const std::string& appName, const std::string& rev);
 
   /**
    * Moves freshly downloaded frames into `out`, if any arrived since the last
    * call. Returns false when there is nothing new. `out` is left untouched on
    * false, so a playing channel keeps playing.
+   *
+   * `rev` receives the revision the SERVICE said it served (its `X-Os-Rev`
+   * header), which is not always the one the document advertised: a save
+   * landing between reading the menu and fetching the frames would otherwise
+   * make the device believe its brand-new bundle is already stale.
    */
-  bool takeChannelFrames(FrameBundle* out, std::string* appName);
+  bool takeChannelFrames(FrameBundle* out, std::string* appName, std::string* rev);
 
-  /** True while a fetch for the selected channel is in flight. */
+  /** True while a fetch for the selected channel is outstanding. */
   bool channelLoading() const;
   /** True when the last fetch for the selected channel failed. */
   bool channelFailed() const;
+
+  /**
+   * How many distinct frame requests have been raised since construction.
+   *
+   * Exposed because it is the only window onto the gate that decides whether an
+   * ask reaches the network at all, and that decision having no observable is
+   * precisely how it could be a permanent no-op for the entire life of this
+   * class without a single test noticing. A self-check can now state the two
+   * halves that matter: a re-ask for content we already hold must NOT count,
+   * and a re-ask for the same channel at a new revision must.
+   */
+  int channelRequestCount() const;
 
   /**
    * Hands the finished frame to the mirror uploader. Cheap and non-blocking:
@@ -156,6 +193,13 @@ class HostLink {
   // for the round trip or every successful hold looks like a timeout.
   static const int kPullTimeoutMs = 13000;
   static const int kFrameTimeoutMs = 20000;
+  // How long a failed fetch of the same request waits before trying again.
+  // Without it the worker re-attempts on its next 30 ms pass, which against a
+  // service that refuses the connection outright — the shape of a laptop that
+  // went to sleep — is a tight loop for as long as the device is on that
+  // channel. A user-driven change still goes immediately: the wait is keyed on
+  // the request that failed, not on the clock alone.
+  static const int kFetchRetryMs = 3000;
 
  private:
   HostLink(const HostLink&);
@@ -165,6 +209,7 @@ class HostLink {
   static void* workerMain(void* self);
   void runPull();
   void runWorker();
+  void wantChannel(const std::string& appName, const std::string& rev, bool force);
 
   std::string mBaseUrl;
 
@@ -176,11 +221,22 @@ class HostLink {
 
   Snapshot mSnapshot;
 
-  // Channel frames. mWantApp is what the UI asked for; mHaveApp is what the
-  // worker last delivered. They differ exactly while a fetch is pending.
+  // Channel frames. mWantApp/mWantRev is what the UI asked for; mHaveApp is
+  // what the worker last delivered.
+  //
+  // The GATE is the serial, not the app name. Every genuinely new request bumps
+  // it, and the worker compares serials — so "the same channel, new content"
+  // and "the same channel, stale render" are both askable, which keying on the
+  // name alone made structurally impossible. Zero means "no request", so a
+  // fetch in flight always carries a non-zero serial and clearing mFetchingSeq
+  // to 0 is unambiguous.
   std::string mWantApp;
+  std::string mWantRev;
+  int mWantSeq;
+  int mHaveSeq;
+  int mFetchingSeq;
   std::string mHaveApp;
-  std::string mFetchingApp;
+  std::string mPendingRev;
   bool mFetchFailed;
   FrameBundle mPending;
   bool mPendingReady;

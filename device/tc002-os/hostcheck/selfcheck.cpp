@@ -25,6 +25,8 @@
 #include "core/Surface.h"
 #include "core/Text.h"
 #include "core/Transitions.h"
+#include "net/BleProtocol.h"
+#include "net/BleProvisionSession.h"
 #include "net/FrameBundle.h"
 #include "net/HostLink.h"
 #include "net/HttpClient.h"
@@ -52,6 +54,7 @@
 #include "ui/LauncherScreen.h"
 #include "ui/LevelOverlay.h"
 #include "ui/MusicScreen.h"
+#include "ui/ProvisionScreen.h"
 #include "ui/SettingsScreen.h"
 #include "ui/ZosLogo.h"
 #include "visual/Glyphs.h"
@@ -2155,6 +2158,18 @@ void checkStateDoc() {
                 doc.items()[i].label == kLabels[i],
             label);
     }
+    // The annotations, from the real encoder's bytes rather than from a
+    // hand-written approximation of them. This is the half the hand-written
+    // fixtures below cannot prove: that the service puts them where this parser
+    // looks, in the order it emits them, with the ids it repeats.
+    static const char* kRevs[6] = {"9f14c0b2ae31", "e90a8dc5b287", "0c33d18a7b45",
+                                   "", "", ""};
+    static const int kTtls[6] = {60000, 10000, 30000, 0, 0, 0};
+    for (int i = 0; i < 6; ++i) {
+      char label[64];
+      std::snprintf(label, sizeof(label), "item %d's revision and ttl round-trip", i);
+      check(doc.items()[i].rev == kRevs[i] && doc.items()[i].ttlMs == kTtls[i], label);
+    }
   }
   check(doc.focusIndex() == 2, "focus resolves to its index");
 
@@ -2339,6 +2354,101 @@ void checkStateDoc() {
                "lyric\tWasurerarenai hito\nlyricat\t40500\nlyricend\t44000\nmenu\t0\n");
   check(window.lyricStartMs() == 40500 && window.lyricEndMs() == 44000,
         "the lyric window is read as absolute track milliseconds");
+
+  // --- the annotations that make an edit visible ---------------------------
+  // `rev` and `ttl` are separate keys rather than extra fields on `item`,
+  // because this parser matches `item` on a strict arity of four: a fifth field
+  // would drop every menu entry and take the channel ring with it.
+  StateDoc annotated;
+  check(annotated.parse("seq\t20\nmenu\t3\n"
+                        "item\tchannel\tbtc\tA\n"
+                        "rev\tbtc\tdeadbeef0001\n"
+                        "ttl\tbtc\t30000\n"
+                        "item\tchannel\tmatrixclock\tB\n"
+                        "rev\tmatrixclock\te90a8dc5b287\n"
+                        "ttl\tmatrixclock\t10000\n"
+                        "item\tsettings\tsettings\tC\n"),
+        "a document carrying revisions and ttls parses");
+  check(annotated.items().size() == 3, "and the annotations are not mistaken for items");
+  if (annotated.items().size() == 3) {
+    check(annotated.items()[0].rev == "deadbeef0001" && annotated.items()[0].ttlMs == 30000,
+          "the first channel's annotations land on the first channel");
+    check(annotated.items()[1].rev == "e90a8dc5b287" && annotated.items()[1].ttlMs == 10000,
+          "and the second's on the second — matched by id, not by position");
+    check(annotated.items()[2].rev.empty() && annotated.items()[2].ttlMs == 0,
+          "an item nobody annotated carries neither");
+  }
+
+  // Order independence, which is the entire reason each record repeats its id.
+  StateDoc reordered;
+  reordered.parse("seq\t21\nmenu\t2\nrev\tb\tsecond\nttl\ta\t30000\n"
+                  "item\tchannel\ta\tA\nitem\tchannel\tb\tB\nrev\ta\tfirst\n");
+  check(reordered.items().size() == 2 && reordered.items()[0].rev == "first" &&
+            reordered.items()[0].ttlMs == 30000 && reordered.items()[1].rev == "second",
+        "annotations find their item whatever order they arrive in");
+
+  StateDoc orphan;
+  orphan.parse("seq\t22\nmenu\t1\nitem\tchannel\ta\tA\nrev\tgone\tzzz\nttl\tgone\t9000\n");
+  check(orphan.items().size() == 1 && orphan.items()[0].rev.empty(),
+        "an annotation naming a channel this menu does not have is dropped");
+
+  // The ttl floor. A refresh costs this device a whole frame bundle over the
+  // radio that is also carrying the long poll, and the service caches a render
+  // for 5 s — so a shorter ttl cannot produce a new pixel, it can only produce
+  // a download loop.
+  StateDoc floored;
+  floored.parse("seq\t23\nmenu\t1\nitem\tchannel\ta\tA\nttl\ta\t1000\n");
+  check(floored.items()[0].ttlMs == tcos::StateDoc::kMinTtlMs,
+        "a ttl below the device's own floor is raised to it");
+  StateDoc nonsense;
+  nonsense.parse("seq\t24\nmenu\t2\nitem\tchannel\ta\tA\nttl\ta\t0\n"
+                 "item\tchannel\tb\tB\nttl\tb\t-5\n");
+  check(nonsense.items()[0].ttlMs == 0 && nonsense.items()[1].ttlMs == 0,
+        "a zero or negative ttl reads as 'does not expire' rather than 'expire now'");
+
+  // An OLDER service, which is the compatibility direction that actually ships:
+  // the firmware is flashed by hand, the service updates itself.
+  StateDoc legacy;
+  legacy.parse("seq\t25\nmenu\t1\nitem\tchannel\tbtc\tA\n");
+  check(legacy.items().size() == 1 && legacy.items()[0].rev.empty() &&
+            legacy.items()[0].ttlMs == 0,
+        "a menu with no rev/ttl lines yields exactly what it did before they existed");
+
+  // --- the signature the channel ring is rebuilt on ------------------------
+  // Keyed on kind/id/label alone this answered "nothing changed" to every
+  // content edit ever made, which is where the news died before it reached the
+  // ring at all.
+  const std::string signatureA = tcos::menuSignature(annotated.items());
+  StateDoc edited;
+  edited.parse("seq\t26\nmenu\t3\n"
+               "item\tchannel\tbtc\tA\n"
+               "rev\tbtc\tdeadbeef0001\n"
+               "ttl\tbtc\t30000\n"
+               "item\tchannel\tmatrixclock\tB\n"
+               "rev\tmatrixclock\t0000feed9999\n"   // the same channel, new pixels
+               "ttl\tmatrixclock\t10000\n"
+               "item\tsettings\tsettings\tC\n");
+  check(tcos::menuSignature(edited.items()) != signatureA,
+        "an edit that moves only a revision moves the signature");
+  StateDoc republished;
+  republished.parse("seq\t27\nmenu\t3\n"
+                    "item\tchannel\tbtc\tA\n"
+                    "rev\tbtc\tdeadbeef0001\n"
+                    "ttl\tbtc\t30000\n"
+                    "item\tchannel\tmatrixclock\tB\n"
+                    "rev\tmatrixclock\te90a8dc5b287\n"
+                    "ttl\tmatrixclock\t10000\n"
+                    "item\tsettings\tsettings\tC\n");
+  check(tcos::menuSignature(republished.items()) == signatureA,
+        "and a republished identical menu does not — the ring is not rebuilt for a lyric");
+  StateDoc retimed;
+  retimed.parse("seq\t28\nmenu\t1\nitem\tchannel\tbtc\tA\nrev\tbtc\tdeadbeef0001\n"
+                "ttl\tbtc\t45000\n");
+  StateDoc sameButFaster;
+  sameButFaster.parse("seq\t29\nmenu\t1\nitem\tchannel\tbtc\tA\nrev\tbtc\tdeadbeef0001\n"
+                      "ttl\tbtc\t30000\n");
+  check(tcos::menuSignature(retimed.items()) != tcos::menuSignature(sameButFaster.items()),
+        "a changed refresh interval reaches the ring too — it is what times the next fetch");
 }
 
 // A scriptable stand-in for zknet: every predicate is a field the test sets, so
@@ -2439,7 +2549,10 @@ class FakeWifi : public tcos::WifiPolicy::Actuator {
 
 // A bundle the FrameBundle decoder accepts, built here rather than loaded from
 // a fixture so a screen test can choose its own frame count and colours.
-std::string makeBundle(int frames, int delayMs) {
+// `tint` goes in the GREEN channel, which is how a test says WHICH bundle is on
+// the panel rather than which frame of one. That is the question the refresh
+// path asks: two renders of the same channel differ only in their pixels.
+std::string makeBundleTinted(int frames, int delayMs, int tint) {
   std::string out("TCF1");
   out.push_back(static_cast<char>(frames & 0xFF));
   out.push_back(static_cast<char>((frames >> 8) & 0xFF));
@@ -2452,11 +2565,15 @@ std::string makeBundle(int frames, int delayMs) {
       // Frame index encoded in the red channel, so a test can assert WHICH
       // frame is on screen rather than merely that something is.
       out.push_back(static_cast<char>(f + 1));
-      out.push_back(static_cast<char>(0));
+      out.push_back(static_cast<char>(tint & 0xFF));
       out.push_back(static_cast<char>(0));
     }
   }
   return out;
+}
+
+std::string makeBundle(int frames, int delayMs) {
+  return makeBundleTinted(frames, delayMs, 0);
 }
 
 void checkHttpClient() {
@@ -2522,6 +2639,31 @@ void checkHttpClient() {
         "a truncated chunk is a failure rather than a partial body");
   check(!tcos::HttpClient::parseResponse("HTTP/1.0 200 OK\r\nno terminator", &status, &body),
         "headers with no blank line are incomplete");
+
+  // Headers reach the caller, because /api/os/frames answers with the revision
+  // it actually served. Without that the device can only record the revision
+  // the state document happened to advertise when it decided to ask, and a save
+  // landing in between costs a redundant ~900 KB round trip.
+  tcos::HttpClient::Response annotated;
+  check(tcos::HttpClient::parseResponse(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+            "X-Os-Rev: e90a8dc5b287\r\nContent-Length: 2\r\n\r\nok",
+            &annotated.status, &annotated.body, &annotated.headers),
+        "a response with headers parses");
+  check(annotated.header("x-os-rev") == "e90a8dc5b287",
+        "and the served revision is readable, whatever case the peer spelled it in");
+  check(annotated.header("content-type") == "application/octet-stream",
+        "so is any other header");
+  check(annotated.header("x-absent").empty(), "an absent header is empty, not garbage");
+  // "\r\nrev:" must not match inside "\r\nx-os-rev:", or a service that ever
+  // sends both would hand the device the wrong one.
+  check(annotated.header("rev").empty(), "a header name is not matched as another's tail");
+  tcos::HttpClient::Response bare;
+  check(tcos::HttpClient::parseResponse("HTTP/1.0 200 OK\r\nX: y\r\n\r\nb", &bare.status,
+                                        &bare.body, &bare.headers),
+        "a response from a service that sends no revision still parses");
+  check(bare.header("x-os-rev").empty(),
+        "and reports no revision rather than an invented one");
 
   // The two halves of this firmware's HTTP, driven against each other over a
   // real socket. A mock would only prove the client agrees with my reading of
@@ -2591,7 +2733,7 @@ void checkChannelRing() {
   ring.onEnter(0);
   check(ring.count() == 2, "the ring takes the channel list");
   check(ring.currentApp() == "btc", "and starts on the first channel");
-  check(ring.takeSelectionChanged(), "entering asks for the settled channel's frames");
+  check(ring.takeSelectionChanged(), "the first menu asks for the settled channel's frames");
   check(!ring.takeSelectionChanged(), "and asks exactly once");
 
   // Before the frames land the name is the only thing there is to draw.
@@ -2601,7 +2743,7 @@ void checkChannelRing() {
 
   tcos::FrameBundle bundle;
   check(bundle.parse(makeBundle(4, 100)), "the test bundle decodes");
-  ring.adoptFrames(bundle, "btc", 1000);
+  ring.adoptFrames(bundle, "btc", "", 1000);
   check(ring.status() == tcos::ChannelRingScreen::kReady, "frames for the settled channel are adopted");
   ring.render(out, 1000);
   check(out.getPixel(0, 0).r == 1, "playback starts at frame 0");
@@ -2612,7 +2754,7 @@ void checkChannelRing() {
   // channel paints over the one the user is actually looking at.
   tcos::FrameBundle stale;
   check(stale.parse(makeBundle(2, 100)), "a second bundle decodes");
-  ring.adoptFrames(stale, "flux", 1300);
+  ring.adoptFrames(stale, "flux", "", 1300);
   ring.render(out, 1300);
   check(out.getPixel(0, 0).r != 0, "a bundle for a channel we are not on is ignored");
   check(ring.currentApp() == "btc", "and does not move the ring");
@@ -2626,7 +2768,7 @@ void checkChannelRing() {
   // Pause holds the frame that is up, not frame 0.
   tcos::FrameBundle fluxFrames;
   check(fluxFrames.parse(makeBundle(4, 100)), "a bundle for the new channel decodes");
-  ring.adoptFrames(fluxFrames, "flux", 3000);
+  ring.adoptFrames(fluxFrames, "flux", "", 3000);
   ring.render(out, 3250);
   check(out.getPixel(0, 0).r == 3, "the new channel plays");
   ring.onInput(tcos::kInputPress, 3250);
@@ -2650,7 +2792,7 @@ void checkChannelRing() {
   // The rail is the one piece of chrome the page keeps, and only briefly: it
   // paints over a row of the content the page exists to show.
   ring.onInput(tcos::kInputTurnCw, 10000);
-  ring.adoptFrames(fluxFrames, ring.currentApp(), 10000);
+  ring.adoptFrames(fluxFrames, ring.currentApp(), "", 10000);
   Surface justMoved(52, 16);
   ring.render(justMoved, 10100);
   Surface settled(52, 16);
@@ -2665,6 +2807,230 @@ void checkChannelRing() {
   }
   check(railJust > 0, "the rail is up just after a move");
   check(railLater == 0, "and gone once the user has settled on a channel");
+}
+
+// "我把字改了，预览更新了，机器没更新——得旋一下旋钮再旋回来。"
+//
+// The regression suite for that sentence, driven end to end: real service bytes
+// through the real parser, the real menu-to-ring mapping, the real screen and
+// the real link gate, in osLogic's own order. Every check below fails on the
+// firmware as it stood, and each fails for its own independent reason — the
+// document had no vocabulary for a changed render, the ring kept its frames
+// through every republish, and the link could not be asked twice for one
+// channel. Turning the knob away and back was the only gesture that got past
+// all three, which is exactly why it was the workaround the user found.
+void checkChannelRefreshPath() {
+  using tcos::ChannelRingScreen;
+  using tcos::HostLink;
+  using tcos::StateDoc;
+
+  // --- the link's gate -----------------------------------------------------
+  // No threads: start() is never called, so nothing here opens a socket. What
+  // is under test is which asks are allowed to reach the network at all.
+  HostLink link;
+  check(link.channelRequestCount() == 0, "a link nobody has asked anything of has no request");
+  link.selectChannel("matrixclock", "e90a8dc5b287");
+  check(link.channelRequestCount() == 1, "selecting a channel raises one request");
+  link.selectChannel("matrixclock", "e90a8dc5b287");
+  link.selectChannel("matrixclock", "e90a8dc5b287");
+  check(link.channelRequestCount() == 1,
+        "re-asking for content already asked for raises none — a screen may call this every tick");
+  link.selectChannel("matrixclock", "0000feed9999");
+  check(link.channelRequestCount() == 2,
+        "the SAME channel at a new revision is a new request — the lock this whole change opens");
+  link.selectChannel("btc", "0000feed9999");
+  check(link.channelRequestCount() == 3, "and so is a different channel");
+  link.refreshChannel("btc", "0000feed9999");
+  check(link.channelRequestCount() == 4,
+        "a forced refresh asks even though nothing about the channel moved");
+  link.selectChannel("btc", "0000feed9999");
+  check(link.channelRequestCount() == 4, "which does not make the next ordinary ask fire");
+  // An older service sends no revision. Empty compares equal to empty, so such
+  // a device keeps exactly the behaviour it has always had: one fetch per
+  // channel change, and no content-driven refresh at all.
+  HostLink legacyLink;
+  legacyLink.selectChannel("btc", "");
+  legacyLink.selectChannel("btc", "");
+  check(legacyLink.channelRequestCount() == 1,
+        "against an older service a re-select is still a no-op, exactly as before");
+
+  // --- the document, the mapping and the screen ----------------------------
+  // Verbatim OsLinkHub.serialize() shape, annotations included. `menu` is only
+  // a hint and `settings` is in here because the mapping has to drop it.
+  static const char* kDocA =
+      "seq\t30\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
+      "menu\t2\n"
+      "item\tchannel\tmatrixclock\t\xE6\x95\xB0\xE5\xAD\x97\xE9\x9B\xA8\xE6\x97\xB6\xE9\x92\x9F\n"
+      "rev\tmatrixclock\te90a8dc5b287\n"
+      "ttl\tmatrixclock\t10000\n"
+      "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+  // The same menu after the user recoloured the channel: same id, same label,
+  // same position, same everything a pre-fix build could see.
+  static const char* kDocB =
+      "seq\t31\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
+      "menu\t2\n"
+      "item\tchannel\tmatrixclock\t\xE6\x95\xB0\xE5\xAD\x97\xE9\x9B\xA8\xE6\x97\xB6\xE9\x92\x9F\n"
+      "rev\tmatrixclock\t0000feed9999\n"
+      "ttl\tmatrixclock\t10000\n"
+      "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+
+  StateDoc docA;
+  StateDoc docB;
+  check(docA.parse(kDocA) && docB.parse(kDocB), "both documents parse");
+  const std::vector<ChannelRingScreen::Entry> menuA =
+      ChannelRingScreen::channelEntries(docA.items());
+  const std::vector<ChannelRingScreen::Entry> menuB =
+      ChannelRingScreen::channelEntries(docB.items());
+  check(menuA.size() == 1 && menuA[0].appName == "matrixclock" && menuA[0].ttlMs == 10000 &&
+            menuA[0].rev == "e90a8dc5b287",
+        "the mapping keeps the channels and everything the ring compares");
+
+  ChannelRingScreen ring;
+  Surface out(52, 16);
+  ring.setEntries(menuA, 0);
+  ring.onEnter(0);
+  check(ring.takeSelectionChanged(), "the first menu asks for the settled channel");
+  ring.takeRefreshDue(0);  // onEnter's own force, consumed the way the tick does
+
+  tcos::FrameBundle green;
+  check(green.parse(makeBundleTinted(2, 1000, 200)), "the first render decodes");
+  ring.adoptFrames(green, "matrixclock", "e90a8dc5b287", 1000);
+  ring.render(out, 1200);
+  check(out.getPixel(0, 0).g == 200, "and is what the panel is showing");
+
+  // 1. An UNCHANGED document must not re-fetch. A fix that re-asked on every
+  //    poll would stall the device: this menu is republished on every settings
+  //    change, and each fetch is up to ~900 KB over the radio that is also
+  //    holding the long poll.
+  ring.setEntries(menuA, 2000);
+  check(!ring.takeSelectionChanged(), "a republished identical menu asks for nothing");
+  check(!ring.takeRefreshDue(2000), "and does not count as staleness either");
+  check(ring.status() == ChannelRingScreen::kReady, "the frames stay up");
+  ring.render(out, 2200);
+  check(out.getPixel(0, 0).g == 200, "and keep playing, uninterrupted");
+
+  // 2. A CHANGED revision must invalidate, with no gesture from the user. This
+  //    is the reported bug, in one assertion.
+  ring.setEntries(menuB, 3000);
+  check(ring.currentApp() == "matrixclock", "the user is not moved off their channel");
+  check(ring.status() == ChannelRingScreen::kLoading, "but the stale frames are dropped");
+  check(ring.takeSelectionChanged(), "and the new ones are asked for");
+  // Both flags, the way the tick drains them: invalidate raises the forced one
+  // too, precisely so a knob wiggle that nets out to zero cannot leave the ring
+  // holding no frames and no outstanding request.
+  check(ring.takeRefreshDue(3000), "invalidate arms a FORCED refresh, not only a selection");
+  ring.render(out, 3100);
+  check(out.getPixel(0, 0).g != 200, "the panel is no longer showing the old render");
+
+  tcos::FrameBundle red;
+  check(red.parse(makeBundleTinted(2, 1000, 90)), "the new render decodes");
+  ring.adoptFrames(red, "matrixclock", "0000feed9999", 3500);
+  ring.render(out, 3600);
+  check(out.getPixel(0, 0).g == 90, "the edit is on the panel, knob untouched");
+  // ...and having arrived, it is not asked for again.
+  ring.setEntries(menuB, 4000);
+  check(!ring.takeSelectionChanged() && !ring.takeRefreshDue(4000),
+        "the menu that produced those frames does not invalidate them a second time");
+
+  // 3. An EXPIRED ttl must re-fetch, because nothing else can advance a clock:
+  //    大字天气钟 renders ten seconds of a time that is now in the past, and no
+  //    revision moves while it recedes.
+  check(!ring.takeRefreshDue(3500 + 9999), "a bundle inside its ttl is not stale");
+  check(ring.takeRefreshDue(3500 + 10000), "and is the moment it passes it");
+  check(!ring.takeRefreshDue(3500 + 10001),
+        "asking again immediately gets nothing — the deadline is re-armed when it fires, "
+        "so a service that cannot answer costs one attempt per ttl, not one per tick");
+  check(ring.status() == ChannelRingScreen::kReady,
+        "and the picture stays up while the refresh is in flight");
+  ring.render(out, 3500 + 10100);
+  check(out.getPixel(0, 0).g == 90, "showing the frames it still has, not a loading label");
+  // The refresh landing restarts the ttl from the arrival, not from the ask.
+  tcos::FrameBundle refreshed;
+  check(refreshed.parse(makeBundleTinted(2, 1000, 140)), "the refreshed render decodes");
+  ring.adoptFrames(refreshed, "matrixclock", "0000feed9999", 14000);
+  ring.render(out, 14100);
+  check(out.getPixel(0, 0).g == 140, "the clock advances without the user doing anything");
+  check(!ring.takeRefreshDue(14000 + 9999) && ring.takeRefreshDue(14000 + 10000),
+        "and the next expiry is measured from when these frames arrived");
+
+  // A failed refresh must not blank a channel that is up. Before frames were
+  // re-fetched on a ttl this could not happen — a fetch was only ever in flight
+  // for a page with nothing on it — so a dropped packet would now trade a
+  // working picture for 加载失败 on every hiccup.
+  ring.setStatus(ChannelRingScreen::kFailed, 15000);
+  check(ring.status() == ChannelRingScreen::kReady, "a failed refresh leaves the picture alone");
+  ring.setStatus(ChannelRingScreen::kOffline, 15100);
+  check(ring.status() == ChannelRingScreen::kReady, "and so does going offline");
+  ring.render(out, 15200);
+  check(out.getPixel(0, 0).g == 140, "the channel is still on the panel");
+
+  // 4. An OLDER SERVICE — no rev, no ttl — must behave exactly as it does
+  //    today. This is the direction that actually ships: the firmware is
+  //    flashed by hand and the service updates itself.
+  StateDoc old;
+  check(old.parse("seq\t40\nmenu\t1\nitem\tchannel\tmatrixclock\tX\n"),
+        "a document from before these keys parses");
+  const std::vector<ChannelRingScreen::Entry> menuOld =
+      ChannelRingScreen::channelEntries(old.items());
+  ChannelRingScreen legacyRing;
+  legacyRing.setEntries(menuOld, 0);
+  legacyRing.onEnter(0);
+  check(legacyRing.takeSelectionChanged(), "the first menu still asks");
+  check(legacyRing.takeRefreshDue(0), "and entering the ring still forces a refresh");
+  tcos::FrameBundle only;
+  check(only.parse(makeBundleTinted(2, 1000, 60)), "its render decodes");
+  legacyRing.adoptFrames(only, "matrixclock", "", 1000);
+  legacyRing.setEntries(menuOld, 2000);
+  check(!legacyRing.takeSelectionChanged(),
+        "a republished menu with no revision never invalidates — an absent rev means "
+        "'nothing to compare', not 'everything changed'");
+  check(!legacyRing.takeRefreshDue(2000) && !legacyRing.takeRefreshDue(1000 * 60 * 60),
+        "and with no ttl nothing ever expires, however long the device sits there");
+  legacyRing.render(out, 1000 * 60 * 60);
+  check(out.getPixel(0, 0).g == 60, "the frames it fetched once are the frames it keeps");
+
+  // 5. A NET-ZERO knob wiggle, drained in one tick — the ring and the link
+  //    together, in osLogic's own order.
+  //
+  //    Both input drains are per tick, not per input: the physical key queue is
+  //    swapped whole into one pass and the console pad loop dispatches
+  //    everything queued in the same pass, and TICK_MS is 40. So cw followed by
+  //    ccw at the same nowMs is reachable by a fast spin. The ring throws its
+  //    frames away and (app, rev) ends up exactly where it started, so a
+  //    selection-keyed ask is declined — 加载中 forever, no request outstanding,
+  //    and nothing that re-arms one until the user touches the knob again.
+  {
+    HostLink wiggleLink;
+    ChannelRingScreen wiggle;
+    wiggle.setEntries(menuB, 0);
+    wiggle.onEnter(0);
+    // The tick, as osLogic writes it: forced wins, and both flags are consumed.
+    const bool moved0 = wiggle.takeSelectionChanged();
+    if (wiggle.takeRefreshDue(0)) wiggleLink.refreshChannel(wiggle.currentApp(), wiggle.currentRev());
+    else if (moved0) wiggleLink.selectChannel(wiggle.currentApp(), wiggle.currentRev());
+    check(wiggleLink.channelRequestCount() == 1, "entering the ring asks once");
+
+    tcos::FrameBundle first;
+    check(first.parse(makeBundleTinted(2, 1000, 200)), "the render decodes");
+    wiggle.adoptFrames(first, "matrixclock", "0000feed9999", 1000);
+    check(wiggle.status() == ChannelRingScreen::kReady, "and is on the panel");
+
+    // One tick, two inputs, net zero movement. There is only one channel in
+    // this menu, so the ring cannot even end up somewhere else.
+    wiggle.onInput(tcos::kInputTurnCw, 2000);
+    wiggle.onInput(tcos::kInputTurnCcw, 2000);
+    const bool moved1 = wiggle.takeSelectionChanged();
+    if (wiggle.takeRefreshDue(2000)) wiggleLink.refreshChannel(wiggle.currentApp(), wiggle.currentRev());
+    else if (moved1) wiggleLink.selectChannel(wiggle.currentApp(), wiggle.currentRev());
+    check(wiggle.status() == ChannelRingScreen::kLoading, "the frames were discarded");
+    check(wiggleLink.channelRequestCount() == 2,
+          "and asked for again — a wiggle that nets out to nothing must not strand the page");
+
+    // And nothing else re-arms it, which is why the ask above has to happen on
+    // this tick: takeRefreshDue's ttl path requires kReady.
+    check(!wiggle.takeRefreshDue(2000 + 1000 * 60 * 60),
+          "there is no later rescue — a ttl cannot expire on a bundle that is not there");
+  }
 }
 
 void checkSettingsScreen() {
@@ -4435,6 +4801,965 @@ void checkProvisionLog() {
         "tmpfs breadcrumbs are the mistake this class exists to end");
 }
 
+// ---------------------------------------------------------------------------
+// BLE provisioning: the wire.
+//
+// Every byte this exercises arrives over an unauthenticated radio from anyone
+// within ten metres. There is no TCP handshake in front of it, no same-origin
+// check, no LAN membership — a GATT write is the only input this firmware takes
+// from a stranger. So the rejection paths get as much attention here as the
+// happy one, because on the device they are the paths that will actually be
+// walked by something that is not the console.
+void checkBleProtocol() {
+  using namespace tcos::ble;
+
+  // --- framing --------------------------------------------------------------
+  {
+    std::vector<std::string> chunks;
+    check(encode("hi", &chunks), "a short message encodes");
+    check(chunks.size() == 1, "into one chunk");
+    check(static_cast<unsigned char>(chunks[0][0]) == (kFlagFirst | kFlagLast | 0),
+          "carrying both FIRST and LAST and sequence zero");
+    check(chunks[0].substr(1) == "hi", "with the payload behind the header");
+  }
+  {
+    // 45 bytes: 19 + 19 + 7. The boundary that matters, because a message that
+    // fits exactly would hide an off-by-one in the LAST bit.
+    const std::string body(45, 'x');
+    std::vector<std::string> chunks;
+    check(encode(body, &chunks) && chunks.size() == 3, "45 bytes is three chunks");
+    check(static_cast<unsigned char>(chunks[0][0]) == (kFlagFirst | 0), "first is FIRST only");
+    check(static_cast<unsigned char>(chunks[1][0]) == 1, "the middle carries neither flag");
+    check(static_cast<unsigned char>(chunks[2][0]) == (kFlagLast | 2), "the last is LAST");
+    check(chunks[0].size() == 20 && chunks[1].size() == 20 && chunks[2].size() == 8,
+          "and no chunk exceeds the 20-byte ATT payload");
+
+    Reassembler rx;
+    std::string out;
+    const char* why = "";
+    check(rx.push(chunks[0].data(), 20, &out, &why) == Reassembler::kNeedMore, "one chunk in");
+    check(rx.push(chunks[1].data(), 20, &out, &why) == Reassembler::kNeedMore, "two chunks in");
+    check(rx.push(chunks[2].data(), 8, &out, &why) == Reassembler::kComplete, "and it completes");
+    check(out == body, "round-tripping the message exactly");
+  }
+  {
+    const std::string tooBig(tcos::ble::kMaxMessageBytes + 1, 'x');
+    std::vector<std::string> chunks;
+    check(!encode(tooBig, &chunks) && chunks.empty(),
+          "a message over the cap is refused rather than truncated");
+  }
+  {
+    // Every way a stranger can malform the stream, and each one must drop the
+    // buffer rather than leave a half-message that still parses.
+    Reassembler rx;
+    std::string out;
+    const char* why = "";
+    check(rx.push(0, 0, &out, &why) == Reassembler::kReject, "a zero-length chunk is rejected");
+    check(std::string(why) == "chunk-size", "and says so");
+
+    char oversized[32];
+    std::memset(oversized, 0, sizeof(oversized));
+    oversized[0] = static_cast<char>(kFlagFirst);
+    check(rx.push(oversized, 21, &out, &why) == Reassembler::kReject,
+          "a chunk longer than the MTU allows is rejected");
+
+    char cont[4];
+    cont[0] = 1;  // no FIRST, sequence 1
+    check(rx.push(cont, 4, &out, &why) == Reassembler::kReject,
+          "a continuation with no message in progress is an orphan");
+    check(std::string(why) == "orphan", "named as one");
+
+    char first[4];
+    first[0] = static_cast<char>(kFlagFirst);
+    first[1] = 'a';
+    check(rx.push(first, 2, &out, &why) == Reassembler::kNeedMore, "a fresh FIRST opens one");
+    char skipped[4];
+    skipped[0] = 5;  // sequence jumps from 1 to 5
+    check(rx.push(skipped, 2, &out, &why) == Reassembler::kReject, "a sequence gap is rejected");
+    check(std::string(why) == "seq", "named as one");
+    check(!rx.inProgress(), "and the partial message is dropped, not kept");
+  }
+  {
+    // Never setting LAST must not be a way to grow the heap of a 36 MB device.
+    Reassembler rx;
+    std::string out;
+    const char* why = "";
+    char chunk[20];
+    std::memset(chunk, 'x', sizeof(chunk));
+    bool rejected = false;
+    for (int i = 0; i < 64 && !rejected; ++i) {
+      chunk[0] = static_cast<char>((i == 0 ? kFlagFirst : 0) | (i & kSeqMask));
+      rejected = rx.push(chunk, 20, &out, &why) == Reassembler::kReject;
+    }
+    check(rejected && std::string(why) == "overflow",
+          "a message that never ends is cut off at the cap");
+  }
+  {
+    // A central that dropped mid-message and came back must not need a resync
+    // command; it just starts again.
+    Reassembler rx;
+    std::string out;
+    const char* why = "";
+    char first[4];
+    first[0] = static_cast<char>(kFlagFirst);
+    first[1] = 'a';
+    rx.push(first, 2, &out, &why);
+    char again[4];
+    again[0] = static_cast<char>(kFlagFirst | kFlagLast);
+    again[1] = 'b';
+    check(rx.push(again, 2, &out, &why) == Reassembler::kComplete, "a new FIRST restarts");
+    check(out == "b", "keeping only the new message");
+    check(rx.restarts() == 1, "and the discarded partial is counted, not silent");
+  }
+
+  // --- the body -------------------------------------------------------------
+  {
+    Message m;
+    const char* why = "";
+    check(m.parse("cmd\tjoin\nssid\thome\npsk\thunter2!\n", &why), "a well-formed document parses");
+    check(m.get("cmd") == "join" && m.get("ssid") == "home", "fields come back by key");
+    check(m.get("missing").empty() && !m.has("missing"), "an absent key is empty, not an error");
+    check(m.size() == 3, "with the field count kept");
+
+    Message noTrailing;
+    check(noTrailing.parse("cmd\thello", &why), "a missing trailing newline is fine");
+  }
+  {
+    // The rejection table. Each of these was a decision, and each decision is a
+    // way in if it goes the other way.
+    struct Case { const char* body; const char* why; const char* what; };
+    const Case cases[] = {
+        {"", "size", "an empty document"},
+        {"cmdjoin\n", "no-tab", "a line with no separator"},
+        {"cmd\tjoin\textra\n", "extra-tab", "a line with two separators"},
+        {"cmd\tjoin\n\nssid\thome\n", "empty-line", "a blank line in the middle"},
+        {"CMD\tjoin\n", "key-charset", "an upper-case key"},
+        {"cmd!\tjoin\n", "key-charset", "a punctuation key"},
+        {"\tjoin\n", "key-size", "an empty key"},
+        {"cmd\tjoin\ncmd\tscan\n", "duplicate", "a duplicated key"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      Message m;
+      const char* why = "";
+      const bool ok = m.parse(cases[i].body, &why);
+      check(!ok && std::string(why) == cases[i].why, std::string("rejects ") + cases[i].what);
+    }
+    // Duplicates are rejected rather than resolved on purpose: "first wins" and
+    // "last wins" are both defensible, and a difference of opinion between the
+    // two sides is a way to get one SSID checked and another one joined.
+
+    Message controlByte;
+    const char* why = "";
+    check(!controlByte.parse(std::string("ssid\tho\x01me\n"), &why) &&
+              std::string(why) == "value-control",
+          "rejects a control byte inside a value");
+
+    Message longKey;
+    check(!longKey.parse(std::string(17, 'k') + "\tv\n", &why) &&
+              std::string(why) == "key-size",
+          "rejects an over-long key");
+
+    Message longValue;
+    check(!longValue.parse("ssid\t" + std::string(161, 'v') + "\n", &why) &&
+              std::string(why) == "value-size",
+          "rejects an over-long value");
+
+    Message tooMany;
+    std::string many;
+    for (int i = 0; i < 13; ++i) {
+      char line[16];
+      std::snprintf(line, sizeof(line), "k%d\tv\n", i);
+      many += line;
+    }
+    check(!tooMany.parse(many, &why) && std::string(why) == "fields",
+          "rejects a document with more fields than the protocol has");
+  }
+
+  // --- what we send ---------------------------------------------------------
+  {
+    const std::string doc = buildState("joining", "home", "192.168.8.42", "", -1);
+    check(doc == "evt\tstate\nphase\tjoining\nssid\thome\nip\t192.168.8.42\n",
+          "a state document is exactly its four fields");
+    check(doc.find("psk") == std::string::npos,
+          "and there is no slot a passphrase could ride out in — buildState has no such "
+          "parameter, which is the same structural redaction ProvisionLog uses");
+
+    const std::string locked = buildState("locked", "", "", "locked-out", 60);
+    check(locked.find("err\tlocked-out\n") != std::string::npos, "an error rides along");
+    check(locked.find("retry\t60\n") != std::string::npos, "with the countdown when there is one");
+    check(buildState("idle", "", "", "", -1).find("retry") == std::string::npos,
+          "and no countdown when there is not");
+
+    // An SSID off the air is the one field of an outbound document a stranger
+    // writes. A tab in it would forge a field; a newline would forge a line.
+    const std::string forged = buildNet(0, 1, "evil\tssid\nrssi\t-1", -40, true, false);
+    check(forged.find("evil ssid rssi -1") != std::string::npos,
+          "a hostile SSID cannot forge fields on the way out");
+    check(buildNet(2, 7, "home", -41, true, true) ==
+              "evt\tnet\ni\t2\nn\t7\nssid\thome\nrssi\t-41\nsec\twpa\ncached\t1\n",
+          "a network line carries index, total, name, signal, security and provenance");
+    check(buildNet(0, 1, "open", -60, false, false).find("sec\topen\n") != std::string::npos,
+          "an unsecured network says so");
+    check(buildErr("frame") == "evt\terr\ncode\tframe\n", "an error is two fields");
+    check(buildHello("ZOS-A772", "abc-1", "CC:C4:B2:77:A7:72") ==
+              "evt\thello\nname\tZOS-A772\nbuild\tabc-1\nmac\tCC:C4:B2:77:A7:72\n",
+          "hello names the device, the build and the MAC");
+  }
+
+  // --- credentials ----------------------------------------------------------
+  {
+    // THE INJECTION. DeviceWifi::connect builds `SET_NETWORK %d psk "%s"` with
+    // snprintf; a quote closes the argument early and the rest of the string is
+    // read as further control-socket syntax. Twenty bytes from a stranger is
+    // exactly the shape of input that finds this.
+    check(!ssidIsSafe("ho\"me"), "an SSID with a quote is refused");
+    check(!ssidIsSafe("ho\\me"), "and so is one with a backslash");
+    check(!pskIsSafe("pass\"word"), "the same for a passphrase");
+    check(!ssidIsSafe(""), "an empty SSID is not a network");
+    check(!ssidIsSafe(std::string(33, 'a')), "33 bytes is past what 802.11 allows");
+    check(ssidIsSafe(std::string(32, 'a')), "32 is not");
+    check(ssidIsSafe("\xE5\xAE\xB6\xE9\x87\x8C"), "a UTF-8 SSID is perfectly legal");
+    check(!ssidIsSafe(std::string("a\nb")), "a newline in an SSID is refused");
+    check(pskIsSafe(""), "an empty passphrase is an open network, not an error");
+    check(!pskIsSafe("short7c"), "seven characters cannot be a WPA passphrase");
+    check(pskIsSafe("eightchr"), "eight can");
+    check(pskIsSafe(std::string(63, 'x')), "and so can sixty-three");
+    check(!pskIsSafe(std::string(64, 'x')),
+          "sixty-four would be a raw hex PSK, which this path would quote as a passphrase "
+          "and silently fail to associate with");
+  }
+
+  // --- the advertisement ----------------------------------------------------
+  {
+    std::vector<uint8_t> ad;
+    check(buildAdvertisingData("ZOS-A772", &ad), "the advertisement builds");
+    check(ad.size() == 31,
+          "and is exactly full — 3 flags + 18 UUID + 10 name, which is why the name is "
+          "eight characters");
+    check(ad[0] == 2 && ad[1] == 0x01 && ad[2] == 0x06,
+          "flags say LE General Discoverable and BR/EDR Not Supported (the vendor's 0x50 "
+          "says neither)");
+    check(ad[3] == 17 && ad[4] == 0x07, "then the complete list of 128-bit service UUIDs");
+    check(ad[5] == kServiceUuid[15] && ad[20] == kServiceUuid[0],
+          "with the UUID reversed, as ATT and AD both require");
+    check(ad[21] == 9 && ad[22] == 0x09, "then the complete local name");
+    check(std::string(reinterpret_cast<const char*>(&ad[23]), 8) == "ZOS-A772",
+          "which is the name the panel shows");
+
+    std::vector<uint8_t> longName;
+    check(buildAdvertisingData("ZOS-A772-EXTRA", &longName), "an over-long name still builds");
+    check(longName.size() == 31, "inside the same 31 bytes");
+    check(longName[22] == 0x08,
+          "demoted to Shortened Local Name — an overflowing payload is dropped whole by the "
+          "controller, which would leave the device advertising nothing");
+    check(!buildAdvertisingData("", &ad), "an empty name is refused");
+  }
+
+  // --- the code -------------------------------------------------------------
+  {
+    check(codeFromSeed(0) == "100000", "the code floor keeps six digits");
+    check(codeFromSeed(899999) == "999999", "and so does the ceiling");
+    check(codeFromSeed(900000) == "100000", "wrapping stays in range");
+    check(codeFromSeed(12345) == codeFromSeed(12345), "and it is a function of the seed alone");
+    check(tcos::text::measure(codeFromSeed(4).c_str()) == 36,
+          "six ASCII cells is 36 px, comfortably inside the 50 px the panel clips to");
+    check(uuidToString(kServiceUuid) == "7a1f5b60-2c8e-4f3a-9d51-0b4e6c8a2d10",
+          "the service UUID is the one the console filters its chooser on");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BLE provisioning: the state machine.
+void checkBleSession() {
+  using tcos::BleProvisionSession;
+
+  // A session that is advertising, connected, and has not proved anything yet.
+  // Repeated in each block rather than shared, because "what happened before"
+  // is the thing most of these are about.
+  struct Fixture {
+    BleProvisionSession session;
+    Fixture() {
+      session.configure("ZOS-A772", "test-build", "CC:C4:B2:77:A7:72");
+      session.beginAdvertising(4242, 0);
+      session.onConnect(0);
+    }
+    void authorise(int nowMs) {
+      session.onMessage("cmd\tcode\ncode\t" + session.code() + "\n", nowMs);
+      drain();
+    }
+    void drain() {
+      std::string out;
+      while (session.takeOutbound(&out)) last = out;
+      std::string a;
+      while (session.takeAudit(&a)) audits.push_back(a);
+    }
+    std::string last;
+    std::vector<std::string> audits;
+  };
+
+  // Authorisation gates BOTH mutators, and it answers rather than ignoring:
+  // silence would leave the console waiting for something that is not coming.
+  {
+    Fixture f;
+    f.session.onMessage("cmd\tscan\n", 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "an unauthorised scan reaches the radio not at all");
+    f.drain();
+    check(f.last.find("err\tno-code\n") != std::string::npos, "and is answered with no-code");
+  }
+
+  {
+    Fixture f;
+    check(f.session.code().size() == 6, "the panel has six digits to show");
+    f.session.onMessage("cmd\tcode\ncode\t000000\n", 100);
+    f.drain();
+    check(!f.session.authorised(), "a wrong code does not authorise");
+    for (int i = 0; i < 4; ++i) f.session.onMessage("cmd\tcode\ncode\t000000\n", 200 + i);
+    f.drain();
+    check(f.last.find("err\tlocked-out\n") != std::string::npos,
+          "five wrong tries lock the session out");
+    check(f.last.find("retry\t60\n") != std::string::npos, "with a countdown the console can show");
+    check(f.session.lockoutRemainingMs(210) > 0, "and the lockout is live");
+    // The right code while locked out must not work: otherwise the lockout is a
+    // message rather than a limit.
+    f.session.onMessage("cmd\tcode\ncode\t" + f.session.code() + "\n", 300);
+    check(!f.session.authorised(), "the correct code is refused while locked out");
+    const std::string held = f.session.code();
+    f.session.beginAdvertising(999, 400);
+    check(f.session.code() == held,
+          "and reconnecting cannot roll a fresh code — that would make the limit five tries "
+          "per reconnect, which is not a limit");
+    f.session.onMessage("cmd\tcode\ncode\t" + f.session.code() + "\n",
+                        400 + BleProvisionSession::kLockoutMs + 1);
+    check(f.session.authorised(), "once it expires the right code works again");
+  }
+
+  // The guard. Refused before the radio is touched, and reported at that
+  // moment: a submit silently dropped leaves a user waiting for a reconnection
+  // that was never going to happen.
+  {
+    Fixture f;
+    BleProvisionSession::Link link;
+    link.locked = true;
+    f.session.noteLink(link, 50);
+    f.authorise(100);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 150);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "a locked link never produces a join request");
+    f.drain();
+    check(f.last.find("err\tlink-locked\n") != std::string::npos, "and the console is told why");
+    check(f.last.find("phase\tlocked\n") != std::string::npos, "in the phase as well as the error");
+  }
+
+  // Credentials that could break the control socket never become a request.
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tjoin\nssid\tho\"me\npsk\thunter22\n", 150);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "an SSID with a quote is refused before it can reach SET_NETWORK");
+    f.drain();
+    check(f.last.find("code\targ\n") != std::string::npos, "with a distinct error");
+  }
+
+  // The happy join, and what happens to the passphrase afterwards.
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 200);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestJoin,
+          "an authorised join is handed to the caller");
+    check(ssid == "home" && psk == "hunter22", "with both credentials");
+    std::string ssid2;
+    std::string psk2;
+    check(f.session.takeRequest(&ssid2, &psk2) == BleProvisionSession::kRequestNone &&
+              psk2.empty(),
+          "and the passphrase is gone from the session the moment it is taken");
+    check(std::string(f.session.phase()) == "joining", "the phase follows");
+
+    f.drain();
+    for (size_t i = 0; i < f.audits.size(); ++i) {
+      check(f.audits[i].find("psk=redacted") != std::string::npos,
+            "every audit line says psk=redacted");
+      check(f.audits[i].find("hunter22") == std::string::npos,
+            "and no audit line can carry the passphrase — the builder is never given it");
+    }
+
+    BleProvisionSession::Link link;
+    link.joining = true;
+    link.wpaState = "ASSOCIATED";
+    f.session.noteLink(link, 300);
+    check(std::string(f.session.phase()) == "joining", "still joining while the policy tries");
+    link.joining = false;
+    link.online = true;
+    link.ssid = "home";
+    link.ip = "192.168.8.42";
+    f.session.noteLink(link, 4000);
+    check(std::string(f.session.phase()) == "online", "an address ends it");
+    f.drain();
+    check(f.last.find("ip\t192.168.8.42\n") != std::string::npos,
+          "and the console is given the address it was waiting for");
+  }
+
+  // The submit tick, in the order osLogic actually uses.
+  //
+  // Every BLE join used to report failure before the radio was asked. The
+  // caller sampled the link BEFORE handing the request to the policy, and at
+  // that instant the policy is in kStandby — a connected BLE console puts it
+  // there through the hotspot hold — so `joining` was false, the attempt was
+  // classified as no-ap, and the console was shown 找不到网络 on the very tick
+  // the user pressed submit, then the truth seconds later. osLogic now takes
+  // the request first; this latch is the belt-and-braces half, because a
+  // caller's ordering is not something this class can see.
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 200);
+    BleProvisionSession::Link link;
+    link.joining = false;  // the policy has not been asked yet
+    f.session.noteLink(link, 200);
+    check(std::string(f.session.phase()) == "joining",
+          "a link sampled before the policy was asked does not end the attempt");
+    check(std::string(f.session.lastError()).empty(), "and diagnoses nothing");
+
+    link.joining = true;
+    link.wpaState = "ASSOCIATED";
+    f.session.noteLink(link, 400);
+    link.joining = false;
+    link.wpaState = "SCANNING";
+    f.session.noteLink(link, 1200);
+    check(std::string(f.session.phase()) == "failed",
+          "once it HAS been seen working, a policy that stops is a real failure");
+
+    // And a policy that never associates at all is still ended, by the budget.
+    Fixture g;
+    g.authorise(100);
+    g.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 200);
+    BleProvisionSession::Link idle;
+    idle.joining = false;
+    g.session.noteLink(idle, 200 + BleProvisionSession::kJoinBudgetMs);
+    check(std::string(g.session.phase()) == "failed",
+          "the join budget is what stops the latch becoming a wait with no end");
+  }
+
+  // The three failures, never collapsed into one. Getting this wrong is the
+  // console-side twin of a bug this firmware has already shipped: a plausible
+  // message that sends the user to fix the wrong thing.
+  {
+    check(std::string(BleProvisionSession::classifyFailure(true, true, true, false)) == "dhcp",
+          "COMPLETED with no address is a lease problem, not a password problem");
+    check(std::string(BleProvisionSession::classifyFailure(true, true, true, true)).empty(),
+          "COMPLETED with an address is not a failure at all");
+    check(std::string(BleProvisionSession::classifyFailure(true, true, false, false)) == "bad-psk",
+          "a four-way handshake that never completes is the key");
+    check(std::string(BleProvisionSession::classifyFailure(true, false, false, false)) == "bad-psk",
+          "and so is an association that never completes — the only step left is the key");
+    check(std::string(BleProvisionSession::classifyFailure(false, false, false, false)) == "no-ap",
+          "never associating at all means nothing with that name answered");
+  }
+
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\twrongpass\n", 200);
+    std::string ssid;
+    std::string psk;
+    f.session.takeRequest(&ssid, &psk);
+    BleProvisionSession::Link link;
+    link.joining = true;
+    link.wpaState = "4WAY_HANDSHAKE";
+    f.session.noteLink(link, 300);
+    link.wpaState = "SCANNING";
+    link.joining = false;
+    f.session.noteLink(link, 5000);
+    check(std::string(f.session.phase()) == "failed", "a policy that gave up ends the attempt");
+    check(std::string(f.session.lastError()) == "bad-psk", "with the handshake it saw named");
+    check(f.session.code().size() == 6,
+          "and the session is still advertising a code, because a failure ends an attempt, "
+          "not the session");
+  }
+
+  {
+    // The state the policy never escapes: associated, no lease, forever. Without
+    // a budget of our own the console sits on a progress bar for good.
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 200);
+    std::string ssid;
+    std::string psk;
+    f.session.takeRequest(&ssid, &psk);
+    BleProvisionSession::Link link;
+    link.joining = true;
+    link.wpaState = "COMPLETED";
+    f.session.noteLink(link, 300);
+    f.session.noteLink(link, 200 + BleProvisionSession::kJoinBudgetMs - 10);
+    check(std::string(f.session.phase()) == "joining", "it waits out the whole budget");
+    f.session.noteLink(link, 200 + BleProvisionSession::kJoinBudgetMs + 10);
+    check(std::string(f.session.phase()) == "failed" &&
+              std::string(f.session.lastError()) == "dhcp",
+          "then reports the lease as the thing that is missing");
+  }
+
+  // The network list.
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tscan\n", 200);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestScan,
+          "an authorised scan reaches the caller");
+    std::vector<BleProvisionSession::Network> nets;
+    BleProvisionSession::Network net;
+    net.ssid = "home";
+    net.rssi = -41;
+    net.secured = true;
+    nets.push_back(net);
+    net.ssid = "guest";
+    net.rssi = -70;
+    net.secured = false;
+    nets.push_back(net);
+    net.ssid = "ev\"il";  // an SSID we could not round-trip through the supplicant
+    nets.push_back(net);
+    f.session.deliverScan(nets, false, 300);
+
+    std::vector<std::string> sent;
+    std::string out;
+    while (f.session.takeOutbound(&out)) sent.push_back(out);
+    int netLines = 0;
+    bool sawTotal = false;
+    for (size_t i = 0; i < sent.size(); ++i) {
+      if (sent[i].find("evt\tnet\n") == 0) {
+        ++netLines;
+        if (sent[i].find("n\t3\n") != std::string::npos) sawTotal = true;
+      }
+      check(sent[i].find("ev\"il") == std::string::npos,
+            "a network the supplicant could not be asked to join is not offered");
+    }
+    check(netLines == 2, "one line per usable network");
+    check(sawTotal,
+          "each carrying the total, so the console renders a determinate list rather than a "
+          "spinner that might never end");
+    check(std::string(f.session.phase()) != "scanning", "and the scan ends");
+  }
+
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("cmd\tscan\n", 200);
+    std::string ssid;
+    std::string psk;
+    f.session.takeRequest(&ssid, &psk);
+    f.session.noteScanFailed(300);
+    f.drain();
+    check(f.last.find("err\tscan-empty\n") != std::string::npos,
+          "a sweep that produced nothing says so rather than leaving the list blank forever");
+  }
+
+  // Malformed input from the air is answered and dropped, never acted on.
+  {
+    Fixture f;
+    f.authorise(100);
+    f.session.onMessage("this is not a document", 200);
+    f.drain();
+    // `doc`, not `frame`. A document this parser refused is permanent — the
+    // same bytes fail the same way — while `frame` means a lost chunk, which
+    // the next FIRST resynchronises. The console ignores `frame` on purpose, so
+    // sharing the code left it waiting out an 8 s reply timeout and reporting
+    // 时钟没有应答 about a device that had answered at once and said no.
+    check(f.last == "evt\terr\ncode\tdoc\n", "a malformed message is rejected whole");
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "and produces no work");
+    f.session.onFrameError("sequence", 260);
+    f.drain();
+    check(f.last == "evt\terr\ncode\tframe\n",
+          "and `frame` is kept for the transport fault it names");
+    f.session.onMessage("cmd\tdrop-tables\n", 250);
+    f.drain();
+    check(f.last == "evt\terr\ncode\tcmd\n", "an unknown command is refused by name");
+  }
+
+  // hello answers before authorisation, and says which of the two reasons the
+  // console cannot proceed for.
+  {
+    Fixture f;
+    f.session.onMessage("cmd\thello\n", 100);
+    std::vector<std::string> sent;
+    std::string out;
+    while (f.session.takeOutbound(&out)) sent.push_back(out);
+    check(sent.size() >= 2 && sent[0].find("evt\thello\n") == 0, "hello identifies the device");
+    check(sent[0].find("name\tZOS-A772\n") != std::string::npos,
+          "with the same name the panel and the advertisement carry");
+    check(sent[1].find("err\tno-code\n") != std::string::npos,
+          "and the state that follows asks for the code");
+  }
+  {
+    Fixture f;
+    BleProvisionSession::Link link;
+    link.locked = true;
+    f.session.noteLink(link, 50);
+    f.session.onMessage("cmd\thello\n", 100);
+    std::vector<std::string> sent;
+    std::string out;
+    while (f.session.takeOutbound(&out)) sent.push_back(out);
+    bool sawLocked = false;
+    for (size_t i = 0; i < sent.size(); ++i) {
+      if (sent[i].find("err\tlink-locked\n") != std::string::npos) sawLocked = true;
+    }
+    check(sawLocked,
+          "a guarded device says so on hello — before the user types a password into a "
+          "console that was never going to be listened to");
+  }
+
+  // A 6 Hz poll must not become six notifications a second.
+  {
+    Fixture f;
+    f.authorise(100);
+    BleProvisionSession::Link link;
+    link.online = true;
+    link.ip = "192.168.8.42";
+    for (int t = 200; t < 2000; t += 160) f.session.noteLink(link, t);
+    int count = 0;
+    std::string out;
+    while (f.session.takeOutbound(&out)) ++count;
+    check(count <= 2, "an unchanged link is published once, not on every poll");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BLE provisioning: the panel.
+void checkProvisionScreen() {
+  using tcos::ProvisionScreen;
+
+  // The stage priority, which is where the honesty rule lives.
+  {
+    ProvisionScreen::Inputs in;
+    in.guardLocked = true;
+    in.bleAdvertising = true;
+    in.online = true;
+    check(ProvisionScreen::stageFor(in) == ProvisionScreen::kGuardLocked,
+          "the guard beats everything, including being online");
+
+    ProvisionScreen::Inputs down;
+    down.bleAdvertising = false;
+    down.centralConnected = true;
+    down.authorised = true;
+    check(ProvisionScreen::stageFor(down) == ProvisionScreen::kRadioDown,
+          "an unconfirmed advertisement beats every stage that would print a name or a code");
+
+    ProvisionScreen::Inputs on;
+    on.bleAdvertising = true;
+    on.online = true;
+    on.joining = true;
+    check(ProvisionScreen::stageFor(on) == ProvisionScreen::kOnline, "an address wins over trying");
+
+    ProvisionScreen::Inputs link;
+    link.bleAdvertising = true;
+    link.centralConnected = true;
+    check(ProvisionScreen::stageFor(link) == ProvisionScreen::kLinkUp,
+          "a central that has not proved the code parks on it");
+    link.authorised = true;
+    check(ProvisionScreen::stageFor(link) == ProvisionScreen::kAdvertising,
+          "and stops parking once it has");
+
+    ProvisionScreen::Inputs idle;
+    idle.bleAdvertising = true;
+    check(ProvisionScreen::stageFor(idle) == ProvisionScreen::kAdvertising,
+          "on the air with nobody connected is simply advertising");
+  }
+
+  // THE HONESTY RULE, asserted where it can actually fail: a state carrying a
+  // name and a code, in the two stages that mean nothing is on the air.
+  {
+    ProvisionScreen::State state;
+    state.name = "ZOS-A772";
+    state.code = "418327";
+    state.portal = "192.168.8.42:80";
+    state.stage = ProvisionScreen::kRadioDown;
+    std::vector<ProvisionScreen::Page> pages = ProvisionScreen::pagesFor(state);
+    for (size_t i = 0; i < pages.size(); ++i) {
+      check(pages[i].text != "ZOS-A772" && pages[i].text != "418327",
+            "a radio that is not on the air shows neither the name nor the code — a user "
+            "tapping a chooser that will never list them is worse than a panel that says so");
+    }
+    check(pages.size() == 3, "it shows the label, the reason, and the way in that still works");
+    check(pages[2].text == "192.168.8.42:80",
+          "the hotspot page appears HERE and only here, where it is the only path left");
+
+    state.stage = ProvisionScreen::kGuardLocked;
+    pages = ProvisionScreen::pagesFor(state);
+    check(pages.size() == 2, "a guarded device says 配网 and 未解锁 and nothing else");
+    for (size_t i = 0; i < pages.size(); ++i) {
+      check(pages[i].text != "418327", "and offers no code it would refuse to act on");
+    }
+
+    state.stage = ProvisionScreen::kAdvertising;
+    pages = ProvisionScreen::pagesFor(state);
+    check(pages.size() == 3 && pages[1].text == "ZOS-A772" && pages[2].text == "418327",
+          "on the air it shows the two things a user standing at the clock needs");
+    check(pages[2].tone == ProvisionScreen::kToneCode, "with the code in its own tone");
+
+    state.stage = ProvisionScreen::kFailed;
+    state.failure = ProvisionScreen::kFailBadPsk;
+    pages = ProvisionScreen::pagesFor(state);
+    check(pages.size() == 3 && pages[1].text == "ZOS-A772",
+          "a failure keeps the name and the code up: the next thing the user does is retype");
+
+    state.stage = ProvisionScreen::kJoining;
+    state.ssid = "home";
+    pages = ProvisionScreen::pagesFor(state);
+    check(pages.size() == 2 && pages[1].text == "home",
+          "joining names the network, so 'you picked the wrong one' is visible on the device");
+
+    state.stage = ProvisionScreen::kOnline;
+    state.ip = "192.168.8.42";
+    pages = ProvisionScreen::pagesFor(state);
+    check(pages.size() == 2 && pages[1].text == "192.168.8.42", "online shows the address");
+  }
+
+  // The failure vocabulary is never guessed at.
+  {
+    check(ProvisionScreen::failureFor("bad-psk") == ProvisionScreen::kFailBadPsk, "密码错误");
+    check(ProvisionScreen::failureFor("no-ap") == ProvisionScreen::kFailNoAp, "找不到网络");
+    check(ProvisionScreen::failureFor("dhcp") == ProvisionScreen::kFailDhcp, "没有地址");
+    check(ProvisionScreen::failureFor("") == ProvisionScreen::kFailNone, "no error, no word");
+    check(ProvisionScreen::failureFor("scan-empty") == ProvisionScreen::kFailOther,
+          "an error this panel cannot name says 连接失败 rather than picking one of the three "
+          "and sending the user to fix the wrong thing");
+  }
+
+  // Widths, against the 50 px the screen clips to.
+  {
+    check(tcos::text::measure("ZOS-A772") == 48, "the name fits without a marquee");
+    check(tcos::text::measure("418327") == 36, "and so does the code");
+    // 蓝牙未启动 — five CJK cells, 60 px, wider than the window, so it marquees.
+    check(tcos::text::measure("\xE8\x93\x9D\xE7\x89\x99\xE6\x9C\xAA\xE5\x90\xAF\xE5\x8A\xA8") ==
+              60,
+          "the radio-down message is wider than the panel and must scroll");
+    check(tcos::text::marqueeCycleMs(48, 50) == 0, "something that fits has no cycle");
+    check(tcos::text::marqueeCycleMs(60, 50) ==
+              2 * tcos::text::kMarqueeDwellMs + 2 * ((10 * 1000) / tcos::text::kMarqueePxPerSecond),
+          "and a cycle is dwell, scroll, dwell, scroll back");
+  }
+
+  // THE CAROUSEL RULE. A page that scrolls must hold for its whole scroll, or
+  // the tail of the widest and most important strings is never seen at all.
+  {
+    check(ProvisionScreen::dwellMsFor("ZOS-A772") == ProvisionScreen::kMinDwellMs,
+          "a page that fits holds for the floor");
+    const std::string wide = "192.168.100.1:8080";
+    check(tcos::text::measure(wide.c_str()) > 50, "a long address does not fit");
+    check(ProvisionScreen::dwellMsFor(wide) == tcos::text::marqueeCycleMs(
+                                                   tcos::text::measure(wide.c_str()), 50),
+          "so it holds for exactly one full ping-pong");
+    check(ProvisionScreen::dwellMsFor(wide) > ProvisionScreen::kMinDwellMs,
+          "which is longer than the floor");
+    check(!ProvisionScreen::autoAdvances(ProvisionScreen::kLinkUp),
+          "the moment somebody connects, the code stops moving");
+    check(ProvisionScreen::autoAdvances(ProvisionScreen::kAdvertising),
+          "otherwise the carousel runs");
+  }
+
+  // And it renders: pixels on the panel, the rail carrying the stage, and the
+  // parked page being the code rather than the label.
+  {
+    Surface out(tcos::kPanelWidth, tcos::kPanelHeight);
+    ProvisionScreen screen;
+    ProvisionScreen::State state;
+    state.stage = ProvisionScreen::kAdvertising;
+    state.name = "ZOS-A772";
+    state.code = "418327";
+    screen.setState(state, 0);
+    screen.onEnter(0);
+    screen.render(out, 200);
+    check(litPixels(out) > 0, "an advertising panel is not blank");
+    check(screen.pageIndex() == 0, "and starts on the label");
+    screen.render(out, ProvisionScreen::kMinDwellMs + 10);
+    check(screen.pageIndex() == 1, "then advances on its own");
+
+    state.stage = ProvisionScreen::kLinkUp;
+    screen.setState(state, 5000);
+    check(screen.pageIndex() == 2,
+          "a central connecting parks the panel on the code — that instant is when the code "
+          "is the answer to the user's question");
+    screen.render(out, 5000 + ProvisionScreen::kMinDwellMs * 3);
+    check(screen.pageIndex() == 2, "and it stays there while they type it");
+    screen.onInput(tcos::kInputTurnCw, 9000);
+    check(screen.pageIndex() == 0, "though the knob still works");
+
+    // The rail is the only always-visible channel, and it is what tells a user
+    // the panel is alive while the text is mid-scroll.
+    Surface joining(tcos::kPanelWidth, tcos::kPanelHeight);
+    state.stage = ProvisionScreen::kJoining;
+    state.ssid = "home";
+    screen.setState(state, 10000);
+    screen.onEnter(10000);
+    screen.render(joining, 10300);
+    int railLit = 0;
+    for (int x = 0; x < tcos::kPanelWidth; ++x) {
+      const Color c = joining.getPixel(x, tcos::kPanelHeight - 1);
+      if (c.r || c.g || c.b) ++railLit;
+    }
+    check(railLit == tcos::kPanelWidth, "the joining rail is a full row with a sweep on it");
+
+    Surface online(tcos::kPanelWidth, tcos::kPanelHeight);
+    state.stage = ProvisionScreen::kOnline;
+    state.ip = "192.168.8.42";
+    screen.setState(state, 20000);
+    screen.onEnter(20000);
+    screen.render(online, 20300);
+    check(litPixels(online) > 0, "and an online panel shows the address it got");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The hotspot hold: what BLE provisioning needs from WifiPolicy.
+//
+// The hotspot is one-way on this radio — bringUpSoftAp() stops wpa_supplicant,
+// /etc/init.rc declares that service `disabled` + `oneshot`, and there is no
+// concurrent AP+station mode — so raising it under a console that is connected
+// over BLE would take away the one thing this architecture exists to provide.
+void checkHotspotHold() {
+  using tcos::WifiPolicy;
+
+  {
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.setHotspotHold(true, 0);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    check(policy.state() == WifiPolicy::kStandby,
+          "with a console connected, a device with no credentials waits in standby");
+    check(w.apStarts == 0, "and the hotspot never goes up");
+    check(w.scans == 0,
+          "nor is a sweep gathered for it — the console does its own, on demand, over a link "
+          "that does not cost the radio");
+    check(policy.isProvisioning(), "it is still 'waiting for a human'");
+    check(!policy.hotspotActive(),
+          "but the panel must not print an SSID and passphrase for a network that is not on "
+          "the air");
+  }
+
+  {
+    // Standby keeps the station radio, because that is the whole point: the
+    // console is about to ask it to scan and to join.
+    FakeWifi w;
+    w.stored = true;
+    // The credentials are issued fine and simply never associate — a moved
+    // router, a changed password. That is the timeout this state exists for.
+    w.assoc = false;
+    WifiPolicy policy(&w);
+    policy.setHotspotHold(true, 0);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    check(policy.state() == WifiPolicy::kConnecting, "it tries the stored network first");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs);
+    check(policy.state() == WifiPolicy::kStandby, "a connect timeout lands in standby too");
+    const int before = w.connects;
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40 + WifiPolicy::kConnectTimeoutMs +
+                WifiPolicy::kBackgroundRetryMs);
+    check(w.connects > before,
+          "and the stored network is still retried in the background — the usual cause is a "
+          "router that is merely slow to come back");
+    w.running = false;
+    policy.tick(WifiPolicy::kAdoptGraceMs + 50 + WifiPolicy::kConnectTimeoutMs +
+                WifiPolicy::kBackgroundRetryMs);
+    check(w.starts > 1 && policy.state() == WifiPolicy::kStartingWpa,
+          "a supplicant that dies in standby is revived, unlike in kProvisioning where "
+          "hostapd deliberately owns wlan0");
+  }
+
+  {
+    // Releasing the hold owes the hotspot to whoever comes next: BLE is not a
+    // path Safari or Firefox has, and a device nobody is driving must still fall
+    // back to the page that works everywhere.
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.setHotspotHold(true, 0);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    check(policy.state() == WifiPolicy::kStandby, "parked");
+    policy.setHotspotHold(false, 30000);
+    check(policy.state() == WifiPolicy::kScanning, "releasing it starts the sweep");
+    w.visible.push_back("neighbour");
+    policy.tick(30100);
+    check(policy.state() == WifiPolicy::kProvisioning && w.apUp,
+          "and the hotspot follows, in that order, exactly as it always has");
+  }
+
+  {
+    // THE TRIP NOTHING ELSE CAN MAKE. A device that already gave up and raised
+    // its hotspot has stopped the supplicant, and nothing in this firmware puts
+    // it back — a console connecting over BLE is the one event that can, because
+    // the person whose session it interrupts is the person asking.
+    FakeWifi w;
+    WifiPolicy policy(&w);
+    policy.begin(0);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    w.visible.push_back("neighbour");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30);
+    check(policy.state() == WifiPolicy::kProvisioning && w.apUp, "the hotspot is up");
+    const int stopsBefore = w.apStops;
+    const int startsBefore = w.starts;
+    policy.setHotspotHold(true, 60000);
+    check(w.apStops == stopsBefore + 1, "connecting over BLE tears the hotspot down");
+    check(w.starts == startsBefore + 1, "and restarts the supplicant it had stopped");
+    check(policy.state() == WifiPolicy::kStartingWpa, "so the radio can be a station again");
+  }
+
+  {
+    // settled() gates the BLE bring-up, which is `ctl.start hciattach` plus
+    // HCIDEVUP on the aic8800 — the part that also carries wlan0 and therefore
+    // adb. Starting it while the policy is mid-command races an association on
+    // the same chip, and the first tick after boot is the worst moment there
+    // is. Nothing but the states where the policy has stopped issuing commands
+    // may answer true.
+    FakeWifi w;
+    w.stored = true;
+    w.assoc = false;
+    WifiPolicy policy(&w);
+    check(!policy.settled(), "before begin() nothing has settled");
+    policy.begin(0);
+    check(policy.state() == WifiPolicy::kAdopting && !policy.settled(),
+          "the adopt grace is a wait, not a resting state");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 10);
+    policy.tick(WifiPolicy::kAdoptGraceMs + 20);
+    check(policy.state() == WifiPolicy::kConnecting && !policy.settled(),
+          "and neither is a supplicant being driven");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 30 + WifiPolicy::kConnectTimeoutMs);
+    check(policy.state() == WifiPolicy::kScanning && !policy.settled(),
+          "nor a sweep in flight");
+    w.visible.push_back("neighbour");
+    policy.tick(WifiPolicy::kAdoptGraceMs + 40 + WifiPolicy::kConnectTimeoutMs);
+    check(policy.state() == WifiPolicy::kProvisioning && policy.settled(),
+          "a device waiting on its hotspot has stopped touching the radio");
+
+    FakeWifi online;
+    online.stored = true;
+    online.running = true;
+    online.assoc = true;
+    online.address = true;
+    WifiPolicy up(&online);
+    up.begin(0);
+    up.tick(10);
+    check(up.state() == WifiPolicy::kOnline && up.settled(), "and so has one that is online");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -4469,6 +5794,8 @@ int main() {
   std::printf("  game screen ok\n");
   checkChannelRing();
   std::printf("  channel ring ok\n");
+  checkChannelRefreshPath();
+  std::printf("  channel refresh path ok\n");
   checkSettingsScreen();
   std::printf("  settings screen ok\n");
   checkMusicScreen();
@@ -4493,6 +5820,14 @@ int main() {
   std::printf("  wifi policy ok\n");
   checkSoftApRecipe();
   std::printf("  soft ap recipe ok\n");
+  checkHotspotHold();
+  std::printf("  hotspot hold ok\n");
+  checkBleProtocol();
+  std::printf("  ble protocol ok\n");
+  checkBleSession();
+  std::printf("  ble session ok\n");
+  checkProvisionScreen();
+  std::printf("  provision screen ok\n");
   checkProvisionLog();
   std::printf("  provision log ok\n");
   checkZosLogo();

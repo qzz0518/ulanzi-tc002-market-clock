@@ -22,6 +22,8 @@ namespace tcos {
  *   accent\tff8844
  *   menu\t3
  *   item\tchannel\tbtc\t市场轮播
+ *   rev\tbtc\te90a8dc5b287
+ *   ttl\tbtc\t10000
  *   item\tmusic\tmusic\t音乐
  *   item\tsettings\tsettings\t设置
  *   np\t1
@@ -47,7 +49,45 @@ class StateDoc {
     Kind kind;
     std::string id;
     std::string label;
+
+    /**
+     * Fingerprint of the frames behind this entry, or empty when the service
+     * does not send one.
+     *
+     * The device fetches a channel's pixels once and holds them, and an edit
+     * moves neither the id nor the label — which is why the only way to see a
+     * recoloured 灯牌 was to turn the knob to another channel and back. This is
+     * the field that makes an edit expressible on the wire at all.
+     *
+     * Empty must keep meaning "never invalidate", not "invalidate now": that is
+     * the shape an older service produces, and a firmware that read an absent
+     * rev as a change would re-download every channel on every poll.
+     */
+    std::string rev;
+
+    /**
+     * How long a fetched bundle stays true, in ms, or 0 for "does not expire".
+     *
+     * 大字天气钟 is ten seconds of frames of a clock, so a device that loops
+     * them forever is showing a minute that has already passed — and no rev
+     * moves, because nobody edited anything. Only the service knows how long
+     * its own render is good for, so it says rather than making us guess.
+     */
+    int ttlMs;
+
+    Item() : kind(kChannel), ttlMs(0) {}
   };
+
+  /**
+   * The device's own floor under `ttl`, below the service's own 1 s clamp.
+   *
+   * A refresh costs this device a whole frame bundle — up to ~900 KB over the
+   * same radio that is carrying the long poll — and the service holds a
+   * channel's render in a 5 s cache, so a device asking more often than that is
+   * guaranteed to be handed the bytes it already has. Anything faster is a
+   * download loop that cannot produce a new pixel.
+   */
+  static const int kMinTtlMs = 5000;
 
   StateDoc();
 
@@ -168,6 +208,24 @@ class StateDoc {
   uint32_t mAccentRgb;
   bool mHasAccent;
 };
+
+/**
+ * One line per item: everything the channel ring is rebuilt for, and nothing
+ * else.
+ *
+ * The document's sequence bumps on things the ring does not care about — a
+ * lyric line changes every few seconds — so the ring is rebuilt on this string
+ * moving rather than on the sequence. Which makes what it covers load-bearing:
+ * keyed on kind/id/label alone it answered "nothing changed" to every content
+ * edit the user has ever made, because an edit moves neither an id nor a label.
+ * The revision and the ttl are in here for exactly that reason.
+ *
+ * Lives beside the parser rather than in osLogic.cc so the host self-check can
+ * assert it: this comparison is the only thing standing between a saved edit
+ * and the panel, and it had no test at all while it was a static helper inside
+ * a translation unit that needs FlyThings headers to compile.
+ */
+std::string menuSignature(const std::vector<StateDoc::Item>& items);
 
 }  // namespace tcos
 

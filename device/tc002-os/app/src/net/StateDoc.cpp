@@ -1,5 +1,6 @@
 #include "net/StateDoc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 
 namespace tcos {
@@ -57,6 +58,18 @@ bool parseAccent(const std::string& text, uint32_t* out) {
   return true;
 }
 
+// `rev` and `ttl` annotate an item by id. They are collected while the document
+// is walked and applied afterwards rather than folded into "the item we just
+// appended": the service emits them directly after their item today, but it
+// repeats the id precisely so this parser does not have to depend on an
+// ordering it never agreed to. A dropped rev is a channel that stops refreshing
+// for good, which is too quiet a failure to key on line order.
+struct Annotation {
+  std::string id;
+  std::string rev;
+  int ttlMs;  // -1 when this record carries no ttl
+};
+
 bool kindFromName(const std::string& name, StateDoc::Kind* out) {
   if (name == "channel") { *out = StateDoc::kChannel; return true; }
   if (name == "music") { *out = StateDoc::kMusic; return true; }
@@ -101,6 +114,8 @@ bool StateDoc::parse(const std::string& body) {
   mLyricSkin = kDefaultSkin;
   mAccentRgb = 0;
   mHasAccent = false;
+
+  std::vector<Annotation> annotations;
 
   size_t start = 0;
   while (start <= body.size()) {
@@ -172,12 +187,63 @@ bool StateDoc::parse(const std::string& body) {
       item.id = fields[2];
       item.label = fields[3];
       mItems.push_back(item);
+    } else if (fields[0] == "rev" && n >= 3) {
+      Annotation note;
+      note.id = fields[1];
+      note.rev = fields[2];
+      note.ttlMs = -1;
+      if (!note.id.empty() && !note.rev.empty()) annotations.push_back(note);
+    } else if (fields[0] == "ttl" && n >= 3) {
+      const int declared = atoi(fields[2].c_str());
+      // A non-positive ttl is dropped rather than clamped: it means the service
+      // said something this build cannot make sense of, and "does not expire"
+      // is the safe reading. Anything positive is floored, because the cost of
+      // a refresh is ours and only we know it.
+      if (!fields[1].empty() && declared > 0) {
+        Annotation note;
+        note.id = fields[1];
+        note.ttlMs = declared < StateDoc::kMinTtlMs ? StateDoc::kMinTtlMs : declared;
+        annotations.push_back(note);
+      }
     }
     // Everything else — including `menu`, which is only a hint — is ignored on
     // purpose, so the service can add fields without bricking deployed firmware.
     if (end >= body.size()) break;
   }
+
+  for (size_t a = 0; a < annotations.size(); ++a) {
+    for (size_t i = 0; i < mItems.size(); ++i) {
+      if (mItems[i].id != annotations[a].id) continue;
+      if (!annotations[a].rev.empty()) mItems[i].rev = annotations[a].rev;
+      if (annotations[a].ttlMs >= 0) mItems[i].ttlMs = annotations[a].ttlMs;
+      break;
+    }
+    // An annotation naming an item that is not in this document is dropped. It
+    // cannot be held for the next one: the document is a whole picture, and a
+    // rev kept from a menu that no longer contains its channel would invalidate
+    // whatever took that id later.
+  }
   return mSeq >= 0;
+}
+
+std::string menuSignature(const std::vector<StateDoc::Item>& items) {
+  std::string out;
+  for (size_t i = 0; i < items.size(); ++i) {
+    char numbers[24];
+    snprintf(numbers, sizeof(numbers), "%d", (int)items[i].kind);
+    out += numbers;
+    out += '\x1f';
+    out += items[i].id;
+    out += '\x1f';
+    out += items[i].label;
+    out += '\x1f';
+    out += items[i].rev;
+    out += '\x1f';
+    snprintf(numbers, sizeof(numbers), "%d", items[i].ttlMs);
+    out += numbers;
+    out += '\x1e';
+  }
+  return out;
 }
 
 int StateDoc::focusIndex() const {

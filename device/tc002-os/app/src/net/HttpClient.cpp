@@ -14,31 +14,6 @@ namespace tcos {
 
 namespace {
 
-// Case-insensitive header lookup. Header names are not case sensitive and Bun
-// does not spell them the way this device's other peers do, so comparing them
-// verbatim would work in the self check and fail on the LAN.
-std::string headerValue(const std::string& headers, const std::string& name) {
-  std::string lowered;
-  lowered.reserve(headers.size());
-  for (size_t i = 0; i < headers.size(); ++i) {
-    const char c = headers[i];
-    lowered.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
-  }
-  std::string needle = "\r\n";
-  needle += name;  // callers pass an already-lowercase name
-  needle += ":";
-  std::string::size_type at = lowered.find(needle);
-  if (at == std::string::npos) return std::string();
-  at += needle.size();
-  std::string::size_type end = headers.find("\r\n", at);
-  if (end == std::string::npos) end = headers.size();
-  std::string value = headers.substr(at, end - at);
-  std::string::size_type first = value.find_first_not_of(" \t");
-  if (first == std::string::npos) return std::string();
-  std::string::size_type last = value.find_last_not_of(" \t");
-  return value.substr(first, last - first + 1);
-}
-
 bool sendAll(int fd, const std::string& data) {
   size_t sent = 0;
   while (sent < data.size()) {
@@ -78,6 +53,34 @@ int connectTo(const std::string& host, int port, int timeoutMs) {
 }
 
 }  // namespace
+
+std::string HttpClient::headerValue(const std::string& headers, const char* name) {
+  std::string lowered;
+  lowered.reserve(headers.size());
+  for (size_t i = 0; i < headers.size(); ++i) {
+    const char c = headers[i];
+    lowered.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+  }
+  // "\r\n" prefixed so the search cannot match inside the status line, and so a
+  // header name cannot be matched as the tail of a longer one.
+  std::string needle = "\r\n";
+  needle += name;  // callers pass an already-lowercase name
+  needle += ":";
+  std::string::size_type at = lowered.find(needle);
+  if (at == std::string::npos) return std::string();
+  at += needle.size();
+  std::string::size_type end = headers.find("\r\n", at);
+  if (end == std::string::npos) end = headers.size();
+  std::string value = headers.substr(at, end - at);
+  std::string::size_type first = value.find_first_not_of(" \t");
+  if (first == std::string::npos) return std::string();
+  std::string::size_type last = value.find_last_not_of(" \t");
+  return value.substr(first, last - first + 1);
+}
+
+std::string HttpClient::Response::header(const char* name) const {
+  return HttpClient::headerValue(headers, name);
+}
 
 bool HttpClient::parseUrl(const std::string& url, std::string* host, int* port,
                           std::string* path) {
@@ -145,38 +148,50 @@ bool HttpClient::dechunk(const std::string& raw, std::string* out) {
   return false;
 }
 
-bool HttpClient::parseResponse(const std::string& raw, int* status, std::string* body) {
+bool HttpClient::parseResponse(const std::string& raw, int* status, std::string* body,
+                               std::string* headersOut) {
   *status = -1;
   body->clear();
+  if (headersOut != 0) headersOut->clear();
   const std::string::size_type headerEnd = raw.find("\r\n\r\n");
   if (headerEnd == std::string::npos) return false;
-  const std::string headers = raw.substr(0, headerEnd);
+  // The leading "\r\n" is part of what is kept, so every lookup — here and by
+  // the caller later — searches the same string rather than each rebuilding it.
+  const std::string headers = "\r\n" + raw.substr(0, headerEnd);
+  if (headersOut != 0) *headersOut = headers;
 
   const std::string::size_type sp = headers.find(' ');
   if (sp == std::string::npos) return false;
   *status = ::atoi(headers.substr(sp + 1, 3).c_str());
   if (*status < 100) return false;
 
-  const std::string rest = raw.substr(headerEnd + 4);
-  // "\r\n" prefixed so the search cannot match inside the status line, which is
-  // also why the status line is never a header here.
-  const std::string encoding = headerValue("\r\n" + headers, "transfer-encoding");
-  if (encoding.find("chunked") != std::string::npos) return dechunk(rest, body);
+  // Sliced by offset rather than copied out. A frame bundle is up to ~900 KB on
+  // a 36 MB device whose README already records an OOM reboot from an oversized
+  // image, and a `rest` copy put a second whole body on the heap for the length
+  // of the parse — on top of `raw`, the destination `body`, and (since channels
+  // refresh on a ttl) the bundle the UI is still showing.
+  const std::string::size_type bodyAt = headerEnd + 4;
+  const size_t available = raw.size() - bodyAt;
+  const std::string encoding = headerValue(headers, "transfer-encoding");
+  if (encoding.find("chunked") != std::string::npos) {
+    // The one path that still copies. Nothing this firmware fetches is chunked
+    // — the service sends Content-Length — so the peak that matters is above.
+    return dechunk(raw.substr(bodyAt), body);
+  }
 
-  const std::string length = headerValue("\r\n" + headers, "content-length");
+  const std::string length = headerValue(headers, "content-length");
   if (!length.empty()) {
     const long declared = ::atol(length.c_str());
     if (declared < 0) return false;
     // Trust the smaller of the two: a short read is a truncated body, and a
     // longer one would mean reading into whatever followed.
-    const size_t want = static_cast<size_t>(declared) < rest.size()
-                            ? static_cast<size_t>(declared)
-                            : rest.size();
-    body->assign(rest, 0, want);
-    return static_cast<size_t>(declared) == rest.size();
+    const size_t want =
+        static_cast<size_t>(declared) < available ? static_cast<size_t>(declared) : available;
+    body->assign(raw, bodyAt, want);
+    return static_cast<size_t>(declared) == available;
   }
 
-  *body = rest;  // close-delimited
+  body->assign(raw, bodyAt, available);  // close-delimited
   return true;
 }
 
@@ -185,6 +200,7 @@ bool HttpClient::perform(const std::string& url, const char* method,
                          Response* out, int timeoutMs) {
   out->status = -1;
   out->body.clear();
+  out->headers.clear();
 
   std::string host;
   std::string path;
@@ -227,7 +243,7 @@ bool HttpClient::perform(const std::string& url, const char* method,
   ::close(fd);
   if (overflowed) return false;
 
-  return parseResponse(raw, &out->status, &out->body);
+  return parseResponse(raw, &out->status, &out->body, &out->headers);
 }
 
 bool HttpClient::get(const std::string& url, Response* out, int timeoutMs) {

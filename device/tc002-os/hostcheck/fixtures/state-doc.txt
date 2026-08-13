@@ -6,8 +6,14 @@ mode	spotlight
 skin	signal
 menu	6
 item	channel	btc	市场轮播
+rev	btc	9f14c0b2ae31
+ttl	btc	60000
 item	channel	matrixclock	数字雨时钟
+rev	matrixclock	e90a8dc5b287
+ttl	matrixclock	10000
 item	channel	notice	通知板
+rev	notice	0c33d18a7b45
+ttl	notice	30000
 item	music	music	音乐
 item	game	game	游戏
 item	settings	settings	设置

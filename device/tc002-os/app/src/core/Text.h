@@ -50,6 +50,17 @@ void drawCentered(Surface& out, const char* utf8, int y, const Color& color,
  */
 int marqueeOffset(int widthPx, int viewW, int elapsedMs);
 
+/**
+ * How long one full ping-pong takes, in ms; zero when the label already fits.
+ *
+ * Exists because any carousel that advances on a fixed period is unreadable the
+ * moment one of its pages marquees: the page changes halfway through the scroll
+ * and the user never sees the tail. A caller that auto-advances must dwell for
+ * at least this long — see ui/ProvisionScreen::dwellMsFor, which is where that
+ * rule is written down and asserted.
+ */
+int marqueeCycleMs(int widthPx, int viewW);
+
 // Marquee tuning, exposed so the host self-check asserts the real values.
 static const int kMarqueeDwellMs = 900;
 static const int kMarqueePxPerSecond = 14;

@@ -66,6 +66,17 @@ class DeviceWifi : public WifiPolicy::Actuator {
   void startScan();
   bool scanResults(std::vector<std::string>* out);
 
+  /**
+   * The same sweep as scanResults(), with the signal and the security flag kept.
+   *
+   * scanResults() is the SSID-only projection of THIS — one read of the
+   * supplicant's cache, one place where "an empty list is not a finished sweep"
+   * is decided. A second scan path was the obvious way to give the BLE console
+   * its RSSI column and would have been a second place for that contract to be
+   * got wrong, which is exactly how the setup page's dropdown shipped empty.
+   */
+  bool scanNetworks(std::vector<WpaCtrl::Network>* out);
+
   /** True when the guard file is present. Re-read every time, never cached. */
   static bool linkChangesAllowed();
 

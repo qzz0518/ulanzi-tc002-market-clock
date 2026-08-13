@@ -67,9 +67,49 @@ void renderRail(Surface& out, int index, int count, int sinceMs) {
 }  // namespace
 
 ChannelRingScreen::ChannelRingScreen()
-    : mStatus(kLoading), mStartedMs(0), mSettledMs(0), mPausedAtMs(0), mPaused(false),
-      mSelectionChanged(false), mBody(kPanelWidth, kPanelHeight),
-      mOutgoing(kPanelWidth, kPanelHeight), mHasOutgoing(false) {}
+    : mBundleAtMs(0), mStatus(kLoading), mStartedMs(0), mSettledMs(0), mPausedAtMs(0),
+      mPaused(false), mSelectionChanged(false), mForceRefresh(false),
+      mBody(kPanelWidth, kPanelHeight), mOutgoing(kPanelWidth, kPanelHeight),
+      mHasOutgoing(false) {}
+
+std::vector<ChannelRingScreen::Entry> ChannelRingScreen::channelEntries(
+    const std::vector<StateDoc::Item>& items) {
+  std::vector<Entry> channels;
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (items[i].kind != StateDoc::kChannel) continue;
+    Entry entry;
+    entry.appName = items[i].id;
+    entry.label = items[i].label;
+    entry.rev = items[i].rev;
+    entry.ttlMs = items[i].ttlMs;
+    channels.push_back(entry);
+  }
+  return channels;
+}
+
+void ChannelRingScreen::invalidate(int nowMs) {
+  mBundle = FrameBundle();
+  mBundleApp.clear();
+  mBundleRev.clear();
+  mStatus = kLoading;
+  mPaused = false;
+  mSelectionChanged = true;
+  // FORCED, not merely "the selection changed", and the difference is a page
+  // that never loads. Both drains are per tick, not per input: the physical key
+  // queue is swapped whole into one pass and the console pad loop dispatches
+  // everything queued in the same pass, so a fast knob spin can put cw and ccw
+  // into a single 40 ms tick. Net zero movement leaves (app, rev) exactly where
+  // it was, HostLink::wantChannel declines to bump its serial, and the ring has
+  // just thrown its frames away — 加载中 forever, with no request outstanding
+  // and nothing that re-arms one until the user touches the knob again.
+  //
+  // Unconditionally true of every caller: setEntries on a rev change or a
+  // vanished channel, selectApp on a real move, onInput on a turn. All three
+  // mean "I discarded the frames and need them back", and invalidate never runs
+  // on an unchanged revision, so this cannot loop.
+  mForceRefresh = true;
+  mSettledMs = nowMs;
+}
 
 void ChannelRingScreen::setEntries(const std::vector<Entry>& entries, int nowMs) {
   // Keep the user where they are across a republish: the service resends the
@@ -78,20 +118,22 @@ void ChannelRingScreen::setEntries(const std::vector<Entry>& entries, int nowMs)
   const std::string keep = currentApp();
   mEntries = entries;
   mRing.setCount(static_cast<int>(mEntries.size()));
-  if (!keep.empty()) {
-    for (size_t i = 0; i < mEntries.size(); ++i) {
-      if (mEntries[i].appName != keep) continue;
-      mRing.setIndex(static_cast<int>(i), nowMs);
-      return;
-    }
-    // The channel we were on is gone; whatever is at this position now is a
-    // different channel, so its frames are no longer ours.
-    mBundle = FrameBundle();
-    mBundleApp.clear();
-    mStatus = kLoading;
-    mSelectionChanged = true;
-    mSettledMs = nowMs;
+  for (size_t i = 0; i < mEntries.size() && !keep.empty(); ++i) {
+    if (mEntries[i].appName != keep) continue;
+    mRing.setIndex(static_cast<int>(i), nowMs);
+    // Still the same channel — but is it still the same pixels? An edit moves
+    // neither the name nor the position, so this comparison is the entire
+    // difference between a saved change reaching the panel and the user having
+    // to turn the knob away and back. An older service sends no revision at
+    // all, in which case both sides are empty and nothing is ever dropped.
+    if (mEntries[i].rev != mBundleRev) invalidate(nowMs);
+    return;
   }
+  // Either nothing was selected before — the first menu of the session, which
+  // is what arms the very first fetch — or the channel we were on is gone and
+  // whatever sits at this index now is a different one whose frames we do not
+  // have.
+  invalidate(nowMs);
 }
 
 const std::string& ChannelRingScreen::currentApp() const {
@@ -104,15 +146,22 @@ const std::string& ChannelRingScreen::currentLabel() const {
   return mEntries[static_cast<size_t>(mRing.index())].label;
 }
 
+const std::string& ChannelRingScreen::currentRev() const {
+  if (mEntries.empty()) return kEmptyString;
+  return mEntries[static_cast<size_t>(mRing.index())].rev;
+}
+
+int ChannelRingScreen::currentTtlMs() const {
+  if (mEntries.empty()) return 0;
+  return mEntries[static_cast<size_t>(mRing.index())].ttlMs;
+}
+
 bool ChannelRingScreen::selectApp(const std::string& appName, int nowMs) {
   for (size_t i = 0; i < mEntries.size(); ++i) {
     if (mEntries[i].appName != appName) continue;
     if (mRing.index() != static_cast<int>(i)) {
       mRing.setIndex(static_cast<int>(i), nowMs);
-      mSelectionChanged = true;
-      mSettledMs = nowMs;
-      mStatus = kLoading;
-      mPaused = false;
+      invalidate(nowMs);
     }
     return true;
   }
@@ -125,14 +174,40 @@ bool ChannelRingScreen::takeSelectionChanged() {
   return value;
 }
 
+bool ChannelRingScreen::takeRefreshDue(int nowMs) {
+  if (mForceRefresh) {
+    mForceRefresh = false;
+    return true;
+  }
+  // Only a bundle that is actually up can be stale. Anything else is already
+  // being asked for through takeSelectionChanged, and answering here too would
+  // put two requests on the wire for one event.
+  if (mStatus != kReady || mBundle.empty()) return false;
+  const int ttlMs = currentTtlMs();
+  if (ttlMs <= 0) return false;  // an older service says nothing; nothing expires
+  if (nowMs - mBundleAtMs < ttlMs) return false;
+  // Re-armed HERE rather than on arrival, so a fetch that fails — or one whose
+  // frames land for a channel we have since left — costs one attempt per ttl
+  // instead of one per tick. adoptFrames re-arms it again on success.
+  mBundleAtMs = nowMs;
+  return true;
+}
+
 void ChannelRingScreen::adoptFrames(FrameBundle& bundle, const std::string& appName,
-                                    int nowMs) {
+                                    const std::string& rev, int nowMs) {
   // Frames that finished downloading after the knob moved on are dropped, not
   // shown: without this check a slow channel paints over the one the user is
   // actually looking at.
   if (appName != currentApp()) return;
   mBundle.swap(bundle);
   mBundleApp = appName;
+  mBundleRev = rev;
+  mBundleAtMs = nowMs;
+  // Playback restarts rather than keeping its phase. A refresh exists because
+  // the pixels are new — a repainted 灯牌, or a clock whose frame 0 is the
+  // current minute — and resuming a new render halfway through would show a
+  // moment that has already gone by. It is also what the official firmware did
+  // on every push, so it is not a change in feel.
   mStartedMs = nowMs;
   mPaused = false;
   mStatus = mBundle.empty() ? kFailed : kReady;
@@ -140,6 +215,14 @@ void ChannelRingScreen::adoptFrames(FrameBundle& bundle, const std::string& appN
 
 void ChannelRingScreen::setStatus(Status status, int nowMs) {
   if (mStatus == status) return;
+  // A failed or offline REFRESH must never blank a channel that is already up.
+  // Before frames were re-fetched on a ttl this could not happen — a fetch was
+  // only ever in flight for a page with nothing on it — but now the ordinary
+  // failure is a dropped packet behind a picture the user is watching, and
+  // trading that picture for 加载失败 would make a working panel flicker every
+  // time the radio hiccuped. The refresh keeps retrying underneath; when it
+  // lands, adoptFrames puts the screen back on its own.
+  if (mStatus == kReady && !mBundle.empty()) return;
   mStatus = status;
   mSettledMs = nowMs;
 }
@@ -150,8 +233,12 @@ void ChannelRingScreen::onEnter(int nowMs) {
   mPaused = false;
   mHasOutgoing = false;
   // Re-ask on every entry: the ring is entered from the root, and the frames
-  // held from last time may be minutes stale.
-  mSelectionChanged = true;
+  // held from last time may be minutes stale. As a FORCED refresh rather than a
+  // selection change, because the selection genuinely has not changed — which
+  // is exactly why this line did nothing for as long as the link was keyed on
+  // the app name: it announced a move that had not happened, to a gate that
+  // only reacted to moves.
+  mForceRefresh = true;
 }
 
 bool ChannelRingScreen::onInput(Input input, int nowMs) {
@@ -170,12 +257,7 @@ bool ChannelRingScreen::onInput(Input input, int nowMs) {
     mHasOutgoing = true;
 
     mRing.turn(input == kInputTurnCw ? 1 : -1, nowMs);
-    mBundle = FrameBundle();
-    mBundleApp.clear();
-    mStatus = kLoading;
-    mPaused = false;
-    mSettledMs = nowMs;
-    mSelectionChanged = true;
+    invalidate(nowMs);
     return true;
   }
 

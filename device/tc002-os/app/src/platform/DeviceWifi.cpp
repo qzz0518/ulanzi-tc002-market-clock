@@ -18,6 +18,7 @@
 #include <net/NetUtils.h>
 
 #include "base/log.h"
+#include "net/BleProtocol.h"
 #include "platform/InstallMode.h"
 #include "platform/NetInfo.h"
 #include "platform/ProvisionLog.h"
@@ -530,6 +531,18 @@ bool DeviceWifi::softApRunning() {
 }
 
 bool DeviceWifi::scanResults(std::vector<std::string>* out) {
+  // The SSID-only projection of scanNetworks, not a second read of the socket.
+  // WifiPolicy wants names; the BLE console wants names, signal and whether a
+  // key is needed. Two callers, one sweep, one contract about what an empty list
+  // means.
+  std::vector<WpaCtrl::Network> nets;
+  const bool ok = scanNetworks(&nets);
+  out->clear();
+  for (size_t i = 0; i < nets.size(); ++i) out->push_back(nets[i].ssid);
+  return ok;
+}
+
+bool DeviceWifi::scanNetworks(std::vector<WpaCtrl::Network>* out) {
   out->clear();
   std::vector<WpaCtrl::Network> nets;
   ::pthread_mutex_lock(&mCtrlLock);
@@ -537,7 +550,7 @@ bool DeviceWifi::scanResults(std::vector<std::string>* out) {
   if (ok) ok = mCtrl.scanResults(&nets);
   ::pthread_mutex_unlock(&mCtrlLock);
   if (!ok) return false;
-  for (size_t i = 0; i < nets.size(); ++i) out->push_back(nets[i].ssid);
+  out->swap(nets);
 
   // CONTRACT (WifiPolicy::Actuator::scanResults): an empty list is "not done",
   // never "done, nothing there". SCAN_RESULTS reads the supplicant's cache,
@@ -605,6 +618,20 @@ bool DeviceWifi::connect(const std::string& ssid, const std::string& psk) {
   if (!linkChangesAllowed()) {
     mEverRefused = true;
     LOGE_TRACE("wifi: connect refused; sideloaded and /tmp/zos-allow-link absent");
+    return false;
+  }
+
+  // The control-socket commands below are built with snprintf and quote both
+  // values: `SET_NETWORK %d ssid "%s"`. A `"` or a `\` inside either would close
+  // the argument early and let the remainder be read as further supplicant
+  // syntax. Credentials now arrive from a GATT write — twenty bytes from anyone
+  // within ten metres, with no origin check of any kind — so the last line of
+  // defence belongs here, at the doorstep, and not only at the parser that
+  // happened to be in front of it this time. ble::ssidIsSafe is pure and pinned
+  // by the host check.
+  if (!ble::ssidIsSafe(ssid) || !ble::pskIsSafe(psk)) {
+    LOGE_TRACE("wifi: connect refused; credentials are not safe for the control socket");
+    ProvisionLog::device().log("WPA_REJECT", "reason=unsafe psk=redacted");
     return false;
   }
 
