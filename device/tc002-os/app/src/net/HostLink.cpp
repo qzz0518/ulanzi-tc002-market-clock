@@ -88,7 +88,14 @@ HostLink::HostLink()
       mTelRestarts(0),
       mTelBattery(-1),
       mTelCharging(false),
-      mTelFlashed(false) {
+      mTelFlashed(false),
+      mTelSleepOn(false),
+      mTelSleepStartMin(0),
+      mTelSleepEndMin(0),
+      mTelSleepIdleSec(0),
+      mTelSleepAsleep(false),
+      mTelSleepClockSynced(false),
+      mTelDirty(false) {
   ::pthread_mutex_init(&mLock, 0);
 }
 
@@ -270,9 +277,21 @@ void HostLink::runWorker() {
     }
 
     // --- telemetry ---------------------------------------------------------
-    if (now - lastReportMs >= static_cast<uint64_t>(kReportIntervalMs)) {
+    //
+    // On the cadence, OR immediately when the panel changed state. Reading the
+    // dirty flag needs the lock, so it is read here rather than folded into the
+    // condition above; the extra POST is at most one per sleep edge, which is
+    // twice a night.
+    bool telemetryDirty = false;
+    {
+      ::pthread_mutex_lock(&mLock);
+      telemetryDirty = mTelDirty;
+      ::pthread_mutex_unlock(&mLock);
+    }
+    if (telemetryDirty || now - lastReportMs >= static_cast<uint64_t>(kReportIntervalMs)) {
       lastReportMs = now;
       ::pthread_mutex_lock(&mLock);
+      mTelDirty = false;
       const std::string screen = mTelScreen;
       const std::string focus = mTelFocus;
       const std::string wifi = mTelWifi;
@@ -281,9 +300,20 @@ void HostLink::runWorker() {
       const int battery = mTelBattery;
       const bool charging = mTelCharging;
       const bool flashed = mTelFlashed;
+      const bool sleepOn = mTelSleepOn;
+      const int sleepStartMin = mTelSleepStartMin;
+      const int sleepEndMin = mTelSleepEndMin;
+      const int sleepIdleSec = mTelSleepIdleSec;
+      const bool sleepAsleep = mTelSleepAsleep;
+      const bool sleepClockSynced = mTelSleepClockSynced;
       ::pthread_mutex_unlock(&mLock);
 
-      char body[512];
+      // 1024, not 512. snprintf TRUNCATES silently, and a truncated JSON body
+      // makes the service's readJson answer 400 — which would not break the
+      // sleep block, it would kill telemetry entirely. The six fields below are
+      // ~110 bytes; the two 64-byte strings plus the SSID and IP already sat
+      // close enough to 512 that adding anything at all needed the headroom.
+      char body[1024];
       ::snprintf(body, sizeof(body),
                  "{\"screen\":\"%s\",\"focus\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
                  "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d,"
@@ -294,11 +324,18 @@ void HostLink::runWorker() {
                  // what a power cycle will bring back. Getting it wrong is the
                  // dangerous direction: promising the official firmware to
                  // someone whose flash holds ZOS.
-                 "\"flashed\":%s}",
+                 "\"flashed\":%s,"
+                 // 夜间休眠. `asleep` is what lets the console say 休眠中 rather
+                 // than show a black rectangle; the config is the EFFECTIVE one,
+                 // which is the only truth a settings form should render.
+                 "\"sleep\":{\"on\":%s,\"startMin\":%d,\"endMin\":%d,\"idleSec\":%d,"
+                 "\"asleep\":%s,\"clockSynced\":%s}}",
                  jsonEscape(screen).c_str(), jsonEscape(focus).c_str(),
                  jsonEscape(wifi).c_str(), jsonEscape(ip).c_str(),
                  static_cast<unsigned long long>(now - startedMs), freeKb(), restarts,
-                 battery, charging ? "true" : "false", flashed ? "true" : "false");
+                 battery, charging ? "true" : "false", flashed ? "true" : "false",
+                 sleepOn ? "true" : "false", sleepStartMin, sleepEndMin, sleepIdleSec,
+                 sleepAsleep ? "true" : "false", sleepClockSynced ? "true" : "false");
       HttpClient::Response response;
       HttpClient::perform(mBaseUrl + "/api/os/report", "POST", "application/json",
                           body, &response, 4000);
@@ -342,6 +379,7 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   // now-playing fields are: a snapshot assembled in two places is a snapshot
   // that will one day disagree with itself.
   mSnapshot.settings = doc.settings();
+  mSnapshot.sleep = doc.sleep();
   mSnapshot.inputs = doc.inputs();
   ::pthread_mutex_unlock(&mLock);
 }
@@ -435,7 +473,8 @@ void HostLink::sendMusicAction(const char* action) {
 void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
                             const std::string& wifi, const std::string& ip,
                             int supplicantRestarts, int batteryPercent, bool charging,
-                            bool flashed) {
+                            bool flashed, bool sleepOn, int sleepStartMin, int sleepEndMin,
+                            int sleepIdleSec, bool sleepAsleep, bool sleepClockSynced) {
   ::pthread_mutex_lock(&mLock);
   mTelScreen = screen;
   mTelFocus = focus;
@@ -445,6 +484,20 @@ void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
   mTelBattery = batteryPercent;
   mTelCharging = charging;
   mTelFlashed = flashed;
+  mTelSleepOn = sleepOn;
+  mTelSleepStartMin = sleepStartMin;
+  mTelSleepEndMin = sleepEndMin;
+  mTelSleepIdleSec = sleepIdleSec;
+  // The panel going dark or coming back is the only telemetry field a console
+  // ACTS on rather than displays, so it does not wait for the 10 s cadence: the
+  // console clears its canvas and says 已息屏 off this flag, and a stale `true`
+  // means a lit panel painted as a blank one for up to ten seconds after the
+  // user's own press woke it. The user then presses again — and that press is
+  // not swallowed, so it changes the channel. The mirror alone cannot fix it:
+  // the console must never infer sleep from the pixels.
+  if (sleepAsleep != mTelSleepAsleep) mTelDirty = true;
+  mTelSleepAsleep = sleepAsleep;
+  mTelSleepClockSynced = sleepClockSynced;
   ::pthread_mutex_unlock(&mLock);
 }
 

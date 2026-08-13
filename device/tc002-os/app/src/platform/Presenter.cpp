@@ -35,7 +35,7 @@ Presenter::~Presenter() {
   delete mImpl;
 }
 
-void Presenter::present(const Surface& surface) {
+void Presenter::present(const Surface& surface, int fadePercent) {
   if (surface.getWidth() != kVisibleWidth || surface.getHeight() != kHeight) {
     LOGE_TRACE("presenter: refusing a %dx%d surface", surface.getWidth(), surface.getHeight());
     return;
@@ -53,18 +53,28 @@ void Presenter::present(const Surface& surface) {
   // same copy the firmware has always done, rather than a scale that happens to
   // be a no-op. Nothing may sit between here and spi.write() that touches the
   // bytes again.
+  //
+  // 夜间休眠's fade rides in the SAME loop, beside the brightness scale, for the
+  // same reason: nothing new may sit between the render and spi.write() that
+  // touches the bytes a second time. Both extremes keep their own fast path —
+  // fadePercent 100 is byte-identical to what this always did, and 0 is a run
+  // of zeroes with no per-byte arithmetic at all, which is what the panel is
+  // sent once a second all night.
   const int step = DeviceControls::instance().brightness();
-  const bool unscaled = step >= kBrightnessSteps;
+  const bool unscaled = step >= kBrightnessSteps && fadePercent >= 100;
+  const bool blank = fadePercent <= 0;
 
   // mPadded keeps its zeroed tail across frames, so only the visible run is
   // copied; the off-panel columns were zeroed once in the constructor.
   for (int y = 0; y < kHeight; ++y) {
     const uint8_t* src = &mRgb[y * visibleBytes];
     uint8_t* dst = &mPadded[y * strideBytes];
-    if (unscaled) {
+    if (blank) {
+      for (int i = 0; i < visibleBytes; ++i) dst[i] = 0;
+    } else if (unscaled) {
       for (int i = 0; i < visibleBytes; ++i) dst[i] = src[i];
     } else {
-      for (int i = 0; i < visibleBytes; ++i) dst[i] = scaleByte(src[i], step);
+      for (int i = 0; i < visibleBytes; ++i) dst[i] = dimByte(src[i], step, fadePercent);
     }
   }
 

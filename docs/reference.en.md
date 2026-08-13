@@ -411,6 +411,70 @@ the level the device is already at still advances the sequence — it means "the
 control", not "this number changed", or dragging a slider back to where it started would
 produce no feedback at all.
 
+**Night sleep** is the same request-plus-rising-edge shape, with **one sequence** rather than
+three:
+
+```
+sleepseq	4
+sleepon	1
+sleepfrom	1380
+sleeptill	420
+sleepidle	300
+```
+
+`sleepfrom` / `sleeptill` are minutes since local midnight and the end is **exclusive** (07:00
+is already morning); `sleepfrom == sleeptill` means **the whole day** — a zero-length window is
+useless, whereas an all-day screensaver is something someone would ask for and is the only way
+to try the feature without waiting for night. Crossing midnight (23:00→07:00) is the **ordinary
+case, not an edge case**. `sleepidle` is in **seconds**, not milliseconds: the value is
+minutes-scale, has no sub-second meaning, and a short line is cheaper for an `atoi` parser.
+
+**Each of the four lines is independently optional, and an absent line means "leave this one
+alone"** — the absence itself, not a sentinel value. So `PUT /api/os/sleep {idleSec:600}` puts
+`sleepseq` and `sleepidle` on the wire and nothing else, exactly as `setvol`/`setbri` are
+withheld until written. The block used to emit all five keys once it started: a timeout-only PUT
+therefore also carried `sleepon 0`, the firmware adopted it and wrote it to `/data`, and
+adjusting the wait turned the feature off and lost the window. A field that HAS been written
+keeps appearing forever, because the device may coalesce several writes into one poll.
+
+One sequence rather than four, because the three settings sequences exist to say *which control*
+the user moved on a panel with a single bar. There is no such display here and the four fields
+are always written together by one console form. **Do not copy the three-sequence pattern
+across.** Nothing is emitted at all until the console has written once: an unwritten default
+sitting in every document would be a request the device could act on, and until a console
+speaks this setting belongs to the device's own 设置 screen.
+
+**A sequence that went backwards means the service restarted, not a replay.** The counter is
+plain instance state in the Bun process and starts again at 1 after `bun start`, while the
+device is still up holding the last number it applied. The device resets its counter and adopts
+(`applySleepRequest` / `applyConsoleSettings`); without that, the 02:00 `{enabled:false}` that
+is the remote escape hatch silently does nothing — the route still answers 200 — until it has
+been pressed as many times as before the restart. Replays are still refused: a replay repeats a
+number, it does not lower it.
+
+The device answers on `/api/os/report` with a `sleep` block:
+
+```json
+"sleep": { "on": true, "startMin": 1380, "endMin": 420, "idleSec": 300,
+           "asleep": false, "clockSynced": true }
+```
+
+**The presence of the block is the capability signal** — deliberately not a `proto` bump: this
+build does not send `proto` at all, and raising it would simultaneously claim a lyric-window
+support the firmware does not have and flip the lyric encoding. `asleep` is the whole answer to
+"a black panel is ambiguous": the console says 已息屏 from this flag and **never infers sleep
+from the pixels**, because black is indistinguishable from a dead clock — the rule
+`describeMirror` already encodes for the offline case. The four config fields are the
+**effective** values, which differ from what the console asked for whenever the knob moved
+them, and are the only truth a form should render. `clockSynced` lets the console explain "sleep
+is on but the panel is not sleeping" instead of leaving it looking like a bug.
+
+`asleep` **is reported immediately on its edge** rather than on the 10 s cadence. The rest of
+telemetry is a display and can be ten seconds old; this one field is what makes a console clear
+its canvas, so a stale `true` paints a panel the user just woke as a blank one — and their
+obvious second press is no longer swallowed, so it changes the channel. The full console
+contract is [`docs/design/zos-night-sleep-console.md`](design/zos-night-sleep-console.md).
+
 **While ZOS is resident the push stops; the render does not.** ZOS replaced the official app and
 `POST /api/custom` went with it; what answers now is a setup portal that returns the config
 page and HTTP 200 for **every** unknown path, so each push "succeeded": `updateCount` climbed,
@@ -679,13 +743,14 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` / `POST` | `/api/os/device-app/*` | The same sideload lifecycle for ZOS (confirmation phrase `START_TC002_OS_SESSION`) |
 | `GET` | `/api/os/pull` | ZOS long-polls the state document (`?seq=`, parks up to 8 s; line-oriented `KEY\tVALUE` plain text, cross-origin) |
 | `GET` | `/api/os/frames` | ZOS fetches one channel's rendered frames by `?app=` (`TCF1` raw-RGB binary, cross-origin) |
-| `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto}` (strings truncated at 64 chars, cross-origin; bumps seq only when `proto` changes) |
+| `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto, sleep?}` (strings truncated at 64 chars, cross-origin; bumps seq only when `proto` changes). `sleep` is `{on, startMin, endMin, idleSec, asleep, clockSynced}`, and **its presence is the night-sleep capability signal**; out-of-range values inside it are clamped rather than failing the whole heartbeat |
 | `POST` | `/api/os/mirror` | ZOS uploads a captured panel frame (body is 2496 raw RGB bytes, cross-origin); the reply `{wanted}` tells the device whether to keep streaming |
 | `GET` | `/api/os/mirror` | Console reads the latest frame — **asking is the subscription**: stop polling and the device stops streaming 10 s later |
-| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
+| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned. Only the field named in the request is stamped: the other one stays in the document with its own `setvolseq` / `setbriseq` unmoved, so the panel raises a bar only for the level the user actually touched |
+| `PUT` | `/api/os/sleep` | Ask the device to adopt a night-sleep configuration: `{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`; 400 when all four are absent, and 400 out of range. Replies `{requested:{enabled,startMin,endMin,idleSec,seq}}`, where a field the console has never written is **`null`** rather than a default — only written fields go on the wire, so a timeout-only PUT cannot also move the window. `startMin == endMin` means **the whole day** rather than a zero-length window and must be accepted. **Every write bumps the sequence** — the device's own 设置 rows are a second writer, and only a rising sequence can overrule the knob. A rising sequence also counts as the user operating the clock, so `{enabled:false}` does not merely stop it sleeping again, it **lights the panel now**: the remote escape hatch for a clock that went dark with nobody in the room |
 | `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing

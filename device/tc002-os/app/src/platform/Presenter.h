@@ -34,7 +34,13 @@ class Presenter {
   // can forget to dim one. It is also what makes the stored brightness apply at
   // boot for free: the first frame after DeviceControls::initialize() is
   // already scaled, with no separate "push it to the hardware" step to miss.
-  void present(const Surface& surface);
+  // `fadePercent` is 夜间休眠's dimmer, applied ON TOP of the stored brightness
+  // and stored nowhere: 100 is the ordinary frame, 0 is a black one. It is a
+  // per-frame argument rather than a brightness step precisely so a power cycle
+  // during a fade cannot bring the panel back dim — see ui/SleepPolicy.h.
+  //
+  // The default keeps every existing caller byte-identical.
+  void present(const Surface& surface, int fadePercent = 100);
 
   // Milliseconds the panel needs between two writes. The MCU drops frames
   // below this; measured and documented by the arcade firmware as 15 ms.
@@ -79,6 +85,28 @@ class Presenter {
     if (value == 0) return 0;  // black stays black; nothing is "lit" to keep
     const int scaled = (static_cast<int>(value) * step) / kBrightnessSteps;
     return static_cast<uint8_t>(scaled > 0 ? scaled : 1);
+  }
+
+  /**
+   * scaleByte, then 夜间休眠's fade.
+   *
+   * NO FLOOR OF 1, and that is the whole difference from scaleByte. That floor
+   * exists so DIMMING never deletes content — a pixel that vanishes reads as a
+   * bug, not as a dim panel. A fade's entire job is the opposite: to reach
+   * black. Keeping both rules in one function would mean the panel could never
+   * actually go dark, which is the feature.
+   *
+   * fadePercent >= 100 short-circuits to scaleByte itself, so the awake path is
+   * provably the same bytes the firmware has always sent (asserted for all 256
+   * values x all 10 steps in the host self-check), and fadePercent <= 0 is
+   * exactly 0 for every input, so a sleeping panel is genuinely black rather
+   * than very slightly lit.
+   */
+  static uint8_t dimByte(uint8_t value, int step, int fadePercent) {
+    if (fadePercent >= 100) return scaleByte(value, step);
+    if (fadePercent <= 0) return 0;
+    const int lit = scaleByte(value, step);
+    return static_cast<uint8_t>((lit * fadePercent) / 100);
   }
 
  private:

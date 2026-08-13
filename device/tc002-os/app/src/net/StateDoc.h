@@ -36,6 +36,31 @@ struct SettingsRequest {
 };
 
 /**
+ * The console's 夜间休眠 block.
+ *
+ * ONE sequence for four fields, unlike the settings block above. Volume and
+ * brightness needed per-field sequences because the panel has one bar and had
+ * to name which control the user moved; there is no such display here, and the
+ * four fields are always written together by one console form. Nobody should
+ * copy the three-sequence pattern across by cargo cult.
+ *
+ * -1 means "the document did not name this", which is how a console that only
+ * flips the switch leaves the window the knob configured. The sequence is what
+ * makes the request safe to repeat: the document carries it forever, so acting
+ * on presence rather than on a rising edge would overrule the device's own 设置
+ * screen on every poll.
+ */
+struct SleepRequest {
+  int seq;       // sleepseq; 0 before the console has ever written
+  int on;        // sleepon: 0/1, or -1 when absent
+  int startMin;  // sleepfrom, minutes since local midnight, or -1
+  int endMin;    // sleeptill, or -1
+  int idleSec;   // sleepidle, SECONDS, or -1
+
+  SleepRequest() : seq(0), on(-1), startMin(-1), endMin(-1), idleSec(-1) {}
+};
+
+/**
  * What one settings document should actually do to the device.
  *
  * Split out of osLogic.cc for the same reason menuSignature was: it needs no
@@ -200,6 +225,16 @@ class StateDoc {
   const SettingsRequest& settings() const { return mSettings; }
 
   /**
+   * 夜间休眠, as the console last asked for it.
+   *
+   * Feed it to applySleepRequest(), which is the only thing allowed to turn it
+   * into something the panel obeys. Absent from a document leaves seq 0, which
+   * can never rise above a primed sequence — so an old service and a new
+   * firmware simply leave the device's own 设置 rows in charge.
+   */
+  const SleepRequest& sleep() const { return mSleep; }
+
+  /**
    * Button and knob events the console pressed on the device's behalf.
    *
    * Each carries its own sequence; the device injects the ones it has not seen.
@@ -262,6 +297,7 @@ class StateDoc {
   std::string mFocus;
   std::vector<Item> mItems;
   SettingsRequest mSettings;
+  SleepRequest mSleep;
   std::vector<Input> mInputs;
   bool mHasNowPlaying;
   bool mPlaying;

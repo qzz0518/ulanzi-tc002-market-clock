@@ -47,6 +47,7 @@
 #include "ui/ProvisionScreen.h"
 #include "ui/Screen.h"
 #include "ui/SettingsScreen.h"
+#include "ui/SleepPolicy.h"
 
 namespace {
 
@@ -223,6 +224,8 @@ enum {
 enum {
 	ACTION_NONE = 0,
 	ACTION_PROVISION = 1,
+	ACTION_SLEEP_WINDOW = 2,
+	ACTION_SLEEP_IDLE = 3,
 };
 
 // The host's channel list, as the second-level ring currently reflects it.
@@ -264,7 +267,40 @@ bool sWasProvisioning = false;
 // volume the user actually last chose (restored from /data by Prefs).
 int sAppliedSettingsSeq = 0;
 int sAppliedInputSeq = 0;
+int sAppliedSleepSeq = 0;
 bool sConsoleSeqPrimed = false;
+
+// ---------------------------------------------------------------------------
+// 夜间息屏. Every RULE lives in ui/SleepPolicy.cpp, which the host self-check
+// links; what is left here is the state the rules are a function of, and the
+// wiring to the panel. Nothing below decides anything about windows or timeouts.
+tcos::SleepConfig sSleepConfig;
+// CLOCK_MONOTONIC, the UI's zero-based one. Stamped by every key event and by
+// every console request whose SEQUENCE ROSE — never by a poll. See the drain in
+// onUI_Timer for why the hook is there rather than in a screen.
+int sLastActivityMs = 0;
+// What was last PRESENTED, and when. The pure decision needs both: the percent
+// so the first black frame is guaranteed rather than waiting for the 1 Hz
+// repaint, the timestamp so the repaint is 1 Hz rather than 50.
+int sLastPanelPercent = 100;
+int sLastPresentMs = 0;
+// The previous tick's verdict, read by the input drain at the top of THIS tick.
+// The drain runs before the decision, so "was the panel dark when the user
+// touched it" can only be answered by what was last on the panel.
+bool sSwallowsInput = false;
+// Which key code the wake swallowed, so its matching release is dropped too. A
+// swallowed key-down followed by a delivered key-up would tell a game engine a
+// button was released that it never saw pressed.
+int sWakeSwallowCode = -1;
+bool sSleepAsleep = false;
+// What the last telemetry read carried. The panel going dark or lighting up is
+// the one telemetry field the console REACTS to rather than displays, so the
+// 2 s read throttle is skipped on its edge: without that the console kept
+// painting a cleared canvas labelled 已息屏 for up to ~12 s after the panel had
+// already woken, and the obvious second press — the one that is no longer
+// swallowed — changed the channel. Exactly the trap the swallow exists to
+// prevent, reintroduced on the surface most people actually touch.
+bool sSleepAsleepReported = false;
 
 // The 主题设置 last written to /data, so a document that repeats it does not
 // re-stage a flash write. NOT a sequence: the theme has one writer and no local
@@ -326,6 +362,77 @@ void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
 	tcos::prefs::setInt("music.accent", accent);
 }
 
+/**
+ * Reads 夜间休眠 back off /data.
+ *
+ * Beside the volume, brightness and theme restores for the same reason: these
+ * are settings a user chose once and expects to still be there after a power
+ * cut. Everything is clamped on the way in — a hand-edited or half-written
+ * prefs file must land on a config that cannot brick, and sanitizeSleepConfig
+ * is where that judgement lives.
+ */
+void restoreSleepConfig() {
+	tcos::SleepConfig cfg;  // the defaults: off, 23:00-07:00, 5 分钟
+	cfg.enabled = tcos::prefs::getInt("sleep.enabled", 0) != 0;
+	cfg.startMin = tcos::prefs::getInt("sleep.startMin", cfg.startMin);
+	cfg.endMin = tcos::prefs::getInt("sleep.endMin", cfg.endMin);
+	// Read as seconds and bounded BEFORE the multiply: a corrupt INT_MAX would
+	// otherwise overflow rather than clamp.
+	int idleSec = tcos::prefs::getInt("sleep.idleSec", cfg.idleMs / 1000);
+	if (idleSec < 0) idleSec = 0;
+	if (idleSec > tcos::kMaxIdleMs / 1000) idleSec = tcos::kMaxIdleMs / 1000;
+	cfg.idleMs = idleSec * 1000;
+	sSleepConfig = tcos::sanitizeSleepConfig(cfg);
+}
+
+/**
+ * Stages 夜间休眠 for /data. STAGED, not written.
+ *
+ * /data is jffs2 on raw NAND; the commit is debounced by
+ * DeviceControls::flushIfDue, which the tick already calls once a frame and
+ * which keys on prefs::dirty() — a global flag, so this needs no flush path of
+ * its own. Committing here would put a flash erase in the input path, which is
+ * the exact mistake the volume knob avoids.
+ */
+void persistSleepConfig() {
+	tcos::prefs::setInt("sleep.enabled", sSleepConfig.enabled ? 1 : 0);
+	tcos::prefs::setInt("sleep.startMin", sSleepConfig.startMin);
+	tcos::prefs::setInt("sleep.endMin", sSleepConfig.endMin);
+	tcos::prefs::setInt("sleep.idleSec", sSleepConfig.idleMs / 1000);
+}
+
+/**
+ * How long ago the wall clock was last proven, in ms; -1 when it never was.
+ *
+ * Wall time and monotonic time are never mixed: this is the monotonic age of
+ * the last accepted NTP reply, which is what decides whether the window may be
+ * believed at all. The window itself is compared against wall time, one
+ * function down.
+ */
+int clockAgeMs(int nowMs) {
+	const tcos::TimeSync::Status status = timeSync().status();
+	if (!status.synced || status.monoMs == 0) return -1;
+	const uint64_t sinceBoot = status.monoMs - sStartMs;
+	return nowMs - (int)sinceBoot;
+}
+
+/**
+ * Local minute-of-day, or -1 when the clock cannot be trusted.
+ *
+ * The one place in this file that knows the device is on UTC+8 — the 时间 row
+ * shares it, so there are not two spellings of that fact to drift apart.
+ */
+int localMinuteNow() {
+	return tcos::localMinuteOfDay((int64_t)time(NULL), tcos::kTzOffsetMinutes);
+}
+
+/** Whether 夜间休眠 has a wall clock good enough to act on. */
+bool sleepClockUsable(int nowMs) {
+	if (!timeSync().synced()) return false;
+	const int age = clockAgeMs(nowMs);
+	return age >= 0 && age <= tcos::kClockTrustMs;
+}
+
 tcos::Shell& shell() {
 	static tcos::Shell instance(tcos::kPanelWidth, tcos::kPanelHeight);
 	return instance;
@@ -379,6 +486,50 @@ class DeviceLevelControls : public tcos::LevelControls {
 tcos::LevelControls& levels() {
 	static DeviceLevelControls single;
 	return single;
+}
+
+/**
+ * The wake gesture, and why it must not also act.
+ *
+ * At 02:00 the user turns the knob to see the time. If that detent also
+ * advanced the channel ring they have lost the channel they left it on and must
+ * fix it in the dark — which is what a phone would never do. So the FIRST event
+ * after the panel has gone black wakes it and is swallowed; the next one
+ * ~100 ms later navigates normally.
+ *
+ * `pairedCode` is the key code whose RELEASE must be dropped along with it, or
+ * -1 for an event that has none — a rotation, or a console-injected action.
+ * Returns true when the wake has consumed the event.
+ */
+bool takeWake(int pairedCode) {
+	if (!sSwallowsInput) return false;
+	// Exactly one gesture, cleared here rather than at the end of the tick: two
+	// presses inside one 20 ms drain must not both be eaten.
+	sSwallowsInput = false;
+	sWakeSwallowCode = pairedCode;
+	return true;
+}
+
+/**
+ * The physical half of the wake, where the down/up pairing lives.
+ *
+ * A game reads raw button EDGES (shell().deliverRawButton), so a swallowed
+ * key-down followed by a delivered key-up would tell an engine a button was
+ * released that it never saw pressed. A rotation carries no release, so nothing
+ * is remembered for it.
+ */
+bool swallowForWake(int code, int status) {
+	const bool rotation = (code == E_KEYCODE_CLOCKWISE || code == E_KEYCODE_ANTI_CLOCKWISE);
+	if (sWakeSwallowCode >= 0) {
+		if (!rotation && code == sWakeSwallowCode && status == 0) {
+			sWakeSwallowCode = -1;
+			return true;  // the release of the press we already swallowed
+		}
+		// Anything else means the pair is over; stop waiting for a release that
+		// is no longer coming.
+		sWakeSwallowCode = -1;
+	}
+	return takeWake((!rotation && status != 0) ? code : -1);
 }
 
 void handleKey(int code, int status, int nowMs) {
@@ -853,6 +1004,31 @@ void rebuildSettings(int nowMs) {
 	row.value = buf;
 	rows.push_back(row);
 
+	// 夜间息屏 / 息屏等待, right after 亮度: they are the other two rows that change
+	// what the panel EMITS, and near the front of a 17-row ring so a user who
+	// went looking for them finds them without a lap.
+	//
+	// 息屏 rather than 休眠, which in Chinese reads as hibernate — a machine
+	// powered down — and is the last thing to promise on a device whose only
+	// recovery is a power cycle. The label appears ALONE for 1100 ms with no
+	// value beside it to disambiguate it, so it has to be right cold; 休眠等待
+	// read as a status ("waiting to sleep") rather than as a duration.
+	//
+	// Both are cycle rows — press to advance — which is the only interaction this
+	// screen has. Two rows rather than three: a separate on/off switch would
+	// answer a question 夜间息屏 already answers, at the cost of one more stop on
+	// a ring you walk one item at a time with a knob.
+	row.label = "\xE5\xA4\x9C\xE9\x97\xB4\xE6\x81\xAF\xE5\xB1\x8F";          // 夜间息屏
+	row.value = tcos::formatSleepWindow(sSleepConfig, sleepClockUsable(nowMs));
+	row.id = ACTION_SLEEP_WINDOW;
+	rows.push_back(row);
+
+	row.label = "\xE6\x81\xAF\xE5\xB1\x8F\xE7\xAD\x89\xE5\xBE\x85";          // 息屏等待
+	row.value = tcos::formatSleepIdle(sSleepConfig);
+	row.id = ACTION_SLEEP_IDLE;
+	rows.push_back(row);
+	row.id = ACTION_NONE;
+
 	const std::string mac = tcos::netinfo::macAddress();
 	row.label = "MAC";
 	row.value = mac.empty() ? "--" : mac;
@@ -952,15 +1128,17 @@ void rebuildSettings(int nowMs) {
 	// whether the time is right now. UTC+8 by hand: settimeofday sets UTC and
 	// this rootfs carries no tzdata, so localtime() would silently return UTC
 	// and look correct in the +0 timezone alone.
+	//
+	// Through localMinuteOfDay, which 夜间休眠 also uses. This row used to add
+	// 8*3600 inline, and a window that disagreed with the time shown two screens
+	// away would be indistinguishable from a broken feature.
 	row.label = "\xE6\x97\xB6\xE9\x97\xB4";                                  // 时间
 	if (!timeSync().synced()) {
 		row.value = "\xE6\x9C\xAA\xE5\x90\x8C\xE6\xAD\xA5";                // 未同步
 	} else {
 		char clock[32];
-		const time_t local = (time_t)(time(NULL) + 8 * 3600);
-		struct tm parts;
-		gmtime_r(&local, &parts);
-		snprintf(clock, sizeof(clock), "%02d:%02d", parts.tm_hour, parts.tm_min);
+		const int minute = localMinuteNow();
+		snprintf(clock, sizeof(clock), "%02d:%02d", minute / 60, minute % 60);
 		row.value = clock;
 	}
 	rows.push_back(row);
@@ -1054,6 +1232,7 @@ static void onUI_init() {
 	// Prefs loads the file lazily, so the ordering here is only about running
 	// before the first frame, not about who opens what.
 	restoreLyricTheme();
+	restoreSleepConfig();
 	tcos::Sfx::instance().initialize();
 	KeyManager::getInstance().start();
 	// Started here rather than in onUI_show: onUI_show runs on every return to
@@ -1184,6 +1363,15 @@ static bool onUI_Timer(int id) {
 		events.swap(sKeyQueue);
 	}
 	for (size_t i = 0; i < events.size(); ++i) {
+		// 夜间休眠's countdown is reset HERE, at the drain, before any routing —
+		// not per screen. "Which gestures count as operating" must not be a
+		// question a screen can answer differently, and this is also what makes
+		// the wake swallow correct inside a game, where the side buttons are raw
+		// edges rather than volume. Every event KeyManager delivers counts:
+		// rotation, the knob press, the middle button, both side buttons short
+		// and long, and the raw edges a game sees.
+		sLastActivityMs = nowMs;
+		if (swallowForWake(events[i].code, events[i].status)) continue;
 		handleKey(events[i].code, events[i].status, nowMs);
 	}
 
@@ -1263,6 +1451,11 @@ static bool onUI_Timer(int id) {
 		if (!sConsoleSeqPrimed && sLink.online) {
 			sConsoleSeqPrimed = true;
 			sAppliedSettingsSeq = sLink.settings.seq;
+			// 夜间休眠 is primed with them. Without this a reboot would replay the
+			// console's last write over a window the knob had since changed —
+			// the same trade already accepted for volume, and here it would also
+			// mean a boot could re-enable sleeping that the user turned off.
+			sAppliedSleepSeq = sLink.sleep.seq;
 			for (size_t i = 0; i < sLink.inputs.size(); ++i) {
 				if (sLink.inputs[i].seq > sAppliedInputSeq) sAppliedInputSeq = sLink.inputs[i].seq;
 			}
@@ -1290,8 +1483,28 @@ static bool onUI_Timer(int id) {
 		// which is how a volume-only change came to draw the BRIGHTNESS bar: the
 		// document carries both values forever, so a `requestedBrightness >= 0`
 		// test was true from the first brightness the console ever set.
-		tcos::applyConsoleSettings(sLink.settings, sAppliedSettingsSeq, levels(),
-		                           shell().overlay(), nowMs);
+		// ACTIVITY, but only on the rising edge — the same distinction that
+		// decides whether it is applied at all. The document repeats the last
+		// request forever; counting its mere presence would hold the panel awake
+		// for the whole life of the service.
+		if (tcos::applyConsoleSettings(sLink.settings, sAppliedSettingsSeq, levels(),
+		                               shell().overlay(), nowMs)) {
+			sLastActivityMs = nowMs;
+		}
+
+		// 夜间休眠 from the console. Also activity on a rising sequence, and
+		// deliberately so: a console PUT of {enabled:false} must not merely stop
+		// the panel sleeping AGAIN, it must light it now. That is the remote
+		// escape hatch for a user whose clock went dark and who is not in the
+		// room with it.
+		if (tcos::applySleepRequest(sLink.sleep, sAppliedSleepSeq, &sSleepConfig)) {
+			sLastActivityMs = nowMs;
+			persistSleepConfig();
+			// The rows are rebuilt on a 500 ms cadence anyway, but only while the
+			// screen is on top; this keeps the value honest if the console writes
+			// while the user is standing on the row.
+			if (shell().top() == &sSettings) rebuildSettings(nowMs);
+		}
 
 		// Button and knob presses the console made on the user's behalf. Injected
 		// through the same path a real key takes, so a remote press cannot behave
@@ -1301,6 +1514,16 @@ static bool onUI_Timer(int id) {
 			const tcos::StateDoc::Input& event = sLink.inputs[i];
 			if (event.seq <= sAppliedInputSeq) continue;
 			sAppliedInputSeq = event.seq;
+			// A remote press is operating the clock, so it resets the countdown
+			// exactly as a physical one does — which also makes the console's
+			// existing direction buttons the wake control, with nothing new to add.
+			//
+			// ...INCLUDING the swallow. A remote press must not behave differently
+			// from a physical one; that is the whole reason console input is
+			// injected through this path instead of a per-screen remote API, and
+			// the console's own notice already says a press wakes the panel.
+			sLastActivityMs = nowMs;
+			if (takeWake(-1)) continue;
 			if (event.action == "cw") {
 				tcos::Sfx::instance().play(tcos::Sfx::kTick);
 				dispatchInput(tcos::kInputTurnCw, nowMs);
@@ -1330,6 +1553,11 @@ static bool onUI_Timer(int id) {
 		// from a pinned channel without it yanking them back every tick.
 		if (sLink.pinned && !sLink.focus.empty() && sLink.focus != sPinnedFocus) {
 			sPinnedFocus = sLink.focus;
+			// Remote navigation, so activity — on the EDGE, like everything else
+			// here. The document carries `focus` forever, so keying on the field
+			// rather than on its change would mean a console that once pinned a
+			// channel keeps the panel awake for good.
+			sLastActivityMs = nowMs;
 			// The console can name any menu entry, not just a channel. Routing
 			// only channels meant pinning 音乐 or 游戏 succeeded in the console,
 			// looked plausible, and moved nothing on the device — the same silent
@@ -1496,7 +1724,8 @@ static bool onUI_Timer(int id) {
 			sSettingsBuiltMs = monoMs();
 			rebuildSettings(nowMs);
 		}
-		if (sSettings.takeActivated() == ACTION_PROVISION) {
+		const int settingsPick = sSettings.takeActivated();
+		if (settingsPick == ACTION_PROVISION) {
 			// A deliberate ask, so the advertisement goes back up even on a clock
 			// that is perfectly online, and a stack that had given up re-arms.
 			sBleForcedUntilMs = nowMs + kBleForcedMs;
@@ -1506,6 +1735,17 @@ static bool onUI_Timer(int id) {
 			sProvisionPushed = true;
 			sProvisionAuto = false;
 			sProvisionOnlineMs = -1;
+		} else if (settingsPick == ACTION_SLEEP_WINDOW || settingsPick == ACTION_SLEEP_IDLE) {
+			// The cycle itself is in ui/SleepPolicy.cpp; this is only the wiring.
+			sSleepConfig = settingsPick == ACTION_SLEEP_WINDOW
+			                   ? tcos::cycleSleepWindow(sSleepConfig)
+			                   : tcos::cycleSleepIdle(sSleepConfig);
+			persistSleepConfig();
+			// Rebuild, then skip the label dwell: a cycle row changes its OWN
+			// value, so leaving the 1100 ms dwell in place would make the press
+			// look like it did nothing and invite a second one.
+			rebuildSettings(nowMs);
+			sSettings.revealValue(nowMs);
 		}
 	}
 	const int gamePick = sGameList.takeActivated();
@@ -1537,19 +1777,64 @@ static bool onUI_Timer(int id) {
 	// two frames.
 	tcos::DeviceControls::instance().flushIfDue(nowMs);
 
-	shell().render(canvas(), nowMs);
-	presenter().present(canvas());
+	// --- 夜间休眠, and the panel ---------------------------------------------
+	//
+	// The decision is a pure function of (now, config, lastActivity, clock),
+	// recomputed every tick — there is no stored "asleep" state to latch dark.
+	// This branch reads four fields off it and names no phase of its own.
+	tcos::SleepInputs sleepIn;
+	sleepIn.config = sSleepConfig;
+	sleepIn.nowMs = nowMs;
+	sleepIn.lastActivityMs = sLastActivityMs;
+	sleepIn.lastPresentMs = sLastPresentMs;
+	sleepIn.lastPanelPercent = sLastPanelPercent;
+	sleepIn.clockSynced = timeSync().synced();
+	sleepIn.clockAgeMs = clockAgeMs(nowMs);
+	sleepIn.minuteOfDay = localMinuteNow();
+	// A device about to power itself off must not go dark first — the user would
+	// never learn why their clock died overnight.
+	sleepIn.forceAwake = tcos::BatteryMonitor::instance().shutdownInSeconds() >= 0;
+	const tcos::SleepDecision sleep = tcos::decideSleep(sleepIn);
+	sSwallowsInput = sleep.swallowsInput;
+	sSleepAsleep = sleep.asleep;
 
-	// The mirror tee. Exactly one place in the firmware produces finished
-	// pixels, and this is immediately after it: the LED bus is write-only and
-	// /dev/fb0 is unrelated to the matrix, so a capture is the only way the
-	// console can show what the panel actually shows. Gated on someone
-	// watching, because the extract alone is 2496 bytes 25 times a second.
-	if (sLink.mirrorWanted) {
-		static std::vector<uint8_t> mirrorRgb;
-		canvas().extractRGB(mirrorRgb);
-		if (!mirrorRgb.empty()) {
-			hostLink().publishMirror(&mirrorRgb[0], (int)mirrorRgb.size());
+	// The TICK stays at 20 ms while dark. It is the only thing that drains the
+	// key queue, polls the link, commits prefs and decides to wake, and putting
+	// 200 ms between the knob turning and the panel lighting would be the one
+	// moment the user is judging this feature. What is skipped is render+present
+	// — the expensive pair — for 49 of every 50 ticks.
+	if (sleep.repaintDue) {
+		if (sleep.asleep) {
+			// BLACK FRAMES, not stopped writes. The MCU holds the last frame it
+			// accepted, so a firmware that merely stopped rendering would FREEZE
+			// the picture rather than hide it. Clearing the canvas rather than
+			// relying on present(…, 0) alone is load-bearing for the tee below:
+			// the console must receive the black the panel received.
+			canvas().clear(Color(0, 0, 0));
+		} else {
+			shell().render(canvas(), nowMs);
+		}
+		presenter().present(canvas(), sleep.panelPercent);
+		sLastPresentMs = nowMs;
+		sLastPanelPercent = sleep.panelPercent;
+
+		// The mirror tee. Exactly one place in the firmware produces finished
+		// pixels, and this is immediately after it: the LED bus is write-only and
+		// /dev/fb0 is unrelated to the matrix, so a capture is the only way the
+		// console can show what the panel actually shows. Gated on someone
+		// watching, because the extract alone is 2496 bytes 25 times a second.
+		//
+		// INSIDE this branch, so the console can only ever receive frames the
+		// panel actually received — which is the property publishMirror exists to
+		// guarantee. While asleep that is one black frame a second, comfortably
+		// inside the console's 2500 ms staleness bar, so it reads 休眠中 off the
+		// telemetry flag rather than 画面已停更 off a starved stream.
+		if (sLink.mirrorWanted) {
+			static std::vector<uint8_t> mirrorRgb;
+			canvas().extractRGB(mirrorRgb);
+			if (!mirrorRgb.empty()) {
+				hostLink().publishMirror(&mirrorRgb[0], (int)mirrorRgb.size());
+			}
 		}
 	}
 
@@ -1557,8 +1842,9 @@ static bool onUI_Timer(int id) {
 	// reading it is: the SSID and the address each cost a socket and an ioctl,
 	// and at 25 fps that would be fifty syscalls a second to answer a question
 	// whose answer changes about once a week.
-	if (monoMs() - sTelemetryReadMs >= 2000) {
+	if (monoMs() - sTelemetryReadMs >= 2000 || sSleepAsleep != sSleepAsleepReported) {
 		sTelemetryReadMs = monoMs();
+		sSleepAsleepReported = sSleepAsleep;
 		tcos::Screen* top = shell().top();
 		const char* screenName = "launcher";
 		if (top == &sChannelRing) screenName = "channel";
@@ -1577,7 +1863,13 @@ static bool onUI_Timer(int id) {
 		                        sWifiPolicy.supplicantRestarts() + sWifiPolicy.softApRestarts(),
 		                        tcos::BatteryMonitor::instance().percent(),
 		                        tcos::BatteryMonitor::instance().charging(),
-		                        !tcos::install::isSideloaded());
+		                        !tcos::install::isSideloaded(),
+		                        // 夜间休眠, as the DEVICE has it — which differs from
+		                        // what the console last asked for whenever the knob
+		                        // moved it, and is the only truth a form should show.
+		                        sSleepConfig.enabled, sSleepConfig.startMin,
+		                        sSleepConfig.endMin, sSleepConfig.idleMs / 1000,
+		                        sSleepAsleep, sleepClockUsable(nowMs));
 	}
 	return true;
 }

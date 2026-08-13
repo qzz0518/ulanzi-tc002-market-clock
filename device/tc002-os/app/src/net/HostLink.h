@@ -63,6 +63,7 @@ class HostLink {
     // Console -> device. See StateDoc for why each carries a sequence, and why
     // the settings block carries three of them rather than one.
     SettingsRequest settings;
+    SleepRequest sleep;
     std::vector<StateDoc::Input> inputs;
 
     // The console's 主题设置. A setting, not a reading: it has one writer and
@@ -176,11 +177,27 @@ class HostLink {
    */
   void sendMusicAction(const char* action);
 
-  /** What the device reports about itself; sent on the worker's own cadence. */
+  /**
+   * What the device reports about itself; sent on the worker's own cadence, or
+   * at once when `sleepAsleep` changed.
+   *
+   * The 夜间息屏 block is the console's ONLY honest source for two things it
+   * cannot otherwise know. `sleepAsleep` is how it says 已息屏 instead of
+   * painting a black rectangle — black pixels are indistinguishable from a dead
+   * clock, which is the rule describeMirror already encodes for the offline
+   * case, so the console must never infer sleep from the frame. And the four
+   * config fields are the EFFECTIVE values, which differ from what the console
+   * asked for whenever the knob moved them.
+   *
+   * The presence of the block is also the capability signal. Deliberately not a
+   * `proto` bump: this build does not send `proto` at all, and raising it would
+   * simultaneously claim the lyric-window support the firmware does not have.
+   */
   void setTelemetry(const std::string& screen, const std::string& focus,
                     const std::string& wifi, const std::string& ip,
                     int supplicantRestarts, int batteryPercent, bool charging,
-                    bool flashed);
+                    bool flashed, bool sleepOn, int sleepStartMin, int sleepEndMin,
+                    int sleepIdleSec, bool sleepAsleep, bool sleepClockSynced);
 
   // 10 fps rather than the panel's 25: the console preview is a monitor, not a
   // video feed, and each frame is a separate HTTP exchange on a device whose
@@ -254,6 +271,16 @@ class HostLink {
   int mTelBattery;
   bool mTelCharging;
   bool mTelFlashed;
+  bool mTelSleepOn;
+  int mTelSleepStartMin;
+  int mTelSleepEndMin;
+  int mTelSleepIdleSec;
+  bool mTelSleepAsleep;
+  bool mTelSleepClockSynced;
+  // Set when the panel's dark/lit state changed, so the report goes out on the
+  // worker's next 30 ms pass instead of on its 10 s one. Only that field: the
+  // rest of telemetry is a display, and a display can be ten seconds old.
+  bool mTelDirty;
 };
 
 }  // namespace tcos

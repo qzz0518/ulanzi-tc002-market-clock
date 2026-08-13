@@ -140,6 +140,7 @@ bool StateDoc::parse(const std::string& body) {
   mFocus.clear();
   mItems.clear();
   mSettings = SettingsRequest();
+  mSleep = SleepRequest();
   mInputs.clear();
   mHasNowPlaying = false;
   mPlaying = false;
@@ -198,6 +199,18 @@ bool StateDoc::parse(const std::string& body) {
       mSettings.volumeSeq = atoi(fields[1].c_str());
     } else if (fields[0] == "setbriseq") {
       mSettings.brightnessSeq = atoi(fields[1].c_str());
+    } else if (fields[0] == "sleepseq") {
+      mSleep.seq = atoi(fields[1].c_str());
+    } else if (fields[0] == "sleepon") {
+      mSleep.on = (fields[1] == "1") ? 1 : 0;
+    } else if (fields[0] == "sleepfrom") {
+      mSleep.startMin = atoi(fields[1].c_str());
+    } else if (fields[0] == "sleeptill") {
+      mSleep.endMin = atoi(fields[1].c_str());
+    } else if (fields[0] == "sleepidle") {
+      // SECONDS on the wire, not ms: the value is minutes-scale, has no
+      // sub-second meaning, and a short line is cheaper for an atoi parser.
+      mSleep.idleSec = atoi(fields[1].c_str());
     } else if (fields[0] == "input" && n >= 3) {
       Input event;
       event.seq = atoi(fields[1].c_str());

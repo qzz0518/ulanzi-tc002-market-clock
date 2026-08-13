@@ -57,6 +57,7 @@
 #include "ui/MusicScreen.h"
 #include "ui/ProvisionScreen.h"
 #include "ui/SettingsScreen.h"
+#include "ui/SleepPolicy.h"
 #include "ui/ZosLogo.h"
 #include "visual/Glyphs.h"
 
@@ -2106,6 +2107,28 @@ void checkConsoleSettings() {
     check(controls.volume() == 2, "a repeated document does not re-apply the request");
   }
 
+  // --- the service restarted -----------------------------------------------
+  // The hub's sequences live in the Bun process and start again at 1 after
+  // `bun start`, while the device is still up holding the last number it
+  // applied. A LOWER sequence is therefore a new counter, not a replay; without
+  // that the console's slider silently does nothing until it has been dragged
+  // as many times as it was before the restart. Same rule as
+  // applySleepRequest's, where it is load-bearing for a dark panel.
+  {
+    FakeControls controls;
+    LevelOverlay hud;
+    int applied = 9;
+    const SettingsRequest afterRestart =
+        settingsFromDoc("seq\t2\nsetseq\t1\nsetvol\t6\nsetvolseq\t1\nmenu\t0\n");
+    check(tcos::applyConsoleSettings(afterRestart, applied, controls, hud, 1000),
+          "a sequence that went backwards is adopted rather than refused");
+    check(controls.volume() == 6, "so the console can still move the volume after a restart");
+    controls.vol = 2;
+    check(!tcos::applyConsoleSettings(afterRestart, applied, controls, hud, 2000),
+          "and the replay guard is still armed at the new counter");
+    check(controls.volume() == 2, "so the knob still wins");
+  }
+
   // --- brightness only -----------------------------------------------------
   {
     FakeControls controls;
@@ -2313,6 +2336,632 @@ void checkConsoleSettings() {
     check(!plan.applyVolume && !plan.applyBrightness &&
               plan.bar == SettingsPlan::kNoBar,
           "a sequence that has not risen plans nothing");
+  }
+}
+
+// 夜间息屏 — parses the wire block the way the device does.
+tcos::SleepRequest sleepFromDoc(const char* body) {
+  tcos::StateDoc doc;
+  doc.parse(body);
+  return doc.sleep();
+}
+
+// The inputs of a device that is inside its window, past its timeout, on a
+// clock it synced a minute ago. Every case below starts here and changes one
+// thing, so what each case is actually about is the line it edits.
+tcos::SleepInputs sleepingInputs() {
+  tcos::SleepInputs in;
+  in.config.enabled = true;
+  in.config.startMin = 1380;  // 23:00
+  in.config.endMin = 420;     // 07:00
+  in.config.idleMs = 300000;  // 5 分钟
+  in.nowMs = 3600000;
+  in.lastActivityMs = 3600000 - 300000;  // exactly at the timeout
+  in.lastPresentMs = 3600000;
+  in.lastPanelPercent = 100;
+  in.clockSynced = true;
+  in.clockAgeMs = 60000;
+  in.minuteOfDay = 60;  // 01:00, inside 23:00→07:00
+  in.forceAwake = false;
+  return in;
+}
+
+void checkSleepPolicy() {
+  using tcos::SleepConfig;
+  using tcos::SleepDecision;
+  using tcos::SleepInputs;
+  using tcos::SleepRequest;
+
+  // --- the window ----------------------------------------------------------
+  // 23:00 → 07:00. Crossing midnight is the ORDINARY case, so it is the first
+  // thing asserted rather than a trailing edge case.
+  check(tcos::insideSleepWindow(1380, 1380, 420), "23:00 is inside 23:00→07:00");
+  check(tcos::insideSleepWindow(1439, 1380, 420), "and so is the last minute before midnight");
+  check(tcos::insideSleepWindow(0, 1380, 420), "and midnight itself, on the other side of the wrap");
+  check(tcos::insideSleepWindow(419, 1380, 420), "and 06:59");
+  check(!tcos::insideSleepWindow(420, 1380, 420),
+        "07:00 is already morning — the end is EXCLUSIVE, so the panel comes back on the hour");
+  check(!tcos::insideSleepWindow(421, 1380, 420), "and 07:01 is outside");
+  check(!tcos::insideSleepWindow(1379, 1380, 420), "and 22:59 is not night yet");
+
+  // A window that does not cross midnight still has to work.
+  check(!tcos::insideSleepWindow(59, 60, 120), "01:00→02:00 excludes 00:59");
+  check(tcos::insideSleepWindow(60, 60, 120), "includes its start");
+  check(tcos::insideSleepWindow(119, 60, 120), "includes the minute before its end");
+  check(!tcos::insideSleepWindow(120, 60, 120), "and excludes its end");
+
+  // start == end is 全天, not a zero-length window. A zero-length window is
+  // useless; an all-day screensaver is a thing someone would ask for.
+  check(tcos::insideSleepWindow(0, 0, 0) && tcos::insideSleepWindow(720, 0, 0) &&
+            tcos::insideSleepWindow(1439, 0, 0),
+        "start == end means the whole day");
+
+  // The case a `<=` on the end gets wrong: 23:00 → midnight.
+  check(tcos::insideSleepWindow(1380, 1380, 0) && tcos::insideSleepWindow(1439, 1380, 0),
+        "23:00→00:00 covers the last hour of the day");
+  check(!tcos::insideSleepWindow(0, 1380, 0), "and stops AT midnight rather than one minute past");
+
+  // Total for anything: a corrupt prefs value must not produce a window nobody
+  // can reason about.
+  check(tcos::insideSleepWindow(1440, 1380, 420) == tcos::insideSleepWindow(0, 1380, 420),
+        "an out-of-range minute wraps rather than falling off the end");
+
+  // --- localisation --------------------------------------------------------
+  // UTC+8 crosses the date line every evening; this is the ordinary case here,
+  // and it is why localtime() (which would return UTC on this tzdata-less
+  // rootfs) is not used.
+  check(tcos::localMinuteOfDay(17 * 3600, 480) == 60,
+        "17:00 UTC is 01:00 the next day at UTC+8");
+  check(tcos::localMinuteOfDay(0, 480) == 480, "the epoch is 08:00 local");
+  check(tcos::localMinuteOfDay(23 * 3600 + 59 * 60, 480) == 479,
+        "and 23:59 UTC is 07:59 local, one minute inside the morning");
+
+  // --- the unsynced clock --------------------------------------------------
+  // A device booted with the kernel's epoch reads 1970-01-01 00:00, which is
+  // INSIDE 23:00→07:00. Without these four guards it blanks itself within
+  // `idle` of every boot and the obvious recovery reproduces it exactly.
+  {
+    SleepInputs in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - 900000;  // long past the timeout
+    check(tcos::decideSleep(in).asleep, "the baseline case really does sleep");
+
+    in.clockSynced = false;
+    const SleepDecision unsynced = tcos::decideSleep(in);
+    check(unsynced.panelPercent == 100 && !unsynced.asleep,
+          "a clock that has never synced never sleeps");
+
+    in.clockSynced = true;
+    in.clockAgeMs = -1;
+    check(!tcos::decideSleep(in).asleep, "nor one whose sync has no monotonic stamp");
+
+    in.clockAgeMs = tcos::kClockTrustMs + 1;
+    check(!tcos::decideSleep(in).asleep, "nor one whose last sync is older than 26 h");
+
+    in.clockAgeMs = tcos::kClockTrustMs - 1;
+    check(tcos::decideSleep(in).asleep,
+          "but a router reboot at 23:05 does not light the bedroom all night");
+  }
+
+  // --- the countdown and the fade ------------------------------------------
+  {
+    SleepInputs in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - (in.config.idleMs - 1);
+    check(tcos::decideSleep(in).panelPercent == 100, "one millisecond short of the timeout is awake");
+
+    in.lastActivityMs = in.nowMs - in.config.idleMs;
+    const SleepDecision starting = tcos::decideSleep(in);
+    check(starting.panelPercent > 0 && starting.panelPercent < 100,
+          "the fade begins at the timeout, at neither extreme");
+    check(!starting.asleep && !starting.swallowsInput,
+          "and the panel is still visible, so input still acts");
+
+    in.lastActivityMs = in.nowMs - (in.config.idleMs + tcos::kSleepFadeMs);
+    const SleepDecision dark = tcos::decideSleep(in);
+    check(dark.panelPercent == 0 && dark.asleep, "and reaches black at the end of the fade");
+
+    // Monotonic, sampled across the whole ramp: a fade that brightened halfway
+    // would read as a fault rather than as the panel going away.
+    int previous = 101;
+    bool monotonic = true;
+    bool swallowMatches = true;
+    for (int idle = 0; idle <= in.config.idleMs + tcos::kSleepFadeMs + 2000; idle += 50) {
+      SleepInputs step = sleepingInputs();
+      step.lastActivityMs = step.nowMs - idle;
+      const SleepDecision d = tcos::decideSleep(step);
+      if (d.panelPercent > previous) monotonic = false;
+      previous = d.panelPercent;
+      if (d.swallowsInput != (d.panelPercent == 0)) swallowMatches = false;
+    }
+    check(monotonic, "the panel never brightens on its way out");
+    check(swallowMatches,
+          "and input is swallowed exactly when the panel is black — never during the fade");
+  }
+
+  // --- everything uncertain resolves to a lit panel ------------------------
+  {
+    SleepInputs in = sleepingInputs();
+    in.lastActivityMs = in.nowMs + 5000;  // the 24.8-day monotonic wrap
+    check(tcos::decideSleep(in).panelPercent == 100, "a negative idle reads as just-used");
+
+    in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - 900000;
+    in.config.idleMs = 0;  // corrupt prefs
+    check(tcos::decideSleep(in).panelPercent == 100,
+          "a corrupt timeout of zero never sleeps rather than sleeping instantly");
+    in.config.idleMs = -1;
+    check(tcos::decideSleep(in).panelPercent == 100, "and neither does a negative one");
+
+    in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - 900000;
+    in.forceAwake = true;
+    check(tcos::decideSleep(in).panelPercent == 100,
+          "a pending low-battery shutdown outranks the window and the timeout");
+
+    in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - 900000;
+    in.config.enabled = false;
+    bool alwaysLit = true;
+    for (int minute = 0; minute < 1440; minute += 7) {
+      in.minuteOfDay = minute;
+      if (tcos::decideSleep(in).panelPercent != 100) alwaysLit = false;
+    }
+    check(alwaysLit, "disabled means lit at every minute of the day and any idle");
+  }
+
+  // --- the window closing wakes the panel with no user action --------------
+  // The safety property that matters most: there is a guaranteed wall-clock
+  // time at which the panel comes back by itself.
+  {
+    SleepInputs in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - 8 * 3600 * 1000;  // nobody has touched it all night
+    in.minuteOfDay = 419;                            // 06:59
+    check(tcos::decideSleep(in).asleep, "still dark at 06:59");
+    in.minuteOfDay = 420;                            // 07:00
+    const SleepDecision morning = tcos::decideSleep(in);
+    check(morning.panelPercent == 100 && !morning.asleep,
+          "and lit at 07:00 without anyone touching it");
+    check(morning.repaintDue, "with a frame written on that very tick");
+  }
+
+  // --- the repaint contract ------------------------------------------------
+  {
+    SleepInputs in = sleepingInputs();
+    in.lastActivityMs = in.nowMs - 900000;
+    in.lastPanelPercent = 1;  // the last frame of the fade
+    in.lastPresentMs = in.nowMs;
+    check(tcos::decideSleep(in).repaintDue,
+          "the FIRST black frame is written immediately, not up to a second later");
+
+    in.lastPanelPercent = 0;
+    in.lastPresentMs = in.nowMs - (tcos::kSleepRepaintMs - 1);
+    check(!tcos::decideSleep(in).repaintDue, "a dark panel is not rewritten at 50 fps");
+    in.lastPresentMs = in.nowMs - tcos::kSleepRepaintMs;
+    check(tcos::decideSleep(in).repaintDue,
+          "but it is rewritten once a second, so one failed SPI write cannot leave it lit");
+  }
+  {
+    SleepInputs awake = sleepingInputs();
+    awake.lastActivityMs = awake.nowMs;
+    check(tcos::decideSleep(awake).repaintDue, "an awake tick always presents");
+    SleepInputs fading = sleepingInputs();
+    fading.lastActivityMs = fading.nowMs - (fading.config.idleMs + 300);
+    check(tcos::decideSleep(fading).repaintDue, "and so does every tick of the fade");
+  }
+
+  // --- waking --------------------------------------------------------------
+  {
+    SleepInputs in = sleepingInputs();
+    in.lastActivityMs = in.nowMs;  // the knob just moved
+    in.lastPanelPercent = 0;
+    const SleepDecision woken = tcos::decideSleep(in);
+    check(woken.panelPercent == 100 && !woken.asleep && woken.repaintDue,
+          "one input lights the panel on the SAME tick, with no fade-in to wait through");
+    check(!woken.swallowsInput, "and the next input acts normally");
+  }
+
+  // --- "the console tab was left open all night" ---------------------------
+  // Eight simulated hours in which nowMs advances, the panel is repainted, and
+  // lastActivityMs never moves — which is exactly what a mirror poll produces,
+  // because a mirror poll is not activity. If polling counted, this loop would
+  // find the panel awake and the feature would be dead for the one person most
+  // likely to have configured it.
+  {
+    SleepInputs in = sleepingInputs();
+    // 23:00 → 09:30, so the whole simulated night stays inside the window and
+    // this case is about the countdown alone. The window closing is asserted on
+    // its own two blocks up.
+    in.config.endMin = 570;
+    in.nowMs = 0;
+    in.lastActivityMs = 0;
+    in.lastPresentMs = 0;
+    in.lastPanelPercent = 100;
+    int repaints = 0;
+    int litTicks = 0;
+    const int totalMs = 8 * 3600 * 1000;
+    for (int t = 0; t <= totalMs; t += 20) {
+      in.nowMs = t;
+      // 01:00 plus the elapsed minutes, so the clock really does move through
+      // the night with the loop.
+      in.minuteOfDay = (60 + t / 60000) % 1440;
+      const SleepDecision d = tcos::decideSleep(in);
+      if (d.panelPercent != 0) ++litTicks;
+      if (d.repaintDue) {
+        ++repaints;
+        in.lastPresentMs = t;
+        in.lastPanelPercent = d.panelPercent;
+      }
+    }
+    // Lit for the 5-minute timeout and the 600 ms fade, then never again.
+    check(litTicks == (300000 + tcos::kSleepFadeMs) / 20,
+          "the panel goes dark once and stays dark for eight hours");
+    // One repaint per second after the ramp, plus the ramp's own every-tick
+    // presents. Bounded rather than exact because the first black frame lands on
+    // whichever 20 ms tick the fade ends on.
+    const int darkMs = totalMs - 300000 - tcos::kSleepFadeMs;
+    check(repaints >= litTicks + darkMs / 1000 &&
+              repaints <= litTicks + darkMs / 1000 + 2,
+          "and is rewritten about once a second while it is, never fifty times");
+  }
+
+  // --- the console request -------------------------------------------------
+  {
+    // Byte-for-byte the block OsLinkHub.serialize() emits, in its order.
+    const SleepRequest wire = sleepFromDoc(
+        "seq\t9\npinned\t0\nmirror\t0\n"
+        "sleepseq\t4\nsleepon\t1\nsleepfrom\t1380\nsleeptill\t420\nsleepidle\t300\n"
+        "menu\t0\n");
+    check(wire.seq == 4 && wire.on == 1 && wire.startMin == 1380 && wire.endMin == 420 &&
+              wire.idleSec == 300,
+          "the sleep block parses off the wire");
+
+    const SleepRequest absent = sleepFromDoc("seq\t1\nmenu\t0\n");
+    check(absent.seq == 0 && absent.on == -1 && absent.startMin == -1 &&
+              absent.endMin == -1 && absent.idleSec == -1,
+          "and a document without one leaves every field unnamed");
+
+    SleepConfig config;  // off, 23:00-07:00, 5 分钟
+    int applied = 0;
+    check(tcos::applySleepRequest(wire, applied, &config), "a rising sequence is adopted");
+    check(applied == 4, "and moves the applied sequence");
+    check(config.enabled && config.startMin == 1380 && config.endMin == 420 &&
+              config.idleMs == 300000,
+          "landing every field");
+
+    // The document repeats the request on every poll forever; acting on it
+    // again is what would make the device's own 设置 rows useless.
+    config.enabled = false;
+    check(!tcos::applySleepRequest(wire, applied, &config),
+          "the same document is not acted on twice");
+    check(!config.enabled, "so the knob keeps winning after the console has spoken");
+  }
+  {
+    // A console that only flips the switch must not clear the window.
+    SleepConfig config;
+    config.startMin = 90;
+    config.endMin = 200;
+    config.idleMs = 600000;
+    int applied = 0;
+    const SleepRequest onlyOn = sleepFromDoc("seq\t1\nsleepseq\t2\nsleepon\t1\nmenu\t0\n");
+    check(tcos::applySleepRequest(onlyOn, applied, &config), "an enable-only request applies");
+    check(config.enabled && config.startMin == 90 && config.endMin == 200 &&
+              config.idleMs == 600000,
+          "and leaves the window and the timeout exactly as they were");
+  }
+  {
+    // The device does not trust the wire, even though the service validates.
+    SleepConfig config;
+    int applied = 0;
+    const SleepRequest silly = sleepFromDoc(
+        "seq\t1\nsleepseq\t3\nsleepon\t1\nsleepfrom\t1440\nsleeptill\t99999\n"
+        "sleepidle\t99999999\nmenu\t0\n");
+    tcos::applySleepRequest(silly, applied, &config);
+    check(config.startMin == 0, "an out-of-range start wraps rather than being stored raw");
+    check(config.endMin == (99999 % 1440), "and so does an out-of-range end");
+    check(config.idleMs == tcos::kMaxIdleMs, "and an absurd timeout is clamped, not overflowed");
+  }
+  {
+    SleepConfig config;
+    int applied = 7;
+    const SleepRequest stale = sleepFromDoc("seq\t1\nsleepseq\t7\nsleepon\t1\nmenu\t0\n");
+    check(!tcos::applySleepRequest(stale, applied, &config),
+          "a sequence equal to the applied one does nothing");
+    check(!config.enabled, "and the config is untouched");
+  }
+  {
+    // THE SERVICE RESTARTED. The hub's sequence is plain instance state in the
+    // Bun process — `bun run build` after any web/ change restarts it — so it
+    // comes back at 1 while this device is still up holding the last number it
+    // applied. Refusing everything below that high-water mark is what killed
+    // the documented way back for a dark panel: `PUT /api/os/sleep
+    // {enabled:false}` at 02:00 answers 200, reports `requested`, and does
+    // nothing, five times over, with nothing anywhere saying so.
+    SleepConfig config;
+    config.enabled = true;
+    int applied = 9;
+    const SleepRequest restarted =
+        sleepFromDoc("seq\t1\nsleepseq\t1\nsleepon\t0\nmenu\t0\n");
+    check(tcos::applySleepRequest(restarted, applied, &config),
+          "a sequence that went BACKWARDS is a restarted service, not a replay");
+    check(!config.enabled, "so the remote escape hatch still lands");
+    check(applied == 1, "and the device follows the new counter");
+    // ...and the replay guard the sequence exists for is still armed: the
+    // document repeats this request on every poll for as long as it stands.
+    config.enabled = true;
+    check(!tcos::applySleepRequest(restarted, applied, &config),
+          "the same document is still not acted on twice");
+    check(config.enabled, "so the knob keeps winning");
+  }
+
+  // --- sanitise ------------------------------------------------------------
+  {
+    SleepConfig raw;
+    raw.startMin = -30;
+    raw.endMin = 2880;
+    raw.idleMs = 10;
+    const SleepConfig safe = tcos::sanitizeSleepConfig(raw);
+    check(safe.startMin == 1410 && safe.endMin == 0, "minutes wrap into the day");
+    check(safe.idleMs == tcos::kMinIdleMs, "and a sub-30-second timeout is floored");
+    raw.idleMs = 99999999;
+    check(tcos::sanitizeSleepConfig(raw).idleMs == tcos::kMaxIdleMs, "as a huge one is capped");
+  }
+
+  // --- the fade is a Presenter concern, and the awake path is unchanged ----
+  {
+    using tcos::Presenter;
+    bool identical = true;
+    for (int step = 1; step <= Presenter::kBrightnessSteps; ++step) {
+      for (int v = 0; v <= 255; ++v) {
+        if (Presenter::dimByte((uint8_t)v, step, 100) != Presenter::scaleByte((uint8_t)v, step)) {
+          identical = false;
+        }
+      }
+    }
+    check(identical, "at 100% the fade is byte-for-byte the frame the firmware always sent");
+
+    bool black = true;
+    for (int step = 1; step <= Presenter::kBrightnessSteps; ++step) {
+      for (int v = 0; v <= 255; ++v) {
+        if (Presenter::dimByte((uint8_t)v, step, 0) != 0) black = false;
+      }
+    }
+    // NO floor of 1 here, unlike scaleByte: that floor stops dimming from
+    // deleting content, whereas a fade's whole job is to reach black.
+    check(black, "and at 0% every byte is zero, so the panel is genuinely dark");
+
+    bool monotonic = true;
+    for (int percent = 1; percent < 100; ++percent) {
+      if (Presenter::dimByte(255, 10, percent) > Presenter::dimByte(255, 10, percent + 1)) {
+        monotonic = false;
+      }
+    }
+    check(monotonic, "and the ramp between them never brightens");
+  }
+}
+
+// The two rows as the user actually reads them, so the panel text is asserted
+// rather than eyeballed on hardware nobody can screenshot.
+void checkSleepRows() {
+  using tcos::SleepConfig;
+
+  SleepConfig cfg;  // off, 23:00-07:00, 5 分钟
+  check(tcos::formatSleepWindow(cfg, true) == "\xE5\x85\xB3\xE9\x97\xAD",
+        "the row reads 关闭 while the feature is off");
+
+  cfg.enabled = true;
+  check(tcos::formatSleepWindow(cfg, true) == "23-07",
+        "and 23-07 when on — hours only, because 23:00-07:00 is 66 px against a 50 px clip");
+  // APPENDED, not substituted. Replacing the window rendered all four settings
+  // identically on a clock that has not synced — which is every freshly flashed
+  // unit before Wi-Fi, i.e. exactly the user who is poking at 设置 to see what
+  // the row does. Four settings, one string, and no way to count presses back
+  // to 关闭.
+  check(tcos::formatSleepWindow(cfg, false) ==
+            "23-07 \xE7\xAD\x89\xE5\xBE\x85\xE6\xA0\xA1\xE6\x97\xB6",
+        "an untrusted clock says so BESIDE the window, not instead of it");
+  {
+    SleepConfig other = cfg;
+    other.startMin = 1320;
+    check(tcos::formatSleepWindow(other, false) != tcos::formatSleepWindow(cfg, false),
+          "so two different windows never read the same on an unsynced clock");
+  }
+
+  cfg.startMin = 0;
+  cfg.endMin = 0;
+  check(tcos::formatSleepWindow(cfg, true) == "\xE5\x85\xA8\xE5\xA4\xA9",
+        "start == end reads 全天 rather than as an empty window");
+
+  cfg.startMin = 1410;  // 23:30
+  cfg.endMin = 405;     // 06:45
+  check(tcos::formatSleepWindow(cfg, true) == "23:30-06:45",
+        "minutes appear only when an endpoint is off the hour, which only a console produces");
+
+  SleepConfig idle;
+  idle.idleMs = 300000;
+  check(tcos::formatSleepIdle(idle) == "5\xE5\x88\x86\xE9\x92\x9F", "5分钟");
+  idle.idleMs = 1800000;
+  check(tcos::formatSleepIdle(idle) == "30\xE5\x88\x86\xE9\x92\x9F", "30分钟");
+  idle.idleMs = 45000;
+  check(tcos::formatSleepIdle(idle) == "45\xE7\xA7\x92",
+        "a console-set 45 s says 45秒 rather than rounding to a minute it does not honour");
+
+  // Every codepoint these rows can put on the panel has a glyph. A missing one
+  // draws as a gap, which on a 52 px row is indistinguishable from a bug.
+  {
+    const char* strings[8] = {
+      "\xE5\xA4\x9C\xE9\x97\xB4\xE6\x81\xAF\xE5\xB1\x8F",              // 夜间息屏
+      "\xE6\x81\xAF\xE5\xB1\x8F\xE7\xAD\x89\xE5\xBE\x85",              // 息屏等待
+      "\xE5\x85\xB3\xE9\x97\xAD",                                      // 关闭
+      "\xE5\x85\xA8\xE5\xA4\xA9",                                      // 全天
+      "23-07 \xE7\xAD\x89\xE5\xBE\x85\xE6\xA0\xA1\xE6\x97\xB6",        // 23-07 等待校时
+      "5\xE5\x88\x86\xE9\x92\x9F",                                     // 5分钟
+      "45\xE7\xA7\x92",                                                // 45秒
+      "23:30-06:45",
+    };
+    bool covered = true;
+    for (int i = 0; i < 8; ++i) {
+      const char* p = strings[i];
+      while (*p != '\0') {
+        const uint32_t cp = tcos::text::utf8Next(p);
+        if (tcos::glyphs::lookup(cp).rows == 0) covered = false;
+      }
+    }
+    check(covered, "every glyph these two rows can draw is in the font");
+  }
+
+  // 夜间息屏 is four CJK cells, the widest a label can be on this panel — the
+  // same geometry 夜间休眠 had, so this is a copy change and not a layout one.
+  check(tcos::text::measure("\xE5\xA4\x9C\xE9\x97\xB4\xE6\x81\xAF\xE5\xB1\x8F") == 48,
+        "the label is exactly 48 px, the four-cell maximum");
+  check(tcos::text::measure("\xE6\x81\xAF\xE5\xB1\x8F\xE7\xAD\x89\xE5\xBE\x85") == 48,
+        "and so is the second one");
+  check(tcos::text::measure("23-07") <= 50, "and the value fits the row without a marquee");
+  // The unsynced form does NOT fit, and that is the accepted trade: drawRow
+  // marquees anything wider than the clip, and this is the abnormal state where
+  // the user needs both halves of the answer.
+  check(tcos::text::measure("23-07 \xE7\xAD\x89\xE5\xBE\x85\xE6\xA0\xA1\xE6\x97\xB6") > 50,
+        "while the untrusted-clock form marquees, which is why it is not the normal one");
+
+  // --- the cycles ----------------------------------------------------------
+  {
+    // 关闭 → 22-07 → 23-07 → 00-08 → 关闭. A full lap returns to where it
+    // started, so a user who overshoots can keep pressing rather than needing a
+    // second control to go back.
+    SleepConfig at;  // off, 23:00-07:00
+    SleepConfig walk = at;
+    walk = tcos::cycleSleepWindow(walk);
+    check(walk.enabled && walk.startMin == 1320 && walk.endMin == 420, "关闭 → 22-07");
+    walk = tcos::cycleSleepWindow(walk);
+    check(walk.startMin == 1380 && walk.endMin == 420, "22-07 → 23-07");
+    walk = tcos::cycleSleepWindow(walk);
+    check(walk.startMin == 0 && walk.endMin == 480, "23-07 → 00-08");
+    walk = tcos::cycleSleepWindow(walk);
+    check(!walk.enabled && walk.startMin == 0 && walk.endMin == 480,
+          "00-08 → 关闭, which keeps the window it came from");
+  }
+  {
+    // 全天 IS NOT ON THE KNOB, and this is the assertion that says so.
+    //
+    // It used to sit one detent past 00-08, so 关闭 → 22-07 → 23-07 → 00-08 →
+    // 全天 → 关闭(全天) turned a night-sleep clock into an all-day screensaver in
+    // two presses of a row a user was merely reading — and left 关闭 holding
+    // 全天, so the next enable landed there too. 全天 is also the one mode with
+    // no wall-clock moment at which the panel comes back by itself, which is the
+    // safety property everything else here is built on. A console form can label
+    // it and explain it; a 52 px row pressed to find out what it does cannot.
+    SleepConfig walk;  // off, 23:00-07:00
+    bool everWholeDay = false;
+    for (int i = 0; i < 24; ++i) {
+      walk = tcos::cycleSleepWindow(walk);
+      if (walk.enabled && walk.startMin == walk.endMin) everWholeDay = true;
+    }
+    check(!everWholeDay, "no number of knob presses can reach 全天");
+  }
+  {
+    // 关闭 KEEPS the window in the CONFIG rather than clearing it: telemetry
+    // keeps reporting it and a console `{enabled:true}` restores it. It does not
+    // mean the next press returns to it — this is a ring, and 22-07 is the next
+    // stop. The two claims are easy to conflate, so both are pinned here.
+    SleepConfig off;
+    off.enabled = false;
+    off.startMin = 1410;  // 23:30
+    off.endMin = 405;     // 06:45
+    const SleepConfig next = tcos::cycleSleepWindow(off);
+    check(next.enabled && next.startMin == 1320 && next.endMin == 420,
+          "from 关闭 the ring advances to 22-07");
+  }
+  {
+    // THE PRESS THAT LEAVES A CONSOLE-SET WINDOW LANDS ON 关闭, WHICH KEEPS IT.
+    //
+    // The config holds one window, so whatever a press moves to is what replaces
+    // it; the most a cycle row can promise is that the first press is
+    // recoverable. It is: 关闭 keeps 23:30-06:45 in the config, telemetry still
+    // reports it, and one console `{enabled:true}` brings it back. The custom
+    // entry therefore sits LAST in the lap. Putting it first — where it was —
+    // stepped straight over it onto 22-07 and destroyed a console setting on
+    // press one; putting it first AND returning to it from 关闭 is a two-stop
+    // ring with the presets unreachable.
+    SleepConfig custom;
+    custom.enabled = true;
+    custom.startMin = 1410;
+    custom.endMin = 405;
+    SleepConfig walk = tcos::cycleSleepWindow(custom);
+    check(!walk.enabled && walk.startMin == 1410 && walk.endMin == 405,
+          "one press off a custom window turns it off WITHOUT throwing the window away");
+    walk = tcos::cycleSleepWindow(walk);
+    check(walk.enabled && walk.startMin == 1320 && walk.endMin == 420,
+          "and the press after that starts the preset lap, in full view of the user");
+    for (int i = 0; i < 2; ++i) walk = tcos::cycleSleepWindow(walk);
+    check(walk.enabled && walk.startMin == 0 && walk.endMin == 480,
+          "the presets still walk through from there");
+    walk = tcos::cycleSleepWindow(walk);
+    check(!walk.enabled, "and back off, so no lap is a dead end");
+  }
+  {
+    // Every stop of every lap, from every starting point, is either 关闭 or a
+    // window that ends at a different minute from the one it starts at. That is
+    // the property the panel's guaranteed self-wake rests on, so it is asserted
+    // over the whole reachable set rather than along one path.
+    SleepConfig starts[4];
+    starts[0] = SleepConfig();                       // the shipped default
+    starts[1].enabled = true;                        // on, 23:00-07:00
+    starts[2].enabled = true; starts[2].startMin = 1410; starts[2].endMin = 405;  // custom
+    starts[3].enabled = true; starts[3].startMin = 0; starts[3].endMin = 0;       // 全天 by wire
+    bool safe = true;
+    for (int s = 0; s < 4; ++s) {
+      SleepConfig walk = starts[s];
+      for (int i = 0; i < 24; ++i) {
+        walk = tcos::cycleSleepWindow(walk);
+        if (walk.enabled && walk.startMin == walk.endMin) safe = false;
+      }
+    }
+    check(safe,
+          "even starting from a console-set 全天, the knob can only reach windows that end");
+  }
+  {
+    // 1 → 3 → 5 → 10 → 30 分钟 → 1.
+    SleepConfig at;
+    at.idleMs = 60000;
+    at = tcos::cycleSleepIdle(at);
+    check(at.idleMs == 180000, "1分钟 → 3分钟");
+    at = tcos::cycleSleepIdle(at);
+    check(at.idleMs == 300000, "3分钟 → 5分钟");
+    at = tcos::cycleSleepIdle(at);
+    check(at.idleMs == 600000, "5分钟 → 10分钟");
+    at = tcos::cycleSleepIdle(at);
+    check(at.idleMs == 1800000, "10分钟 → 30分钟");
+    at = tcos::cycleSleepIdle(at);
+    check(at.idleMs == 60000, "30分钟 → 1分钟");
+  }
+
+  // --- the row shows what the press changed --------------------------------
+  // Without revealValue a cycle row changes something invisible: the label is
+  // still up for 1100 ms, the user presses again, and the setting jumps two.
+  {
+    tcos::SettingsScreen screen;
+    Surface out(52, 16);
+    std::vector<tcos::SettingsScreen::Row> rows;
+    tcos::SettingsScreen::Row row;
+    row.id = 2;
+    row.label = "\xE5\xA4\x9C\xE9\x97\xB4\xE6\x81\xAF\xE5\xB1\x8F";  // 夜间息屏
+    row.value = "23-07";
+    rows.push_back(row);
+    screen.setRows(rows, 0);
+    screen.onEnter(0);
+
+    out.clear();
+    screen.render(out, 200);
+    const int label = litPixels(out);
+
+    // Same instant, without the reveal: still the label, for another second.
+    out.clear();
+    screen.render(out, 200 + tcos::SettingsScreen::kSwapMs + 10);
+    check(litPixels(out) == label, "the dwell would otherwise hold the label past the press");
+
+    screen.revealValue(200);
+    out.clear();
+    screen.render(out, 200 + tcos::SettingsScreen::kSwapMs + 10);
+    check(litPixels(out) > 0 && litPixels(out) != label,
+          "revealValue puts the new value on the row instead");
   }
 }
 
@@ -6118,6 +6767,10 @@ int main() {
   std::printf("  level overlay ok\n");
   checkConsoleSettings();
   std::printf("  console settings ok\n");
+  checkSleepPolicy();
+  std::printf("  sleep policy ok\n");
+  checkSleepRows();
+  std::printf("  sleep rows ok\n");
   checkTimeSync();
   std::printf("  time sync ok\n");
   checkBrightness();

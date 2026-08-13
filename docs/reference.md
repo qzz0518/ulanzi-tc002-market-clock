@@ -341,6 +341,57 @@ item	settings	settings	设置
 不存在时完全一致。控制台重发一个设备已经是这个值的档位仍然会推进序列——序列的语义是「用户
 动了这个控件」而不是「这个数变了」，否则把滑块拖回原位就没有任何回执。
 
+**夜间息屏**是同一套「请求 + 上升沿」，但**只有一个序列**：
+
+```
+sleepseq	4
+sleepon	1
+sleepfrom	1380
+sleeptill	420
+sleepidle	300
+```
+
+`sleepfrom` / `sleeptill` 是本地零点起的分钟数，**结束时刻不含**（07:00 已经是早上）；
+`sleepfrom == sleeptill` 表示**全天**——零长度的窗口没有用处，而全天屏保是有人会要的，也是
+不等到半夜就能试这个功能的唯一办法。跨零点（23:00→07:00）是**常态而不是边界情况**。
+`sleepidle` 是**秒**不是毫秒：这个量级到不了亚秒，短一点的行对 `atoi` 也更便宜。
+
+**四行各自可缺，缺的那一行意思是「这一项别动」**——不是哨兵值，是行本身不出现。所以
+`PUT /api/os/sleep {idleSec:600}` 之后文档里只有 `sleepseq` + `sleepidle`，和 `setvol`/
+`setbri` 在没写过时不发是同一条规矩。曾经这个块一旦开始发就五行全发：只改超时的一次 PUT 会
+连带发出 `sleepon 0`，固件照单全收并写进 `/data`——用户调一下等待时间就把功能关了、窗口也丢
+了。一个字段被写过之后会**一直**出现在文档里，因为设备可以把几次写入合并成一次轮询读到。
+
+只有一个序列而不是四个，是因为音量/亮度那三个序列是为「面板只有一条 bar，要说出用户动的是
+哪一个」而生的，这里没有这样的显示，而这四个字段永远由控制台的同一张表单一起写。**不要照抄
+那套三序列的写法。**控制台从未写过时**一行都不发**：没写过的默认值躺在每份文档里，就是一份
+设备可以照做的请求，而在控制台开口之前这个设置属于设备自己的 设置 页。
+
+**序列变小 = 服务重启了，不是重放。**序列是 Bun 进程里的普通实例状态，`bun start` 之后从 1
+重来，而设备还开着、还记着上次采纳的号。设备侧对**低于**已采纳值的序列会把计数器归零后采纳
+（`applySleepRequest` / `applyConsoleSettings`），否则凌晨两点那次 `{enabled:false}` 会安静地
+什么都不做——路由照样回 200——直到重按够次数为止。重放仍然挡得住：重放是重复同一个号，不是
+往回退。
+
+设备侧的 `/api/os/report` 因此多带一个 `sleep` 块：
+
+```json
+"sleep": { "on": true, "startMin": 1380, "endMin": 420, "idleSec": 300,
+           "asleep": false, "clockSynced": true }
+```
+
+**这个块在不在，就是能力探测本身**——不走 `proto`：这一版固件根本不发 `proto`，把它抬上去会
+同时宣称一份它并没有的 lyric window 支持，还会翻转歌词编码。`asleep` 是「黑屏有歧义」的全部
+答案：控制台据此说「已息屏」，而**绝不从像素推断息屏**——全黑和一台死掉的时钟在屏幕上一模
+一样，这正是 `describeMirror` 对离线情形早就写死的规矩。四个配置字段是**设备实际生效的值**，
+只要有人拧过旋钮它就和控制台请求的不同，表单该渲染的是它。`clockSynced` 让控制台能解释
+「开了却不息屏」而不是让它看起来像 bug。
+
+`asleep` **翻转时立刻补发一次遥测**，不等 10 秒周期。其余字段是给人看的、旧十秒无所谓；这一个
+是控制台会据以清空画布的，停在 `true` 就意味着用户自己按醒的面板还被画成一块空白，而接下来
+那一下按键**不再被吞**，会直接翻频道。控制台侧的完整契约见
+[`docs/design/zos-night-sleep-console.md`](design/zos-night-sleep-console.md)。
+
 **ZOS 在位时，推送这一步会停，渲染这一步不会。** ZOS 顶替了官方 app，`POST /api/custom` 随之
 消失；而它的配网页对**任何未知路径**都回配置页加 HTTP 200，于是每一次推送都「成功」：
 `updateCount` 在涨、`lastError` 干净、控制台显示频道健康，像素却进了一个伪装成 200 的 404。
@@ -555,13 +606,14 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` / `POST` | `/api/os/device-app/*` | ZOS 的同一套侧载生命周期（确认口令 `START_TC002_OS_SESSION`） |
 | `GET` | `/api/os/pull` | ZOS 长轮询状态文档（`?seq=`，最多挂起 8 秒；行式 `KEY\tVALUE` 纯文本，免同源） |
 | `GET` | `/api/os/frames` | ZOS 按 `?app=` 拉取一个频道渲染好的帧包（`TCF1` 原始 RGB 二进制，免同源） |
-| `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq） |
+| `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto, sleep?}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq）。`sleep` 形如 `{on, startMin, endMin, idleSec, asleep, clockSynced}`，**它在不在就是夜间息屏的能力探测**；块内数值越界按范围夹住而不是让整条心跳 400 |
 | `POST` | `/api/os/mirror` | ZOS 回传面板实拍帧（正文即 2496 字节原始 RGB，免同源）；应答 `{wanted}` 告诉设备是否继续推 |
 | `GET` | `/api/os/mirror` | 控制台取最新一帧，**取本身就是订阅**：10 秒不取设备自动停流 |
-| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
+| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
 | `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值。只写请求里点名的那一项：另一项也会随 `setvolseq` / `setbriseq` 一起留在文档里，但序列不动，面板因此只为用户真正动过的那一项亮 bar |
+| `PUT` | `/api/os/sleep` | 请求设备采用一套夜间息屏：`{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`，四个都缺则 400，越界也是 400。应答 `{requested:{enabled,startMin,endMin,idleSec,seq}}`，**没写过的字段是 `null`** 而不是默认值——只发出去写过的那几行，一次只改超时的 PUT 不会顺手改掉窗口。`startMin == endMin` 是**全天**而不是零长度窗口，必须接受。**每次写入都推进序列**——设备的 设置 页是第二个写方，只有上升的序列能盖过旋钮。序列上升同时也被设备算作一次「用户操作」，所以 `{enabled:false}` 不只是停止再次息屏，而是**当场点亮面板**：这是黑屏时不在时钟旁边的人唯一的远程逃生口 |
 | `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}`（`lyricEndMs` 是这一句**唱完**的时刻，`lyricUntilMs` 是下一句接手的时刻；`lyricWords` 形如 `[{startMs,endMs,text}]`，最多 64 条、每条 ≤16 字符、合计 ≤200 字符，格式不对就整表丢弃而不是让上报失败），正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |

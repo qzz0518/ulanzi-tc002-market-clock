@@ -49,6 +49,17 @@ class SettingsScreen : public Screen {
   int takeActivated();
   int selectedIndex() const { return mRing.index(); }
 
+  /**
+   * Skips the label dwell so the value is on the row now.
+   *
+   * For rows that CYCLE their own value. Without it a press changes something
+   * invisible: the row is showing its label for 1100 ms, the value that just
+   * moved is off-panel, and the user presses again — advancing the setting two
+   * positions to see the first one. Called by the handler right after it
+   * rebuilds the rows.
+   */
+  void revealValue(int nowMs) { mRowShownMs = nowMs - kLabelDwellMs; }
+
  private:
   void renderRail(Surface& out) const;
 
