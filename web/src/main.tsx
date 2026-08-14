@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { CladdProvider } from "@cladd-ui/react";
 import { App } from "@/app";
+import { attachMediaSession } from "@/lib/media-session";
 import "@/styles/globals.css";
 import "@/styles/music-player.css";
 
@@ -25,6 +26,10 @@ createRoot(root).render(
     </div>
   </CladdProvider>,
 );
+
+// 锁屏 / 灵动岛 / 蓝牙耳机上的「正在播放」。挂在页面这一层而不是某个视图里：
+// 播放器是模块单例，切到内容页歌照放，那块卡片也得跟着照放歌名而不是网页标题。
+attachMediaSession();
 
 if ("serviceWorker" in navigator && window.isSecureContext) {
   window.addEventListener("load", () => {
