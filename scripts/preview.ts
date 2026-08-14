@@ -24,6 +24,8 @@ const controller = new WorkspaceController({
   pushPayload: async () => ({ status: 200 }),
   deleteApp: async () => ({ status: 200 }),
   pixelAssetStore: new PixelAssetStore(".runtime/pixel-assets"),
+  // No vibeClient: AI usage is a firmware app now, so nothing a channel renders
+  // asks for a usage snapshot and this pass must not talk to ten vendors.
 });
 
 await mkdir(".runtime/previews", { recursive: true });

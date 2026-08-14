@@ -43,6 +43,7 @@
 
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { judgeBundle } from "./bundle-gate.ts";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -629,8 +630,57 @@ const stockPath = resolve(
 const bundleDir = resolve(flag("bundle", join(repoRoot, "device/tc002-os/release/bundle")));
 const outPath = resolve(flag("out", join(repoRoot, ".runtime/tc002-os/update.img")));
 const verifyOnly = process.argv.includes("--verify-only");
+const allowStaleBundle = process.argv.includes("--allow-stale-bundle");
 const restoreArg = flag("restore", "");
 const restoreDir = restoreArg === "" ? null : resolve(restoreArg);
+
+/**
+ * Refuses to pack a bundle that is older than the code sitting next to it.
+ *
+ * This packs `release/bundle/`, which a SEPARATE step (`create-os-release.ts`)
+ * fills from the cross-build output. Skip that step and `os-build` → `os-image`
+ * still prints every success line it always prints and emits a container of the
+ * PREVIOUS build — which then installs perfectly, reboots, and comes back
+ * running exactly what it was running before. An evening was spent reading a
+ * vendor updater's disassembly over that, looking for the reason an install
+ * "did not take", when the image simply had nothing new in it.
+ *
+ * Compared byte-for-byte rather than by mtime: a rebuild that produces an
+ * identical .so is fine to pack, and a bundle copied around loses its
+ * timestamps. Silent only when the two agree.
+ */
+async function assertBundleIsCurrent(dir: string): Promise<void> {
+  const builtPath = join(repoRoot, "device/tc002-lyrics-player/flythings-build/libzkgui-os.so");
+  let built: Buffer | null = null;
+  try {
+    built = await readFile(builtPath);
+  } catch {
+    built = null;
+  }
+  const staged = await readFile(join(dir, "libzkgui.so"));
+  const verdict = judgeBundle(built, staged, allowStaleBundle);
+  if (verdict.ok) return;
+
+  const why = verdict.reason === "no-build"
+    ? `There is no cross-build output to compare against:\n    ${builtPath}\n`
+      + "  Nothing here can tell whether the bundle is current, and a bundle that is not\n"
+      + "  current packs the PREVIOUS build.\n"
+    : `Bundle is not the build sitting next to it:\n`
+      + `    built:  ${builtPath} (${verdict.builtBytes} bytes)\n`
+      + `    bundle: ${join(dir, "libzkgui.so")} (${verdict.bundleBytes} bytes)\n`;
+  console.error(
+    "Refusing to pack.\n  " + why
+      + "  Build, then stage it into the bundle:\n"
+      + "    mise run os-build\n"
+      + "    bun run scripts/create-os-release.ts -- <staging-dir> <version> os\n"
+      + "  Or pass --allow-stale-bundle if packing the checked-in bundle is what you mean.\n"
+      + "  The failure this prevents is silent: the stale container installs cleanly,\n"
+      + "  reboots, and comes back running what it was already running.",
+  );
+  process.exit(1);
+}
+
+if (!verifyOnly) await assertBundleIsCurrent(bundleDir);
 
 let stock: Buffer;
 try {

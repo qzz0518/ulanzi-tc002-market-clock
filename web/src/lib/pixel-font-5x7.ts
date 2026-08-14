@@ -54,6 +54,10 @@ export const PIXEL_FONT_5X7: Readonly<Record<string, readonly string[]>> = {
   Y: ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
   Z: ["####", "...#", "..#.", "..#.", ".#..", "#...", "####"],
   "?": [".##.", "#..#", "...#", "..#.", "..#.", "....", "..#."],
+  // The VIBE duo page sets a lone starred percent in this face, so the sign has
+  // to exist at 7 px too; 5 columns is the widest cell here, which is what the
+  // two bowls plus the slash need.
+  "%": ["##..#", "##..#", "...#.", "..#..", ".#...", "#..##", "#..##"],
 };
 
 /** Every glyph in the table is exactly this tall; only the width varies. */

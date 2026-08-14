@@ -200,6 +200,97 @@ describe("tc002-os host link", () => {
     expect(hub.getTelemetry()?.ip).toBe("192.168.8.240");
   });
 
+  test("the device's own record retires the request, even with uptime rising", () => {
+    // The uptime heuristic is wrong in a case that really happens: an upgrade
+    // early in a boot, where the last report before the reboot carries a
+    // SMALLER uptime than the first report after it. The device's record is
+    // the evidence; the heuristic is only for firmware that cannot send one.
+    const hub = new OsLinkHub();
+    const beat = (uptimeMs: number, upgradeSeqInstalled?: number) => hub.report({
+      screen: "launcher",
+      focus: "btc",
+      wifi: "online",
+      ip: "192.168.8.240",
+      uptimeMs,
+      freeKb: 900,
+      supplicantRestarts: 0,
+      proto: 0,
+      batteryPercent: 87,
+      charging: false,
+      flashed: true,
+      ...(upgradeSeqInstalled === undefined ? {} : { upgradeSeqInstalled }),
+    });
+
+    beat(3_000, 0);
+    const asked = hub.requestUpgrade();
+    expect(hub.getUpgradeSeq()).toBe(asked);
+
+    // The reboot happened, and the first report after it has a LARGER uptime
+    // than the last one before it — the heuristic sees nothing.
+    beat(9_000, asked);
+    expect(hub.getUpgradeSeq()).toBe(0);
+    expect(hub.serialize()).not.toContain("upgrade\t");
+  });
+
+  test("a device that has installed nothing does not retire the request", () => {
+    // 0 is a real answer, not a missing one. A device still working on the
+    // request keeps reporting 0, and the request has to survive that.
+    const hub = new OsLinkHub();
+    const beat = (uptimeMs: number, upgradeSeqInstalled: number) => hub.report({
+      screen: "launcher", focus: "btc", wifi: "online", ip: "192.168.8.240",
+      uptimeMs, freeKb: 900, supplicantRestarts: 0, proto: 0,
+      batteryPercent: 87, charging: false, flashed: true, upgradeSeqInstalled,
+    });
+
+    beat(3_000, 0);
+    const asked = hub.requestUpgrade();
+    beat(13_000, 0);
+    expect(hub.getUpgradeSeq()).toBe(asked);
+    // An older record — the device installed something, but not this.
+    beat(23_000, asked - 1);
+    expect(hub.getUpgradeSeq()).toBe(asked);
+    beat(33_000, asked);
+    expect(hub.getUpgradeSeq()).toBe(0);
+  });
+
+  test("a reboot withdraws a standing install request", () => {
+    // The vendor updater ends in a restart, so an uptime that went backwards
+    // while a request stood means the device already acted on it. Leaving the
+    // request up is the whole boot loop: the panel cannot remember across the
+    // reboot, so the process holding the request has to.
+    const hub = new OsLinkHub();
+    const beat = (uptimeMs: number) => hub.report({
+      screen: "launcher",
+      focus: "btc",
+      wifi: "online",
+      ip: "192.168.8.240",
+      uptimeMs,
+      freeKb: 900,
+      supplicantRestarts: 0,
+      proto: 0,
+      batteryPercent: 87,
+      charging: false,
+      flashed: true,
+    });
+
+    beat(900_000);
+    const asked = hub.requestUpgrade();
+    expect(asked).toBeGreaterThan(0);
+    expect(hub.serialize().split("\n")).toContain(`upgrade\t${asked}`);
+
+    beat(905_000);
+    expect(hub.getUpgradeSeq()).toBe(asked);
+
+    beat(4_000);
+    expect(hub.getUpgradeSeq()).toBe(0);
+    expect(hub.serialize()).not.toContain("upgrade\t");
+
+    // And the next press is still a NEWER id than the withdrawn one, or the
+    // device's own /data record would read it as one it already installed.
+    const again = hub.requestUpgrade();
+    expect(again).toBeGreaterThan(asked);
+  });
+
   test("still produces the exact bytes the firmware's parser is tested against", () => {
     // device/tc002-os/hostcheck/fixtures/state-doc.txt is parsed by the C++
     // self-check. Without this assertion the two sides could drift: the encoder
@@ -218,15 +309,84 @@ describe("tc002-os host link", () => {
       { ...entry("notice", "通知板"), rev: "0c33d18a7b45", ttlMs: 30_000 },
       entry("music", "音乐", "music"),
       entry("game", "游戏", "game"),
+      entry("vibe", "VIBE", "vibe"),
       entry("settings", "设置", "settings"),
     ]);
     hub.setDisplay({ focus: "notice", pinned: true });
+    // The VIBE block is in the fixture for the same reason the channels' rev and
+    // ttl are: its records are what the firmware's parser is written against —
+    // one `vibea` per agent, an optional `vibes`, then that agent's metric rows,
+    // each repeating the id so the parser may index rather than trust ordering.
+    hub.setVibe([
+      {
+        id: "claude",
+        label: "Claude",
+        plan: "Max 20x",
+        stale: false,
+        metrics: [
+          { label: "Session", used: 11, limit: 100, resetSec: 18_000 },
+          { label: "Weekly", used: 72, limit: 100, resetSec: 259_200 },
+        ],
+      },
+      {
+        id: "codex",
+        label: "Codex",
+        plan: "Plus",
+        stale: true,
+        metrics: [{ label: "Weekly", used: 4, limit: 100, resetSec: -1 }],
+      },
+    ]);
 
     const fixture = readFileSync(
       join(import.meta.dir, "../device/tc002-os/hostcheck/fixtures/state-doc.txt"),
       "utf8",
     );
     expect(hub.serialize()).toBe(fixture);
+  });
+
+  test("the vibe block is idempotent, so a five-minute republish wakes nobody", () => {
+    const hub = new OsLinkHub();
+    const agents = () => [{
+      id: "claude",
+      label: "Claude",
+      plan: "Max 20x",
+      stale: false,
+      metrics: [{ label: "Session", used: 11, limit: 100, resetSec: 18_000 }],
+    }];
+    hub.setVibe(agents());
+    const afterFirst = hub.currentSeq();
+    // The publisher runs on a timer; an unchanged payload must not bump the
+    // sequence or every parked long poll wakes for nothing every five minutes.
+    hub.setVibe(agents());
+    expect(hub.currentSeq()).toBe(afterFirst);
+
+    const moved = agents();
+    moved[0]!.metrics[0]!.used = 12;
+    hub.setVibe(moved);
+    expect(hub.currentSeq()).toBe(afterFirst + 1);
+  });
+
+  test("vibe values are clamped and separators can never reach the wire", () => {
+    const hub = new OsLinkHub();
+    hub.setVibe([{
+      // A label carrying a tab would split into fields the parser never agreed
+      // to; channel names already taught us that (sanitizeField).
+      id: "claude",
+      label: "Cla\tude",
+      plan: "Max\n20x",
+      stale: false,
+      metrics: [
+        { label: "Ses\tsion", used: 4_000, limit: -5, resetSec: Number.NaN },
+        { label: "Weekly", used: 72, limit: 100, resetSec: 60 },
+        { label: "Third", used: 1, limit: 100, resetSec: 60 },
+      ],
+    }]);
+    const doc = hub.serialize();
+    expect(doc).toContain("vibea\tclaude\tCla ude\tMax 20x");
+    // 999 is what three digit cells can hold; a negative limit is no ceiling.
+    expect(doc).toContain("vibem\tclaude\tSes sion\t999\t0\t-1");
+    // Two starred metrics is the panel's budget, so a third never ships.
+    expect(doc).not.toContain("Third");
   });
 
   test("mirroring is a lease the console renews, not a session it must tear down", () => {

@@ -40,10 +40,51 @@ Color accentFor(LauncherScreen::Icon icon) {
     case LauncherScreen::kIconMusic:    return Color(255, 96, 160);
     case LauncherScreen::kIconGame:     return Color(120, 170, 255);
     case LauncherScreen::kIconSettings: return Color(200, 200, 200);
+    // Violet, and specifically NOT the amber the usage pages use for 80%: a
+    // card wearing the warning colour would read as an alert on a device with
+    // nothing to warn about yet. The MARK ignores this and runs its own sweep
+    // (see kIconVibe in drawIcon); this is what the rest of the card is tinted
+    // with, so the ring still has one colour per room.
+    case LauncherScreen::kIconVibe:     return Color(190, 120, 255);
     case LauncherScreen::kIconChannel:
     default:                            return Color(0, 230, 100);
   }
 }
+
+/**
+ * A wrapping ramp through three key colours.
+ *
+ * Every family badge runs one of these rather than a flat accent. Three keys
+ * and not a full HSV rotation because a rotation spends a third of its travel
+ * in whatever hue happens to belong to another card, and on a ring where colour
+ * is how you know which room you are in, that reads as the wrong room for a
+ * moment every cycle. Each ramp below stays inside its own family.
+ */
+Color rampHue(float t, const float keys[3][3]) {
+  t = t - floorf(t);
+  const float scaled = t * 3.0f;
+  const int from = static_cast<int>(scaled) % 3;
+  const int to = (from + 1) % 3;
+  const float f = scaled - floorf(scaled);
+  return Color(
+      static_cast<int>(keys[from][0] + (keys[to][0] - keys[from][0]) * f),
+      static_cast<int>(keys[from][1] + (keys[to][1] - keys[from][1]) * f),
+      static_cast<int>(keys[from][2] + (keys[to][2] - keys[from][2]) * f));
+}
+
+// magenta -> violet -> cyan. The loud one, and deliberately the widest sweep.
+const float kVibeKeys[3][3] = {{255, 70, 200}, {150, 110, 255}, {70, 225, 255}};
+// hot pink -> coral -> amber. Warm the whole way; music is the warm room.
+const float kMusicKeys[3][3] = {{255, 90, 170}, {255, 120, 120}, {255, 190, 90}};
+// arcade blue -> cyan -> mint. Cool, and clear of the greens the ring uses.
+const float kGameKeys[3][3] = {{110, 160, 255}, {90, 220, 255}, {130, 255, 210}};
+// spring green -> teal -> lime. The ring's own family.
+const float kRingKeys[3][3] = {{0, 230, 100}, {0, 210, 180}, {150, 245, 90}};
+// steel -> silver -> pale blue. Settings stays quiet; it is the only badge that
+// must not compete with the four it sits beside.
+const float kSetKeys[3][3] = {{150, 160, 175}, {215, 220, 230}, {170, 195, 235}};
+
+Color vibeHue(float t) { return rampHue(t, kVibeKeys); }
 
 void plot(Surface& out, int x, int y, const Color& c) {
   if (x < 0 || y < 0 || x >= out.getWidth() || y >= out.getHeight()) return;
@@ -53,16 +94,19 @@ void plot(Surface& out, int x, int y, const Color& c) {
 // Icons are procedural: a 12x12 RGB bitmap would cost 432 bytes each, and the
 // whole point of this firmware is that it fits where the official one does not.
 //
-// All four ANIMATE, and all four animate by MOVING something. On a 12x12 cell a
+// All five ANIMATE, and all five animate by MOVING something. On a 12x12 cell a
 // brightness pulse is nearly invisible and a 4-step rotation reads as flicker,
 // so every icon here changes a position by at least two pixels per cycle. Cost
 // is a handful of sinf/cosf per frame over at most 144 pixels.
-void drawIcon(Surface& out, LauncherScreen::Icon icon, int x, int y,
-              const Color& c, int phaseMs) {
+void drawIcon(Surface& out, LauncherScreen::Icon icon, int x, int y, int phaseMs) {
   const float kTwoPi = 6.2831853f;
 
-  // Per-game sprites draw themselves, in their own engine's palette; the four
-  // family badges below take the card's single accent.
+  // No accent parameter, and that is the point: every badge below runs its own
+  // ramp now (rampHue, above), so a card's accent no longer reaches its icon.
+  // It still tints the rest of the card and the transition wash — accentFor()
+  // has other callers — but passing it here would be plumbing to nowhere.
+  //
+  // Per-game sprites draw themselves, in their own engine's palette.
   if (icon >= LauncherScreen::kIconGameBreakout) {
     gameicons::draw(out, icon - LauncherScreen::kIconGameBreakout, x, y, phaseMs);
     return;
@@ -70,102 +114,134 @@ void drawIcon(Surface& out, LauncherScreen::Icon icon, int x, int y,
 
   switch (icon) {
     case LauncherScreen::kIconChannel: {
-      // A 3-bar equaliser. sinf rather than a fract-based ramp: the ramp had a
-      // discontinuity at the wrap, which showed up as a visible snap.
-      for (int bar = 0; bar < 3; ++bar) {
-        const float phase = (phaseMs / 900.0f) * kTwoPi + bar * 1.9f;
-        const float wave = 0.5f + 0.5f * sinf(phase);
-        const int h = 3 + static_cast<int>(wave * 7.0f);
-        for (int i = 0; i < h; ++i) {
-          const int py = y + 11 - i;
-          plot(out, x + 1 + bar * 4, py, c);
-          plot(out, x + 2 + bar * 4, py, c);
-        }
+      // 轮播 — cards sliding past a window, which is what the room does. The
+      // three-bar equaliser this replaced was fine on its own but sat two
+      // cards away from VIBE's waveform, and at 12 px "bars that bounce" and
+      // "a wave that travels" are the same idea twice.
+      const float period = 1800.0f;
+      const float u = (phaseMs / period) - floorf(phaseMs / period);
+      const int slide = static_cast<int>(u * 6.0f);   // one card width per cycle
+      // The window frame, dim, so the cards are seen to pass THROUGH something.
+      for (int i = 0; i < 12; ++i) {
+        plot(out, x + i, y, dim(rampHue(0.0f, kRingKeys), 0.35f));
+        plot(out, x + i, y + 11, dim(rampHue(0.0f, kRingKeys), 0.35f));
+      }
+      for (int card = -1; card < 3; ++card) {
+        const int cx = x + card * 6 + 6 - slide;
+        const Color hot = rampHue(card * 0.33f + phaseMs / 2600.0f, kRingKeys);
+        for (int dy = 2; dy <= 9; ++dy)
+          for (int dx = 0; dx < 4; ++dx) {
+            const int px = cx + dx;
+            if (px < x || px >= x + 12) continue;     // clipped by the window
+            plot(out, px, y + dy, (dy == 2 || dy == 9) ? dim(hot, 0.55f) : hot);
+          }
       }
       break;
     }
     case LauncherScreen::kIconMusic: {
-      // Two beamed quavers bouncing in antiphase. The beam stays put and the
-      // heads travel 3 px, which is a quarter of the cell — unmistakable motion
-      // at this size, and unmistakably musical.
-      const float phase = (phaseMs / 760.0f) * kTwoPi;
-      const int lift[2] = {
-          static_cast<int>(1.5f + 1.5f * sinf(phase)),
-          static_cast<int>(1.5f + 1.5f * sinf(phase + 3.14159f)),
-      };
-      // Beam across the top, joining both stems.
-      for (int i = 0; i < 9; ++i) plot(out, x + 2 + i, y + 1, c);
-      for (int i = 0; i < 9; ++i) plot(out, x + 2 + i, y + 2, c);
-      for (int n = 0; n < 2; ++n) {
-        const int sx = (n == 0) ? x + 2 : x + 10;
-        const int headTop = y + 7 + lift[n];
-        for (int i = y + 3; i < headTop; ++i) plot(out, sx, i, c);
-        // A 3x3 head hanging off the stem, on the inside so both fit the cell.
-        const int hx = (n == 0) ? sx : sx - 2;
-        for (int dy = 0; dy < 3; ++dy)
-          for (int dx = 0; dx < 3; ++dx) plot(out, hx + dx, headTop + dy, c);
-      }
+      // A quaver riding a wave of its own. The two beamed notes this replaced
+      // were a static bracket at 12 px: the beam is 9 px of unchanging pixels
+      // and the heads moved 3, so nine tenths of the mark never moved and it
+      // read as furniture. One note that travels the full cell reads as music
+      // being played rather than music being printed.
+      const float period = 1400.0f;
+      const float u = (phaseMs / period) - floorf(phaseMs / period);
+      const int nx = x + 1 + static_cast<int>(u * 7.0f + 0.5f);
+      // Bob on a sine so the note rises and falls as it crosses, and the stem
+      // stays vertical — a note that tilted would just look broken.
+      const int ny = y + 6 + static_cast<int>(sinf(u * kTwoPi) * 2.5f);
+      const Color hot = rampHue(u + phaseMs / 3000.0f, kMusicKeys);
+
+      // A dim staff line, so the bob has something to be measured against.
+      for (int i = 0; i < 12; i += 2) plot(out, x + i, y + 10, dim(hot, 0.3f));
+      // 3x3 head, 4 px stem, 2 px flag: the smallest thing that still reads as
+      // a quaver rather than a domino.
+      for (int dy = 0; dy < 3; ++dy)
+        for (int dx = 0; dx < 3; ++dx) plot(out, nx + dx, ny + dy, hot);
+      for (int i = 1; i <= 4; ++i) plot(out, nx + 2, ny - i, hot);
+      plot(out, nx + 3, ny - 4, hot);
+      plot(out, nx + 3, ny - 3, dim(hot, 0.6f));
       break;
     }
     case LauncherScreen::kIconGame: {
-      // Pong. A d-pad was tried first and rejected: its only motion was a
-      // highlight landing on pixels the static cross had already lit, so the
-      // icon's silhouette never changed and it read as frozen. Here the ball
-      // travels the full cell and the paddles chase it — actual displacement,
-      // which is the only kind of animation legible at 12x12.
-      const float period = 1500.0f;
+      // An invader, stepping. The pong rally this replaced was three 1-2 px
+      // sprites on a black cell — technically moving, visually a few loose
+      // dots. A silhouette everyone already knows survives being small, and
+      // stepping it two pixels sideways is the same displacement rule.
+      static const unsigned short kInvader[2][8] = {
+          {0x0C30, 0x07E0, 0x0FF0, 0x1DB8, 0x1FF8, 0x0A50, 0x1188, 0x0810},
+          {0x0C30, 0x07E0, 0x0FF0, 0x1DB8, 0x1FF8, 0x0A50, 0x0DB0, 0x1008},
+      };
+      const float period = 1000.0f;
       const float u = (phaseMs / period) - floorf(phaseMs / period);
-      // Triangle waves: the ball crosses and returns, bouncing off the top and
-      // bottom on a faster axis so the path reads as a rally rather than a slide.
-      const float triX = u < 0.5f ? (u * 2.0f) : (2.0f - u * 2.0f);
-      const float v = (phaseMs / 620.0f) - floorf(phaseMs / 620.0f);
-      const float triY = v < 0.5f ? (v * 2.0f) : (2.0f - v * 2.0f);
-      const int bx = x + 3 + static_cast<int>(triX * 6.0f + 0.5f);
-      const int by = y + 2 + static_cast<int>(triY * 8.0f + 0.5f);
-
-      // Paddles track the ball, clamped inside the cell.
-      int leftY = by - 1;
-      if (leftY < y + 1) leftY = y + 1;
-      if (leftY > y + 9) leftY = y + 9;
-      int rightY = (y + 11) - (by - y) - 1;  // mirrored, so they are not identical
-      if (rightY < y + 1) rightY = y + 1;
-      if (rightY > y + 9) rightY = y + 9;
-
-      for (int i = 0; i < 3; ++i) {
-        plot(out, x + 1, leftY + i, c);
-        plot(out, x + 10, rightY + i, c);
+      const int step = (u < 0.5f) ? 0 : 1;          // two legs, two frames
+      const int shift = (u < 0.25f || u >= 0.75f) ? 0 : 1;
+      const Color hot = rampHue(u * 0.5f + phaseMs / 2400.0f, kGameKeys);
+      for (int row = 0; row < 8; ++row) {
+        const unsigned short bits = kInvader[step][row];
+        for (int col = 0; col < 13; ++col) {
+          if (bits & (1 << (12 - col))) plot(out, x + col - 1 + shift, y + 2 + row, hot);
+        }
       }
-      // A 2x2 ball, big enough to be seen against the paddles.
-      plot(out, bx, by, c);
-      plot(out, bx + 1, by, c);
-      plot(out, bx, by + 1, c);
-      plot(out, bx + 1, by + 1, c);
+      break;
+    }
+    case LauncherScreen::kIconVibe: {
+      // A travelling waveform. VIBE is a vibration, so the badge is one — and
+      // the three-bar meter this replaced was a mistake: kIconChannel is also
+      // three bars, so at 12 px the two rooms wore the same face.
+      //
+      // This is the ONE family badge that ignores the card's accent and runs
+      // its own magenta→cyan sweep. Deliberate: the accent exists so a card
+      // says which room it is, and this room's whole character is that it is
+      // the loud one. Games are already polychrome, so the precedent is there.
+      //
+      // Displacement, per the house rule: the crest walks the full 12 px cell
+      // once per cycle, and the ribbon's colour walks with it.
+      const float travel = (phaseMs / 1250.0f) * kTwoPi;
+      int prevPy = -1;
+      for (int col = 0; col < 12; ++col) {
+        const float u = col / 11.0f;
+        // 1.5 periods across the cell: one full crest plus the start of the
+        // next, which reads as "a wave" where a single arc reads as a hill.
+        const float wave = sinf(u * kTwoPi * 1.5f - travel);
+        const int py = y + 5 + static_cast<int>(wave * 3.5f - 0.5f);
+        const Color hot = vibeHue(u * 0.45f + phaseMs / 2600.0f);
+        // Fill the gap to the previous column. Plotting one pixel per column
+        // leaves a dotted trail wherever the wave is steep — which at 1.5
+        // periods across 12 px is most of it — and a dotted trail reads as
+        // noise, not as a wave.
+        if (prevPy >= 0) {
+          const int lo = py < prevPy ? py : prevPy;
+          const int hi = py < prevPy ? prevPy : py;
+          for (int fill = lo; fill <= hi; ++fill) plot(out, x + col, fill, hot);
+        } else {
+          plot(out, x + col, py, hot);
+        }
+        // A dim under-edge gives the ribbon weight without doubling its
+        // apparent amplitude, which at this size would clip against the cell.
+        plot(out, x + col, py + 1, dim(hot, 0.45f));
+        prevPy = py;
+      }
       break;
     }
     case LauncherScreen::kIconSettings: {
-      // A gear that actually rotates: six teeth placed by angle and advanced
-      // continuously, instead of four teeth snapping between four slots.
-      const float angle = (phaseMs / 2400.0f) * kTwoPi;
-      const int cx = x + 5;
-      const int cy = y + 6;
-      // Hub.
-      for (int dy = 0; dy < 2; ++dy)
-        for (int dx = 0; dx < 2; ++dx) plot(out, cx + dx, cy + dy, c);
-      // Body ring at radius 2.
-      for (int a = 0; a < 16; ++a) {
-        const float th = (a / 16.0f) * kTwoPi;
-        plot(out, cx + static_cast<int>(cosf(th) * 2.4f + 0.5f),
-             cy + static_cast<int>(sinf(th) * 2.4f + 0.5f), dim(c, 0.55f));
-      }
-      // Teeth at radius 4, rotating.
-      for (int t = 0; t < 6; ++t) {
-        const float th = angle + (t / 6.0f) * kTwoPi;
-        const int tx = cx + static_cast<int>(cosf(th) * 4.2f + (cosf(th) < 0 ? -0.5f : 0.5f));
-        const int ty = cy + static_cast<int>(sinf(th) * 4.2f + (sinf(th) < 0 ? -0.5f : 0.5f));
-        plot(out, tx, ty, c);
-        // Fatten each tooth towards the hub so it reads as a tooth, not a speck.
-        plot(out, cx + static_cast<int>(cosf(th) * 3.0f + (cosf(th) < 0 ? -0.5f : 0.5f)),
-             cy + static_cast<int>(sinf(th) * 3.0f + (sinf(th) < 0 ? -0.5f : 0.5f)), c);
+      // Three sliders, knobs travelling. A gear was the obvious choice and the
+      // wrong one: rotation at 12 px is four indistinguishable frames, so the
+      // badge sat still while every other card moved. Sliders are what the
+      // room actually contains — volume, brightness, a night window — and a
+      // knob crossing its track is displacement nobody can miss.
+      const float periods[3] = {2100.0f, 1500.0f, 2700.0f};
+      for (int row = 0; row < 3; ++row) {
+        const int ty = y + 2 + row * 4;
+        const float phase = (phaseMs / periods[row]) * kTwoPi + row * 2.1f;
+        const float u = 0.5f + 0.5f * sinf(phase);
+        const Color hot = rampHue(row * 0.3f + phaseMs / 3200.0f, kSetKeys);
+        for (int i = 0; i < 12; ++i) plot(out, x + i, ty, dim(hot, 0.3f));
+        const int kx = x + static_cast<int>(u * 9.0f + 0.5f);
+        for (int dx = 0; dx < 3; ++dx) {
+          plot(out, kx + dx, ty - 1, hot);
+          plot(out, kx + dx, ty, hot);
+        }
       }
       break;
     }
@@ -314,12 +390,10 @@ void LauncherScreen::renderArrows(Surface& out, int nowMs) const {
 
 void LauncherScreen::renderCard(Surface& out, const Entry& entry, int originX,
                                 int nowMs, int riseY) const {
-  const Color accent = accentFor(entry.icon);
-
   // Cards slide horizontally; anything fully off-panel costs nothing to skip.
   if (originX <= -kPanelWidth || originX >= kPanelWidth) return;
 
-  drawIcon(out, entry.icon, originX + kIconX, 2 + riseY, accent, nowMs);
+  drawIcon(out, entry.icon, originX + kIconX, 2 + riseY, nowMs);
 
   const int labelWidth = text::measure(entry.label.c_str());
   const int viewX = originX + kLabelX;

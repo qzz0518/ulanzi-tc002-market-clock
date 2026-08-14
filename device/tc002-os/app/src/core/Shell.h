@@ -7,6 +7,7 @@
 #include "core/Transitions.h"
 #include "ui/LevelOverlay.h"
 #include "ui/Screen.h"
+#include "ui/UpgradeOverlay.h"
 
 namespace tcos {
 
@@ -102,6 +103,14 @@ class Shell {
    */
   LevelOverlay& overlay() { return mOverlay; }
 
+  /**
+   * The firmware-install takeover. Here for the volume bar's reason carried to
+   * its extreme: an install must survive navigation, and there is no backing out
+   * of one — so it must not be a Screen that 「返回」 can pop off the stack while
+   * the device is writing its own flash.
+   */
+  UpgradeOverlay& upgrade() { return mUpgrade; }
+
  private:
   Shell(const Shell&);
   Shell& operator=(const Shell&);
@@ -121,6 +130,7 @@ class Shell {
   Surface mOutgoing;   // snapshot of the frame we are leaving
   Surface mIncoming;   // scratch for the frame we are entering
   LevelOverlay mOverlay;
+  UpgradeOverlay mUpgrade;
   Screen* mEntryScreens[kMaxEntryStyles];
   Entry mEntryKinds[kMaxEntryStyles];
   int mEntryCount;

@@ -34,7 +34,6 @@ port 43820.
 | `APP_NAME` | `btc` | Default channel name for fresh installs and first-run legacy migration |
 | `ADB_BIN` | auto-detected at install | Absolute `adb` path; a LaunchAgent doesn't inherit the shell PATH |
 | `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials); **every** device request goes through it, live and notify included |
-| `OPENUSAGE_URL` | `http://127.0.0.1:6736` | OpenUsage's local API — the VIBE usage data source; a loopback request, so `CLOCK_HTTP_PROXY` never applies |
 
 ## Control-panel behavior
 
@@ -111,30 +110,82 @@ this repository, and author/source attribution is retained.
 
 ## AI usage (VIBE)
 
-"AI 用量总览" (`tools:vibe-duo`, two AI coding agents side by side) and "AI 用量详情"
-(`tools:vibe-agent`, one agent's metric rows, meters, and reset times) are two ordinary
-content types whose numbers all come from the read-only local API of the OpenUsage menu bar
-app on this machine (`OPENUSAGE_URL`, default `http://127.0.0.1:6736`). Its ten providers are
-not ported: reading credentials, refreshing OAuth, and speaking to ten private endpoints is
-exactly the code that rots, and going through the API means the panel's numbers **always**
-match what the user sees in the menu bar
-([ADR 0010](adr/0010-vibe-openusage-source.md)).
+VIBE is **an app on ZOS**, peer to 音乐 and 游戏 on the knob's root ring (order: 音乐 / 游戏 /
+轮播 / **VIBE** / 设置). Inside it the knob pages: an overview of two agents side by side
+first, then one page per agent (metric rows, meters, reset countdown); press toggles used vs
+left, hold goes back. It is deliberately **not a channel** — a channel is an animation fetched
+on a timer, with no input and no way to be pushed to, and VIBE's next step is reacting live to
+the vibe-coding session on this machine ([ADR 0011](adr/0011-vibe-is-a-firmware-app.md)). The
+official firmware and the two sideloaded ones have no root ring to add to, so **VIBE exists
+only under ZOS**.
 
-The console's **VIBE** tab mirrors OpenUsage's Customize: the provider list, at most two
-starred metrics per agent (`PUT /api/vibe/starred` — those are the ones that reach the panel),
-an LED preview, and one click to lay the channels out on the clock. That layout is a
-read-modify-write over an app-name convention: the overview is `vibe` and each agent's detail
-page is `vibe_<id>` (`vibe_claude`, `vibe_codex`, …), so the knob simply pages through them —
-no new protocol, and no new server route.
+The service collects the numbers itself and **nothing extra has to be installed**: one adapter
+per vendor (`src/vibe/providers/<vendor>.ts`) reads the credential that vendor's own CLI already
+left on this Mac, then calls that vendor's usage endpoint
+([ADR 0010](adr/0010-vibe-native-usage-collection.md)).
 
-**Nothing rather than something wrong**: the snapshot is cached for 15 minutes (3× OpenUsage's
-fixed 5-minute refresh, which is why `SOURCE_STALE_MS` and its 120 s is not reused). Within
-that window a failed fetch keeps serving the last good numbers; past it, it raises instead of
-showing stale ones. With OpenUsage not running the panel draws an `OPENUSAGE OFFLINE` frame —
-like the weather faces' "not configured", a named state rather than a channel failure — while
-the console shows an install pointer. A snapshot older than 10 minutes lights one amber pixel
-in the top-right corner (OpenUsage's own "Outdated" threshold); a metric with no data is
-dropped entirely rather than drawn as a placeholder dash.
+Ten vendors are supported: **Claude** (its Keychain item, or `~/.claude/.credentials.json`),
+**Codex** (`~/.codex/auth.json` or `~/.config/codex/auth.json`), **Cursor**, **Antigravity**,
+**Copilot**, **Devin**, **Grok** (`~/.grok/auth.json`), **OpenCode**, **OpenRouter**, and
+**Z.ai**. The first eight borrow their CLI's login; **OpenRouter and Z.ai have no local CLI
+login to borrow**, so the console takes a pasted API key, stored in `.runtime/vibe-keys.json`
+(mode `0600`). Each vendor's own environment variable is honoured too — `OPENROUTER_API_KEY`
+for OpenRouter, `ZAI_API_KEY` / `Z_AI_API_KEY` / `ZHIPUAI_API_KEY` for Z.ai — and a key stored
+from the console outranks them, so it can override a shell export the service inherited at boot.
+
+Reading the Keychain is one `security` call against an item you already authorised for your own
+CLI, so it **raises no new prompt**; on a non-macOS host the reader is inert and those vendors
+simply never detect. Credentials are read, used to sign one request, and discarded — never
+logged, never persisted. The only thing written to disk is the two API keys you paste yourself.
+
+The console's **VIBE** tab lists the ten agents, at most two starred metrics per agent
+(`PUT /api/vibe/starred` — those are the ones that reach the panel), a preview of both pages,
+and one "open it on the clock" button (the existing `PUT /api/os/display` `{focus:"vibe"}`).
+The metric catalog, labels, default stars and the 80 % / 90 % meter bands follow OpenUsage's
+semantics (it is the reference implementation for this collection; nothing of it is required
+at runtime).
+
+The device gets its data as **new keys in the pull document**, on the same long poll as the
+menu: `vibe` (agent count), `vibea` (agent: id / name / plan), `vibes` (this vendor is standing
+on its last good values), `vibem` (metric row: label / used / limit / seconds until reset).
+They are new *keys* rather than extra fields on an existing one — deployed firmware arity-checks
+`item` and would drop the whole line, while unknown keys are ignored by design, which is what
+makes these safe to send to a panel that has never heard of VIBE. Percentages are resolved
+server-side so the device does no unit arithmetic; a metric with no ceiling arrives as
+`limit: 0` and is drawn as a bare number, because a meter without a limit would imply one we
+invented. A star change republishes immediately; otherwise it refreshes every five minutes,
+the same cadence as the collector's own floor, so republishing costs no vendor request.
+
+**Nothing rather than something wrong — and degradation is per vendor**:
+
+- No credential for a vendor on this machine → it does not appear in the snapshot at all. A
+  state, not an error: the console greys it out with a sign-in hint.
+- A vendor's endpoint fails → only that row is lost. Its last good values stand in for
+  **15 minutes** flagged `stale`, then it drops out entirely and only the error remains; every
+  other vendor keeps refreshing.
+- A vendor answers 429 → it is parked until its Retry-After passes. The cooldown is per vendor,
+  so a rate-limited Claude never stops Codex.
+- **Nothing at all is signed in** (or everything refused) → the document carries `vibe\t0` and
+  the ZOS panel draws a single centred CJK word, **saying which emptiness this is**: 未配置 when
+  the device has no console address yet, 离线 when it has one and nothing arrived, 未登录 only
+  when the link is up and no agent is signed in on this Mac
+  (`device/tc002-os/app/src/ui/VibeScreen.cpp`) — one shared word for all three would send the
+  user hunting for a login they already have. The console's own 52×16 preview still draws the
+  `AI USAGE` / `NO LOGIN` pair (`web/src/lib/vibe.ts`). Like the weather faces' "not
+  configured", a named state rather than a failure, while the console shows its sign-in /
+  paste-a-key pointer.
+
+The controller keeps its own 15-minute snapshot cache on top of that (`GET
+/api/vibe/status?refresh=1` forces a re-collection), which is why `SOURCE_STALE_MS` and its
+120 s is not reused. The amber pixel in the panel's top-right corner is **per vendor**, not the
+age of the whole snapshot: it lights when a vendor on the page being drawn is standing on its
+last good values (the document's `vibes` key — the 15-minute window above), which on the
+overview means either of the two and on a detail page means that one (`VibeScreen.cpp`, and the
+console preview follows the same rule). The number is still the best one there is, so it is
+marked rather than hidden. A metric with no data is dropped entirely rather than drawn as a
+placeholder dash. The console's agent list carries a separate 10-minute "Outdated" hint
+(`VIBE_OUTDATED_MS` in `web/src/lib/vibe.ts`, OpenUsage's own threshold) — that one is the age
+of the whole snapshot on the web page, and is not the same thing as the pixel on the panel.
 
 ## Music
 
@@ -277,13 +328,15 @@ of embers, three pens trace the letters, a flash and hold, then a CRT-style coll
 entirely procedural, carrying no glyph data, so it runs before the font tables exist. It
 cross-fades into the root menu.
 
-The root menu is a **fixed four**: Music / Games / Channels / Settings. A list is a lie on
-52×16 — four 12 px CJK cells fill the width, so anything showing a selected row plus its
+The root menu is a **fixed five**: Music / Games / Channels / VIBE / Settings. A list is a lie
+on 52×16 — four 12 px CJK cells fill the width, so anything showing a selected row plus its
 neighbours ends up with three unreadable rows — so a page shows exactly one entry,
 full-bleed, and a knob detent slides the next one in, with a one-pixel rail on the bottom row
-carrying the ring's size and position. Channels are not on this ring: they are content, not
-destinations, and ten of them would push the other three off a ring that shows one item at a
-time. They live one level down, the same way the seven games do.
+carrying the ring's size and position. VIBE sits between Channels and Settings: the first
+three keep the position three firmware releases of muscle memory put them in, and Settings
+stays last. Channels are not on this ring: they are content, not destinations, and ten of them
+would push the other four off a ring that shows one item at a time. They live one level down,
+the same way the seven games do.
 
 | Input | Behaviour |
 | --- | --- |
@@ -300,11 +353,14 @@ what they were looking at, and pushing a screen for it would make "back" ambiguo
 bar is up, further short presses keep adjusting brightness rather than snapping back to
 volume mid-adjustment.
 
-Each destination announces itself with its own motion, lifted from the boot screens of the
-two firmwares ZOS replaces: channels as a CRT power-on (320 ms), music as a spectrum rise
+The five destinations share four entry motions, lifted from the boot screens of the two
+firmwares ZOS replaces: channels as a CRT power-on (320 ms), music as a spectrum rise
 (300 ms), games as a cartridge shine-sweep (280 ms), settings as a drop-and-bounce (260 ms).
-Every one is a pure compositing operator over two finished rasters, and leaving is the same
-function evaluated backwards — so an entry can never look right going in and wrong coming out.
+**VIBE reuses music's spectrum rise** (300 ms) rather than earning a sixth motif: the card
+just pressed is already three bars rising into their ceiling, so bars rising into the room is
+that same gesture carried through rather than one borrowed from elsewhere. Every one is a pure
+compositing operator over two finished rasters, and leaving is the same function evaluated
+backwards — so an entry can never look right going in and wrong coming out.
 
 - **Channels**: the console's enabled channels, one per page, and **each page is its
   channel** — no icon, no label. The picture is content the service already composed;
@@ -326,6 +382,8 @@ function evaluated backwards — so an entry can never look right going in and w
   what keeps it smooth at 25 fps over a link that updates a few times a minute. The side
   buttons are deliberately **not** taken over — volume is the one control a user reaches for
   while music is playing.
+- **VIBE**: the AI coding agents' quotas — one overview page plus one page per agent. What it
+  draws and how it degrades is the [VIBE](#ai-usage-vibe) section above.
 - **Settings**: network, IP, console address, volume, brightness, MAC, the setup-page
   address, uptime, version. The panel holds exactly one text row (both glyph tables are 12 px
   tall and the panel is 16), so label and value share that row **in time**: landing on an item
@@ -770,8 +828,9 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/market/search` | Search addable market assets by query and kind |
 | `GET` / `POST` | `/api/market/instruments` | List added assets; register one by candidate ref |
 | `GET` | `/api/market/icons/:iconRef.png` | 16×16 pixel icon of a runtime asset (immutable cache) |
-| `GET` | `/api/vibe/status` | The VIBE usage snapshot plus the provider catalog and starred table (read-only, cross-origin). `?refresh=1` forces one fetch from OpenUsage; otherwise the cache answers. An unreachable OpenUsage is **not an HTTP error**: still 200, with `snapshot: null` and an `error`, which is what the console renders its install pointer from |
+| `GET` | `/api/vibe/status` | The VIBE usage snapshot plus the provider catalog, the starred table, and `keys` (per key-based vendor: `stored` / `environment` / `unset` — **never the key itself**) (read-only, cross-origin). `?refresh=1` forces a re-collection; otherwise the cache answers. Nothing being signed in is **not an HTTP error**: still 200, with `snapshot: null` and an `error`, which is what the console renders its sign-in / paste-a-key pointer from |
 | `PUT` | `/api/vibe/starred` | Choose which metrics an agent shows on the panel: `{providerId, starred}`, at most 2 after de-duplication; the reply is the full starred table merged with the catalog defaults (same-origin + JSON, 400 on validation failure) |
+| `PUT` | `/api/vibe/key` | Store an API key for OpenRouter / Z.ai: `{providerId, key}`, an empty string clears it; the reply is only the `keys` state table and **never echoes the key back** (same-origin + JSON, 400 on validation failure) |
 | `GET` | `/api/presets`, `/api/icons/:id.png` | Legacy market presets and built-in asset icons |
 | `GET` / `PUT` | `/api/settings` | Legacy single-carousel settings |
 | `POST` | `/api/preview` | Legacy: returns rendered GIF/PNG bytes directly |
@@ -801,10 +860,13 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` / `POST` | `/api/os/device-app/*` | The same sideload lifecycle for ZOS (confirmation phrase `START_TC002_OS_SESSION`) |
 | `GET` | `/api/os/pull` | ZOS long-polls the state document (`?seq=`, parks up to 8 s; line-oriented `KEY\tVALUE` plain text, cross-origin) |
 | `GET` | `/api/os/frames` | ZOS fetches one channel's rendered frames by `?app=` (`TCF1` raw-RGB binary, cross-origin) |
+| `GET` | `/api/os/firmware` | The device fetches the image it is about to install (`.runtime/tc002-os/update.img`, the ZKSWE container `mise run os-image` packs; cross-origin). Carries `Content-Length` and `ETag` / `X-Build-Id` — **that id is the MD5 inside the container header**, the one the vendor updater itself verifies, not `ZOS_BUILD_ID`: the git rev is compiled into libzkgui.so behind an xz squashfs, and decompressing a megabyte per request is not a status endpoint. 404 when nothing has been packed. The path is a constant named by the composition root; nothing on the request can move it |
 | `POST` | `/api/os/report` | ZOS telemetry every 10 s: `{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto, sleep?}` (strings truncated at 64 chars, cross-origin; bumps seq only when `proto` changes). `sleep` is `{on, startMin, endMin, idleSec, asleep, clockSynced}`, and **its presence is the night-sleep capability signal**; out-of-range values inside it are clamped rather than failing the whole heartbeat |
 | `POST` | `/api/os/mirror` | ZOS uploads a captured panel frame (body is 2496 raw RGB bytes, cross-origin); the reply `{wanted}` tells the device whether to keep streaming |
 | `GET` | `/api/os/mirror` | Console reads the latest frame — **asking is the subscription**: stop polling and the device stops streaming 10 s later |
-| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
+| `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, upgradeSeq, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `upgradeSeq` counts installs ever asked for, so the console can see a request is outstanding — the device reboots to install, and there is no other receipt in between. `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
+| `GET` | `/api/os/firmware/status` | For the console: `{packed, image, upgradeSeq}`, where `image` is `{bytes, buildId, builtAt}` or `null`. `builtAt` is the image file's mtime and answers the only question available before the device reboots — is this the build I just packed. `packed` is stated rather than inferred from the presence of the other fields; it sits next to a button that rewrites flash |
+| `POST` | `/api/os/upgrade` | Ask the device to install the packed image: body `{}`, reply `{seq}`. **409 when nothing is packed** — the sequence would reach the device, the device would fetch the image, get a 404 and stop, while the console claimed an install was under way. The device honours a given sequence once per boot; installing reboots it, so the link going quiet mid-way is by design rather than a fault |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned. Only the field named in the request is stamped: the other one stays in the document with its own `setvolseq` / `setbriseq` unmoved, so the panel raises a bar only for the level the user actually touched |
@@ -812,8 +874,8 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing
-`report` / `heartbeat` endpoints and ZOS's `/api/os/pull`, `/api/os/frames`, `/api/os/report`
-and `POST /api/os/mirror`, whose caller is the clock rather than a browser and has no Origin
+`report` / `heartbeat` endpoints and ZOS's `/api/os/pull`, `/api/os/frames`, `/api/os/firmware`,
+`/api/os/report` and `POST /api/os/mirror`, whose caller is the clock rather than a browser and has no Origin
 to send; `POST /api/os/mirror`'s body is raw RGB rather than JSON, because a base64 JSON
 envelope would cost a third more bytes per frame for nothing the firmware can use); the
 request-body limit is 256 KiB.

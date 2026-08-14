@@ -32,9 +32,13 @@ class LauncherScreen : public Screen {
     kIconMusic,
     kIconGame,
     kIconSettings,
-    // Per-game sprites, one per engine. These are polychrome where the four
+    kIconVibe,
+    // Per-game sprites, one per engine. These are polychrome where the five
     // above are single-accent badges, and that palette difference is what makes
     // entering the games ring feel like a different room.
+    //
+    // Everything below this line is indexed as `icon - kIconGameBreakout` into
+    // gameicons::, so a new family badge goes ABOVE it, never here.
     kIconGameBreakout,
     kIconGameFlappy,
     kIconGameSnake,

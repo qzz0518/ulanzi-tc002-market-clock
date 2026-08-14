@@ -37,6 +37,7 @@ import {
 import { MusicPlayer } from "@/components/music/music-player";
 import { GameShell } from "@/components/game/game-shell";
 import { ZosPanel } from "@/components/zos/zos-panel";
+import { VibePanel } from "@/components/vibe/vibe-panel";
 import { MiniPlayer } from "@/components/music/mini-player";
 import { StudioHeader } from "@/components/studio/studio-header";
 import { WorkspaceEditor } from "@/components/studio/workspace-editor";
@@ -811,6 +812,14 @@ export function App() {
     setView(nextView);
   };
 
+  // 双击侧栏里的频道 = 选中它 + 去「内容」页。走 changeView 而不是 setView,
+  // 因为顶部导航就是走它的:侧载固件在跑时那道闸门会挡下工作区页面,而一个能绕开
+  // 导航的快捷方式不该顺带绕开闸门。
+  const openChannelInConsole = (channelId: string) => {
+    selectChannel(channelId);
+    changeView("console");
+  };
+
   const createCanvasTarget = () => {
     if (!workspace) return;
     const definition = catalog.find((entry) => entry.id === "creative:canvas");
@@ -940,6 +949,12 @@ export function App() {
         title: "像素游戏厅",
         description: "在浏览器里玩 52 × 16 像素小游戏，实时画面同步上屏，成绩进排行榜。",
       }
+    : view === "vibe"
+    ? {
+        kicker: "TC002 VIBE USAGE",
+        title: "VIBE 用量",
+        description: "把 Claude Code、Codex 等 AI 编码代理的额度搬上像素屏，直接读本机各代理自己的登录。",
+      }
     : view === "canvas"
     ? {
         kicker: "TC002 PIXEL STUDIO",
@@ -964,6 +979,8 @@ export function App() {
     ? "studio-page is-music-page"
     : view === "game"
     ? "studio-page is-game-page"
+    : view === "vibe"
+    ? "studio-page is-vibe-page"
     : view === "canvas"
     ? "studio-page is-canvas-page"
     : view === "library"
@@ -976,6 +993,8 @@ export function App() {
     ? "studio-layout is-music"
     : view === "game"
     ? "studio-layout is-game"
+    : view === "vibe"
+    ? "studio-layout is-vibe"
     : view === "canvas"
     ? "studio-layout is-canvas"
     : view === "library"
@@ -1030,11 +1049,12 @@ export function App() {
       )}
 
       <div className={layoutClassName}>
-        {view !== "music" && view !== "game" && view !== "zos" && (
+        {view !== "music" && view !== "game" && view !== "zos" && view !== "vibe" && (
           <ChannelSidebar
             channels={workspace.channels}
             selectedChannelId={selectedChannel.id}
             onSelect={selectChannel}
+            onOpen={openChannelInConsole}
             onAdd={addChannel}
             onDelete={deleteChannel}
           />
@@ -1171,6 +1191,10 @@ export function App() {
           // 手上的 live 比这里推导出来的更新一拍，再喂一个会凭空多出一个可能
           // 与它自己读数打架的真相来源。
           <ZosPanel />
+        ) : view === "vibe" ? (
+          // 用量数字它自己拉 /api/vibe/status；固件模式从这里接，与 音乐/游戏/内容
+          // 同一条路——「VIBE」是 ZOS 上的一个 App，非 ZOS 固件下没有这一页。
+          <VibePanel firmwareMode={firmwareMode} />
         ) : (
           <MusicPlayer firmwareMode={firmwareMode} onFirmwareOnlineChange={setMusicFirmwareOnline} />
         )}

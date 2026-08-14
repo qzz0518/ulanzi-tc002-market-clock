@@ -1,10 +1,17 @@
-seq	3
+seq	4
 pinned	1
 mirror	0
 focus	notice
 mode	spotlight
 skin	signal
-menu	6
+vibe	2
+vibea	claude	Claude	Max 20x
+vibem	claude	Session	11	100	18000
+vibem	claude	Weekly	72	100	259200
+vibea	codex	Codex	Plus
+vibes	codex	1
+vibem	codex	Weekly	4	100	-1
+menu	7
 item	channel	btc	市场轮播
 rev	btc	9f14c0b2ae31
 ttl	btc	60000
@@ -16,4 +23,5 @@ rev	notice	0c33d18a7b45
 ttl	notice	30000
 item	music	music	音乐
 item	game	game	游戏
+item	vibe	vibe	VIBE
 item	settings	settings	设置

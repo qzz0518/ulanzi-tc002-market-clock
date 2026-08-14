@@ -28,6 +28,7 @@
 #include "core/Transitions.h"
 #include "net/BleProtocol.h"
 #include "net/BleProvisionSession.h"
+#include "net/FirmwareUpdate.h"
 #include "net/FrameBundle.h"
 #include "net/HostLink.h"
 #include "net/HttpClient.h"
@@ -59,6 +60,8 @@
 #include "ui/ProvisionScreen.h"
 #include "ui/SettingsScreen.h"
 #include "ui/SleepPolicy.h"
+#include "ui/UpgradeOverlay.h"
+#include "ui/VibeScreen.h"
 #include "ui/ZosLogo.h"
 #include "visual/Glyphs.h"
 
@@ -1264,11 +1267,12 @@ void checkLauncher() {
   // is too small for a brightness pulse to read, and a four-step rotation looks
   // like flicker rather than motion — this check exists because three of the
   // four icons shipped static and only the equaliser was noticed as alive.
-  static const LauncherScreen::Icon kAllIcons[4] = {
+  static const LauncherScreen::Icon kAllIcons[5] = {
       LauncherScreen::kIconChannel, LauncherScreen::kIconMusic,
-      LauncherScreen::kIconGame, LauncherScreen::kIconSettings};
-  static const char* kIconNames[4] = {"channel", "music", "game", "settings"};
-  for (int i = 0; i < 4; ++i) {
+      LauncherScreen::kIconGame, LauncherScreen::kIconSettings,
+      LauncherScreen::kIconVibe};
+  static const char* kIconNames[5] = {"channel", "music", "game", "settings", "vibe"};
+  for (int i = 0; i < 5; ++i) {
     std::vector<LauncherScreen::Entry> one;
     LauncherScreen::Entry only;
     only.label = "x";
@@ -3023,6 +3027,456 @@ void checkSleepRows() {
   }
 }
 
+// ---- 「VIBE」 -----------------------------------------------------------
+
+tcos::StateDoc::VibeMetric vibeMetric(const char* label, int used, int limit, int resetSec) {
+  tcos::StateDoc::VibeMetric metric;
+  metric.label = label;
+  metric.used = used;
+  metric.limit = limit;
+  metric.resetSec = resetSec;
+  return metric;
+}
+
+tcos::StateDoc::VibeAgent vibeAgent(const char* id, const char* plan, bool stale) {
+  tcos::StateDoc::VibeAgent agent;
+  agent.id = id;
+  agent.label = id;
+  agent.plan = plan;
+  agent.stale = stale;
+  return agent;
+}
+
+// The severity tiers are asserted as EXACT hex rather than "brighter than".
+// They are the same three values the console draws and the LED channel drew,
+// and that agreement is the entire claim of this screen — a check that accepted
+// anything reddish would accept a panel that quietly drifted away from it.
+bool rectHasColor(const Surface& s, int x0, int y0, int x1, int y1, uint32_t rgb) {
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      if (s.getPixel(x, y).toRGB888() == rgb) return true;
+    }
+  }
+  return false;
+}
+
+bool rectIsDark(const Surface& s, int x0, int y0, int x1, int y1) {
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      const Color c = s.getPixel(x, y);
+      if (c.r || c.g || c.b) return false;
+    }
+  }
+  return true;
+}
+
+bool rectsEqual(const Surface& a, const Surface& b, int x0, int y0, int x1, int y1) {
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      if (a.getPixel(x, y).toRGB888() != b.getPixel(x, y).toRGB888()) return false;
+    }
+  }
+  return true;
+}
+
+const uint32_t kVibeNormal = 0xffffffu;
+const uint32_t kVibeWarn = 0xffcc00u;
+const uint32_t kVibeDanger = 0xff453au;
+const uint32_t kVibeMeter = 0x0a84ffu;
+
+void checkVibeScreen() {
+  using tcos::StateDoc;
+  using tcos::VibeScreen;
+
+  // --- the empty page ------------------------------------------------------
+  {
+    VibeScreen vibe;
+    Surface unconfigured(52, 16);
+    Surface offline(52, 16);
+    Surface noLogin(52, 16);
+    vibe.onEnter(0);
+    check(vibe.pageCount() == 1, "an empty screen is still exactly one page");
+    vibe.setLink(false, false);
+    vibe.render(unconfigured, 100);
+    vibe.setLink(true, false);
+    vibe.render(offline, 100);
+    vibe.setLink(true, true);
+    vibe.render(noLogin, 100);
+    check(litPixels(noLogin) > 0, "the empty page still says something");
+    check(surfacesDiffer(unconfigured, offline) && surfacesDiffer(offline, noLogin) &&
+              surfacesDiffer(unconfigured, noLogin),
+          "the three emptinesses do not share a word");
+    // Two of them are not about VIBE at all, and the user has to be able to
+    // leave a page that is telling them their console is unreachable.
+    check(!vibe.onInput(tcos::kInputHold, 200), "a hold bubbles to the Shell from an empty page");
+    check(!vibe.onInput(tcos::kInputPress, 200), "and a press toggles nothing that is not there");
+  }
+
+  std::vector<StateDoc::VibeAgent> one;
+  {
+    StateDoc::VibeAgent claude = vibeAgent("claude", "Max 20x", false);
+    claude.metrics.push_back(vibeMetric("Session", 11, 100, -1));
+    claude.metrics.push_back(vibeMetric("Weekly", 72, 100, -1));
+    one.push_back(claude);
+  }
+
+  // --- one agent -----------------------------------------------------------
+  {
+    VibeScreen vibe;
+    vibe.setAgents(one, 0);
+    vibe.onEnter(0);
+    check(vibe.pageCount() == 2, "one agent is an overview plus its own page");
+    Surface overview(52, 16);
+    vibe.render(overview, 100);
+    check(litPixels(overview) > 0, "the overview draws");
+    check(vibe.onInput(tcos::kInputTurnCw, 200), "a detent is consumed");
+    check(vibe.page() == 1, "and moves onto the agent's page");
+    Surface detail(52, 16);
+    vibe.render(detail, 400);  // past RingModel's 180 ms slide
+    check(surfacesDiffer(overview, detail), "which is not the overview redrawn");
+    // The 12 px mark owns x=0..11 and the rows start at 15; the gutter between
+    // them is the only thing keeping a three-digit value off the vendor's badge.
+    check(rectIsDark(detail, 12, 0, 14, 15), "the detail page keeps its mark/row gutter clear");
+    check(rectHasColor(detail, 19, 2, 32, 6, kVibeMeter),
+          "a quota under 80% fills its meter in blue");
+  }
+
+  // --- seven agents, and the ring around them ------------------------------
+  {
+    static const char* kIds[7] = {"claude", "codex", "cursor", "copilot",
+                                  "grok",   "devin", "zai"};
+    std::vector<StateDoc::VibeAgent> seven;
+    for (int i = 0; i < 7; ++i) {
+      StateDoc::VibeAgent agent = vibeAgent(kIds[i], "Pro", false);
+      agent.metrics.push_back(vibeMetric("Session", 10 + i * 7, 100, -1));
+      seven.push_back(agent);
+    }
+    VibeScreen vibe;
+    vibe.setAgents(seven, 0);
+    vibe.onEnter(0);
+    check(vibe.pageCount() == 8, "seven agents make eight pages");
+    vibe.onInput(tcos::kInputTurnCcw, 100);
+    check(vibe.page() == 7, "turning back off the overview wraps to the last agent");
+    for (int i = 0; i < 8; ++i) vibe.onInput(tcos::kInputTurnCw, 300 + i * 300);
+    check(vibe.page() == 7, "and a full lap of the ring comes back to the same page");
+
+    // Every page draws, and no page draws off the panel. Rendered onto a canvas
+    // bigger than the panel because Surface::setPixel clips: a layout that ran
+    // past x=51 would be invisible on a 52x16 one.
+    for (int p = 0; p < 8; ++p) {
+      Surface big(72, 24);
+      const int at = 3000 + p * 400;
+      vibe.onInput(tcos::kInputTurnCw, at);
+      vibe.render(big, at + 300);
+      char what[80];
+      std::snprintf(what, sizeof(what), "page %d draws inside 52x16", vibe.page());
+      check(litPixels(big) > 0 && rectIsDark(big, 52, 0, 71, 23) &&
+                rectIsDark(big, 0, 16, 51, 23),
+            what);
+    }
+  }
+
+  // --- the stale corner ----------------------------------------------------
+  {
+    VibeScreen fresh;
+    fresh.setAgents(one, 0);
+    fresh.onEnter(0);
+    Surface freshFrame(52, 16);
+    fresh.render(freshFrame, 100);
+    check(freshFrame.getPixel(51, 0).toRGB888() == 0, "a fresh agent lights no corner pixel");
+
+    std::vector<StateDoc::VibeAgent> held = one;
+    held[0].stale = true;
+    VibeScreen stale;
+    stale.setAgents(held, 0);
+    stale.onEnter(0);
+    Surface overview(52, 16);
+    stale.render(overview, 100);
+    check(overview.getPixel(51, 0).toRGB888() == kVibeWarn,
+          "an agent whose refresh was refused is marked amber at (51,0)");
+    stale.onInput(tcos::kInputTurnCw, 200);
+    Surface detail(52, 16);
+    stale.render(detail, 500);
+    check(detail.getPixel(51, 0).toRGB888() == kVibeWarn, "on its own page too");
+  }
+
+  // --- severity, at the two steps that decide it ---------------------------
+  //
+  // 80 and 90 are absolute thresholds, so the interesting inputs are the values
+  // either side of each. The value column is x=33..51 — the meter stops at 32 —
+  // so this reads the NUMBER's colour and not the bar's.
+  {
+    static const int kUsed[4] = {79, 80, 89, 90};
+    static const uint32_t kWant[4] = {kVibeNormal, kVibeWarn, kVibeWarn, kVibeDanger};
+    static const uint32_t kTiers[3] = {kVibeNormal, kVibeWarn, kVibeDanger};
+    for (int i = 0; i < 4; ++i) {
+      std::vector<StateDoc::VibeAgent> agents;
+      StateDoc::VibeAgent agent = vibeAgent("claude", "Max 20x", false);
+      agent.metrics.push_back(vibeMetric("Session", kUsed[i], 100, -1));
+      agents.push_back(agent);
+      VibeScreen vibe;
+      vibe.setAgents(agents, 0);
+      vibe.onEnter(0);
+      vibe.onInput(tcos::kInputTurnCw, 0);
+      Surface frame(52, 16);
+      vibe.render(frame, 400);
+      char what[96];
+      std::snprintf(what, sizeof(what), "%d%% of a quota draws its own severity", kUsed[i]);
+      check(rectHasColor(frame, 33, 0, 51, 15, kWant[i]), what);
+      for (int k = 0; k < 3; ++k) {
+        if (kTiers[k] == kWant[i]) continue;
+        std::snprintf(what, sizeof(what), "%d%% draws no other tier beside it", kUsed[i]);
+        check(!rectHasColor(frame, 33, 0, 51, 15, kTiers[k]), what);
+      }
+    }
+  }
+
+  // --- 已用 / 剩余 ---------------------------------------------------------
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    StateDoc::VibeAgent agent = vibeAgent("claude", "Max 20x", false);
+    agent.metrics.push_back(vibeMetric("Session", 92, 100, -1));
+    agents.push_back(agent);
+    VibeScreen vibe;
+    vibe.setAgents(agents, 0);
+    vibe.onEnter(0);
+    vibe.onInput(tcos::kInputTurnCw, 0);
+    Surface used(52, 16);
+    Surface left(52, 16);
+    vibe.render(used, 400);
+    check(!vibe.showLeft() && !vibe.takeShowLeftChanged(),
+          "nothing asks to be persisted before the first press");
+    check(vibe.onInput(tcos::kInputPress, 500), "the press is consumed");
+    check(vibe.showLeft() && vibe.takeShowLeftChanged(), "and asks to be persisted once");
+    check(!vibe.takeShowLeftChanged(), "reading that flag clears it");
+    vibe.render(left, 900);  // past the 160 ms confirm flash
+    check(surfacesDiffer(used, left), "已用 and 剩余 are different numbers");
+    // The METER does not invert. The bar means "this much is spent" in both
+    // states, so only the digits under it change — otherwise the toggle would
+    // redraw the one thing the user was using to compare agents at a glance.
+    check(rectsEqual(used, left, 19, 5, 32, 9), "and the meter under them does not move");
+    // Nor does the severity: 92% spent is 8% left, and it is the same danger.
+    check(rectHasColor(used, 33, 0, 51, 15, kVibeDanger) &&
+              rectHasColor(left, 33, 0, 51, 15, kVibeDanger),
+          "severity is read off what is spent, in both directions");
+  }
+
+  // --- a balance, which has no ceiling to be a fraction of ------------------
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    StateDoc::VibeAgent agent = vibeAgent("openrouter", "", false);
+    agent.metrics.push_back(vibeMetric("Credits", 42, 0, -1));
+    agents.push_back(agent);
+    VibeScreen vibe;
+    vibe.setAgents(agents, 0);
+    vibe.onEnter(0);
+    vibe.onInput(tcos::kInputTurnCw, 0);
+    Surface frame(52, 16);
+    vibe.render(frame, 400);
+    check(rectIsDark(frame, 19, 5, 32, 9), "a metric with no ceiling draws no meter");
+    check(rectHasColor(frame, 33, 5, 51, 9, kVibeNormal),
+          "and its bare number is never a warning, because there is nothing to warn about");
+  }
+
+  // --- the reset countdown shares the value cell ---------------------------
+  {
+    std::vector<StateDoc::VibeAgent> timed;
+    StateDoc::VibeAgent agent = vibeAgent("claude", "Max 20x", false);
+    agent.metrics.push_back(vibeMetric("Session", 50, 100, 18000));  // resets in 5 h
+    timed.push_back(agent);
+    VibeScreen vibe;
+    vibe.setAgents(timed, 0);
+    vibe.onEnter(0);
+    vibe.onInput(tcos::kInputTurnCw, 0);
+    Surface value(52, 16);
+    Surface reset(52, 16);
+    vibe.render(value, 400);
+    vibe.render(reset, VibeScreen::kValueDwellMs + 400);
+    check(surfacesDiffer(value, reset), "the reset countdown takes the value cell in turn");
+    // Anchored to the page change, so walking onto a page always starts on the
+    // number rather than wherever the wall clock happened to be.
+    Surface firstFrame(52, 16);
+    vibe.render(firstFrame, 200);
+    check(!surfacesDiffer(firstFrame, value), "and a page always opens on the number");
+
+    std::vector<StateDoc::VibeAgent> untimed = timed;
+    untimed[0].metrics[0].resetSec = -1;
+    VibeScreen quiet;
+    quiet.setAgents(untimed, 0);
+    quiet.onEnter(0);
+    quiet.onInput(tcos::kInputTurnCw, 0);
+    Surface a(52, 16);
+    Surface b(52, 16);
+    quiet.render(a, 400);
+    quiet.render(b, VibeScreen::kValueDwellMs + 400);
+    check(!surfacesDiffer(a, b),
+          "a metric the vendor gave no reset time for never invents a countdown");
+  }
+
+  // --- the worst case the layout has to survive ----------------------------
+  //
+  // Two agents, two metrics each, every one of them a three-digit percentage,
+  // and labels far longer than the one character the row can show. This is the
+  // input the overflow ladder in renderOverview exists for.
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    for (int i = 0; i < 2; ++i) {
+      StateDoc::VibeAgent agent = vibeAgent(i == 0 ? "claude" : "codex", "Max 20x", false);
+      agent.metrics.push_back(vibeMetric("Session limit for the current window", 100, 100, -1));
+      agent.metrics.push_back(vibeMetric("Weekly limit for the current window", 100, 100, -1));
+      agents.push_back(agent);
+    }
+    VibeScreen vibe;
+    vibe.setAgents(agents, 0);
+    vibe.onEnter(0);
+    Surface big(72, 24);
+    vibe.render(big, 400);
+    check(litPixels(big) > 0 && rectIsDark(big, 52, 0, 71, 23) &&
+              rectIsDark(big, 0, 16, 51, 23),
+          "two full quotas side by side stay inside 52x16");
+    vibe.onInput(tcos::kInputTurnCw, 500);
+    Surface bigDetail(72, 24);
+    vibe.render(bigDetail, 900);
+    check(litPixels(bigDetail) > 0 && rectIsDark(bigDetail, 52, 0, 71, 23) &&
+              rectIsDark(bigDetail, 0, 16, 51, 23),
+          "and so does a three-digit value beside a long label");
+    check(rectIsDark(bigDetail, 12, 0, 14, 15), "with the mark/row gutter still clear");
+  }
+
+  // --- an agent this build has never heard of ------------------------------
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    StateDoc::VibeAgent agent = vibeAgent("some-vendor-shipped-after-this-build", "Pro", false);
+    agent.metrics.push_back(vibeMetric("Session", 30, 100, -1));
+    agents.push_back(agent);
+    VibeScreen vibe;
+    vibe.setAgents(agents, 0);
+    vibe.onEnter(0);
+    vibe.onInput(tcos::kInputTurnCw, 0);
+    Surface frame(52, 16);
+    vibe.render(frame, 400);
+    // The neutral gauge stands in. A page of numbers with no owner would be
+    // worse than a generic badge.
+    check(!rectIsDark(frame, 0, 2, 11, 13), "an unknown vendor still gets a mark");
+  }
+
+  // --- an agent with nothing to report -------------------------------------
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    agents.push_back(vibeAgent("devin", "Team", false));
+    VibeScreen vibe;
+    vibe.setAgents(agents, 0);
+    vibe.onEnter(0);
+    Surface overview(52, 16);
+    vibe.render(overview, 100);
+    check(litPixels(overview) > 0, "an overview with no numbers still says so");
+    vibe.onInput(tcos::kInputTurnCw, 200);
+    Surface detail(52, 16);
+    vibe.render(detail, 500);
+    check(!rectIsDark(detail, 0, 2, 11, 13) && !rectIsDark(detail, 15, 2, 51, 13),
+          "and the agent's own page keeps its mark beside the words");
+  }
+}
+
+// The seam between the parser, the link and 「VIBE」.
+//
+// Modelled on checkMusicPath, and for the same reason: every piece of the VIBE
+// path can pass alone while a field dies between StateDoc and the panel. The
+// document below is verbatim OsLinkHub.serialize() output, and it is driven
+// through the real HostLink copy and a real Shell before any pixel is read.
+void checkVibePath() {
+  using tcos::HostLink;
+  using tcos::LauncherScreen;
+  using tcos::Shell;
+  using tcos::StateDoc;
+  using tcos::VibeScreen;
+
+  static const char* kDoc =
+      "seq\t21\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
+      "vibe\t2\n"
+      "vibea\tclaude\tClaude\tMax 20x\n"
+      "vibem\tclaude\tSession\t11\t100\t18000\n"
+      "vibem\tclaude\tWeekly\t92\t100\t259200\n"
+      "vibea\tcodex\tCodex\tPlus\n"
+      "vibes\tcodex\t1\n"
+      "vibem\tcodex\tWeekly\t4\t100\t-1\n"
+      "menu\t2\n"
+      "item\tvibe\tvibe\tVIBE\n"
+      "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
+
+  StateDoc doc;
+  check(doc.parse(kDoc), "the live VIBE document parses");
+
+  HostLink hlink;
+  hlink.adoptDocument(doc, 1250000);
+  const HostLink::Snapshot snap = hlink.snapshot();
+  check(snap.vibe.size() == 2, "the VIBE block survives the copy into the snapshot");
+  if (snap.vibe.size() == 2) {
+    check(snap.vibe[0].metrics.size() == 2 && snap.vibe[0].metrics[1].used == 92,
+          "and so do the metrics, which is the half a menu-only copy would drop");
+    check(snap.vibe[1].stale, "and the stale flag, which is the only reason the corner lights");
+  }
+  check(snap.items.size() == 2 && snap.items[0].kind == StateDoc::kVibe,
+        "the menu entry the console pins arrives beside it");
+
+  LauncherScreen launcher;
+  VibeScreen vibe;
+  Shell shell(52, 16);
+  Surface frame(52, 16);
+
+  const int kIdVibe = 5;
+  std::vector<LauncherScreen::Entry> entries;
+  LauncherScreen::Entry entry;
+  entry.label = "\xE9\x9F\xB3\xE4\xB9\x90";  // 音乐
+  entry.icon = LauncherScreen::kIconMusic;
+  entry.id = 1;
+  entries.push_back(entry);
+  entry.label = "VIBE";
+  entry.icon = LauncherScreen::kIconVibe;
+  entry.id = kIdVibe;
+  entries.push_back(entry);
+  launcher.setEntries(entries, 0);
+  shell.setEntryStyle(&vibe, Shell::kEntryEqualiser);
+  shell.reset(&launcher, 0);
+
+  // Driven the way the tick drives it: route, feed, render, every frame.
+  int t = 0;
+  for (int step = 0; step < 300; ++step) {
+    t += 40;
+    if (step == 5) shell.onInput(tcos::kInputTurnCw, t);   // onto 「VIBE」
+    if (step == 15) shell.onInput(tcos::kInputPress, t);   // enter it
+    if (launcher.takeActivated() == kIdVibe) shell.push(&vibe, t);
+    if (shell.top() == &vibe) {
+      vibe.setLink(true, snap.online);
+      vibe.setAgents(snap.vibe, t);
+      vibe.takeShowLeftChanged();
+    }
+    shell.render(frame, t);
+  }
+  check(shell.top() == &vibe, "pressing 「VIBE」 lands on the usage app");
+  check(litPixels(frame) > 0, "which is not a blank panel");
+  // 92% is red ON THE PANEL, not merely in the snapshot — the whole point of
+  // this check is that a number can reach the screen object and never be drawn.
+  check(rectHasColor(frame, 0, 0, 51, 15, kVibeDanger),
+        "a quota past 90% arrives on the panel as red");
+  check(frame.getPixel(51, 0).toRGB888() == kVibeWarn,
+        "and the agent whose refresh was refused is marked in the corner");
+
+  // A hold is the way out of every screen in this firmware, and it has to still
+  // be the way out of this one — the screen consumes turns and presses.
+  shell.onInput(tcos::kInputHold, t + 100);
+  check(shell.top() == &launcher, "and a hold walks back up to the root ring");
+
+  // The document being republished on its timer must not walk the user back to
+  // the overview: the whole ring is unusable if a five-minute refresh rewinds it.
+  shell.push(&vibe, t + 200);
+  vibe.setAgents(snap.vibe, t + 200);
+  vibe.onInput(tcos::kInputTurnCw, t + 300);
+  const int settled = vibe.page();
+  vibe.setAgents(snap.vibe, t + 600);
+  check(vibe.page() == settled, "a republished document keeps the page the user is reading");
+}
+
 // Replays exactly what osLogic.cc does when the user presses confirm on 游戏 and
 // then on a game. The device showed this path restarting the framework, which
 // the per-class checks could not have caught: each piece works alone, and the
@@ -3145,28 +3599,30 @@ void checkStateDoc() {
 
   StateDoc doc;
   check(doc.parse(body), "the real service document parses");
-  check(doc.seq() == 3, "seq is read");
+  check(doc.seq() == 4, "seq is read");
   check(doc.pinned(), "pinned is read");
   check(!doc.mirror(), "the mirror flag is read");
   check(doc.focus() == "notice", "focus is read");
-  check(doc.items().size() == 6, "every item is read");
-  if (doc.items().size() == 6) {
+  check(doc.items().size() == 7, "every item is read");
+  if (doc.items().size() == 7) {
     // Every field of every record, not a spot check: a partial assertion here
     // let a deliberate fixture edit pass once while the TypeScript side caught
     // it, which is exactly the asymmetry this pair of tests exists to remove.
-    static const StateDoc::Kind kKinds[6] = {
+    static const StateDoc::Kind kKinds[7] = {
         StateDoc::kChannel, StateDoc::kChannel, StateDoc::kChannel,
-        StateDoc::kMusic, StateDoc::kGame, StateDoc::kSettings};
-    static const char* kIds[6] = {"btc", "matrixclock", "notice", "music", "game", "settings"};
-    static const char* kLabels[6] = {
+        StateDoc::kMusic, StateDoc::kGame, StateDoc::kVibe, StateDoc::kSettings};
+    static const char* kIds[7] = {"btc",  "matrixclock", "notice",  "music",
+                                  "game", "vibe",        "settings"};
+    static const char* kLabels[7] = {
         "\xE5\xB8\x82\xE5\x9C\xBA\xE8\xBD\xAE\xE6\x92\xAD",              // 市场轮播
         "\xE6\x95\xB0\xE5\xAD\x97\xE9\x9B\xA8\xE6\x97\xB6\xE9\x92\x9F",  // 数字雨时钟
         "\xE9\x80\x9A\xE7\x9F\xA5\xE6\x9D\xBF",                          // 通知板
         "\xE9\x9F\xB3\xE4\xB9\x90",                                      // 音乐
         "\xE6\xB8\xB8\xE6\x88\x8F",                                      // 游戏
+        "VIBE",
         "\xE8\xAE\xBE\xE7\xBD\xAE",                                      // 设置
     };
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
       char label[64];
       std::snprintf(label, sizeof(label), "item %d round-trips", i);
       check(doc.items()[i].kind == kKinds[i] && doc.items()[i].id == kIds[i] &&
@@ -3177,16 +3633,45 @@ void checkStateDoc() {
     // hand-written approximation of them. This is the half the hand-written
     // fixtures below cannot prove: that the service puts them where this parser
     // looks, in the order it emits them, with the ids it repeats.
-    static const char* kRevs[6] = {"9f14c0b2ae31", "e90a8dc5b287", "0c33d18a7b45",
-                                   "", "", ""};
-    static const int kTtls[6] = {60000, 10000, 30000, 0, 0, 0};
-    for (int i = 0; i < 6; ++i) {
+    static const char* kRevs[7] = {"9f14c0b2ae31", "e90a8dc5b287", "0c33d18a7b45",
+                                   "", "", "", ""};
+    static const int kTtls[7] = {60000, 10000, 30000, 0, 0, 0, 0};
+    for (int i = 0; i < 7; ++i) {
       char label[64];
       std::snprintf(label, sizeof(label), "item %d's revision and ttl round-trip", i);
       check(doc.items()[i].rev == kRevs[i] && doc.items()[i].ttlMs == kTtls[i], label);
     }
   }
   check(doc.focusIndex() == 2, "focus resolves to its index");
+
+  // --- the VIBE block ------------------------------------------------------
+  // Read off the SAME real-encoder bytes as the menu above, and read from a
+  // block the service emits BEFORE the menu — which is what proves this parser
+  // indexes by the repeated agent id rather than by line position. `vibes` for
+  // codex also sits between its `vibea` and its `vibem`, so a parser that
+  // folded annotations into "the agent we just appended" would still pass, and
+  // one that folded them into "the last record seen" would not.
+  check(doc.vibe().size() == 2, "both agents are read");
+  if (doc.vibe().size() == 2) {
+    const StateDoc::VibeAgent& claude = doc.vibe()[0];
+    check(claude.id == "claude" && claude.label == "Claude" && claude.plan == "Max 20x",
+          "the agent's id, name and plan round-trip");
+    check(!claude.stale, "an agent with no vibes line is fresh");
+    check(claude.metrics.size() == 2, "both starred metrics are read");
+    if (claude.metrics.size() == 2) {
+      check(claude.metrics[0].label == "Session" && claude.metrics[0].used == 11 &&
+                claude.metrics[0].limit == 100 && claude.metrics[0].resetSec == 18000,
+            "the first metric round-trips, five columns and all");
+      check(claude.metrics[1].label == "Weekly" && claude.metrics[1].used == 72 &&
+                claude.metrics[1].limit == 100 && claude.metrics[1].resetSec == 259200,
+            "and the second keeps its order");
+    }
+    const StateDoc::VibeAgent& codex = doc.vibe()[1];
+    check(codex.id == "codex" && codex.plan == "Plus", "the second agent round-trips");
+    check(codex.stale, "vibes\t<id>\t1 marks the agent stale");
+    check(codex.metrics.size() == 1 && codex.metrics[0].resetSec == -1,
+          "an unknown reset time stays -1 rather than becoming a countdown");
+  }
 
   // Robustness: the firmware must never brick itself on a document it only
   // half understands, or one forward-compatible field on the service side
@@ -3210,6 +3695,55 @@ void checkStateDoc() {
   StateDoc ragged;
   check(ragged.parse("seq\t5\nitem\tchannel\tonly-three-fields\n"), "a short item line is skipped");
   check(ragged.items().empty(), "and does not produce a half-built entry");
+
+  // The VIBE keys have to fail the same way the rest of the document does:
+  // per-record, never per-document. A vendor adding a column, or an agent whose
+  // header line was lost, must cost that record and nothing else.
+  StateDoc vibeRagged;
+  check(vibeRagged.parse("seq\t8\nvibe\t2\n"
+                         "vibea\tclaude\tClaude\n"                    // 3 fields: no plan
+                         "vibem\tclaude\tSession\t11\t100\t0\n"       // orphaned by the line above
+                         "vibea\tcodex\tCodex\tPlus\n"
+                         "vibem\tcodex\tWeekly\t4\t100\n"             // 5 fields: no resetSec
+                         "vibem\tcodex\tSession\t9\t100\t60\n"),
+        "a ragged VIBE record does not fail the document");
+  check(vibeRagged.vibe().size() == 1, "a short vibea line is skipped whole");
+  if (vibeRagged.vibe().size() == 1) {
+    check(vibeRagged.vibe()[0].id == "codex", "and the well-formed agent survives it");
+    check(vibeRagged.vibe()[0].metrics.size() == 1 &&
+              vibeRagged.vibe()[0].metrics[0].label == "Session",
+          "a short vibem line is skipped without shifting the row after it");
+  }
+
+  StateDoc vibeExtra;
+  vibeExtra.parse("seq\t9\nvibea\ta\tA\tPro\n"
+                  "vibem\ta\tOne\t1\t100\t0\nvibem\ta\tTwo\t2\t100\t0\n"
+                  "vibem\ta\tThree\t3\t100\t0\n"
+                  "vibes\tghost\t1\nvibem\tghost\tX\t5\t100\t0\n");
+  check(vibeExtra.vibe().size() == 1, "a record naming an absent agent creates no agent");
+  if (vibeExtra.vibe().size() == 1) {
+    check(vibeExtra.vibe()[0].metrics.size() == 2,
+          "a third metric is dropped rather than rotated onto a row that does not exist");
+    check(!vibeExtra.vibe()[0].stale, "a stale flag for an absent agent lands on nobody");
+  }
+
+  StateDoc vibeWild;
+  vibeWild.parse("seq\t10\nvibea\ta\tA\tPro\nvibem\ta\tS\t-5\t99999\t-77\n");
+  check(vibeWild.vibe().size() == 1, "an agent with out-of-range numbers still exists");
+  if (vibeWild.vibe().size() == 1 && vibeWild.vibe()[0].metrics.size() == 1) {
+    const StateDoc::VibeMetric& m = vibeWild.vibe()[0].metrics[0];
+    // Three digit cells is the whole layout budget, and -1 is the only "not
+    // said" this screen knows how to draw.
+    check(m.used == 0 && m.limit == 999 && m.resetSec == -1,
+          "numbers are clamped to what the panel can draw");
+  }
+
+  // Reparsed on the SAME object, because the property under test is the reset:
+  // the service sends `vibe\t0` when the user signs out everywhere, and a parser
+  // that merged would leave yesterday's quota on the panel for good.
+  check(vibeWild.parse("seq\t11\nvibe\t0\n"), "a document with no agents parses");
+  check(vibeWild.vibe().empty(),
+        "and clears the block rather than keeping the last one");
 
   StateDoc noFocus;
   noFocus.parse("seq\t6\nitem\tchannel\ta\tb\n");
@@ -3728,6 +4262,624 @@ void checkHttpClient() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Firmware self-update: the download half.
+//
+// What follows a successful download on the real device is an erase of mtd3
+// `res`, with no recovery slot and no A/B pair behind it, so these are not
+// hygiene checks. Every one of them is a way an image that is not an image, or
+// not all there, could otherwise reach the directory the vendor updater looks
+// in — and the device cannot report any of it afterwards, because a success
+// reboots into different firmware and logcat wedges adbd on this unit.
+
+// A listening socket that answers with bytes the test chose.
+//
+// net::HttpServer cannot serve this: it always sends a Content-Length that
+// matches what it sends, which is exactly the one reply shape that must be
+// tested here. A connection that promises 4 KB and delivers 1 KB before dying
+// IS the failure being defended against, and the only way to produce it is to
+// write the bytes by hand.
+class RawServer {
+ public:
+  RawServer() : mFd(-1), mPort(0) {}
+  ~RawServer() { stop(); }
+
+  int start() {
+    mFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (mFd < 0) return -1;
+    int one = 1;
+    ::setsockopt(mFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(mFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(mFd, 1) != 0) {
+      stop();
+      return -1;
+    }
+    socklen_t len = sizeof(addr);
+    if (::getsockname(mFd, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
+      stop();
+      return -1;
+    }
+    mPort = ntohs(addr.sin_port);
+    return mPort;
+  }
+
+  int port() const { return mPort; }
+
+  /** Accepts one connection, drains the request, writes `reply`, closes. */
+  bool serveOnce(const std::string& reply) {
+    const int fd = ::accept(mFd, 0, 0);
+    if (fd < 0) return false;
+    char buf[2048];
+    std::string request;
+    while (request.find("\r\n\r\n") == std::string::npos) {
+      const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+      if (n <= 0) break;
+      request.append(buf, static_cast<size_t>(n));
+    }
+    size_t sent = 0;
+    while (sent < reply.size()) {
+      const ssize_t n = ::send(fd, reply.data() + sent, reply.size() - sent, 0);
+      if (n <= 0) break;
+      sent += static_cast<size_t>(n);
+    }
+    ::close(fd);
+    return true;
+  }
+
+  void stop() {
+    if (mFd >= 0) ::close(mFd);
+    mFd = -1;
+  }
+
+ private:
+  int mFd;
+  int mPort;
+};
+
+const char* const kFwDir = "/tmp/zos-fw-test/";
+
+std::string fwPath(const char* name) { return std::string(kFwDir) + name; }
+
+bool fileExists(const std::string& path) {
+  struct stat st;
+  return ::stat(path.c_str(), &st) == 0;
+}
+
+std::string readWholeFile(const std::string& path) {
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == 0) return std::string();
+  std::string out;
+  char buf[4096];
+  size_t n = 0;
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+  std::fclose(f);
+  return out;
+}
+
+void writeWholeFile(const std::string& path, const std::string& body) {
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (f == 0) return;
+  std::fwrite(body.data(), 1, body.size(), f);
+  std::fclose(f);
+}
+
+/** A body that begins the way a ZKSWE container does, padded to `bytes`. */
+std::string fakeImage(size_t bytes) {
+  std::string out = "ZKSWEV1.0-180127";
+  while (out.size() < bytes) out.push_back(static_cast<char>('a' + (out.size() % 23)));
+  out.resize(bytes);
+  return out;
+}
+
+std::string rawReply(const char* statusLine, long declaredLength, const std::string& body) {
+  char head[192];
+  std::snprintf(head, sizeof(head),
+                "HTTP/1.0 %s\r\nContent-Type: application/octet-stream\r\n"
+                "Content-Length: %ld\r\n\r\n",
+                statusLine, declaredLength);
+  return std::string(head) + body;
+}
+
+// What the download looked like from the outside, filled in by the progress
+// callback on the download's own thread.
+struct FwProbe {
+  int calls;
+  bool sawPartFile;    // the .part existed while bytes were landing
+  bool sawFinalFile;   // the real name existed while bytes were landing
+  long lastReceived;
+  long lastTotal;
+
+  FwProbe() : calls(0), sawPartFile(false), sawFinalFile(false), lastReceived(0),
+              lastTotal(0) {}
+};
+
+void fwProgress(void* ctx, long received, long total) {
+  FwProbe* probe = static_cast<FwProbe*>(ctx);
+  ++probe->calls;
+  probe->lastReceived = received;
+  probe->lastTotal = total;
+  // Sampled here rather than after the fact, because "the real name never
+  // existed until the whole body had arrived" is a claim about the MIDDLE of
+  // the transfer and there is nothing left to look at once it ends.
+  if (fileExists(fwPath(tcos::FirmwareUpdate::partName()))) probe->sawPartFile = true;
+  if (fileExists(fwPath(tcos::FirmwareUpdate::imageName()))) probe->sawFinalFile = true;
+}
+
+struct FwRun {
+  std::string url;
+  tcos::FirmwareUpdate::Verdict verdict;
+  long received;
+  FwProbe probe;
+
+  FwRun() : verdict(tcos::FirmwareUpdate::kOk), received(0) {}
+};
+
+FwRun gFwRun;
+
+void* fwDownloadMain(void*) {
+  tcos::FirmwareUpdate update;
+  gFwRun.verdict = update.fetch(gFwRun.url, kFwDir, 3000, &fwProgress, &gFwRun.probe);
+  gFwRun.received = update.received();
+  return 0;
+}
+
+/** One download against a hand-written reply. Leaves the result in gFwRun. */
+void runDownload(const std::string& reply) {
+  ::unlink(fwPath(tcos::FirmwareUpdate::imageName()).c_str());
+  ::unlink(fwPath(tcos::FirmwareUpdate::partName()).c_str());
+  gFwRun = FwRun();
+
+  RawServer server;
+  const int port = server.start();
+  if (port <= 0) {
+    check(false, "the raw test server binds a port");
+    return;
+  }
+  char url[128];
+  std::snprintf(url, sizeof(url), "http://127.0.0.1:%d/api/os/firmware", port);
+  gFwRun.url = url;
+
+  pthread_t thread;
+  pthread_create(&thread, 0, &fwDownloadMain, 0);
+  server.serveOnce(reply);
+  pthread_join(thread, 0);
+  server.stop();
+}
+
+void checkFirmwareUpdate() {
+  typedef tcos::FirmwareUpdate FW;
+
+  // --- the pure guard rails, which decide before a file is ever opened ------
+  check(FW::judgeHeader(200, 1500000) == FW::kOk, "a plausible image is accepted");
+  check(FW::judgeHeader(404, 1500000) == FW::kBadStatus,
+        "a 404 is refused however long its body is");
+  // 200 exactly, not 2xx: a 204 or a 206 is a successful reply that is not a
+  // whole image, and treating the two as the same thing is how a partial
+  // container reaches flash.
+  check(FW::judgeHeader(204, 0) == FW::kBadStatus, "a 204 is not an image");
+  check(FW::judgeHeader(206, 900000) == FW::kBadStatus, "neither is a partial content reply");
+  check(FW::judgeHeader(200, -1) == FW::kNoLength,
+        "a 200 with no length is refused: completeness would be uncheckable");
+  check(FW::kMinImageBytes == 572,
+        "the floor is one ZKSWE container header: 20 + 28 + 524");
+  check(FW::judgeHeader(200, FW::kMinImageBytes - 1) == FW::kTooSmall,
+        "anything shorter than a header is not a short image, it is not an image");
+  check(FW::judgeHeader(200, FW::kMinImageBytes) == FW::kOk, "exactly a header is allowed");
+  check(FW::kMaxImageBytes == 8 * 1024 * 1024, "the ceiling is mtd3 res: 0x800000");
+  check(FW::judgeHeader(200, FW::kMaxImageBytes) == FW::kOk, "a full partition fits");
+  check(FW::judgeHeader(200, FW::kMaxImageBytes + 1) == FW::kTooLarge,
+        "one byte more does not, and is refused here rather than by the updater");
+
+  check(FW::looksLikeContainer("ZKSWEV1.0-180127", 16), "the container magic is recognised");
+  check(!FW::looksLikeContainer("<!DOCTYPE html>x", 16),
+        "an error page that arrived with a 200 is not");
+  check(!FW::looksLikeContainer("ZKSWE", 5),
+        "and five bytes are not enough to decide either way");
+
+  // The one thing that keeps this whole check away from `mount`: staging into a
+  // scratch directory does not merely skip the remount, it cannot reach it.
+  check(FW::needsWritableStorage("/mnt/storage/zkimg/"),
+        "the real staging directory needs the remount");
+  check(FW::needsWritableStorage("/mnt/storage"), "so does the mount point itself");
+  check(!FW::needsWritableStorage("/mnt/storage-other/x"),
+        "but a directory that merely starts with the same letters does not");
+  check(!FW::needsWritableStorage(kFwDir), "and neither does the test's scratch directory");
+
+  check(FW::imagePath("/x/") == "/x/update.img" && FW::imagePath("/x") == "/x/update.img",
+        "the image path is the same with or without a trailing slash");
+  check(FW::partPath("/x/") == "/x/update.img.part",
+        "and the partial is the same name with a suffix, so it lands on the same "
+        "filesystem and the rename is atomic");
+
+  ::mkdir("/tmp/zos-fw-test", 0755);
+
+  // --- a whole image, end to end -------------------------------------------
+  const std::string image = fakeImage(4096);
+  runDownload(rawReply("200 OK", static_cast<long>(image.size()), image));
+  check(gFwRun.verdict == FW::kOk, "a complete image is accepted");
+  check(readWholeFile(fwPath(FW::imageName())) == image,
+        "and lands byte for byte under the name the updater looks for");
+  check(!fileExists(fwPath(FW::partName())),
+        "with no partial left beside it");
+  check(gFwRun.probe.calls > 0 && gFwRun.probe.lastReceived == (long)image.size() &&
+            gFwRun.probe.lastTotal == (long)image.size(),
+        "progress is reported as it lands, and ends at the declared length");
+  // THE DISCIPLINE, observed from inside the transfer rather than inferred from
+  // its result: the bytes were in the .part, and the name the updater reads was
+  // not there yet.
+  check(gFwRun.probe.sawPartFile, "the bytes land in the .part file");
+  check(!gFwRun.probe.sawFinalFile,
+        "and update.img does not exist until the last byte has arrived");
+
+  // --- a connection that dies mid-image ------------------------------------
+  const std::string half = fakeImage(1000);
+  runDownload(rawReply("200 OK", 4096, half));
+  check(gFwRun.verdict == FW::kTruncated, "a short body is a truncated download");
+  check(!fileExists(fwPath(FW::imageName())),
+        "A DROPPED CONNECTION LEAVES NOTHING WHERE THE UPDATER WILL FIND IT");
+  check(!fileExists(fwPath(FW::partName())), "and the partial is deleted, not kept");
+
+  // --- replies that are not images -----------------------------------------
+  runDownload(rawReply("200 OK", 700, std::string(700, 'x')));
+  check(gFwRun.verdict == FW::kNotContainer,
+        "a 200 whose body is not a ZKSWE container is refused");
+  check(!fileExists(fwPath(FW::imageName())) && !fileExists(fwPath(FW::partName())),
+        "and nothing is left behind");
+
+  runDownload(rawReply("404 Not Found", 9, "not here"));
+  check(gFwRun.verdict == FW::kBadStatus, "a 404 is refused");
+  check(!fileExists(fwPath(FW::partName())),
+        "and no file is even opened for it");
+
+  runDownload(rawReply("200 OK", 10, fakeImage(10)));
+  check(gFwRun.verdict == FW::kTooSmall, "a body shorter than a container header is refused");
+  check(!fileExists(fwPath(FW::partName())),
+        "before a byte of it is written anywhere");
+
+  // A service too old to know this route answers HTML, and HTML has no length
+  // problem — it has a type problem, which is why the magic check exists.
+  runDownload("HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n<h1>404</h1>");
+  check(gFwRun.verdict == FW::kNoLength,
+        "a 200 with no Content-Length is refused rather than trusted to close cleanly");
+
+  // --- clearing away what an install left behind ----------------------------
+  // The vendor updater does not delete the image it flashed, and a leftover is
+  // not inert: it is the only thing the chain needs to flash it again. That is
+  // what turned "install once" into a reinstall on every boot on the real
+  // device, with the panel dark throughout.
+  check(FW::discardStaged(kFwDir), "sweeping an empty staging directory succeeds");
+
+  writeWholeFile(fwPath(FW::imageName()), fakeImage(1024));
+  writeWholeFile(fwPath(FW::partName()), std::string(64, 'z'));
+  check(FW::discardStaged(kFwDir), "a spent image is swept");
+  check(!fileExists(fwPath(FW::imageName())), "the installed image is gone");
+  check(!fileExists(fwPath(FW::partName())),
+        "and so is the fragment a dropped transfer left, which no one would ever finish");
+
+  // The remount branch is UNREACHABLE from here, and deliberately: a scratch
+  // directory is not under /mnt/storage, so this check never spawns `mount`.
+  check(!FW::needsWritableStorage(kFwDir), "the scratch directory needs no remount");
+  // Staging moved to tmpfs after this unit's UDISK grew a bad region where a
+  // 1 MB image lands; the old location stays a candidate for hand-pushed
+  // images, and it is the one that still has to be remounted.
+  check(!FW::needsWritableStorage(FW::stagingDir()),
+        "and neither does tmpfs, which is where images are staged now");
+  check(FW::needsWritableStorage(FW::legacyStagingDir()),
+        "the UDISK location still does");
+  check(std::string(FW::stagingDir()).compare(0, 5, "/tmp/") == 0,
+        "and staging really is on tmpfs, which a reboot clears — so a spent "
+        "image cannot outlive the install that consumed it");
+
+  ::unlink(fwPath(FW::imageName()).c_str());
+  ::unlink(fwPath(FW::partName()).c_str());
+  ::rmdir("/tmp/zos-fw-test");
+}
+
+// The state machine between the console's request and the vendor updater.
+//
+// HostLink's threads are never started here: every seam this drives is public
+// precisely because the worker's body needs a socket, and a check that
+// re-implemented the gate would agree with a runWorker that got it wrong.
+void checkUpgradePath() {
+  typedef tcos::HostLink::UpgradeState State;
+  tcos::HostLink link;
+
+  check(link.upgradeState().stage == State::kIdle, "a fresh link has no install pending");
+  check(link.takeUpgradeRequest() == 0, "and asks for no download");
+  check(!link.takeUpgradeInstallReady(), "and never offers the updater anything");
+
+  tcos::StateDoc first;
+  check(first.parse("seq\t1\nupgrade\t1\n"), "a document carrying an install request parses");
+  link.adoptDocument(first, 1000);
+  check(link.upgradeState().stage == State::kPending,
+        "a console request arms a DOWNLOAD, not an install");
+  check(!link.takeUpgradeInstallReady(),
+        "nothing is installable before anything has been downloaded");
+
+  check(link.takeUpgradeRequest() == 1, "the worker picks the request up");
+  check(link.upgradeState().stage == State::kDownloading, "and the panel is told so");
+  check(link.takeUpgradeRequest() == 0, "the same request is not handed out twice");
+  link.adoptDocument(first, 2000);
+  check(link.takeUpgradeRequest() == 0,
+        "and the document repeating it forever is honoured ONCE");
+
+  link.noteUpgradeProgress(400, 1600);
+  check(link.upgradeState().received == 400 && link.upgradeState().total == 1600,
+        "progress reaches the UI thread");
+
+  link.noteUpgradeResult(1, tcos::FirmwareUpdate::kTruncated);
+  check(link.upgradeState().stage == State::kFailed, "a failed download says so");
+  check(link.upgradeState().verdict == tcos::FirmwareUpdate::kTruncated,
+        "and carries WHY, because the device cannot be asked afterwards");
+  check(!link.takeUpgradeInstallReady(),
+        "A FAILED DOWNLOAD NEVER CALLS THE INSTALLER");
+  link.adoptDocument(first, 3000);
+  check(link.takeUpgradeRequest() == 0,
+        "and a failure does not re-arm itself: retrying is the console asking again");
+
+  tcos::StateDoc second;
+  second.parse("seq\t2\nupgrade\t2\n");
+  link.adoptDocument(second, 4000);
+  check(link.takeUpgradeRequest() == 2, "a new request is a new download");
+  link.noteUpgradeResult(2, tcos::FirmwareUpdate::kOk);
+  check(link.upgradeState().stage == State::kInstalling, "a complete image arms the install");
+  check(link.takeUpgradeInstallReady(), "which the UI thread takes");
+  check(!link.takeUpgradeInstallReady(),
+        "exactly once — the vendor chain reboots, so a second call only interrupts the first");
+
+  tcos::StateDoc third;
+  third.parse("seq\t3\nupgrade\t3\n");
+  link.adoptDocument(third, 5000);
+  check(link.takeUpgradeRequest() == 3, "the console can ask again");
+  link.noteUpgradeResult(2, tcos::FirmwareUpdate::kOk);
+  check(!link.takeUpgradeInstallReady(),
+        "but a result for a superseded request installs nothing: the user wants the "
+        "image they asked for last");
+
+  // The hub's counter is ordinary state in a Bun process and returns to 1 when
+  // could never ask this device for an install again. The hub issues
+  // seconds-since-epoch rather than a count for exactly this reason — a
+  // restarted counter must not collide with an id the device already installed.
+  tcos::StateDoc restarted;
+  restarted.parse("seq\t9\nupgrade\t4\n");
+  link.adoptDocument(restarted, 6000);
+  check(link.takeUpgradeRequest() == 4,
+        "a service that restarted its counter can still ask");
+
+  tcos::StateDoc quiet;
+  quiet.parse("seq\t10\n");
+  link.adoptDocument(quiet, 7000);
+  check(link.takeUpgradeRequest() == 0, "a document with no request asks for nothing");
+
+  // --- the record that survives the reboot ---------------------------------
+  // The one guard that cannot live in the object above: a successful install
+  // reboots from inside the vendor chain, so every member of this class is
+  // back at its initial value when the question "have I already done this?" is
+  // finally asked. Measured on hardware: the console's request was still
+  // standing, the memory-only guard was 0, and the device reinstalled the same
+  // image on every boot with the panel dark throughout.
+  typedef tcos::HostLink HL;
+  const char* const kSeqPath = "/tmp/zos-upgrade-seq-test";
+  ::unlink(kSeqPath);
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "no record means nothing has been installed");
+  check(HL::writeUpgradeSeq(kSeqPath, 1755000000), "the record is written");
+  check(HL::readUpgradeSeq(kSeqPath) == 1755000000, "and reads back");
+  check(HL::writeUpgradeSeq(kSeqPath, 1755000009) && HL::readUpgradeSeq(kSeqPath) == 1755000009,
+        "a later install replaces it");
+  check(!HL::writeUpgradeSeq("/nonexistent-dir/zos-upgrade.seq", 1755000009),
+        "AND A WRITE THAT CANNOT LAND SAYS SO — the caller uses this to refuse to knock");
+  check(!HL::writeUpgradeSeq(kSeqPath, 0) && !HL::writeUpgradeSeq(kSeqPath, -1),
+        "a record that could never be a request id is refused rather than stored");
+
+  // Both directions of a corrupt record, because they are NOT symmetric: one
+  // that reads as 0 costs a single extra install, one that reads as huge is a
+  // device no console can ever ask again — the guard is "newer than what I
+  // installed", and nothing is newer than INT_MAX before 2038.
+  writeWholeFile(kSeqPath, "");
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "an empty record installs rather than strands");
+  writeWholeFile(kSeqPath, "not a number\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "and so does junk");
+  writeWholeFile(kSeqPath, "-5\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "and so does a negative one");
+  writeWholeFile(kSeqPath, "17 55000009\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "and so does a number with something after it");
+  writeWholeFile(kSeqPath, "1755000009xyz\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "including trailing letters, which strtol would ignore");
+  writeWholeFile(kSeqPath, std::string(64, '7'));
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "a record longer than one we would write is not ours");
+
+  // THE OVERFLOW CASE, and the reason it is spelled out rather than trusted to
+  // a range test. `long` is 32 bits on the ARM this ships to, so strtol clamps
+  // an overflowing value to LONG_MAX == 0x7fffffff and a `> 0x7fffffff` test
+  // waves it through as INT_MAX — permanently stranding the unit. That test
+  // used to be here and PASSED, for one reason only: this self-check is built
+  // LP64 on the host, where `long` is wider and the same line behaves the
+  // opposite way. errno is what makes the verdict independent of sizeof(long).
+  writeWholeFile(kSeqPath, "99999999999999999999\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 0,
+        "an out-of-range record reads as 0 REGARDLESS OF sizeof(long)");
+  writeWholeFile(kSeqPath, "2147483648\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 0, "and so does one just past a 32-bit id");
+  writeWholeFile(kSeqPath, "2147483647\n");
+  check(HL::readUpgradeSeq(kSeqPath) == 2147483647, "while the largest legal one still reads");
+  ::unlink(kSeqPath);
+
+  // --- the gate, driven end to end -----------------------------------------
+  // The path is injectable for exactly this: without it the only assertions
+  // possible were about the parser, and the branch that can strand a device —
+  // the on-disk record REFUSING a request — had no coverage at all.
+  {
+    ::unlink(kSeqPath);
+    tcos::HostLink booted;
+    booted.setUpgradeSeqPath(kSeqPath);
+    check(booted.installedUpgradeSeq() == 0, "a device with no record has installed nothing");
+
+    tcos::StateDoc doc;
+    doc.parse("seq\t11\nupgrade\t1755000009\n");
+    booted.adoptDocument(doc, 100);
+    check(booted.takeUpgradeRequest() == 1755000009, "so the request is honoured");
+
+    // What the device does at the moment of handing over: record, then knock.
+    check(booted.noteUpgradeInstalled(1755000009), "the request is recorded before the knock");
+    check(booted.installedUpgradeSeq() == 1755000009, "and the record is the request");
+
+    // The reboot. Every member is back at its initial value; only /data knows.
+    tcos::HostLink afterReboot;
+    afterReboot.setUpgradeSeqPath(kSeqPath);
+    tcos::StateDoc stillStanding;
+    stillStanding.parse("seq\t12\nupgrade\t1755000009\n");
+    afterReboot.adoptDocument(stillStanding, 200);
+    check(afterReboot.takeUpgradeRequest() == 0,
+          "THE SAME REQUEST, AFTER THE REBOOT, INSTALLS NOTHING — this is the boot loop");
+    check(afterReboot.upgradeState().stage == State::kIdle,
+          "and the panel is not left claiming an install is under way");
+
+    // ...but the console can still ask, which is the other half and the one a
+    // too-eager guard breaks: a device that can never be updated again.
+    tcos::StateDoc pressedAgain;
+    pressedAgain.parse("seq\t13\nupgrade\t1755000010\n");
+    afterReboot.adoptDocument(pressedAgain, 300);
+    check(afterReboot.takeUpgradeRequest() == 1755000010, "a NEWER request still arms");
+
+    // And a record the parser refuses must not strand the device either.
+    writeWholeFile(kSeqPath, "99999999999999999999\n");
+    tcos::HostLink corrupted;
+    corrupted.setUpgradeSeqPath(kSeqPath);
+    tcos::StateDoc afterCorruption;
+    afterCorruption.parse("seq\t14\nupgrade\t1755000011\n");
+    corrupted.adoptDocument(afterCorruption, 400);
+    check(corrupted.takeUpgradeRequest() == 1755000011,
+          "a corrupt record costs one extra install, never the ability to update");
+    ::unlink(kSeqPath);
+  }
+
+  // --- every way an install can fail leaves the panel ------------------------
+  // Each of these used to be a bare `return` out of upgradeEntryPoint, and each
+  // left the state machine in kInstalling with no way out but a reboot.
+  {
+    const int reasons[5] = {HL::kInstallNoRecord, HL::kInstallNoMonitor, HL::kInstallNoImage,
+                            HL::kInstallDeclined, HL::kInstallTimedOut};
+    for (int i = 0; i < 5; ++i) {
+      tcos::HostLink link2;
+      tcos::StateDoc doc2;
+      doc2.parse("seq\t1\nupgrade\t1755000009\n");
+      link2.adoptDocument(doc2, 10);
+      check(link2.takeUpgradeRequest() == 1755000009, "arm it");
+      link2.noteUpgradeResult(1755000009, 0);
+      check(link2.upgradeState().stage == State::kInstalling, "a staged image is installable");
+      check(link2.takeUpgradeInstallReady(), "and the UI thread takes it");
+
+      link2.noteInstallFailed(reasons[i]);
+      check(link2.upgradeState().stage == State::kFailed,
+            "EVERY install failure leaves kInstalling — 安装中 forever is not an outcome");
+      check(link2.upgradeState().verdict == HL::kInstallVerdictBase + reasons[i],
+            "and carries which one, because the device cannot be asked afterwards");
+      check(!link2.takeUpgradeInstallReady(),
+            "and does not leave a loaded trigger for the next tick");
+    }
+    // The two verdict spaces stay apart: a truncated download and a refused
+    // image are different problems, and the log carries only this number.
+    check(HL::kInstallVerdictBase > static_cast<int>(tcos::FirmwareUpdate::kWriteFailed),
+          "install reasons cannot be mistaken for download verdicts");
+  }
+
+  // --- what the panel says -------------------------------------------------
+  tcos::UpgradeOverlay overlay;
+  Surface out(52, 16);
+  check(!overlay.visible(0), "the overlay is invisible until there is an install");
+  overlay.render(out, 0);
+  check(litPixels(out) == 0, "and draws nothing");
+
+  overlay.set(tcos::UpgradeOverlay::kDownloading, 0, 1000);
+  check(overlay.visible(1000), "a download takes the panel");
+  out.clear();
+  overlay.render(out, 1000);
+  const int atZero = litPixels(out);
+  check(atZero > 0, "and says something at 0%");
+  out.clear();
+  overlay.render(out, 1700);
+  check(litPixels(out) > 0, "including 700 ms later, with no new bytes");
+  // The sweep is the only difference between those two frames, and it is the
+  // whole answer to "is this thing still running": a bar that has not moved
+  // since the last frame is indistinguishable from a hung device without it.
+  {
+    Surface a(52, 16);
+    Surface b(52, 16);
+    overlay.render(a, 1000);
+    overlay.render(b, 1000 + tcos::UpgradeOverlay::kSweepMs / 2);
+    bool railMoved = false;
+    for (int x = 0; x < 52; ++x) {
+      const Color pa = a.getPixel(x, 15);
+      const Color pb = b.getPixel(x, 15);
+      if (pa.r != pb.r || pa.g != pb.g || pa.b != pb.b) railMoved = true;
+    }
+    check(railMoved, "a stalled download still moves a pixel, so it cannot look frozen");
+  }
+
+  overlay.set(tcos::UpgradeOverlay::kDownloading, 50, 2000);
+  out.clear();
+  overlay.render(out, 2000);
+  int filled = 0;
+  for (int x = 0; x < 52; ++x) {
+    const Color c = out.getPixel(x, 15);
+    if (c.r == 120 && c.g == 255 && c.b == 170) ++filled;
+  }
+  check(filled == 26, "the rail fills with the bytes that landed, not with time");
+
+  overlay.set(tcos::UpgradeOverlay::kFailed, 0, 3000);
+  check(overlay.visible(3000), "a failure is shown");
+  check(overlay.visible(3000 + tcos::UpgradeOverlay::kFailHoldMs - 1), "long enough to read");
+  check(!overlay.visible(3000 + tcos::UpgradeOverlay::kFailHoldMs),
+        "then the panel goes back to being a clock rather than staying stuck on an "
+        "error nobody is coming to clear");
+
+  overlay.set(tcos::UpgradeOverlay::kInstalling, 100, 4000);
+  check(overlay.visible(4000 + 60000),
+        "an install does NOT expire: the device is supposed to disappear into a "
+        "reboot, and if it does not, 安装中 is still the truth");
+
+  // The Shell composes it last, over the volume bar and over a transition: an
+  // install outranks everything else that can be on this panel.
+  tcos::Shell shell(52, 16);
+  tcos::LauncherScreen launcher;
+  std::vector<tcos::LauncherScreen::Entry> entries;
+  tcos::LauncherScreen::Entry entry;
+  entry.label = "A";
+  entry.icon = tcos::LauncherScreen::kIconMusic;
+  entry.id = 1;
+  entries.push_back(entry);
+  launcher.setEntries(entries, 0);
+  shell.reset(&launcher, 0);
+  shell.overlay().show(tcos::LevelOverlay::kVolume, 3, 6, 5000);
+  shell.upgrade().set(tcos::UpgradeOverlay::kInstalling, 100, 5000);
+  Surface composed(52, 16);
+  shell.render(composed, 5000);
+  Surface alone(52, 16);
+  tcos::UpgradeOverlay solo;
+  solo.set(tcos::UpgradeOverlay::kInstalling, 100, 5000);
+  solo.render(alone, 5000);
+  bool identical = true;
+  for (int y = 0; y < 16 && identical; ++y) {
+    for (int x = 0; x < 52; ++x) {
+      const Color a = composed.getPixel(x, y);
+      const Color b = alone.getPixel(x, y);
+      if (a.r != b.r || a.g != b.g || a.b != b.b) {
+        identical = false;
+        break;
+      }
+    }
+  }
+  check(identical,
+        "the install takeover replaces the frame, volume bar and all — the panel "
+        "must not argue with itself about what is happening");
+  check(shell.isAnimating(5000), "and the shell keeps redrawing while it is up");
+}
+
 void checkChannelRing() {
   tcos::ChannelRingScreen ring;
   Surface out(52, 16);
@@ -3871,22 +5023,26 @@ void checkChannelRefreshPath() {
 
   // --- the document, the mapping and the screen ----------------------------
   // Verbatim OsLinkHub.serialize() shape, annotations included. `menu` is only
-  // a hint and `settings` is in here because the mapping has to drop it.
+  // a hint; `settings` and `vibe` are in here because the mapping has to drop
+  // both — they are root DESTINATIONS the launcher owns, and a ring that let one
+  // through would put 「VIBE」 on the carousel as a page with no frames.
   static const char* kDocA =
       "seq\t30\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
-      "menu\t2\n"
+      "menu\t3\n"
       "item\tchannel\tmatrixclock\t\xE6\x95\xB0\xE5\xAD\x97\xE9\x9B\xA8\xE6\x97\xB6\xE9\x92\x9F\n"
       "rev\tmatrixclock\te90a8dc5b287\n"
       "ttl\tmatrixclock\t10000\n"
+      "item\tvibe\tvibe\tVIBE\n"
       "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
   // The same menu after the user recoloured the channel: same id, same label,
   // same position, same everything a pre-fix build could see.
   static const char* kDocB =
       "seq\t31\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
-      "menu\t2\n"
+      "menu\t3\n"
       "item\tchannel\tmatrixclock\t\xE6\x95\xB0\xE5\xAD\x97\xE9\x9B\xA8\xE6\x97\xB6\xE9\x92\x9F\n"
       "rev\tmatrixclock\t0000feed9999\n"
       "ttl\tmatrixclock\t10000\n"
+      "item\tvibe\tvibe\tVIBE\n"
       "item\tsettings\tsettings\t\xE8\xAE\xBE\xE7\xBD\xAE\n";
 
   StateDoc docA;
@@ -3899,6 +5055,8 @@ void checkChannelRefreshPath() {
   check(menuA.size() == 1 && menuA[0].appName == "matrixclock" && menuA[0].ttlMs == 10000 &&
             menuA[0].rev == "e90a8dc5b287",
         "the mapping keeps the channels and everything the ring compares");
+  check(docA.items().size() == 3,
+        "and the document really did carry the two destinations it dropped");
 
   ChannelRingScreen ring;
   Surface out(52, 16);
@@ -7651,6 +8809,10 @@ int main() {
   std::printf("  http server ok\n");
   checkHttpClient();
   std::printf("  http client ok\n");
+  checkFirmwareUpdate();
+  std::printf("  firmware update ok\n");
+  checkUpgradePath();
+  std::printf("  upgrade path ok\n");
   checkSetupPortal();
   std::printf("  setup portal ok\n");
   checkGameScreen();
@@ -7667,6 +8829,10 @@ int main() {
   std::printf("  music theme ok\n");
   checkMusicPath();
   std::printf("  music path ok\n");
+  checkVibeScreen();
+  std::printf("  vibe screen ok\n");
+  checkVibePath();
+  std::printf("  vibe path ok\n");
   checkLyricTiming();
   std::printf("  lyric timing ok\n");
   checkLyricLegacyFrames();

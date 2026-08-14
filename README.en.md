@@ -86,15 +86,36 @@ page (battery / USB / versions / IP, knob-adjustable volume), and the same seven
 with 8-bit sound effects. Sideloading works exactly like the music firmware: memory-only,
 a power cycle or one click restores the official firmware, flash is never written.
 
+## AI usage (VIBE)
+
+Puts the quota of AI coding agents — Claude Code, Codex, and eight more — on the pixel panel.
+It is **an app on ZOS**, peer to 音乐 and 游戏 on the knob's root ring: an overview of two
+agents side by side first, then one page per agent (metrics, meters, reset countdown); the knob
+pages, press toggles used vs left, hold goes back. An app rather than a channel because a
+channel is only an animation refetched on a timer — no input, nothing to push to — and VIBE's
+next step is reacting live to the vibe-coding session on this machine
+(see [ADR 0011](docs/adr/0011-vibe-is-a-firmware-app.md)).
+
+The service collects the numbers itself: it reads the login each agent's own CLI already left on
+this Mac and calls that vendor's usage endpoint, so nothing else has to be installed; with
+nothing signed in the panel says so rather than inventing a number
+(see [ADR 0010](docs/adr/0010-vibe-native-usage-collection.md)).
+
+The console's **VIBE** tab lists the ten agents and their metrics, stars at most two per agent
+(those are the ones that reach the panel), previews both 52×16 pages, and can jump the clock
+straight to the app. OpenRouter and Z.ai have no local CLI login to borrow, so they take a
+pasted API key there.
+
 ## ZOS system firmware
 
 The first two firmwares are things you sideload for a while; **ZOS** (`device/tc002-os/`)
 replaces the whole thing: it takes the official app's place and *is* the device's system.
 Boot is a 2.5-second ZOS wordmark animation, then a knob-driven root menu —
-**Music / Games / Channels / Settings** — one item per page, full-bleed (a list does not
-fit on 52×16: four 12px CJK cells fill the width). The knob pages, a press descends, a
-hold goes back, at every level. Each destination arrives with its own motion (channels
-like a CRT waking up, music as an equaliser rising, a game as a cartridge seated, settings
+**Music / Games / Channels / VIBE / Settings** — one item per page, full-bleed (a list does
+not fit on 52×16: four 12px CJK cells fill the width, one label's worth, and squeezing the
+neighbours in leaves three unreadable rows). The knob pages, a press descends, a hold goes
+back, at every level. The five destinations share four entry motions (channels like a CRT
+waking up, music and VIBE as an equaliser rising, a game as a cartridge seated, settings
 as a drawer dropping); leaving replays that same motion backwards. The side buttons are
 volume on a short press and brightness on a long one, both raising a bar that expires on
 its own.

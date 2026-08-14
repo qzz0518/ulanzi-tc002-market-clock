@@ -1,14 +1,14 @@
 # TC002 OS — 替换官方固件的系统固件
 
 面向 Ulanzi TC002（52×16 RGB LED）的完整系统固件：一页一项的旋钮式菜单、
-自带 WiFi 配网、频道 / 音乐 / 游戏 / 设置统一入口，以及可从 Pixel Studio 控制台
+自带 WiFi 配网、频道 / 音乐 / 游戏 / VIBE / 设置统一入口，以及可从 Pixel Studio 控制台
 直接控制与实时镜像的设备画面。
 
 与已有的两套侧载固件（`../tc002-lyrics-player` 音乐播放器、`../tc002-arcade` 游戏厅）
 互斥共存，共用同一条 `/tmp` 加载路径与 `/tmp/tc002-sideload.id` 会话标识（ADR 0004）。
 
-> **当前进度**：开机动画、Shell / 两级菜单、七款游戏、音乐页、设置页、控制台链路
-> （长轮询 + 帧包 + 画面镜像）、音量 / 亮度、夜间息屏、配网页面均已就位。
+> **当前进度**：开机动画、Shell / 两级菜单、七款游戏、音乐页、VIBE 页、设置页、
+> 控制台链路（长轮询 + 帧包 + 画面镜像）、音量 / 亮度、夜间息屏、配网页面均已就位。
 > **尚未实现：热点（SoftAP）**；改变链路的那一半锁在守卫文件后面，见下方「WiFi 与配网」。
 
 ## 唯一的架构铁律
@@ -37,6 +37,7 @@ app/src/net/      HostLink, StateDoc, FrameBundle, HttpClient/Server,
 app/src/platform/ Presenter, Sfx, DeviceControls, NetInfo,
                   DeviceProvisioning                                  ← 唯一的设备侧
 app/src/visual/   Glyphs.cpp                    ← 唯一允许 include 字模表的翻译单元
+                  VibeIcons.h                   ← 生成物：厂商标记点阵
 app/src/managers/ KeyManager, McuManager        ← 沿用 arcade 已验证实现
 app/src/uart/     串口 / MCU 协议                ← 同上
 app/src/activity/ FlyThings Activity 外壳        ← 精简版，无 ZK 控件
@@ -56,8 +57,8 @@ sideload/os       侧载启动脚本
 
 | 输入 | 行为 |
 |---|---|
-| 旋钮左右 | 当前环内翻页；音乐页上一首 / 下一首；游戏内直达引擎 |
-| 旋钮键 / 中键短按 | 进入 / 确认；频道页暂停继续；音乐页播放暂停 |
+| 旋钮左右 | 当前环内翻页；音乐页上一首 / 下一首；VIBE 页翻代理；游戏内直达引擎 |
+| 旋钮键 / 中键短按 | 进入 / 确认；频道页暂停继续；音乐页播放暂停；VIBE 页切已用 / 剩余 |
 | 任意键长按 600ms | 返回上一层（未被页面消费的 `kInputHold` 由 Shell 统一 pop） |
 | 侧键短按 | 音量 ±1（0–6，与官方固件同刻度；mixer 上限实测为 50） |
 | 侧键长按 | 亮度 ±1（10 档） |
@@ -73,14 +74,43 @@ sideload/os       侧载启动脚本
 
 ## 菜单
 
-主菜单固定四项：**音乐 / 游戏 / 轮播 / 设置**，一页一项、满幅显示。频道在「轮播」下一层，
-七款游戏在「游戏」下一层——频道是内容不是目的地，十个频道会把另外三项挤出这个一次只显示
-一项的环。频道页**没有图标也没有名字**：画面是服务端排好的内容，名字只在帧还没下载完时
-出现。四个入口各有各的进场动画（CRT / 均衡器 / 卡带 / 抽屉），退出是同一段动画倒放。
+主菜单固定五项：**音乐 / 游戏 / 轮播 / VIBE / 设置**，一页一项、满幅显示。频道在
+「轮播」下一层，七款游戏在「游戏」下一层——频道是内容不是目的地，十个频道会把另外四项
+挤出这个一次只显示一项的环。频道页**没有图标也没有名字**：画面是服务端排好的内容，名字
+只在帧还没下载完时出现。各入口有各自的进场动画（CRT / 均衡器 / 卡带 / 抽屉），退出是同一
+段动画倒放；「VIBE」复用均衡器——按下去的那张卡就是三根往上涨的竖条，进场是同一个动作
+的延续。`Shell::kMaxEntryStyles` 是 8，现已用掉 7，第八个目的地必须先把这个常量调大，
+溢出是静默降级不是报错。
+
+「VIBE」的位置在「轮播」之后、「设置」之前：前三项的肌肉记忆不动，设置仍在末位。
 
 音效是合成的（方波 / 三角波 / 噪声 + 频率扫描 + 衰减包络，直接写 `base::AudioPlayer`），
 不带任何 .wav——采样要经 MediaPlayer 解码，会拖进约 1.1MB .text + 856KB .bss 的 ffmpeg。
 Shell 的三声（tick / confirm / back）全局统一，七款游戏各有自己的开始 / 得分 / 结束音色。
+
+## VIBE
+
+各家 AI 编码代理还剩多少额度。**固件原生绘制，不是频道**：额度数字要「刚才变了就立刻看到」，
+而频道是服务端排好、按 ttl 拉一次的一段 GIF；长轮询能在一个局域网往返内把变化推到面板，
+只有自己画数字的页面用得上这条通道（见 `docs/design/vibe-firmware-app.md`）。
+
+页面是一个环：第 0 页是总览（前两个代理并排），第 1..N 页每个代理一页。旋钮翻页并绕回，
+按下在**已用 / 剩余**之间切换（记在 prefs 的 `vibe.showLeft`），长按照常返回上一层。
+侧键不接管——音量和亮度是用户随时要用的，一页数字没有理由抢。
+
+排版沿用 LED 频道版那套已在真机上读过的：总览每格 10px 厂商标记 + 数值列，详情页 12px 标记
++ 单字符指标标签 + 14px 进度条 + 右对齐数值；白 → 80% 琥珀 → 90% 红；数据是上一轮的好数据顶
+着（厂商这轮拒了）时右上角 (51,0) 点一颗琥珀像素。重置倒计时和数值**分时共用同一格**——
+进度条占 x=19..32、三位数值占 x=37..51，行里没有第三个位置了；相位以翻页为锚，所以走进一页
+永远先看到数字。
+
+厂商标记来自 `visual/VibeIcons.h`，由 `scripts/gen-vibe-icons.ts` 从控制台用的同一份点阵生成，
+`test/vibe-icons-parity.test.ts` 逐位比对两侧。数字用一张 `ui/VibeScreen.cpp` 私有的 3×5 字模：`visual/Glyphs.h`
+只有 12px 一档，而 16px 的面板放得下 12px 的**一行**，这个页面要两行。
+
+线协议是四个新键（`vibe` / `vibea` / `vibes` / `vibem`），全部新增、不给旧键加字段——已部署固件
+对 `item` 做 `n == 4` 的严格 arity 检查，多一列会让它整条丢弃。`kProtocol` 不动：加键不是破坏性
+变更，这正是那个字段承诺的语义。
 
 ## 夜间息屏
 
@@ -173,7 +203,18 @@ raw NAND 上的 jffs2，一次擦除绝不能落在输入路径上。
 mise run os-hostcheck    # clang++ 编译 UI 并断言像素，不需要设备
 mise run os-build        # Docker 交叉编译 → libzkgui-os.so（ELF32 ARM，已 strip）
 mise run os-linkaudit    # 链接审计，见下
+
+# 出固件镜像还有中间一步，别跳：os-image 打的是 release/bundle/，不是编译产物
+rm -rf .runtime/os-stage && cp -R device/tc002-os/release/bundle .runtime/os-stage
+cp device/tc002-lyrics-player/flythings-build/libzkgui-os.so .runtime/os-stage/libzkgui.so
+bun run scripts/create-os-release.ts -- "$PWD/.runtime/os-stage" <版本> os
+mise run os-image        # 打包成可刷的 update.img
 ```
+
+**为什么要专门写这一句**：跳掉中间那步，`os-build` → `os-image` 会照常打印每一行成功信息，
+产出的却是**上一个 build** 的容器。它能装、装完重启、回来跑的还是原来那个固件——`build id`
+纹丝不动，看着就像「升级链装不上」。为此翻过厂商升级器的反汇编，而镜像里根本没有新东西。
+现在 `pack-image.ts` 会逐字节比对 bundle 里的 `libzkgui.so` 与编译产物，不一致直接拒绝打包。
 
 `os-linkaudit` 拦的是唯一一种「推上去才发现」的故障：加载器对缺符号只会报一句
 `initLib error: undefined symbol`，面板全黑，不告诉你缺哪个库哪个符号。它做四件事：
@@ -288,19 +329,92 @@ mise run os-restore-image    # → .runtime/tc002-stock/restore-live.img（还�
 （含那 509 字节填充，实为 MSVC `rand()`、种子 `0x14e4a39e`）。没有这道关卡，
 刷进去的就是一个猜测。
 
-### 安装（官方流程，逐字取自 `IDE使用说明/说明文档.md`）
+### 安装
+
+**从控制台**（装好 ZOS 之后的常规路径）：ZOS 面板的「固件更新」区 → 「更新时钟固件」。
+服务把 `.runtime/tc002-os/update.img` 通过 `GET /api/os/firmware` 发给设备，设备下到
+`/tmp/zkimg/update.img`（tmpfs；为什么不再是 `/mnt/storage/zkimg/`，见下文「暂存位置已经
+从……换到 `/tmp/zkimg/`」那段）后自己发起安装、写 `mtd3`、重启。
+
+下载归 `HostLink` 的 worker 线程（`net/FirmwareUpdate.{h,cpp}`），**不占 UI tick**：
+1 MB 的传输放在 20ms 的 tick 里，恰好会在用户最盯着面板的那几秒把它冻住。代价是诚实的
+——下载期间镜像与遥测停一下，设备紧接着就重启进新固件了。
+
+控制台这条路落在 tmpfs 上，本来就可写，**不碰 `/mnt/storage`**；只有暂存目录在
+`/mnt/storage` 底下时（手推的那条路，以及开机清理扫到它），**固件才自己 remount 成 rw、
+写完再 remount 回 ro**，同样不需要人先去开权限。落盘先写 `update.img.part`，**收满服务端
+声明的最后一个字节才 rename** 成 `update.img` 并 `sync`：断线只会留下一个被删掉的 `.part`，绝不会在升级器要读的位置留下
+一个截断的镜像。四道闸门都在写 flash 之前：非 200 拒、无 `Content-Length` 拒（没有长度
+就没法判断收全了没有）、比容器头（572 字节）短或比分区（8 MiB）大拒、开头不是
+`ZKSWEV1.0` 拒——最后这条挡的是「服务端 200 返回一页 HTML」。**任何一条不过就不叫升级器。**
+
+面板上看得见：下载中是 `更新NN%`，底行进度条随字节走、未填满的部分有一颗像素在扫（
+停住的传输和死机要能分辨）；镜像收全是 `安装中`，present 一帧之后才交给厂商升级链；
+失败是 `更新失败`，停 8 秒后面板变回时钟。失败**不会自动重试**——重试就是在控制台再按
+一次（序号变了才会重新下载）。`/data/zos-provision.log` 里每个阶段一行 `UPGRADE`，
+因为成功会重启进另一套固件、失败时多半没人在看，这个文件是唯一的记录。
+
+**从命令行**（首次安装，或控制台不可用时）：
 
 ```bash
-adb push ./update.img /tmp/update.img
-adb shell setprop sys.zkupgrade.flag 255
-adb shell setprop sys.zkupgrade.dir /tmp
-adb shell setprop ctl.restart zkswe
+adb shell mount -o remount,rw /mnt/storage
+adb shell mkdir -p /mnt/storage/zkimg
+adb push .runtime/tc002-os/update.img /mnt/storage/zkimg/update.img
+adb shell sync
+# 然后请求安装：控制台按钮，或 curl -X POST 服务的 /api/os/upgrade
 ```
 
-驱动升级的是**框架**不是应用：`/bin/zkgui`（即 `service zkswe`）链接
-`libzkupgrade.so`，`libeasyui.so` 导入全套 `zk_upgrade_*` 并持有 `UpgradeMonitor`。
-应用的 `libzkgui.so` 里没有 `UpgradeActivity` 并不说明这条链是死的——它在应用之上，
-所以换掉应用不会换掉它。另一条路（`zkdaemon` → `/bin/zkupgradebin`）**确实是死的**，
+`/mnt/storage/zkimg/` 仍是 `upgradeEntryPoint()` 的**第二个候选目录**（第一个是控制台用的
+`/tmp/zkimg/`），所以这条手推路径照样能装；两个目录按顺序各试一次，谁先交出一个合法镜像就装谁。
+
+手推的镜像装完**务必删掉**（`rm /mnt/storage/zkimg/update.img`）：厂商的升级链不会删它，
+留着的话下一次请求会把同一个镜像再装一遍。开机清理确实会把两个目录都扫一遍，但它只在这台
+设备**走控制台装过至少一次**之后才动手（否则手工暂存的镜像会在被请求之前就被清掉），所以别
+拿它当手推的兜底。走控制台则不必操心：镜像在 tmpfs 上，装完那一次重启就没了。
+
+#### 谁来发起：是**应用**，不是框架
+
+这一条是这套固件最容易丢、丢了最贵的知识（见
+[ADR 0012](../../docs/adr/0012-the-app-must-knock-for-upgrades.md)）：
+
+- 写 `mtd3` 的 `zk_upgrade_perform()` 只被 `UpgradeMonitor::threadLoop()` 调用，
+  而后者只被 `UpgradeMonitor::startUpgrade()` 启动。
+- **`libeasyui.so` 和 `/bin/zkgui` 里没有任何地方主动调用它们。** 框架装着整台机器，
+  但从不拧钥匙。
+- 原厂 Ulanzi app 自己拧：全设备只有它的 `libzkgui.so` 引用了
+  `UpgradeMonitor::getInstance` 和 `::checkUpgradeFile`。
+
+所以那套「push + 四个 setprop + 重启 zkswe」在原厂固件上能刷，而在**已经装好 ZOS 的
+机器上什么都不会发生**——门还在，没人敲。ZOS 里对应的一行是
+`tcos::upgradeEntryPoint()`（`logic/osLogic.cc`），**删掉它等于让这台设备再也升级不了**。
+
+它**不能放在启动路径上**：放过一次，面板直接卡死——镜像装完不会被自动删除，于是每次开机
+都重新进入升级链，app 永远走不到第一个 Screen。触发因此是显式的：拉取文档里的
+`upgrade\t<seq>` 键，同一个序号一次开机只认一次。
+
+「一次开机只认一次」不够，因为**装完的结局就是重启**：重启后内存里的计数器归零，而控制台
+还在发同一个请求，于是被判成新请求、再装一遍，无限循环。所以设备把装过的请求号写在
+`/data/zos-upgrade.seq`（mtd6，刷 mtd3 碰不到），判据是「比装过的**更新**」而不是「不等于」;
+请求号由服务端发**纪元秒**而不是自增计数——Bun 进程一重启计数器就回到 1，会和设备已经记下的
+号撞车，那台设备就再也叫不动了。配套的另一半是开机时 `FirmwareUpdate::discardStaged()` 清掉
+暂存镜像：厂商链不删它，而一个还在原位的镜像就是下一次开机重装的全部理由。
+
+**暂存位置已经从 `/mnt/storage/zkimg/` 换到 `/tmp/zkimg/`**，因为本机那块 UDISK（mtd7，
+8.5 MB vfat）在 1 MB 镜像落盘的位置长了坏区。实测证据：暂存好的 `update.img` 两次都在同一个
+6% 偏移读失败（`adb pull` 报 `Input/output error`），而同一分区上更老的 2.7 MB
+`stock-update.img.bak` 完整读出；读错误立刻触发挂载参数里的 `errors=remount-ro`，于是**之后**
+那次下载的 `rename` 和兜底 `unlink` 双双失败（verdict=8 `kWriteFailed`），而厂商升级链拿到一个
+读不回来的镜像，面板就永远停在「安装中」。
+
+换成 tmpfs 之后，原来反对它的理由变成了支持它的理由：镜像只有 1 MB，`/tmp` 有 16.5 MB、
+可用内存 17 MB，而且它只在「下载完」到「几秒后安装」之间存在——**重启清空 tmpfs，正好就是
+「装完必须删镜像」那一条**，不用再靠代码保证。`/mnt/storage/zkimg/` 保留为 `upgradeEntryPoint()`
+的第二个候选目录，手工 push 的镜像照样能装；开机清理会把两个目录都扫一遍。
+
+两条曾被当成解释、实测为假的说法，记在这里免得重查：升级**不经** `UpgradeActivity`
+（它的布局 `zkupgrade.ftu` 在本机任何 `/res` 里都不存在，原厂也没有）；type-3 `res`
+**不走** u-boot 交接（反汇编显示是直接写 MTD 字符设备，`zk_upgrade_ready()` 也不设置
+`perform()` 会读的任何状态）。另一条路（`zkdaemon` → `/bin/zkupgradebin`）确实是死的，
 那个二进制在本机不存在。
 
 ### 为什么刷 `res` 拿不走 adb

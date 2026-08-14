@@ -8,10 +8,12 @@
 #include <vector>
 
 #include <os/SystemProperties.h>
+#include <os/UpgradeMonitor.h>
 
 #include <unistd.h>
 
 #include "net/BleProvisionSession.h"
+#include "net/FirmwareUpdate.h"
 #include "net/HostLink.h"
 #include "net/PortalService.h"
 #include "net/WifiPolicy.h"
@@ -50,6 +52,11 @@
 #include "ui/Screen.h"
 #include "ui/SettingsScreen.h"
 #include "ui/SleepPolicy.h"
+#include "ui/UpgradeOverlay.h"
+#include "ui/VibeScreen.h"
+
+// Defined below; called from the startup path before it is defined.
+namespace tcos { void upgradeEntryPoint(int seq); }
 
 namespace {
 
@@ -134,6 +141,7 @@ tcos::LauncherScreen sGameList;      // the games ring, one level down
 tcos::GameScreen sGameScreen;
 tcos::ChannelRingScreen sChannelRing;  // the channels, one level down
 tcos::MusicScreen sMusic;
+tcos::VibeScreen sVibe;              // 「VIBE」, a peer of 音乐 on the root ring
 tcos::SettingsScreen sSettings;
 tcos::ProvisionScreen sProvision;
 
@@ -219,6 +227,7 @@ enum {
 	ID_GAMES = 2,
 	ID_SETTINGS = 3,
 	ID_CHANNELS = 4,
+	ID_VIBE = 5,
 	ID_GAME_BASE = 200,
 };
 
@@ -247,6 +256,39 @@ std::string sMenuSignature;
 // panel and a dark one, so it earns a row on the settings screen.
 std::string sMcuVersion;
 std::string sPinnedFocus;
+// The document sequence 「VIBE」 was last fed at, or -1 for "feed it now".
+//
+// A gate rather than a per-tick copy: the VIBE block is ten agents of strings,
+// and handing it over fifty times a second to redraw numbers that move once
+// every five minutes is the same mistake the 160 ms snapshot poll exists to
+// avoid one function up. Every change to the block bumps the hub's sequence, so
+// comparing one int is exactly as sensitive as comparing the payload.
+int sVibeFedSeq = -1;
+// When the vendor updater may be started, or -1 for "not staged".
+//
+// A DELAY, not a flag, and it is the only reason it is a number: the panel has
+// to present 安装中 before the chain that tears every service down begins.
+// checkUpgradeFile() does not return in any useful sense — it clears
+// /tmp/EasyUI.cfg, flashes and reboots — so a frame composed after it is a
+// frame nobody sees, and calling it on the same tick the download finished
+// meant the last thing on the panel was whatever was there before.
+int sUpgradeInstallAtMs = -1;
+// When the vendor chain was handed control, or -1. The chain reboots the device
+// when it succeeds, so this timer only ever expires on a failure — and the
+// vendor's own `zk_upgrade_end` RETURNS WITHOUT REBOOTING for any error code,
+// which is precisely how the panel ends up reading 安装中 with nothing running
+// behind it. Four minutes: an erase-and-write of mtd3 with an MD5 re-read was
+// measured well inside one, and anything past that is not slow, it is over.
+int sUpgradeHandoffAtMs = -1;
+const int kUpgradeChainTimeoutMs = 240000;
+// Long enough for the frame carrying 安装中 to be composed, presented on the
+// panel and teed to the console mirror; short enough that it reads as the last
+// beat of the install rather than as a pause.
+const int kUpgradeHandoffMs = 600;
+// The install stage the breadcrumb log was last told about. Seeded with kIdle
+// (0), not -1: every boot begins there, and a log line for it would be one jffs2
+// write per power-up saying nothing happened.
+int sUpgradeLoggedStage = 0;
 
 // The link's view of the world, refreshed on a slower cadence than the render:
 // a snapshot copies the whole menu, and doing that 25 times a second to read
@@ -362,6 +404,19 @@ void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
 	tcos::prefs::setInt("music.mode", mode);
 	tcos::prefs::setInt("music.skin", skin);
 	tcos::prefs::setInt("music.accent", accent);
+}
+
+/**
+ * Reads the 已用 / 剩余 toggle back off /data.
+ *
+ * Beside the theme restore, and for the same reason: it is a preference the
+ * user set once with a single press, there is no console writer to fight, and a
+ * page that forgot it on every power cut would make the toggle not worth having.
+ * A missing key reads as 已用, which is what the page showed before the toggle
+ * existed.
+ */
+void restoreVibePrefs() {
+	sVibe.setShowLeft(tcos::prefs::getInt("vibe.showLeft", 0) != 0);
 }
 
 /**
@@ -1235,6 +1290,39 @@ static void onUI_init() {
 	// zkdaemon watches this property; without it the framework treats the app
 	// as hung and can restart zkswe under us.
 	SystemProperties::setString("sys.zkapp.state", "running");
+
+	// Knock on the updater's door, the way the stock app does.
+	//
+	// This is not the framework's job, which is the thing that cost a whole
+	// evening to learn: /bin/zkgui links libzkupgrade and libeasyui owns
+	// UpgradeMonitor, but NOTHING in either calls it unprompted. The stock
+	// Ulanzi app imports UpgradeMonitor::getInstance and ::checkUpgradeFile and
+	// calls them itself — those two symbols are in its .so and in no other. So
+	// the vendor's documented "push update.img, set four properties, restart
+	// zkswe" recipe flashes a stock device and did nothing at all on ours: once
+	// ZOS replaced /res, the door was still there and nobody was knocking.
+	//
+	// Without this an installed ZOS cannot be updated by the supported path at
+	// all — the only way in is a sideload, which a power cycle undoes. That
+	// makes this call the difference between a firmware that can be upgraded
+	// and one that can only be replaced.
+	//
+	// checkUpgradeFile() is cheap when there is nothing staged: it stats
+	// <dir>update.img and returns immediately. The directory is the vendor's
+	// own — /mnt/storage is the UDISK partition their stock image sits on, and
+	// zkdaemon points at the same place on boot.
+	// Deliberately NOT called here — see upgradeEntryPoint().
+	//
+	// What DOES belong on the startup path is the opposite: clearing away an
+	// image a previous boot already installed. The vendor chain leaves it where
+	// it found it, and a staged image is the only thing the updater needs to
+	// flash again — so the leftover, not the knock, is what a reboot turns into
+	// a loop. Guarded on having ever knocked, so an image staged by hand on a
+	// device that has never taken an OTA is still there when it is asked for.
+	if (hostLink().installedUpgradeSeq() > 0) {
+		tcos::FirmwareUpdate::discardStaged(tcos::FirmwareUpdate::stagingDir());
+		tcos::FirmwareUpdate::discardStaged(tcos::FirmwareUpdate::legacyStagingDir());
+	}
 	sStartMs = monoMs();
 
 	// Bring the MCU up. This is not optional, and the reason it looked optional
@@ -1278,6 +1366,7 @@ static void onUI_init() {
 	// Prefs loads the file lazily, so the ordering here is only about running
 	// before the first frame, not about who opens what.
 	restoreLyricTheme();
+	restoreVibePrefs();
 	restoreSleepConfig();
 	tcos::Sfx::instance().initialize();
 	KeyManager::getInstance().start();
@@ -1312,6 +1401,137 @@ static void onUI_intent(const Intent *intentPtr) {
 	}
 }
 
+namespace tcos {
+
+/**
+ * Offer the vendor updater a chance to run — ON REQUEST, never at startup.
+ *
+ * Calling this from the app's init path froze the panel: UpgradeMonitor is a
+ * Thread and the chain it drives tears services down, and doing that before the
+ * first Screen exists leaves an app that heartbeats forever and never draws.
+ * Measured, not reasoned about — the panel came back the moment the call left
+ * the startup path.
+ *
+ * Worse, an unconditional check re-fires on every boot as long as an image is
+ * staged: the updater does not remove the file it flashed, so the device would
+ * reinstall the same image, restart, and do it again. That is a boot loop with
+ * a frozen screen, which is exactly what it looked like from the outside.
+ *
+ * So the trigger is explicit: the console asks by publishing `upgrade\t<id>` in
+ * the pull document — a deliberate act with a human behind it — and the id is
+ * seconds-since-epoch, recorded on /data once this device has handed it over.
+ * A request no newer than that record is not a request. Everything the vendor
+ * chain does after that — ready, perform, end, reboot — is theirs, including
+ * its failures, which is why it is on a timer: its exit path reboots only on
+ * success and returns silently on every error.
+ *
+ * WHAT PUTS THE IMAGE THERE. HostLink, on its worker thread, before this is
+ * ever called: it streams GET /api/os/firmware into
+ * FirmwareUpdate::stagingDir() as update.img.part and renames it only once the
+ * byte has arrived (net/FirmwareUpdate.h). So by the time this runs, the file
+ * the updater is about to find is either whole or absent — a dropped connection
+ * cannot leave a truncated container in the directory this function points at.
+ */
+void upgradeEntryPoint(int seq) {
+	// Latches on a chain that ACTUALLY STARTED, not on having tried. The vendor
+	// chain, once running, must never be interrupted by a second knock — but a
+	// knock that never reached it (no record, no updater, no image) has taken
+	// nothing over and there is no reason for it to cost the device its only
+	// attempt this boot.
+	static bool started = false;
+	if (started) {
+		return;
+	}
+
+	// Written BEFORE the knock, because there is no after: a successful install
+	// reboots from inside the vendor chain. This is what stops the next boot
+	// from reading the console's still-standing request as a new one and
+	// installing the same image again, forever.
+	//
+	// AND IT IS A PRECONDITION, not a courtesy. Knocking without the record is
+	// the boot loop with extra steps: the install succeeds, the device reboots,
+	// nothing remembers, the request is still standing. If /data will not take
+	// it, this attempt is over.
+	if (!hostLink().noteUpgradeInstalled(seq)) {
+		hostLink().noteInstallFailed(HostLink::kInstallNoRecord);
+		return;
+	}
+
+	UpgradeMonitor* monitor = UpgradeMonitor::getInstance();
+	if (monitor == NULL) {
+		hostLink().noteInstallFailed(HostLink::kInstallNoMonitor);
+		return;
+	}
+	// Where we stage, and the directory we used to stage in so a hand-pushed
+	// image still installs. /tmp is first because it is where FirmwareUpdate
+	// writes: tmpfs cannot develop the bad region this unit's UDISK did, and it
+	// is cleared by the reboot the install ends in — see net/FirmwareUpdate.h.
+	//
+	// `/mnt/storage/` ITSELF IS NOT IN THIS LIST, and must never be. That is
+	// where the FACTORY STOCK update.img lives — every unit has one, the mtd3
+	// write does not touch it, and this repo pulls it as the round-trip
+	// reference for its own packer. A loop that falls through to it turns "the
+	// image I asked for was refused" into "ZOS was replaced by the firmware it
+	// replaced", with the request recorded as installed on the way out. The
+	// user pressed 升级 and lost the system. A refused image must be a visible
+	// failure, never a substitution.
+	static const char* kDirs[2] = {FirmwareUpdate::stagingDir(),
+	                               FirmwareUpdate::legacyStagingDir()};
+	for (int i = 0; i < 2; ++i) {
+		// zk_upgrade_check() reads `sys.zkupgrade.flag` ONLY when
+		// `sys.zkupgrade.dir` is non-empty; with the directory unset it takes
+		// the caller's path and leaves the flag at 0, and a flag of 0 selects
+		// nothing. Nothing selected means startUpgrade() has no work, which on
+		// the panel is the word 安装中 and an image that never installs — the
+		// exact symptom, measured twice.
+		//
+		// The flag is a BITMASK OVER PARTITION TYPE, not a boolean: bit 3 is
+		// `res`, the only partition we ever ship. 255 would also work and is
+		// what the vendor's own zkdaemon writes, but it means "install every
+		// partition this container carries", which is not a thing to say
+		// casually to a flash writer.
+		//
+		// Both are consumed — check() clears them as it reads — so they are set
+		// immediately before each attempt rather than once up front.
+		SystemProperties::setString("sys.zkupgrade.dir", kDirs[i]);
+		SystemProperties::setInt("sys.zkupgrade.flag", 1 << 3);
+		if (!monitor->checkUpgradeFile(kDirs[i])) {
+			continue;
+		}
+		LOGD("zos: upgrade staged in %s\n", kDirs[i]);
+		// checkUpgradeFile() only VALIDATES and SELECTS. What runs the install
+		// is startUpgrade(), and on stock the caller is UpgradeActivity —
+		// which cannot exist here: its layout `zkupgrade.ftu` is in no /res on
+		// this unit, Ulanzi's included. So checkUpgradeFile alone leaves an
+		// image selected and nothing happening, which on the panel is the word
+		// 安装中 forever. Measured, not reasoned about: a probe that called
+		// only checkUpgradeFile never wrote mtd3; adding this line wrote it.
+		//
+		// Everything past here is the vendor's — ready, perform, end — with
+		// its own magic/CRC/model-id/flash-type gates and a post-write MD5
+		// re-read. It reboots the device itself when it succeeds.
+		if (monitor->startUpgrade()) {
+			LOGD("zos: upgrade started\n");
+			started = true;
+		} else {
+			// Nothing selected, or one is already running. Either way nothing
+			// further happens on this device until it is asked again, so the
+			// panel has to stop claiming otherwise.
+			LOGD("zos: startUpgrade declined\n");
+			hostLink().noteInstallFailed(HostLink::kInstallDeclined);
+		}
+		return;
+	}
+
+	// Every candidate directory refused the image. On the panel this used to be
+	// the word 安装中 for as long as the device stayed up, which is the single
+	// most misleading thing this firmware could display: nobody power-cycles a
+	// device that says it is working.
+	hostLink().noteInstallFailed(HostLink::kInstallNoImage);
+}
+
+}  // namespace tcos
+
 static void onUI_show() {
 	{
 		std::lock_guard<std::mutex> lock(sKeyMutex);
@@ -1319,11 +1539,14 @@ static void onUI_show() {
 	}
 	KeyManager::getInstance().addKeyEventCallback(keyEventCb);
 
-	// The root ring is fixed: these four are what the device does, and they do
+	// The root ring is fixed: these five are what the device does, and they do
 	// not come from the host. The workspace's channels are content, not
 	// destinations — they live one level down, under 轮播, the same way the
 	// seven games live under 游戏. Ten channels on this ring would push the
-	// other three off the end of a ring that shows one item at a time.
+	// other four off the end of a ring that shows one item at a time.
+	//
+	// 「VIBE」 sits between 轮播 and 设置 so the first three keep the position
+	// three firmware releases of muscle memory put them in, and 设置 stays last.
 	std::vector<tcos::LauncherScreen::Entry> entries;
 	tcos::LauncherScreen::Entry entry;
 	entry.label = "\xE9\x9F\xB3\xE4\xB9\x90";              // 音乐
@@ -1337,6 +1560,10 @@ static void onUI_show() {
 	entry.label = "\xE8\xBD\xAE\xE6\x92\xAD";              // 轮播
 	entry.icon = tcos::LauncherScreen::kIconChannel;
 	entry.id = ID_CHANNELS;
+	entries.push_back(entry);
+	entry.label = "VIBE";
+	entry.icon = tcos::LauncherScreen::kIconVibe;
+	entry.id = ID_VIBE;
 	entries.push_back(entry);
 	entry.label = "\xE8\xAE\xBE\xE7\xBD\xAE";              // 设置
 	entry.icon = tcos::LauncherScreen::kIconSettings;
@@ -1374,6 +1601,12 @@ static void onUI_show() {
 	shell().setEntryStyle(&sGameList, tcos::Shell::kEntryCartridge);
 	shell().setEntryStyle(&sGameScreen, tcos::Shell::kEntryCartridge);
 	shell().setEntryStyle(&sChannelRing, tcos::Shell::kEntryCrt);
+	// 「VIBE」 reuses the equaliser rather than earning a sixth motif: the card
+	// the user just pressed is three bars rising inside their ceiling, so bars
+	// rising into the room is the same gesture continued rather than a borrowed
+	// one. Seven of kMaxEntryStyles' eight slots are now spoken for; an eighth
+	// destination must raise that constant, because overflow degrades silently.
+	shell().setEntryStyle(&sVibe, tcos::Shell::kEntryEqualiser);
 	shell().setEntryStyle(&sSettings, tcos::Shell::kEntryDrop);
 	shell().setEntryStyle(&sProvision, tcos::Shell::kEntryDrop);
 	// volume/brightness already adopted in onUI_init
@@ -1633,6 +1866,11 @@ static bool onUI_Timer(int id) {
 				}
 			} else if (sLink.focus == "game") {
 				if (shell().top() != &sGameList) shell().push(&sGameList, nowMs);
+			} else if (sLink.focus == "vibe") {
+				// The console's 「在时钟上打开」 button. The id is the one
+				// publishOsMenu emits for the 「VIBE」 entry.
+				sVibeFedSeq = -1;
+				if (shell().top() != &sVibe) shell().push(&sVibe, nowMs);
 			} else if (sLink.focus == "settings") {
 				rebuildSettings(nowMs);
 				if (shell().top() != &sSettings) shell().push(&sSettings, nowMs);
@@ -1683,6 +1921,105 @@ static bool onUI_Timer(int id) {
 		}
 	}
 
+	// An install the console explicitly asked for.
+	//
+	// The DOWNLOAD is the link's job and runs on its worker thread: the device
+	// fetches /api/os/firmware and stages it at FirmwareUpdate::stagingDir(),
+	// which is what the vendor updater looks at first. Nothing here waits on it —
+	// a 1 MB transfer inside the 20 ms tick would freeze the panel for exactly as
+	// long as the user is most likely to be watching it.
+	//
+	// What is left on this thread is the two things that must be on it: what the
+	// panel says, and starting the vendor chain, which is a Thread that tears
+	// every service down and has only ever been called from here.
+	{
+		const tcos::HostLink::UpgradeState upgrade = hostLink().upgradeState();
+
+		tcos::UpgradeOverlay::Stage panel = tcos::UpgradeOverlay::kHidden;
+		int percent = 0;
+		switch (upgrade.stage) {
+		case tcos::HostLink::UpgradeState::kPending:
+			panel = tcos::UpgradeOverlay::kDownloading;
+			break;
+		case tcos::HostLink::UpgradeState::kDownloading:
+			panel = tcos::UpgradeOverlay::kDownloading;
+			// `long` is 32 bits on this ARM, and the numerator peaks at
+			// kMaxImageBytes * 100 = 838,860,800 — inside it with room, because
+			// FirmwareUpdate refuses anything larger than the partition before a
+			// byte is written.
+			if (upgrade.total > 0) {
+				percent = (int)((upgrade.received * 100) / upgrade.total);
+			}
+			break;
+		case tcos::HostLink::UpgradeState::kInstalling:
+			panel = tcos::UpgradeOverlay::kInstalling;
+			percent = 100;
+			break;
+		case tcos::HostLink::UpgradeState::kFailed:
+			panel = tcos::UpgradeOverlay::kFailed;
+			break;
+		case tcos::HostLink::UpgradeState::kIdle:
+		default:
+			break;
+		}
+		shell().upgrade().set(panel, percent, nowMs);
+
+		// A breadcrumb per stage change, on /data, because this is the one path
+		// whose outcome the device cannot report afterwards: a success reboots
+		// into different firmware and a failure happens with nobody watching.
+		// logcat wedges adbd on this unit, so this file is the whole record.
+		if ((int)upgrade.stage != sUpgradeLoggedStage) {
+			sUpgradeLoggedStage = (int)upgrade.stage;
+			char fields[96];
+			snprintf(fields, sizeof(fields), "seq=%d stage=%d bytes=%ld/%ld verdict=%d",
+			         upgrade.seq, (int)upgrade.stage, upgrade.received, upgrade.total,
+			         upgrade.verdict);
+			tcos::ProvisionLog::device().log("UPGRADE", fields);
+		}
+
+		// An install keeps the panel awake for as long as it runs, and this is
+		// the one place activity is a STATE rather than an edge. A human pressed
+		// a button in the console, so it counts at all — the rule the settings
+		// and input blocks above follow — and it counts throughout, because
+		// 夜间息屏 skips render entirely: a panel that went dark mid-install
+		// would make the one operation the user most needs to watch the one they
+		// cannot. A failure is excluded on purpose; the clock goes back to being
+		// a clock, and to sleeping.
+		if (upgrade.stage != tcos::HostLink::UpgradeState::kIdle &&
+		    upgrade.stage != tcos::HostLink::UpgradeState::kFailed) {
+			sLastActivityMs = nowMs;
+		}
+
+		// ONLY after a complete image has been staged. A failed or refused
+		// download never reaches this line, so the updater is never offered a
+		// truncated container — and it is still honoured once per boot, by
+		// upgradeEntryPoint's own guard: the vendor chain does not delete what it
+		// flashed, so a second pass would reinstall the same image forever.
+		if (hostLink().takeUpgradeInstallReady()) {
+			sUpgradeInstallAtMs = nowMs + kUpgradeHandoffMs;
+		}
+		if (sUpgradeInstallAtMs >= 0 && nowMs >= sUpgradeInstallAtMs) {
+			sUpgradeInstallAtMs = -1;
+			tcos::ProvisionLog::device().log("UPGRADE", "stage=handoff");
+			sUpgradeHandoffAtMs = nowMs;
+			tcos::upgradeEntryPoint(upgrade.seq);
+		}
+		// The vendor chain's own failures are ASYNCHRONOUS and silent: it runs on
+		// its own thread, and its exit path reboots only on success. Without this
+		// the panel keeps saying 安装中 until someone pulls the plug — which is
+		// the worst thing this screen can do, because it is indistinguishable
+		// from an install that is still working and nobody interrupts one of
+		// those. Cleared as soon as the state leaves kInstalling, so a chain that
+		// reported a failure through its own path is not double-reported.
+		if (upgrade.stage != tcos::HostLink::UpgradeState::kInstalling) {
+			sUpgradeHandoffAtMs = -1;
+		} else if (sUpgradeHandoffAtMs >= 0 &&
+		           nowMs - sUpgradeHandoffAtMs > kUpgradeChainTimeoutMs) {
+			sUpgradeHandoffAtMs = -1;
+			hostLink().noteInstallFailed(tcos::HostLink::kInstallTimedOut);
+		}
+	}
+
 	// Route activations before rendering, so a press lands on the panel in the
 	// same frame the user made it.
 	const int rootPick = sLauncher.takeActivated();
@@ -1695,6 +2032,13 @@ static bool onUI_Timer(int id) {
 		shell().push(&sMusic, nowMs);
 	} else if (rootPick == ID_CHANNELS) {
 		shell().push(&sChannelRing, nowMs);
+	} else if (rootPick == ID_VIBE) {
+		// Re-armed on entry rather than only on a bump: the numbers may not have
+		// moved since the last visit, but the link state might have, and walking
+		// into a page still showing 离线 because nothing bumped is the whole
+		// class of bug the gate could introduce.
+		sVibeFedSeq = -1;
+		shell().push(&sVibe, nowMs);
 	}
 
 	// --- feed whichever screen is on top -----------------------------------
@@ -1766,6 +2110,23 @@ static bool onUI_Timer(int id) {
 			break;
 		default:
 			break;
+		}
+	} else if (shell().top() == &sVibe) {
+		// Same three emptinesses the music screen separates: a device that was
+		// never told where the console lives has no way to know whether anyone is
+		// signed in, and saying 未登录 would send the user hunting a login they
+		// already have.
+		sVibe.setLink(!hostLink().baseUrl().empty(), sLink.online);
+		if (sLink.seq != sVibeFedSeq) {
+			sVibeFedSeq = sLink.seq;
+			sVibe.setAgents(sLink.vibe, nowMs);
+		}
+		if (sVibe.takeShowLeftChanged()) {
+			// STAGED, not written, exactly like the theme: /data is jffs2 on raw
+			// NAND and DeviceControls::flushIfDue already commits once a frame.
+			// Erasing flash inside a button press is the mistake the volume knob
+			// avoids two functions up.
+			tcos::prefs::setInt("vibe.showLeft", sVibe.showLeft() ? 1 : 0);
 		}
 	} else if (shell().top() == &sSettings) {
 		// Values move while the screen is up — the volume keys work here too —
@@ -1899,6 +2260,7 @@ static bool onUI_Timer(int id) {
 		const char* screenName = "launcher";
 		if (top == &sChannelRing) screenName = "channel";
 		else if (top == &sMusic) screenName = "music";
+		else if (top == &sVibe) screenName = "vibe";
 		else if (top == &sSettings) screenName = "settings";
 		else if (top == &sGameScreen) screenName = "game";
 		else if (top == &sGameList) screenName = "games";

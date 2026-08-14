@@ -250,4 +250,113 @@ bool HttpClient::get(const std::string& url, Response* out, int timeoutMs) {
   return perform(url, "GET", std::string(), std::string(), out, timeoutMs);
 }
 
+bool HttpClient::streamGet(const std::string& url, Response* out, const Stream& sink,
+                           int timeoutMs) {
+  out->status = -1;
+  out->body.clear();
+  out->headers.clear();
+  if (sink.ready == 0 || sink.data == 0) return false;
+
+  std::string host;
+  std::string path;
+  int port = 0;
+  if (!parseUrl(url, &host, &port, &path)) return false;
+
+  const int fd = connectTo(host, port, timeoutMs);
+  if (fd < 0) return false;
+  if (!sendAll(fd, buildRequest("GET", path, host, std::string(), std::string()))) {
+    ::close(fd);
+    return false;
+  }
+
+  // Everything read but not yet handed on. It holds the header block first and
+  // then one recv() at a time, so the peak here is one buffer rather than the
+  // whole body — which is the entire reason this function exists beside get().
+  std::string pending;
+  char buf[8192];
+
+  std::string::size_type headerEnd = std::string::npos;
+  while ((headerEnd = pending.find("\r\n\r\n")) == std::string::npos) {
+    if (pending.size() >= static_cast<size_t>(kMaxHeaderBytes)) {
+      ::close(fd);
+      return false;
+    }
+    const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+    if (n <= 0) {  // closed or timed out before the headers ended
+      ::close(fd);
+      return false;
+    }
+    pending.append(buf, static_cast<size_t>(n));
+  }
+  out->headers = "\r\n" + pending.substr(0, headerEnd);
+  pending.erase(0, headerEnd + 4);
+
+  const std::string::size_type sp = out->headers.find(' ');
+  if (sp == std::string::npos) {
+    ::close(fd);
+    return false;
+  }
+  out->status = ::atoi(out->headers.substr(sp + 1, 3).c_str());
+
+  const std::string length = headerValue(out->headers, "content-length");
+  const long declared = length.empty() ? -1 : ::atol(length.c_str());
+  const bool chunked =
+      headerValue(out->headers, "transfer-encoding").find("chunked") != std::string::npos;
+
+  if (out->status < 200 || out->status >= 300 || chunked) {
+    // Not something to stream. Buffer it as an ordinary reply so the caller can
+    // say WHAT the service answered rather than only that it was not an image;
+    // the bound is the same one perform() uses, because an error page that big
+    // is itself the anomaly.
+    out->body = pending;
+    while (out->body.size() < static_cast<size_t>(kMaxResponseBytes)) {
+      const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+      if (n <= 0) break;
+      out->body.append(buf, static_cast<size_t>(n));
+    }
+    ::close(fd);
+    return false;
+  }
+
+  if (!sink.ready(sink.ctx, *out, declared)) {
+    ::close(fd);
+    return false;
+  }
+
+  long delivered = 0;
+  bool accepted = true;
+  bool complete = false;
+  while (true) {
+    if (!pending.empty()) {
+      // Never hand over more than was declared: a peer that overruns its own
+      // Content-Length must not be able to append to a file whose size the
+      // caller has already accepted.
+      if (declared >= 0 && delivered + static_cast<long>(pending.size()) > declared) {
+        pending.resize(static_cast<size_t>(declared - delivered));
+      }
+      if (!pending.empty() && !sink.data(sink.ctx, pending.data(), pending.size())) {
+        accepted = false;
+        break;
+      }
+      delivered += static_cast<long>(pending.size());
+      pending.clear();
+    }
+    if (declared >= 0 && delivered >= declared) {
+      complete = true;
+      break;
+    }
+    const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+    if (n <= 0) {
+      // An orderly close completes a close-delimited body and TRUNCATES a
+      // declared one. The caller decides what to do about it; what it must not
+      // do is find out by asking the file how big it is.
+      complete = (declared < 0 && n == 0);
+      break;
+    }
+    pending.assign(buf, static_cast<size_t>(n));
+  }
+  ::close(fd);
+  return accepted && complete;
+}
+
 }  // namespace tcos

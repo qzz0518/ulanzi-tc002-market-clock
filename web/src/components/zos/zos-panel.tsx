@@ -20,12 +20,15 @@ import {
   describeDriver,
   describeMirror,
   describeVitals,
+  type ZosFirmwareStatus,
   type ZosInputAction,
   type ZosInputEvent,
   type ZosLink,
   type ZosMirrorFrame,
   type ZosState,
+  type ZosUpgradeRequest,
 } from "@/lib/zos-link";
+import { deriveFirmwareMode } from "@/lib/firmware-mode";
 import {
   defaultOpenSection,
   describeSections,
@@ -37,6 +40,7 @@ import { ZosMenu, type ZosPinTarget } from "@/components/zos/zos-menu";
 import { ZosMirrorScreen } from "@/components/zos/zos-mirror-screen";
 import { ZosInputDeck } from "@/components/zos/zos-input-deck";
 import { ZosSendRows, type ZosSendSettingsPatch } from "@/components/zos/zos-send-row";
+import { ZosFirmwareUpdate } from "@/components/zos/zos-firmware-update";
 import { BleUnavailableNote } from "@/components/zos/zos-ble-note";
 import { ZosProvisionDialog, useBleSupport } from "@/components/zos/zos-provision-dialog";
 import { useAppToast } from "@/lib/use-app-toast";
@@ -72,6 +76,14 @@ export function ZosPanel() {
   // only race the first.
   const [busy, setBusy] = useState(false);
   const [provisionOpen, setProvisionOpen] = useState(false);
+  // Three pieces of update state: what the service has packed, the install this
+  // session asked for, and the consent a human has to tick by hand. The consent
+  // is deliberately not persisted — coming back to this page starts it unticked.
+  const [firmware, setFirmware] = useState<ZosFirmwareStatus | null>(null);
+  const [firmwareError, setFirmwareError] = useState<string | null>(null);
+  const [firmwareBusy, setFirmwareBusy] = useState(false);
+  const [upgradeConsent, setUpgradeConsent] = useState(false);
+  const [upgrade, setUpgrade] = useState<ZosUpgradeRequest | null>(null);
   // The gate is read here, not only in the dialog: a browser that cannot do
   // Web Bluetooth must never be offered the button in the first place.
   const bleSupport = useBleSupport();
@@ -97,6 +109,54 @@ export function ZosPanel() {
     const timer = window.setInterval(() => setNow(Date.now()), AGE_TICK_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  const loadFirmware = useCallback(async () => {
+    const link = linkRef.current;
+    if (!link) return;
+    setFirmwareBusy(true);
+    try {
+      setFirmware(await link.readFirmwareStatus());
+      setFirmwareError(null);
+    } catch (error) {
+      // A failed read is a failed read. Keeping the previous image facts would
+      // leave a button that rewrites flash standing on a stale premise.
+      setFirmware(null);
+      setFirmwareError(errorMessage(error));
+    } finally {
+      setFirmwareBusy(false);
+    }
+  }, []);
+
+  // The image is not device state: it changes only when someone repacks it. So
+  // this reads once and 重新读取 covers the rest — no third poll. Effects run in
+  // order, so linkRef is already set by the one above.
+  useEffect(() => {
+    void loadFirmware();
+  }, [loadFirmware]);
+
+  const startUpgrade = useCallback(async () => {
+    const link = linkRef.current;
+    if (!link) return;
+    setFirmwareBusy(true);
+    try {
+      const seq = await link.requestUpgrade();
+      setUpgrade({ seq, at: Date.now(), sawOffline: false });
+      // Consent covers one install. Updating again after the device comes back
+      // means ticking it again — a flash write should not stay unlocked because
+      // someone agreed to the previous one.
+      setUpgradeConsent(false);
+      toast.success("已下发更新请求", {
+        description: "时钟会自己下载镜像、写入 flash 并重启，期间面板不响应。",
+      });
+      // Read the state back at once: the sequence in the pull document is the
+      // only evidence that the ask actually reached the wire.
+      await link.refreshState();
+    } catch (error) {
+      toast.error("固件更新请求失败", { description: errorMessage(error) });
+    } finally {
+      setFirmwareBusy(false);
+    }
+  }, [toast]);
 
   const applyDisplay = useCallback(async (
     focus: string | null,
@@ -157,6 +217,26 @@ export function ZosPanel() {
   });
   const vitals = describeVitals(state);
   const driver = describeDriver(display, menu, state?.telemetry ?? null, live);
+  // This page takes no firmwareMode prop (it polls /api/os/state itself), so the
+  // mode is derived here from its own reading. The two sideload heartbeats are
+  // not visible from here; passing false can only under-claim, never over-claim,
+  // and the one verdict this section needs — "what is reporting is ZOS" — is
+  // exactly the one that reading alone can settle.
+  const firmwareMode = deriveFirmwareMode({
+    osState: state,
+    musicFirmwareOnline: false,
+    arcadeOnline: false,
+  });
+
+  // Having actually seen the device leave is the whole difference between "it
+  // rebooted" and "nothing happened". Miss that moment and being online again
+  // can no longer be told as a reboot.
+  useEffect(() => {
+    if (live) return;
+    setUpgrade((current) => (
+      current === null || current.sawOffline ? current : { ...current, sawOffline: true }
+    ));
+  }, [live]);
 
   // The device's own root ring: four destinations, content one level down.
   const sections = describeSections({
@@ -313,6 +393,25 @@ export function ZosPanel() {
             <ZosSendRows requested={requested} onSend={(patch) => void sendSettings(patch)} />
           </aside>
         </div>
+
+        {/* Updating the whole device's system firmware belongs to neither
+            column: it is not a menu entry and not a send. Hence full width, and
+            last. */}
+        <ZosFirmwareUpdate
+          mode={firmwareMode}
+          zosFlashed={state?.zosFlashed === true}
+          live={live}
+          status={firmware}
+          statusError={firmwareError}
+          request={upgrade}
+          serverSeq={state?.upgradeSeq ?? null}
+          now={now}
+          busy={firmwareBusy}
+          consent={upgradeConsent}
+          onConsentChange={setUpgradeConsent}
+          onUpgrade={() => void startUpgrade()}
+          onRefreshStatus={() => void loadFirmware()}
+        />
       </Surface>
 
       <ZosProvisionDialog

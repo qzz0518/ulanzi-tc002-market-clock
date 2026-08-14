@@ -7,6 +7,8 @@
 // at whatever the firmware's compositor manages (~4fps measured on hardware),
 // and telemetry arrives on the firmware's own 10s heartbeat.
 
+import { firmwareModeLabel, type FirmwareMode } from "@/lib/firmware-mode";
+
 export const ZOS_SCREEN_WIDTH = 52;
 export const ZOS_SCREEN_HEIGHT = 16;
 export const ZOS_MIRROR_RGB_BYTES = ZOS_SCREEN_WIDTH * ZOS_SCREEN_HEIGHT * 3;
@@ -102,6 +104,13 @@ export interface ZosState {
   live: boolean;
   /** Sticky: a flashed ZOS stays true even while the device is off the air. */
   zosFlashed?: boolean;
+  /**
+   * The install request the service is carrying in its pull document, or 0/absent
+   * for "nobody has asked". Only ever moves forward, and the firmware honours a
+   * given number once per boot — so this is the console's proof that the request
+   * is still on the wire, not a progress reading.
+   */
+  upgradeSeq?: number;
   requestedSettings?: ZosRequestedSettings;
   requestedSleep?: ZosRequestedSleep;
   /** Service-side event tail. Not drained on consumption, so never shown as "pending". */
@@ -717,6 +726,229 @@ export function describeDriver(
   };
 }
 
+// --- Firmware self-update ---------------------------------------------------
+//
+// Installing a new ZOS rewrites mtd3 `res`, and the only writer is the vendor
+// updater — which the firmware now calls itself, once per boot, when the pull
+// document carries a sequence it has not honoured yet. So the console's whole
+// job here is: say what is packed on the service's disk, ask exactly once, and
+// then report only what it can actually see.
+//
+// What it can see is little, and that is the point. There is no progress
+// channel: the updater tears every service down, writes flash and reboots, so
+// the device stops answering halfway through by design. "It went quiet and then
+// it came back" is the strongest honest signal that exists on this link — the
+// version that ended up in flash is the device's to report, not ours to claim.
+
+export interface ZosFirmwareImage {
+  /** Build identity as the packer stamped it; null when the service did not say. */
+  buildId: string | null;
+  /** Image size in bytes. */
+  bytes: number | null;
+  /** When the image was packed, epoch ms on the service's clock. */
+  builtAt: number | null;
+}
+
+export interface ZosFirmwareStatus {
+  /** An image is on the service's disk, so the device has something to fetch. */
+  packed: boolean;
+  /** Only ever present when `packed`; every field inside is independently optional. */
+  image: ZosFirmwareImage | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function asPositive(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * `GET /api/os/firmware/status` → what the panel may say about the image.
+ *
+ * Read field by field rather than cast, because every one of these ends up on
+ * screen next to a button that rewrites flash: a shape this reader does not
+ * recognise has to become a blank, never a plausible-looking build id or size.
+ * `packed` is likewise never inferred from "the route answered 200" — no flag
+ * and no facts means nothing is packed.
+ */
+export function parseFirmwareStatus(raw: unknown): ZosFirmwareStatus {
+  const root = asRecord(raw);
+  if (root === null) return { packed: false, image: null };
+  const body = asRecord(root.image) ?? root;
+  const buildId = asText(body.buildId);
+  const bytes = asPositive(body.bytes) ?? asPositive(body.size);
+  const builtAt = asPositive(body.builtAt) ?? asPositive(body.builtAtMs);
+  const flag = typeof root.packed === "boolean"
+    ? root.packed
+    : typeof body.packed === "boolean" ? body.packed : null;
+  const packed = flag ?? (buildId !== null || bytes !== null || builtAt !== null);
+  if (!packed) return { packed: false, image: null };
+  return { packed: true, image: { buildId, bytes, builtAt } };
+}
+
+/** The install request the service acknowledged, or null when it did not say. */
+export function parseUpgradeSeq(raw: unknown): number | null {
+  const root = asRecord(raw);
+  if (root === null) return null;
+  const body = asRecord(root.upgrade) ?? root;
+  const seq = asPositive(body.seq) ?? asPositive(body.upgradeSeq);
+  return seq === null ? null : Math.round(seq);
+}
+
+/** Image size, in the unit a person would use to talk about it. */
+export function formatImageBytes(bytes: number | null): string | null {
+  if (bytes === null) return null;
+  const mib = bytes / (1024 * 1024);
+  return mib >= 1 ? `${mib.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/**
+ * How long ago the image was packed.
+ *
+ * Relative rather than absolute, because the question this answers is "is this
+ * the build I just made?". The subtraction crosses two clocks (the service
+ * stamped it, the browser is reading it), so a small negative is skew rather
+ * than an image from the future and reads as 刚刚.
+ */
+export function describeImageAge(builtAt: number | null, now: number): string | null {
+  if (builtAt === null) return null;
+  const ms = Math.max(0, now - builtAt);
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+export type ZosUpgradeGate = "ready" | "offline" | "foreign";
+
+export interface ZosUpgradeGateStatus {
+  gate: ZosUpgradeGate;
+  /** Why the section is inert. Null exactly when `gate` is "ready". */
+  note: { title: string; detail: string } | null;
+}
+
+/**
+ * Whether this clock is a thing this console may offer to update.
+ *
+ * Only a reporting ZOS qualifies: the device fetches the image over the same
+ * HTTP link it pulls state on, so an install is not something that can be
+ * queued for later the way a pin or a volume can. The three refusals are three
+ * different situations with three different ways out, and collapsing them into
+ * one "不可用" would hide the way out in each.
+ */
+export function describeUpgradeGate(mode: FirmwareMode, zosFlashed: boolean): ZosUpgradeGateStatus {
+  if (mode === "zos") return { gate: "ready", note: null };
+  if (mode === "music" || mode === "arcade") {
+    return {
+      gate: "foreign",
+      note: {
+        title: `${firmwareModeLabel(mode)}正占着时钟`,
+        detail: "这里更新的是闪存里的 ZOS 系统固件。先结束侧载或断电重启回到 ZOS，再回来更新。",
+      },
+    };
+  }
+  if (zosFlashed) {
+    return {
+      gate: "offline",
+      note: {
+        title: "时钟没有在上报",
+        detail: "ZOS 已经刷进闪存，但更新要时钟自己来下载镜像——先把它连回网络（上面的蓝牙配网就能做这件事），再回来更新。",
+      },
+    };
+  }
+  return {
+    gate: "foreign",
+    note: {
+      title: "当前不适用",
+      detail: "这一节更新的是 ZOS 系统固件；时钟现在没有在上报 ZOS，没有可更新的对象。",
+    },
+  };
+}
+
+/** An install this console asked for, and what it has observed since. */
+export interface ZosUpgradeRequest {
+  /** The sequence the service answered with; null when it did not say. */
+  seq: number | null;
+  /** When the receipt arrived. Only ever used as a duration, never as a date. */
+  at: number;
+  /** The device stopped reporting after the request — the reboot we asked for. */
+  sawOffline: boolean;
+}
+
+export type ZosUpgradePhase = "requested" | "installing" | "returned";
+
+export interface ZosUpgradeWatch {
+  phase: ZosUpgradePhase;
+  label: string;
+  detail: string;
+  /** How long the request has been outstanding. */
+  elapsed: string;
+  /** The sequence still on the wire, as a sentence; null when nobody said one. */
+  receipt: string | null;
+}
+
+/**
+ * What has happened since the console asked — and nothing beyond that.
+ *
+ * The device cannot report its own install: it is being rewritten. So the three
+ * phases are the three things the link genuinely distinguishes — the request is
+ * out, the device has gone quiet, the device is back — and none of them is
+ * "更新成功". Claiming that from here would be claiming it on evidence the
+ * console does not have, and the failure it would hide (a device that comes
+ * back on the old build) is exactly the one worth seeing.
+ */
+export function describeUpgradeWatch(input: {
+  request: ZosUpgradeRequest;
+  live: boolean;
+  /** `ZosState.upgradeSeq` — the request the service is still carrying. */
+  serverSeq: number | null;
+  now: number;
+}): ZosUpgradeWatch {
+  const elapsed = formatUptime(Math.max(0, input.now - input.request.at));
+  const seq = asPositive(input.serverSeq) ?? input.request.seq;
+  // NOT 「第 N 次」. The id is seconds-since-epoch, not a count — the firmware
+  // records it on /data and compares "newer than what I installed", which a
+  // counter restarting with the service would break. Rendered as a count it
+  // read 「第 1786721798 次」, which is both false and absurd.
+  const receipt = seq === null ? null : `服务当前下发的更新请求编号 ${seq}。`;
+  if (input.request.sawOffline && input.live) {
+    return {
+      phase: "returned",
+      label: "设备已重启并回到在线",
+      // The one thing the console must not do here is congratulate itself.
+      detail: "控制台看到的就是这些：请求已下发、设备离线、又回到在线。装上的是哪一版，以时钟自己显示的为准。",
+      elapsed,
+      receipt,
+    };
+  }
+  if (!input.live) {
+    return {
+      phase: "installing",
+      label: "设备已离线",
+      detail: "更新器正在写入 flash 并重启，这期间面板不响应是正常的。不要断电——断电会中断安装。",
+      elapsed,
+      receipt,
+    };
+  }
+  return {
+    phase: "requested",
+    label: "已下发更新请求",
+    detail: "时钟会在下一次拉取状态时开始下载镜像；开始安装后它会离线几分钟。",
+    elapsed,
+    receipt,
+  };
+}
+
 export interface ZosLinkOptions {
   /**
    * Whether to drive the mirror loop. Default true.
@@ -759,6 +991,14 @@ export interface ZosLink {
    * overwrite the other three — the exact bug the service layer already fixed
    * once and now guards with a test. */
   setSleep(patch: { enabled?: boolean; startMin?: number; endMin?: number; idleSec?: number }): Promise<ZosRequestedSleep>;
+  /** GET /api/os/firmware/status — what the service has packed for the device to fetch. */
+  readFirmwareStatus(): Promise<ZosFirmwareStatus>;
+  /**
+   * POST /api/os/upgrade. Resolves with the install sequence now on the wire, or
+   * null when the service did not name one — the request still stands either way,
+   * so a missing receipt must not read as a failure.
+   */
+  requestUpgrade(): Promise<number | null>;
 }
 
 async function describeFailure(response: Response): Promise<string> {
@@ -906,6 +1146,20 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
         body: JSON.stringify(payload),
       });
       return body.requested;
+    },
+    async readFirmwareStatus() {
+      return parseFirmwareStatus(await readJson<unknown>("/api/os/firmware/status"));
+    },
+    async requestUpgrade() {
+      // An empty JSON body rather than no body at all: the write endpoints take
+      // JSON, and this request carries no arguments — which image gets installed
+      // is the service's business, and it is the only one that knows what it
+      // packed. Consent is the console's own gate, not a phrase on the wire.
+      return parseUpgradeSeq(await readJson<unknown>("/api/os/upgrade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }));
     },
   };
 }

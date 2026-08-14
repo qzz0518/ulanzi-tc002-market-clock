@@ -69,7 +69,7 @@ describe("mini player — when it exists", () => {
   });
 
   test("every other tab shows it", () => {
-    const views: StudioView[] = ["console", "canvas", "library", "game", "zos"];
+    const views: StudioView[] = ["console", "canvas", "library", "game", "zos", "vibe"];
     for (const view of views) {
       expect([view, miniPlayerView(snapshot(), view)?.title]).toEqual([view, "反方向的钟"]);
     }

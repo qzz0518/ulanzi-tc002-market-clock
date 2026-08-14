@@ -72,6 +72,8 @@ import {
   type MarketInstrumentKind,
 } from "./market/instruments.ts";
 import { GeocodeClient, parseGeocodeQuery, type GeocodePlace } from "./weather/geocode.ts";
+import type { VibeUsageSnapshot } from "./vibe/usage-service.ts";
+import { VIBE_CATALOG } from "./vibe/vibe-catalog.ts";
 
 const CLOCK_FRAME_FILE = Bun.file(new URL("./assets/tc002-frame.png", import.meta.url));
 const WEB_ASSETS = new Map([
@@ -101,6 +103,17 @@ export interface ControlApiOptions {
     reset: () => Promise<DeviceHostStatus>;
   };
   osLink?: OsLinkHub;
+  /**
+   * The flashable ZKSWE container `mise run os-image` writes, so the device can
+   * fetch its own update over the link it already polls instead of waiting for
+   * someone to `adb push`.
+   *
+   * Named by the composition root like every other `.runtime` path, and never
+   * derived from a request: /api/os/firmware is device-facing and therefore has
+   * no same-origin check, so "the path is not an input" is the whole of that
+   * route's containment argument. Unset means no image is on offer.
+   */
+  osFirmwarePath?: string;
   // Where the 主题设置 outlives the process. Omitted in tests, where module
   // memory is the whole of the story; `save` is deliberately fire-and-forget so
   // a full disk cannot fail a colour change (ADR 0007).
@@ -132,6 +145,19 @@ export interface ControlApiOptions {
   marketCatalog?: MarketCatalogService;
   // Test seam; defaults to the real Open-Meteo geocoding client (free, no key).
   weatherGeocode?: { search(query: string): Promise<GeocodePlace[]> };
+  vibe?: {
+    // Never rejects when nothing is signed in: the GUI needs a 200 carrying the
+    // reason so it can show its setup guide instead of an error toast.
+    status: (refresh: boolean) => Promise<{
+      /** Per key-based vendor: "stored" | "environment" | "unset". Never the key itself. */
+      keys: Record<string, string>;
+      starred: Record<string, string[]>;
+      snapshot: VibeUsageSnapshot | null;
+      error: string | null;
+    }>;
+    setStarred: (providerId: string, starred: unknown) => Record<string, string[]>;
+    setKey: (providerId: string, key: string | null) => Promise<void>;
+  };
 }
 
 // The device's live music control state. The web UI mutates it via /control (and
@@ -549,6 +575,65 @@ function decodeMirrorFrames(
     }
     return { canvas, delayMs };
   });
+}
+
+/**
+ * The ZKSWE container's first 20 bytes are magic[16] + hdrSize + itemCount +
+ * eiOffset + 1; a 524-byte ei block sits at eiOffset, and the payload begins
+ * right after it with the MD5 of what lands in flash. See
+ * device/tc002-os/release/pack-image.ts, which is where those numbers are
+ * derived and proved.
+ */
+const ZKSWE_MAGIC = "ZKSWEV1.0";
+const ZKSWE_EI_BYTES = 524;
+const ZKSWE_MD5_BYTES = 16;
+
+interface OsFirmwareImage {
+  /** Carried back so the caller streams the file this was measured from. */
+  path: string;
+  bytes: number;
+  mtimeMs: number;
+  /** See readOsFirmwareImage — the updater's digest, not ZOS_BUILD_ID. */
+  buildId: string;
+}
+
+/**
+ * Stat the staged update.img and derive an identity for it, or null when the
+ * packer has not run.
+ *
+ * THE ID IS THE UPDATER'S OWN MD5, NOT ZOS_BUILD_ID. The git rev the firmware
+ * writes to /data/zos-build.id is a string compiled into libzkgui.so, and by
+ * the time it reaches this file it is inside an xz-compressed squashfs — a
+ * `strings` sweep over update.img does not find it, and decompressing a
+ * megabyte per request to read twenty characters is not a status endpoint. The
+ * container already carries a digest of exactly the filesystem that lands in
+ * mtd3, 588 bytes in, and that digest is the number the device itself verifies
+ * before it erases anything. It is cheap, it is derived from the file rather
+ * than invented, and unlike size+mtime it survives the image being copied.
+ *
+ * A header that does not parse falls back to size+mtime rather than refusing to
+ * serve: pack-image cannot emit such a file, and the gate on a corrupt image is
+ * the device's own CRC and MD5 checks, not this.
+ */
+async function readOsFirmwareImage(path: string | undefined): Promise<OsFirmwareImage | null> {
+  if (path === undefined) return null;
+  const file = Bun.file(path);
+  if (!(await file.exists())) return null;
+  const bytes = file.size;
+  const mtimeMs = file.lastModified;
+  // eiOffset is a u8, so the digest can never sit past byte 780.
+  const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+  const md5At = (head[18] ?? 0) + ZKSWE_EI_BYTES;
+  const parsed = head.length >= md5At + ZKSWE_MD5_BYTES
+    && Buffer.from(head.subarray(0, ZKSWE_MAGIC.length)).toString("latin1") === ZKSWE_MAGIC;
+  return {
+    path,
+    bytes,
+    mtimeMs,
+    buildId: parsed
+      ? Buffer.from(head.subarray(md5At, md5At + ZKSWE_MD5_BYTES)).toString("hex")
+      : `${bytes}-${mtimeMs}`,
+  };
 }
 
 function liveAppName(value: unknown): string {
@@ -1795,6 +1880,55 @@ export function createControlHandler(
         return jsonResponse({ workspace: controller.getWorkspace() });
       }
 
+      if (request.method === "GET" && url.pathname === "/api/vibe/status") {
+        if (!options.vibe) {
+          return jsonResponse({ error: "vibe usage is unavailable" }, 404);
+        }
+        const status = await options.vibe.status(url.searchParams.get("refresh") === "1");
+        return jsonResponse({
+          catalog: VIBE_CATALOG.map((entry) => ({
+            id: entry.id,
+            displayName: entry.displayName,
+            order: entry.order,
+            percentKeys: entry.percentKeys,
+            defaultStarred: entry.defaultStarred,
+            metricLabels: entry.metricLabels,
+          })),
+          starred: status.starred,
+          keys: status.keys,
+          snapshot: status.snapshot,
+          error: status.error,
+        });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/vibe/starred") {
+        if (!options.vibe) {
+          return jsonResponse({ error: "vibe usage is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        const input = await readJson(request) as { providerId?: unknown; starred?: unknown };
+        if (typeof input.providerId !== "string") {
+          throw new SettingsValidationError("providerId is required");
+        }
+        return jsonResponse({ starred: options.vibe.setStarred(input.providerId, input.starred) });
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/vibe/key") {
+        if (!options.vibe) {
+          return jsonResponse({ error: "vibe usage is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        const input = await readJson(request) as { providerId?: unknown; key?: unknown };
+        if (typeof input.providerId !== "string") {
+          throw new SettingsValidationError("providerId is required");
+        }
+        // An empty string clears the key; the response never echoes it back.
+        const key = typeof input.key === "string" ? input.key : null;
+        await options.vibe.setKey(input.providerId, key);
+        const status = await options.vibe.status(false);
+        return jsonResponse({ keys: status.keys });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/device/settings/general") {
         if (!options.deviceGeneralSettings) {
           return jsonResponse({ error: "device general settings are unavailable" }, 404);
@@ -1910,6 +2044,43 @@ export function createControlHandler(
         });
       }
 
+      // The image the device installs, served like a frame bundle: device-facing
+      // GET, no same-origin check because the device is not a browser and sends
+      // no Origin. Deliberately NOT gated on `osLink` — a download that touches
+      // none of the hub's state should not fail for a reason that has nothing to
+      // do with the file.
+      //
+      // This is the last step of the update path that a human still had to do by
+      // hand: the device pulls its document and its pixels over HTTP already, so
+      // it pulls its firmware the same way and `adb push` stops being a
+      // prerequisite for flashing.
+      if (request.method === "GET" && url.pathname === "/api/os/firmware") {
+        const image = await readOsFirmwareImage(options.osFirmwarePath);
+        if (image === null) {
+          return jsonResponse({ error: "no firmware image has been packed" }, 404);
+        }
+        return new Response(Bun.file(image.path), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/octet-stream",
+            // Stated rather than left to the stream: the device writes this to a
+            // partition with no A/B pair, so it has to be able to tell a
+            // truncated download from a complete one before it stages anything.
+            "Content-Length": String(image.bytes),
+            // A megabyte of flash image must never come back out of a proxy
+            // cache; the ETag is how a device skips a re-download, not a header
+            // some middlebox gets to decide for it.
+            "Cache-Control": "no-store",
+            ETag: `"${image.buildId}"`,
+            // Same value under a plain name, because the consumer here is a
+            // 52x16 clock rather than an HTTP cache: the firmware records what
+            // it staged, and quoting rules are not something to reimplement in
+            // C++ on a device with one core.
+            "X-Build-Id": image.buildId,
+          },
+        });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/os/report") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
         const input = await readJson(request) as Record<string, unknown>;
@@ -1943,6 +2114,14 @@ export function createControlHandler(
           // and the console renders its controls disabled rather than guessing
           // from `proto`, which this firmware does not send at all.
           ...readOsSleepReport(input.sleep),
+          // What the device says it has already installed. ABSENT on any build
+          // from before this existed, which is why it is undefined rather than
+          // 0 — 0 is a real answer ("nothing installed") and would retire a
+          // request the device never took.
+          upgradeSeqInstalled: typeof input.upgradeSeqInstalled === "number"
+            && Number.isFinite(input.upgradeSeqInstalled)
+            ? Math.max(0, Math.floor(input.upgradeSeqInstalled))
+            : undefined,
         });
         return new Response(null, { status: 204 });
       }
@@ -1983,6 +2162,60 @@ export function createControlHandler(
         });
       }
 
+      // What the console needs to render the 安装 button: is there anything to
+      // install, which build is it, and has an install already been asked for.
+      // Read-only, so no same-origin check — the same treatment /api/os/state
+      // gets, and nothing here is a change.
+      if (request.method === "GET" && url.pathname === "/api/os/firmware/status") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        const image = await readOsFirmwareImage(options.osFirmwarePath);
+        return jsonResponse({
+          // Stated rather than left to be inferred from the presence of the
+          // fields below. The console puts this next to a button that rewrites
+          // flash, and "the route answered 200" is not an answer to "is there
+          // anything to install".
+          packed: image !== null,
+          image: image === null ? null : {
+            bytes: image.bytes,
+            buildId: image.buildId,
+            // The file's mtime, which for the packer's output is when it was
+            // packed. An absolute stamp rather than the `ageMs` the mirror and
+            // telemetry report: those answer "is this stream live", where a
+            // browser a few seconds out of step gives the wrong answer, and this
+            // one answers "is this the build I just made" — a question minutes
+            // wide, whose reader already clamps the skew (describeImageAge).
+            builtAt: image.mtimeMs,
+          },
+          upgradeSeq: options.osLink.getUpgradeSeq(),
+        });
+      }
+
+      // The trigger. Explicit and human-driven on purpose: the device's updater
+      // tears every service down, rewrites mtd3 and reboots, and it does not
+      // delete the image it flashed — a device that decided this for itself
+      // would reinstall on every boot and never reach its first screen, which is
+      // exactly what happened when upgradeEntryPoint() ran at startup.
+      if (request.method === "POST" && url.pathname === "/api/os/upgrade") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        // JSON-only like every other write route. There are no fields; the point
+        // is the Content-Type, which a cross-origin form cannot set without a
+        // preflight the browser will not send.
+        await readJson(request);
+        // 409 rather than a cheerful 200: the sequence would reach the device,
+        // the device would fetch /api/os/firmware, find a 404, and stop — while
+        // the console sat there claiming an install was under way. Asking a
+        // clock to install nothing is a guaranteed disappointment, so it is
+        // refused where the answer is still legible.
+        if (await readOsFirmwareImage(options.osFirmwarePath) === null) {
+          return jsonResponse({ error: "no firmware image has been packed" }, 409);
+        }
+        // The sequence is the receipt, exactly as /api/os/input's event is: the
+        // console can tell a request that reached the hub from one that did not,
+        // without waiting on a device that is about to disappear for a minute.
+        return jsonResponse({ seq: options.osLink.requestUpgrade() });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/os/state") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
         const telemetry = options.osLink.getTelemetry();
@@ -2005,6 +2238,13 @@ export function createControlHandler(
             },
           live: options.osLink.isDeviceLive(),
           mirrorWanted: options.osLink.mirrorWanted(),
+          // How many installs have ever been asked for, so the console can see
+          // that a request is outstanding. It is the only receipt there is: the
+          // device honours a given sequence once per boot and then reboots, so
+          // between the click and the next telemetry there is nothing else to
+          // show — and a console that showed nothing would invite a second
+          // click at exactly the moment the panel is rewriting mtd3.
+          upgradeSeq: options.osLink.getUpgradeSeq(),
           // Sticky and independent of `live`: what a power cycle restores does
           // not stop being true because the device stopped reporting.
           zosFlashed: options.osLink.zosFlashed(),

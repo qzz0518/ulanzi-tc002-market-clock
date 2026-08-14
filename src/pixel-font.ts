@@ -45,6 +45,9 @@ export const PIXEL_FONT_3X5: Readonly<Record<string, readonly string[]>> = {
   Y: ["#.#", "#.#", ".#.", ".#.", ".#."],
   Z: ["###", "..#", ".#.", "#..", "###"],
   "%": ["#.#", "..#", ".#.", "#..", "#.#"],
+  // No room for a stem at 3 columns, so the S carries the currency on its own
+  // — the VIBE pages need "$33" to read as dollars beside a bare "93%".
+  $: [".##", "##.", ".#.", ".##", "##."],
   ":": ["...", ".#.", "...", ".#.", "..."],
   "-": ["...", "...", "###", "...", "..."],
   ".": ["...", "...", "...", "...", ".#."],

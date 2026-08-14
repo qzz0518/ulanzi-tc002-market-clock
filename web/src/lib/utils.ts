@@ -10,7 +10,14 @@ export function clone<T>(value: T): T {
 }
 
 export function uid(prefix: string): string {
-  return `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  // crypto.randomUUID exists only in secure contexts. Phones reach this console
+  // over plain-http LAN (http://192.168.x.x:43820), where it is undefined — and
+  // the VIBE preview mints ids during render, so without the fallback the whole
+  // tab white-screens there. These ids only need workspace-local uniqueness.
+  const core = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().replaceAll("-", "")
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `${prefix}_${core.slice(0, 12)}`;
 }
 
 export function seconds(milliseconds: number): number {

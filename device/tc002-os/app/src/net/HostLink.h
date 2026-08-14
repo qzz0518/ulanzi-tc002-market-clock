@@ -40,6 +40,18 @@ class HostLink {
     bool mirrorWanted;
     std::string focus;
     std::vector<StateDoc::Item> items;
+    // 「VIBE」. A reading, not a setting: it has an external source that can
+    // fail, and the service says so per agent with `stale` rather than by
+    // dropping the row. Empty means nobody is signed in on the host — or that
+    // the service predates the VIBE block, which the panel words the same way.
+    std::vector<StateDoc::VibeAgent> vibe;
+    /**
+     * Console-initiated install request; 0 when never asked.
+     *
+     * Kept as the document's own field. What the firmware ACTS on is
+     * upgradeState(), which this class derives from it — see adoptDocument.
+     */
+    int upgradeSeq;
     int consecutiveFailures;
 
     // Now playing, resolved to text by the service. `stampMonoMs` is the raw
@@ -86,7 +98,12 @@ class HostLink {
     uint32_t accentRgb;
     bool hasAccent;
 
+    // upgradeSeq is initialised HERE and not only where it is parsed: an
+    // uninitialised int on the one field that ends in an erase of mtd3 is a
+    // firmware that can decide to reinstall itself out of stack garbage before
+    // the first document has even arrived.
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
+                 upgradeSeq(0),
                  consecutiveFailures(0), nowPlaying(false), playing(false),
                  positionMs(0), durationMs(0), stampMonoMs(0),
                  lyricStartMs(-1), lyricEndMs(-1), lyricUntilMs(-1),
@@ -173,6 +190,174 @@ class HostLink {
    */
   int channelRequestCount() const;
 
+  // -------------------------------------------------------------------------
+  // Firmware install, requested by the console.
+  //
+  // The device DOWNLOADS the image before anything is installed. Until this
+  // existed the only way an image reached the staging directory was a human
+  // running `adb push`, which made the supported update path depend on a cable
+  // and a laptop; everything else the panel shows already arrives over this
+  // link, and now so does the firmware.
+  //
+  // The whole flow: a rising `upgrade` sequence in the pull document arms a
+  // request (adoptDocument), the worker thread takes it (takeUpgradeRequest)
+  // and streams the image to FirmwareUpdate::stagingDir() (tmpfs — see that
+  // header for why it is not the UDISK partition it used to be),
+  // reporting bytes as they land, and finally records a verdict
+  // (noteUpgradeResult). ONLY a kOk verdict raises the install flag, and only
+  // the UI thread takes it — the vendor updater is a thread that tears services
+  // down, and the one place in this firmware that has ever called it is the UI
+  // tick.
+
+  struct UpgradeState {
+    enum Stage {
+      kIdle,         // nobody has asked
+      kPending,      // asked, the worker has not picked it up yet
+      kDownloading,  // streaming to the staging file
+      kInstalling,   // a whole image is staged; the vendor chain is next
+      kFailed,       // nothing was staged, and nothing will be installed
+    };
+
+    Stage stage;
+    int seq;        // the console request this is about
+    long received;  // bytes written so far
+    long total;     // bytes the service declared, or 0 before the headers land
+    // FirmwareUpdate::Verdict for a download that failed, or
+    // kInstallVerdictBase + InstallFailure for one that got as far as the
+    // vendor chain. Meaningful when stage == kFailed. The two spaces are kept
+    // apart because "the download was truncated" and "the updater refused the
+    // image" are different problems with different fixes, and the only record
+    // of which one happened is this number in /data/zos-provision.log.
+    int verdict;
+
+    UpgradeState() : stage(kIdle), seq(0), received(0), total(0), verdict(0) {}
+  };
+
+  /**
+   * Why an install that reached the vendor chain did not happen.
+   *
+   * EVERY ONE OF THESE USED TO BE A BARE `return`, and every one of them left
+   * the panel reading 安装中 for as long as the device stayed up — the state
+   * machine had no way out of kInstalling except a reboot. A firmware update
+   * that fails silently and looks identical to one still in progress is worse
+   * than one that fails loudly: nobody power-cycles a device that says it is
+   * working.
+   */
+  enum InstallFailure {
+    kInstallNoRecord = 1,  // /data would not take the request id; see below
+    kInstallNoMonitor,     // UpgradeMonitor::getInstance() returned nothing
+    kInstallNoImage,       // no candidate directory held one the updater wanted
+    kInstallDeclined,      // startUpgrade() said no
+    kInstallTimedOut,      // the chain neither rebooted nor came back
+  };
+  /** Keeps InstallFailure codes out of FirmwareUpdate::Verdict's range (0..8). */
+  static const int kInstallVerdictBase = 100;
+
+  /** Cheap enough to read on every UI tick; the panel draws a progress bar. */
+  UpgradeState upgradeState() const;
+
+  /**
+   * The worker's gate: the request to download now, or 0.
+   *
+   * ONCE PER SEQUENCE. The document repeats `upgrade <n>` for as long as the
+   * console remembers it, so a gate keyed on anything but the sequence's change
+   * would re-download — and re-install — on every poll for the life of the
+   * service. Public, like adoptDocument and for the same reason: the worker
+   * thread's body cannot be reached without a socket, and a self-check that
+   * re-implemented this gate would agree with a runWorker that got it wrong.
+   */
+  int takeUpgradeRequest();
+
+  /** Called from the download as bytes land. */
+  void noteUpgradeProgress(long received, long total);
+
+  /**
+   * Records how the attempt for `seq` ended. `verdict` is a
+   * FirmwareUpdate::Verdict; only 0 (kOk) arms the install.
+   *
+   * A result for a sequence the console has already superseded is dropped: the
+   * user pressing the button again while a download was running means they want
+   * the NEW image, and installing the old one because it happened to finish
+   * first is the wrong answer to that.
+   */
+  void noteUpgradeResult(int seq, int verdict);
+
+  /**
+   * True exactly once, after a COMPLETE image has been staged. The UI thread's
+   * permission to call the vendor updater.
+   */
+  bool takeUpgradeInstallReady();
+
+  /**
+   * The request id this device has already handed to the updater, from `/data`.
+   *
+   * ON DISK, because the install ENDS IN A REBOOT. An in-memory guard is
+   * cleared by the very event it exists to survive: the device comes back with
+   * the counter at 0, the console is still publishing the same `upgrade <n>`,
+   * the request reads as new, and the same image installs again — measured, and
+   * it takes the panel with it, since the vendor chain reboots before the app
+   * draws a frame. `/data` is mtd6; writing ZOS is mtd3, so this record outlives
+   * the thing it is guarding against.
+   *
+   * 0 when nothing has been installed, which is also what an unreadable or
+   * garbage file reports — the failure mode of "guard missing" is one extra
+   * install, and of "guard stuck on" is a device that can never be updated.
+   *
+   * Compared with `>`, not `!=`: the ids are seconds-since-epoch, so "newer
+   * than what I installed" is the actual question, and it is the one that can
+   * be answered before the fact — a device can be seeded with the id it is
+   * about to take, which is how a build that predates this record is upgraded
+   * to one that keeps it without looping on the way.
+   */
+  int installedUpgradeSeq() const;
+
+  /**
+   * Records `seq` as installed, and says whether the record is really there.
+   *
+   * Called BEFORE the updater is knocked, never after: there is no after. The
+   * return value is the whole point — writing this record is a PRECONDITION of
+   * knocking, not a courtesy alongside it. If /data will not take it (full,
+   * remounted read-only, a jffs2 error) and we knock anyway, the install
+   * succeeds, the device reboots, the record is absent, the console's request
+   * is still standing, and it installs again on every boot forever. Fail
+   * closed: no record, no knock.
+   *
+   * Verified by READING IT BACK through the same strict parser the guard uses,
+   * not by trusting fwrite's return: the value that matters is the one a later
+   * boot will actually parse, and a write that lands as something the parser
+   * rejects is a write that did not happen.
+   *
+   * A failed install therefore also consumes the request, which is deliberate —
+   * the console allocates a strictly greater id per press, so retrying is a
+   * press, while the alternative is a device that retries a broken image
+   * forever without being asked.
+   */
+  bool noteUpgradeInstalled(int seq);
+
+  /** Moves the panel out of 安装中 and says why. */
+  void noteInstallFailed(int reason);
+
+  /**
+   * The file halves, path-injected so the host check drives the real parser and
+   * the real writer against a scratch file rather than /data.
+   *
+   * readUpgradeSeq is STRICT, and it has to be, because its two failure modes
+   * are not symmetric. Reading a valid record as 0 costs one extra install.
+   * Reading junk as a huge number costs the device: the guard is "newer than
+   * what I installed", so a record of INT_MAX can never be beaten and that unit
+   * is off the update path for good, with no way back that does not involve
+   * opening it. So: errno is checked (on this ARM `long` IS 32 bits, and
+   * strtol clamps an overflowing value to LONG_MAX == 0x7fffffff, which a naive
+   * range test waves straight through), the end pointer must land on the end of
+   * the number, and a file too long to be one we wrote is refused outright.
+   */
+  static int readUpgradeSeq(const char* path);
+  static bool writeUpgradeSeq(const char* path, int seq);
+
+  /** Where the record lives. Overridable ONLY so the host check can drive the
+   *  real guard end to end against a scratch file; the device never calls it. */
+  void setUpgradeSeqPath(const char* path);
+
   /**
    * Hands the finished frame to the mirror uploader. Cheap and non-blocking:
    * it copies 2496 bytes under a lock the worker holds only to take them.
@@ -229,12 +414,23 @@ class HostLink {
     int sleepIdleSec;
     bool sleepAsleep;
     bool sleepClockSynced;
+    /**
+     * The request id this device has on /data — what it has already installed.
+     *
+     * The console needs this to retire a standing request, and it needs it
+     * EXPLICITLY. Inferring it from an uptime that went backwards is a guess
+     * that is wrong in a real case: if the last report before the reboot
+     * happened early in that boot, the first report after it can carry a
+     * LARGER uptime and the reboot is invisible. This number is the device
+     * answering the actual question instead.
+     */
+    int upgradeSeqInstalled;
 
     Report()
         : uptimeMs(0), freeKb(0), supplicantRestarts(0), batteryPercent(-1),
           charging(false), flashed(false), sleepOn(false), sleepStartMin(0),
           sleepEndMin(0), sleepIdleSec(0), sleepAsleep(false),
-          sleepClockSynced(false) {}
+          sleepClockSynced(false), upgradeSeqInstalled(0) {}
   };
 
   /**
@@ -261,6 +457,11 @@ class HostLink {
   // for the round trip or every successful hold looks like a timeout.
   static const int kPullTimeoutMs = 13000;
   static const int kFrameTimeoutMs = 20000;
+  // Per READ, like every other budget here, so a slow transfer that is still
+  // making progress is not cut off part way. The image is up to 8 MiB and the
+  // whole download is one request; 20 s of silence on a LAN transfer is a dead
+  // peer, not a slow one.
+  static const int kFirmwareTimeoutMs = 20000;
   // How long a failed fetch of the same request waits before trying again.
   // Without it the worker re-attempts on its next 30 ms pass, which against a
   // service that refuses the connection outright — the shape of a laptop that
@@ -277,6 +478,9 @@ class HostLink {
   static void* workerMain(void* self);
   void runPull();
   void runWorker();
+  /** Blocks the worker for the whole download. See the call site for why. */
+  void runUpgrade(int seq);
+  static void upgradeProgress(void* self, long received, long total);
   void wantChannel(const std::string& appName, const std::string& rev, bool force);
 
   std::string mBaseUrl;
@@ -312,6 +516,16 @@ class HostLink {
   // At most a handful can pile up between worker passes; a spun knob that
   // outruns the network should skip tracks, not queue a minute of them.
   std::vector<std::string> mActions;
+
+  // The install request. mUpgradeArmedSeq is what the console asked for,
+  // mUpgradeStartedSeq is what the worker has already picked up; they differ
+  // for exactly as long as one request is waiting to be served, which is what
+  // makes "once per sequence" a comparison rather than a timer.
+  UpgradeState mUpgrade;
+  int mUpgradeArmedSeq;
+  int mUpgradeStartedSeq;
+  bool mUpgradeInstallReady;
+  std::string mUpgradeSeqPath;
 
   std::vector<uint8_t> mMirrorFrame;
   bool mMirrorDirty;

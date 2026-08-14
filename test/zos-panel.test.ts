@@ -6,8 +6,19 @@ import { CladdProvider } from "@cladd-ui/react";
 import { ZosPanel } from "../web/src/components/zos/zos-panel";
 import { ZosMirrorScreen } from "../web/src/components/zos/zos-mirror-screen";
 import { ZosInputDeck } from "../web/src/components/zos/zos-input-deck";
+import {
+  ZosFirmwareUpdate,
+  type ZosFirmwareUpdateProps,
+} from "../web/src/components/zos/zos-firmware-update";
 import { StudioHeader } from "../web/src/components/studio/studio-header";
-import { describeMirror } from "../web/src/lib/zos-link.ts";
+import {
+  describeImageAge,
+  describeMirror,
+  describeUpgradeWatch,
+  formatImageBytes,
+  parseFirmwareStatus,
+  parseUpgradeSeq,
+} from "../web/src/lib/zos-link.ts";
 
 function markup(node: Parameters<typeof renderToStaticMarkup>[0]): string {
   return renderToStaticMarkup(createElement(CladdProvider, null, node));
@@ -246,8 +257,9 @@ describe("zos panel", () => {
     // 一次)。这里只留 markup 里看不见的那几条:组件的取舍,以及不该复活的旧写法。
     const html = markup(createElement(ZosPanel));
     // 分组小标题全 app 一个样,所以用 SectionTitle 而不是自己写一层眉题。
+    // 三块:设备菜单、下发到设备、固件更新。
     expect(html).toContain("cladd-section-title");
-    expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(2);
+    expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(3);
     // 音量与亮度都用 Slider:全 app 只有「常规设置」那一处在调这两个值,
     // 那边两条都是 Slider,这里跟着走。
     expect(html).toContain("cladd-slider");
@@ -293,5 +305,235 @@ describe("zos panel", () => {
     expect(tabButton("console")).toContain("disabled");
     expect(tabButton("zos")).not.toContain("disabled");
     expect(tabButton("zos")).toContain('aria-selected="true"');
+  });
+});
+
+// --- 固件更新 ---------------------------------------------------------------
+
+const NOW = 1_700_000_000_000;
+
+const PACKED: ZosFirmwareUpdateProps["status"] = {
+  packed: true,
+  image: { buildId: "zos-2026.08.14+3f2a1c", bytes: 8_912_896, builtAt: NOW - 2 * 3_600_000 },
+};
+
+function updateMarkup(overrides: Partial<ZosFirmwareUpdateProps> = {}): string {
+  return markup(createElement(ZosFirmwareUpdate, {
+    mode: "zos",
+    zosFlashed: true,
+    live: true,
+    status: { packed: false, image: null },
+    statusError: null,
+    request: null,
+    serverSeq: null,
+    now: NOW,
+    busy: false,
+    consent: false,
+    onConsentChange: () => {},
+    onUpgrade: () => {},
+    onRefreshStatus: () => {},
+    ...overrides,
+  }));
+}
+
+/** 装机按钮那一段 markup;整份里到处都有 disabled,得先把按钮切出来再判断。 */
+function installButton(html: string): string | undefined {
+  return html.split("<button").find((chunk) => chunk.includes("更新时钟固件"));
+}
+
+describe("zos firmware update", () => {
+  test("no image packed: says how to make one, and offers no button that cannot work", () => {
+    const html = updateMarkup({ status: { packed: false, image: null } });
+
+    expect(html).toContain("固件更新");
+    expect(html).toContain("还没有打包镜像");
+    expect(html).toContain("mise run os-image");
+    // 按下去必然失败的入口比没有入口更糟。
+    expect(installButton(html)).toBeUndefined();
+    expect(html).not.toContain("我知道更新期间会发生什么");
+    // 打完包不该要求刷新整页。
+    expect(html).toContain("重新读取");
+  });
+
+  test("an image on disk is described by its own facts, and only those", () => {
+    const html = updateMarkup({ status: PACKED });
+
+    expect(html).toContain("镜像已就绪");
+    expect(html).toContain("zos-2026.08.14+3f2a1c");
+    expect(html).toContain("8.5 MB");
+    expect(html).toContain("2 小时前");
+    expect(installButton(html)).toBeDefined();
+
+    // 服务没说的字段一律不占位:凭空的版本号会被当成真的。
+    const bare = updateMarkup({ status: { packed: true, image: { buildId: null, bytes: null, builtAt: null } } });
+    expect(bare).toContain("镜像已就绪");
+    expect(bare).not.toContain("版本");
+    expect(bare).not.toContain("大小");
+    expect(bare).not.toContain("打包于");
+    expect(installButton(bare)).toBeDefined();
+  });
+
+  test("the status read can fail, and then it says so instead of showing an old image", () => {
+    const html = updateMarkup({ status: null, statusError: "HTTP 404" });
+    expect(html).toContain("读不到镜像信息");
+    expect(html).toContain("HTTP 404");
+    expect(html).toContain('role="alert"');
+    expect(installButton(html)).toBeUndefined();
+
+    const loading = updateMarkup({ status: null });
+    expect(loading).toContain("正在读取镜像信息…");
+    expect(installButton(loading)).toBeUndefined();
+  });
+
+  test("the button is gated on an explicit consent that says what will happen", () => {
+    const unchecked = updateMarkup({ status: PACKED, consent: false });
+    // 侧载面板同款:先把要发生的事说完,再让人勾。
+    expect(unchecked).toContain("时钟会下载镜像、写入 flash 并重启，期间面板会短暂无响应；断电会中断安装。");
+    expect(installButton(unchecked)).toContain("disabled");
+
+    const checked = updateMarkup({ status: PACKED, consent: true });
+    expect(installButton(checked)).not.toContain("disabled");
+  });
+
+  test("a request in flight is reported by what the console can see, and nothing more", () => {
+    const request = { seq: 3, at: NOW - 90_000, sawOffline: false };
+
+    const sent = updateMarkup({ status: PACKED, consent: true, request, serverSeq: 3 });
+    expect(sent).toContain("已下发更新请求");
+    expect(sent).toContain("已过 1 分 30 秒");
+    // 编号不是次数:服务端发的是纪元秒,固件按「比装过的更新」比较。渲染成
+    // 「第 N 次」会写出「第 1786721798 次」——既不对也荒唐。
+    expect(sent).toContain("编号 3");
+    expect(sent).not.toContain("第 3 次");
+    // 一次在途的安装,不能被第二次点击追上。
+    expect(installButton(sent)).toContain("disabled");
+
+    // 设备掉线正是我们要它做的事:此时门禁那句「先把它连回网络」是错的,不许出现。
+    const installing = updateMarkup({
+      mode: "official",
+      zosFlashed: true,
+      live: false,
+      status: PACKED,
+      consent: true,
+      request,
+      serverSeq: 3,
+    });
+    expect(installing).toContain("设备已离线");
+    expect(installing).toContain("断电会中断安装");
+    expect(installing).not.toContain("时钟没有在上报");
+
+    const returned = updateMarkup({
+      status: PACKED,
+      consent: true,
+      request: { ...request, sawOffline: true },
+      serverSeq: 3,
+    });
+    expect(returned).toContain("设备已重启并回到在线");
+    // 观察不到的成功就不许宣布——装上的是哪一版由时钟自己说。
+    expect(returned).not.toContain("更新成功");
+    expect(returned).not.toContain("已更新");
+    // 回来了就可以再来一次。
+    expect(installButton(returned)).not.toContain("disabled");
+  });
+
+  test("other firmwares are told what this section is, not just that it is off", () => {
+    // 没在上报 ZOS:没有可更新的对象,连镜像信息都不摆。
+    const nothing = updateMarkup({ mode: "official", zosFlashed: false, live: false, status: PACKED });
+    expect(nothing).toContain("当前不适用");
+    expect(nothing).toContain("ZOS 系统固件");
+    expect(nothing).not.toContain("镜像已就绪");
+    expect(installButton(nothing)).toBeUndefined();
+
+    // 侧载占着时钟:出路是先结束侧载,不是「不可用」。
+    const music = updateMarkup({ mode: "music", zosFlashed: true, live: false, status: PACKED });
+    expect(music).toContain("音乐固件正占着时钟");
+    expect(music).toContain("先结束侧载");
+    expect(installButton(music)).toBeUndefined();
+
+    // 刷了 ZOS 但掉线:更新要设备自己下载镜像,所以先把它连回网络。
+    const offline = updateMarkup({ mode: "official", zosFlashed: true, live: false, status: PACKED });
+    expect(offline).toContain("时钟没有在上报");
+    expect(offline).toContain("蓝牙配网");
+    expect(installButton(offline)).toBeUndefined();
+  });
+
+  test("the panel's first paint offers no install — nothing has reported yet", () => {
+    const html = markup(createElement(ZosPanel));
+    expect(html).toContain("固件更新");
+    expect(html).toContain("当前不适用");
+    expect(installButton(html)).toBeUndefined();
+  });
+
+  test("reads the image status field by field, and never invents one", () => {
+    // 认得出的两种写法都收,认不出的一律留白——这些数字紧挨着一个会重写闪存的按钮。
+    expect(parseFirmwareStatus({ packed: true, image: { buildId: "b1", bytes: 1024, builtAt: 7 } }))
+      .toEqual({ packed: true, image: { buildId: "b1", bytes: 1024, builtAt: 7 } });
+    expect(parseFirmwareStatus({ image: { buildId: "b1", size: 2048, builtAtMs: 9 } }))
+      .toEqual({ packed: true, image: { buildId: "b1", bytes: 2048, builtAt: 9 } });
+    // 200 不等于「有镜像」。
+    expect(parseFirmwareStatus({})).toEqual({ packed: false, image: null });
+    expect(parseFirmwareStatus({ packed: false, image: { buildId: "b1" } }))
+      .toEqual({ packed: false, image: null });
+    expect(parseFirmwareStatus(null)).toEqual({ packed: false, image: null });
+    // 类型不对的字段当成没给,而不是照着渲染。
+    expect(parseFirmwareStatus({ packed: true, image: { buildId: 7, bytes: "big", builtAt: -1 } }))
+      .toEqual({ packed: true, image: { buildId: null, bytes: null, builtAt: null } });
+
+    expect(parseUpgradeSeq({ seq: 4 })).toBe(4);
+    expect(parseUpgradeSeq({ upgrade: { seq: 4 } })).toBe(4);
+    // 服务没给回执,请求仍然算发出去了——null,不是 0,更不是 NaN。
+    expect(parseUpgradeSeq({ ok: true })).toBeNull();
+  });
+
+  test("image size and age are formatted, and skew never becomes a future build", () => {
+    expect(formatImageBytes(8_912_896)).toBe("8.5 MB");
+    expect(formatImageBytes(4_096)).toBe("4 KB");
+    expect(formatImageBytes(null)).toBeNull();
+
+    expect(describeImageAge(NOW - 30_000, NOW)).toBe("刚刚");
+    expect(describeImageAge(NOW - 5 * 60_000, NOW)).toBe("5 分钟前");
+    expect(describeImageAge(NOW - 3 * 3_600_000, NOW)).toBe("3 小时前");
+    expect(describeImageAge(NOW - 50 * 3_600_000, NOW)).toBe("2 天前");
+    // 服务盖的时间戳,浏览器的时钟——差几秒是时钟偏差,不是「未来打包的镜像」。
+    expect(describeImageAge(NOW + 4_000, NOW)).toBe("刚刚");
+    expect(describeImageAge(null, NOW)).toBeNull();
+  });
+
+  test("the watch reports the sequence the service still carries, not the one we sent", () => {
+    // 服务重启会把序号清掉,设备就永远看不到这次请求了;所以回执优先读服务的。
+    const watch = describeUpgradeWatch({
+      request: { seq: 2, at: NOW - 1_000, sawOffline: false },
+      live: true,
+      serverSeq: 5,
+      now: NOW,
+    });
+    expect(watch.receipt).toContain("编号 5");
+    const fallback = describeUpgradeWatch({
+      request: { seq: 2, at: NOW - 1_000, sawOffline: false },
+      live: true,
+      serverSeq: null,
+      now: NOW,
+    });
+    expect(fallback.receipt).toContain("编号 2");
+    const silent = describeUpgradeWatch({
+      request: { seq: null, at: NOW - 1_000, sawOffline: false },
+      live: true,
+      serverSeq: null,
+      now: NOW,
+    });
+    expect(silent.receipt).toBeNull();
+  });
+
+  test("the console asks once, on the endpoints the service exposes", async () => {
+    const [linkSource, panelSource] = await Promise.all([
+      Bun.file(new URL("../web/src/lib/zos-link.ts", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/zos/zos-panel.tsx", import.meta.url)).text(),
+    ]);
+
+    expect(linkSource).toContain('"/api/os/firmware/status"');
+    expect(linkSource).toContain('"/api/os/upgrade"');
+    // 装机是明确的人为动作,不是轮询:面板只在装载时读一次镜像信息,写只走点击。
+    expect(panelSource).toContain("link.requestUpgrade()");
+    expect(panelSource).not.toContain("setInterval(() => void loadFirmware");
   });
 });

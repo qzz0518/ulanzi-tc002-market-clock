@@ -16,6 +16,7 @@ import {
   WORKSPACE_LIMITS,
   WorkspaceStore,
   assertLegacySettingsCompatible,
+  createDefaultWorkspace,
   legacySettingsFromWorkspace,
   migrateDashboardSettings,
   validateWorkspace,
@@ -37,6 +38,13 @@ import {
   type WeatherClient,
   type WeatherObservation,
 } from "./weather/client.ts";
+import {
+  VibeUnavailableError,
+  type VibeUsageService,
+  type VibeUsageSnapshot,
+  type VibeUsageView,
+} from "./vibe/usage-service.ts";
+import { VIBE_CATALOG, defaultVibeStarred } from "./vibe/vibe-catalog.ts";
 
 export interface RenderedChannel {
   frames: readonly PixelCanvas[];
@@ -117,6 +125,9 @@ export interface WorkspaceControllerOptions {
   marketIconStore?: MarketIconStore;
   dynamicMarketClient?: DynamicMarketDataClient;
   weatherClient?: WeatherClient;
+  vibeClient?: VibeUsageService;
+  /** Read per render, not captured: the console can re-star a metric mid-session. */
+  vibeStarred?: () => Record<string, string[]>;
   /**
    * True while the device serves itself and must not be written to.
    *
@@ -131,6 +142,15 @@ export interface WorkspaceControllerOptions {
    * its clock digits advance.
    */
   devicePushSuspended?: () => boolean;
+  /**
+   * Where the boot-time workspace migration announces itself.
+   *
+   * Unlike OsSleepRequestStore's onWarn this defaults to writing the line rather
+   * than to a no-op: channels vanishing from the knob is the one thing here a
+   * user could mistake for data loss, and service.ts builds this controller
+   * without handing it a logger. Injectable so tests can read the line back.
+   */
+  onLog?: (event: string, details: Record<string, unknown>) => void;
   now?: () => number;
 }
 
@@ -140,6 +160,131 @@ function errorMessage(error: unknown): string {
 
 const PREVIEW_CACHE_TTL_MS = 5_000;
 const PREVIEW_CACHE_LIMIT = 16;
+
+/**
+ * The appName convention the retired VIBE placement wrote: one overview App
+ * plus one detail App per catalogued agent. Matched against the catalog rather
+ * than against `vibe_*` so a channel somebody named `vibe_notes` themselves is
+ * never a candidate for the whole-channel removal below.
+ */
+const RETIRED_VIBE_APP_NAMES: ReadonlySet<string> = new Set([
+  "vibe",
+  ...VIBE_CATALOG.map((entry) => `vibe_${entry.id}`),
+]);
+
+function isRetiredVibeContentId(contentId: string): boolean {
+  return contentId === "tools:vibe-duo" || contentId === "tools:vibe-agent";
+}
+
+interface VibeChannelMigration {
+  workspace: WorkspaceSettings;
+  droppedChannels: string[];
+  strippedItems: number;
+  resetToDefaults: boolean;
+}
+
+/**
+ * Boot-time removal of the channels VIBE used to be placed into.
+ *
+ * AI usage is a first-class ZOS app now, so `tools:vibe-duo` and
+ * `tools:vibe-agent` are gone from the registry — and validateKnownContent
+ * turns an unresolvable contentId into a throw inside the constructor, which
+ * runs before Bun.serve. Anyone who ever pressed 布置到时钟 therefore has a
+ * workspace.json that would stop the service from booting, so this is not an
+ * optional convenience: it is what keeps `bun start` working across the upgrade.
+ *
+ * Two removals, because two different things could have happened. A channel the
+ * placement created — our appName AND nothing but VIBE inside — goes whole,
+ * name and all. A VIBE tile someone added to their own carousel from 内容市场
+ * loses only that item; taking their carousel with it would be a far bigger
+ * surprise than the tile. Channels emptied by the second pass then go too,
+ * because a channel with no items cannot be represented at all.
+ */
+function dropRetiredVibeChannels(
+  workspace: WorkspaceSettings,
+  defaultAppName: string,
+): VibeChannelMigration {
+  const droppedChannels: string[] = [];
+  let strippedItems = 0;
+  const channels: ChannelConfig[] = [];
+  // Nothing to migrate in a document that is not one; validateWorkspace is the
+  // only place allowed to name what is wrong with it.
+  if (!Array.isArray(workspace?.channels)) {
+    return { workspace, droppedChannels, strippedItems, resetToDefaults: false };
+  }
+  for (const channel of workspace.channels) {
+    const placed = RETIRED_VIBE_APP_NAMES.has(channel.appName)
+      && channel.items.length > 0
+      && channel.items.every((item) => isRetiredVibeContentId(item.contentId));
+    if (placed) {
+      droppedChannels.push(channel.appName);
+      continue;
+    }
+    const items = channel.items.filter((item) => !isRetiredVibeContentId(item.contentId));
+    if (items.length === channel.items.length) {
+      channels.push(channel);
+      continue;
+    }
+    strippedItems += channel.items.length - items.length;
+    if (items.length === 0) {
+      droppedChannels.push(channel.appName);
+      continue;
+    }
+    channels.push({ ...channel, items });
+  }
+  if (droppedChannels.length === 0 && strippedItems === 0) {
+    return { workspace, droppedChannels, strippedItems, resetToDefaults: false };
+  }
+  // The device needs at least one channel and validateWorkspace enforces it, so
+  // a workspace that was nothing but VIBE pages has to land somewhere. The stock
+  // default is the only honest destination — better an obviously fresh panel
+  // than a service that refuses to start.
+  if (channels.length === 0) {
+    return {
+      workspace: createDefaultWorkspace(defaultAppName),
+      droppedChannels,
+      strippedItems,
+      resetToDefaults: true,
+    };
+  }
+  return { workspace: { version: 3, channels }, droppedChannels, strippedItems, resetToDefaults: false };
+}
+
+/**
+ * How long a usage snapshot may stand in for a failed refresh.
+ *
+ * Deliberately not `config.sourceStaleMs`: that defaults to 120 s, tuned for
+ * quote feeds that tick continuously, while a quota window moves in five-minute
+ * steps at best and hourly at worst. Two minutes against such a source would
+ * call a perfectly current snapshot stale and blank the page on the first
+ * hiccup. Fifteen minutes is the tolerance; past that the panel says so rather
+ * than showing a number nobody can date.
+ */
+const VIBE_STALE_MS = 15 * 60_000;
+
+/**
+ * The floor between two collection rounds, however often somebody asks.
+ *
+ * The callers are the five-minute publisher behind the panel's VIBE app, every
+ * settings change (a re-star has to show up at once), and an open console tab.
+ * Without a floor those three would each start their own round and a quiet
+ * afternoon would still cost dozens of vendor requests an hour, for numbers
+ * whose own windows move in five-minute steps at best — which is exactly what
+ * earned a 429 during bring-up. Only the console's explicit 刷新 bypasses it.
+ */
+const VIBE_MIN_REFRESH_MS = 5 * 60_000;
+
+/**
+ * The floor the console's own 刷新 still has to respect.
+ *
+ * `GET /api/vibe/status?refresh=1` is a read-only route on a socket bound to
+ * 0.0.0.0, so it takes no same-origin check — which means anything on the LAN
+ * can ask for a collection round. Without a floor of its own, a loop on that
+ * URL would drive ten vendor requests per hit and get the user rate limited
+ * everywhere. Twenty seconds keeps the button feeling instant while capping a
+ * hostile poller at three rounds a minute.
+ */
+const VIBE_FORCED_REFRESH_FLOOR_MS = 20_000;
 
 /**
  * JSON with a deterministic key order.
@@ -171,15 +316,30 @@ export class WorkspaceController {
   private readonly marketIconStore?: MarketIconStore;
   private readonly dynamicMarketClient: DynamicMarketDataClient;
   private readonly weatherClient?: WeatherClient;
+  private readonly vibeClient?: VibeUsageService;
+  private readonly vibeStarred?: () => Record<string, string[]>;
   private readonly devicePushSuspended: () => boolean;
+  private readonly onLog: (event: string, details: Record<string, unknown>) => void;
   private readonly now: () => number;
   private readonly startedAt: string;
   private workspace: WorkspaceSettings;
+  /**
+   * Settles once the boot-time VIBE migration has been written back and the
+   * Custom Apps it removed have been deleted from the clock.
+   *
+   * The migration itself is synchronous — it must be, because the document it
+   * repairs is validated in the constructor — but persisting it is not, and
+   * without a handle a test could only poll the file. Already resolved when
+   * there was nothing to migrate, which is every workspace after the first boot.
+   */
+  readonly vibeMigrationSettled: Promise<void>;
   private readonly marketCache = new Map<AssetId, AssetMarketData>();
   private readonly marketErrors = new Map<AssetId, string>();
   private readonly dynamicMarketCache = new Map<string, RuntimeMarketData>();
   private readonly dynamicMarketErrors = new Map<string, string>();
   private readonly weatherCache = new Map<string, WeatherObservation>();
+  private vibeCache?: VibeUsageSnapshot;
+  private vibeInFlight?: Promise<VibeUsageSnapshot>;
   private readonly channelRuntime = new Map<string, MutableChannelRuntime>();
   private readonly previewCache = new Map<string, {
     rendered: RenderedChannel;
@@ -207,11 +367,58 @@ export class WorkspaceController {
       timeoutMs: options.config.requestTimeoutMs,
     });
     this.weatherClient = options.weatherClient;
+    this.vibeClient = options.vibeClient;
+    this.vibeStarred = options.vibeStarred;
     this.devicePushSuspended = options.devicePushSuspended ?? (() => false);
+    this.onLog = options.onLog ?? ((event, details) => {
+      console.log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
+    });
     this.now = options.now ?? Date.now;
     this.startedAt = new Date(this.now()).toISOString();
-    this.workspace = this.validateKnownContent(options.workspace, true);
+    // Before validateKnownContent, not after: the whole point is that the
+    // document coming off disk no longer validates.
+    const migration = dropRetiredVibeChannels(options.workspace, options.config.appName);
+    this.workspace = this.validateKnownContent(migration.workspace, true);
     this.syncRuntime();
+    this.vibeMigrationSettled = this.settleVibeMigration(migration);
+  }
+
+  /**
+   * Persists the boot-time migration and clears what it left on the device.
+   *
+   * Writing back matters as much as the removal: skip it and every boot
+   * re-migrates while the console shows a workspace that disagrees with disk.
+   * Deleting the Custom Apps matters too — under the official firmware each
+   * removed channel is still resident on the clock, and nothing else would ever
+   * take it off the knob, so 「旧频道自动消失」would be true only in the browser.
+   */
+  private async settleVibeMigration(migration: VibeChannelMigration): Promise<void> {
+    if (migration.droppedChannels.length === 0 && migration.strippedItems === 0) return;
+    this.onLog("workspace_vibe_channels_migrated", {
+      droppedChannels: migration.droppedChannels,
+      strippedItems: migration.strippedItems,
+      resetToDefaults: migration.resetToDefaults,
+      reason: "vibe_is_a_firmware_app",
+    });
+    try {
+      await this.workspaceStore.save(this.workspace);
+    } catch (error) {
+      // Not fatal. The in-memory workspace is already correct, so the panel and
+      // the console behave; it only means the next boot migrates again.
+      this.onLog("workspace_vibe_migration_save_failed", { error: errorMessage(error) });
+      return;
+    }
+    const retained = new Set(this.workspace.channels.map((channel) => channel.appName));
+    for (const appName of migration.droppedChannels) {
+      if (retained.has(appName) || this.devicePushSuspended()) continue;
+      try {
+        await this.queueDeviceWrite(() => this.deleteApp(appName));
+      } catch (error) {
+        // Same bucket saveWorkspace uses, so retryCleanup picks these up on the
+        // schedule: a clock that was simply asleep at boot still loses the apps.
+        this.cleanupErrors[appName] = errorMessage(error);
+      }
+    }
   }
 
   private validateKnownContent(
@@ -511,6 +718,60 @@ export class WorkspaceController {
     } catch (error) {
       if (cached && this.now() - Date.parse(cached.fetchedAt) < this.config.sourceStaleMs) {
         return cached;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * One usage snapshot per refresh, shared by everyone who wants the numbers.
+   *
+   * No content type reads this any more — AI usage is a firmware app — so the
+   * callers are `/api/vibe/status` and service.ts's `publishOsVibe()`, which
+   * folds the snapshot into the state document the panel long-polls. It stays
+   * on the controller because the three floors below are what stop those two
+   * from turning into ten vendor conversations a minute.
+   *
+   * Same shape as getMarket/getWeather — cache first, stale cache as the
+   * fallback, throw once it is older than VIBE_STALE_MS — with one addition:
+   * the starred table is merged in here rather than at the consumer, so both
+   * the console and the wire see the same 「哪两行上屏」answer.
+   */
+  async getVibeUsage(forceRefresh: boolean, userRequested = false): Promise<VibeUsageView> {
+    if (!this.vibeClient) throw new VibeUnavailableError("usage collection is not configured");
+    const starred = this.vibeStarred?.() ?? defaultVibeStarred();
+    const cached = this.vibeCache;
+    const age = cached === undefined ? Number.POSITIVE_INFINITY : this.now() - Date.parse(cached.fetchedAt);
+    // A cache hit must still age out: with no VIBE channel scheduled nothing
+    // ever passes forceRefresh=true, so an unaged hit would pin the boot-time
+    // snapshot forever while /api/vibe/status reports it as current.
+    if (!forceRefresh && cached && age < VIBE_STALE_MS) {
+      return { snapshot: cached, starred };
+    }
+    // Scheduled pushes share one collection round; the console's own refresh
+    // gets a much shorter floor rather than none (see both constants).
+    const floor = userRequested ? VIBE_FORCED_REFRESH_FLOOR_MS : VIBE_MIN_REFRESH_MS;
+    if (cached && age < floor) {
+      return { snapshot: cached, starred };
+    }
+    // One collection round is shared by everyone who asks while it is running:
+    // a channel push, a preview and an open console tab otherwise each start
+    // their own, and ten vendors do not need three simultaneous conversations.
+    // Awaited INSIDE the try, not outside it. Outside, a round that throws gave
+    // the caller who started it the last-good snapshot and everyone who joined
+    // it the exception — two tabs looking at the same failure, one showing the
+    // numbers from ten minutes ago and one showing nothing at all.
+    try {
+      const inFlight = this.vibeInFlight;
+      if (inFlight) return { snapshot: await inFlight, starred };
+      const round = this.vibeClient.fetchSnapshot();
+      this.vibeInFlight = round;
+      const snapshot = await round.finally(() => { this.vibeInFlight = undefined; });
+      this.vibeCache = snapshot;
+      return { snapshot, starred };
+    } catch (error) {
+      if (cached && age < VIBE_STALE_MS) {
+        return { snapshot: cached, starred };
       }
       throw error;
     }

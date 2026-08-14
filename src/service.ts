@@ -43,6 +43,9 @@ import { DynamicMarketDataClient } from "./market/quotes.ts";
 import { BundledCryptoLogoCatalog } from "./market/logo-catalog.ts";
 import { NotifyManager } from "./notify.ts";
 import { WeatherClient } from "./weather/client.ts";
+import { VibeUsageService } from "./vibe/usage-service.ts";
+import { VibeKeyStore } from "./vibe/vibe-key-store.ts";
+import { VibeStore } from "./vibe/vibe-store.ts";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown error";
@@ -84,6 +87,21 @@ const workspaceStore = new WorkspaceStore(
 // /data copy in the same poll (ADR 0007).
 const lyricThemeStore = new LyricThemeStore(".runtime/lyric-theme.json");
 restoreDeviceLyricTheme(await lyricThemeStore.load());
+// Which usage metrics each AI agent pins on the LED. Loaded before the handler
+// like the theme store above, for a plainer reason: the controller reads this
+// table on the very first channel render, and a render that started on the
+// catalog defaults would push a panel the user never asked for.
+const vibeStore = new VibeStore(".runtime/vibe.json");
+await vibeStore.load();
+// Vendor API keys live in their own 0600 file: OpenRouter and Z.ai have no CLI
+// on this machine to borrow a login from, so the user pastes a key instead.
+const vibeKeyStore = new VibeKeyStore(".runtime/vibe-keys.json");
+await vibeKeyStore.load();
+// Each adapter talks to its own vendor over the public internet, so these
+// requests take the normal route — CLOCK_HTTP_PROXY is for the device only.
+const vibeClient = new VibeUsageService({
+  apiKey: (providerId) => vibeKeyStore.resolve(providerId),
+});
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
 const instrumentStore = new InstrumentStore(".runtime/market-instruments");
 const marketIconStore = new MarketIconStore(".runtime/market-icons");
@@ -165,6 +183,8 @@ const controller = new WorkspaceController({
   marketIconStore,
   dynamicMarketClient,
   weatherClient: new WeatherClient({ timeoutMs: config.requestTimeoutMs }),
+  vibeClient,
+  vibeStarred: () => vibeStore.getStarred(),
 });
 // Both sideloadable apps (music player, arcade) share one installer class and
 // the same clock verification / service-origin closures; only the profile
@@ -310,10 +330,67 @@ function publishOsMenu(): void {
   // position does not shift as the user adds and removes content.
   entries.push({ id: "music", label: "音乐", kind: "music" });
   entries.push({ id: "game", label: "游戏", kind: "game" });
+  entries.push({ id: "vibe", label: "VIBE", kind: "vibe" });
   entries.push({ id: "settings", label: "设置", kind: "settings" });
   osLink.setMenu(entries);
 }
 publishOsMenu();
+
+/**
+ * Publishes the AI-usage rows the panel's VIBE app draws.
+ *
+ * Reads the controller's cached snapshot rather than forcing a collection: this
+ * runs on a timer and on every settings change, and ten vendors do not need a
+ * conversation because somebody renamed a channel. `getVibeUsage(false)` serves
+ * the cache and only reaches the network when there is nothing to serve.
+ *
+ * Nothing signed in is a state, not a failure — the document then carries
+ * `vibe\t0` and the panel draws its own 未登录 page, exactly as the console does.
+ */
+async function publishOsVibe(): Promise<void> {
+  try {
+    const view = await controller.getVibeUsage(false);
+    osLink.setVibe(view.snapshot.providers.map((provider) => {
+      const starred = view.starred[provider.id] ?? [];
+      // Star order decides row order; a starred metric the vendor did not send
+      // this round simply has no row rather than an invented zero.
+      const metrics = starred
+        .map((key) => provider.metrics.find((metric) => metric.key === key))
+        .filter((metric): metric is NonNullable<typeof metric> => metric !== undefined);
+      return {
+        id: provider.id,
+        label: provider.displayName,
+        plan: provider.plan ?? "",
+        stale: provider.stale,
+        metrics: metrics.map((metric) => {
+          const value = metric.kind === "balance" ? metric.available : metric.used;
+          const resetsAt = metric.resetsAt === undefined ? Number.NaN : Date.parse(metric.resetsAt);
+          return {
+            label: metric.label,
+            used: value ?? 0,
+            // A meter needs a ceiling to mean anything; percent metrics carry
+            // one, a credit balance does not and is drawn as a bare number.
+            limit: metric.unit === "percent" ? metric.limit ?? 100 : 0,
+            resetSec: Number.isFinite(resetsAt) ? Math.round((resetsAt - Date.now()) / 1000) : -1,
+          };
+        }),
+      };
+    }));
+  } catch {
+    // Signed into nothing, or every vendor refused: the panel says so itself.
+    osLink.setVibe([]);
+  }
+}
+void publishOsVibe();
+// Same cadence as the collector's own floor, so a republish never costs a
+// vendor request — it only moves numbers the collector already refreshed.
+//
+// unref'd like every other timer here. A referenced interval holds the event
+// loop open, and this process is stopped by a signal: without this it survives
+// SIGINT/SIGTERM and only dies when something works out to SIGKILL it, which on
+// a launchd-managed service turns every restart into a stall.
+const osVibeTimer = setInterval(() => { void publishOsVibe(); }, 5 * 60_000);
+osVibeTimer.unref?.();
 
 // --- now playing, for the tc002-os music screen ------------------------------
 // The device-facing music endpoints carry a track *id*; a 52x16 panel needs a
@@ -441,10 +518,17 @@ osNowTimer.unref?.();
 
 const controlHandler = createControlHandler(controller, {
   onSettingsChanged: () => {
+    // A star change must reach the panel now, not at the next five-minute tick.
+    void publishOsVibe();
     publishOsMenu();
     wakeSleep?.();
   },
   osLink,
+  // What `mise run os-image` packs (device/tc002-os/release/pack-image.ts). The
+  // device pulls its document and its pixels over HTTP, so it pulls its firmware
+  // the same way; naming the path here rather than in the handler keeps it a
+  // fixed string that no request can influence.
+  osFirmwarePath: ".runtime/tc002-os/update.img",
   lyricThemeStore,
   controlAccess,
   deviceGeneralSettings: {
@@ -493,6 +577,40 @@ const controlHandler = createControlHandler(controller, {
   notify,
   notifyToken: config.notifyToken,
   marketCatalog,
+  vibe: {
+    status: async (refresh) => {
+      try {
+        // The console's 刷新 is the one caller allowed past the collection floor.
+        const view = await controller.getVibeUsage(refresh, refresh);
+        return {
+          keys: vibeKeyStore.status(),
+          starred: view.starred,
+          snapshot: view.snapshot,
+          error: null,
+        };
+      } catch (error) {
+        // Signed into nothing yet is the normal first-run state, so the console
+        // gets a 200 with the reason and renders its setup guide.
+        return {
+          keys: vibeKeyStore.status(),
+          starred: vibeStore.getStarred(),
+          snapshot: null,
+          error: errorMessage(error),
+        };
+      }
+    },
+    setStarred: (providerId, starred) => {
+      const next = vibeStore.setStarred(providerId, starred);
+      // The panel draws the starred metrics, so a star change is a change to
+      // what is ON THE CLOCK. Without this it reached the device at the next
+      // five-minute tick, while both reference docs and the console's own
+      // caption promised it arrived at once — the docs were right about the
+      // design and the wiring was the part that was missing.
+      void publishOsVibe();
+      return next;
+    },
+    setKey: (providerId, key) => vibeKeyStore.set(providerId, key),
+  },
 });
 const gameSockets = await createGameSocketHub({
   doodlePath: ".runtime/doodle.json",

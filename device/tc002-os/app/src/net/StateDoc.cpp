@@ -70,11 +70,35 @@ struct Annotation {
   int ttlMs;  // -1 when this record carries no ttl
 };
 
+// The same trick for the VIBE block, which annotates an AGENT by id: `vibes`
+// and `vibem` are collected while the document is walked and applied afterwards,
+// so neither depends on its `vibea` having been seen first. The service emits
+// them in that order; it never agreed to keep doing so, and the whole reason it
+// repeats the id on every record is to free this parser from line order.
+struct VibeRecord {
+  std::string id;
+  bool isMetric;  // false = the stale flag, which carries no metric
+  StateDoc::VibeMetric metric;
+
+  VibeRecord() : isMetric(false) {}
+};
+
+// The service already clamps these to 0..999, so this is belt and braces — but
+// the page has three digit cells and a 14 px meter, and neither should be able
+// to be widened by a document.
+int clampVibeNumber(const std::string& text) {
+  int value = atoi(text.c_str());
+  if (value < 0) return 0;
+  if (value > 999) return 999;
+  return value;
+}
+
 bool kindFromName(const std::string& name, StateDoc::Kind* out) {
   if (name == "channel") { *out = StateDoc::kChannel; return true; }
   if (name == "music") { *out = StateDoc::kMusic; return true; }
   if (name == "game") { *out = StateDoc::kGame; return true; }
   if (name == "settings") { *out = StateDoc::kSettings; return true; }
+  if (name == "vibe") { *out = StateDoc::kVibe; return true; }
   return false;
 }
 
@@ -128,7 +152,7 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
 }
 
 StateDoc::StateDoc()
-    : mSeq(-1), mPinned(false), mMirror(false), mHasNowPlaying(false),
+    : mSeq(-1), mPinned(false), mMirror(false), mUpgradeSeq(0), mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
       mLyricEndMs(-1), mLyricUntilMs(-1), mLyricMode(kDefaultMode),
       mLyricSkin(kDefaultSkin), mAccentRgb(0), mHasAccent(false) {}
@@ -139,6 +163,7 @@ bool StateDoc::parse(const std::string& body) {
   mMirror = false;
   mFocus.clear();
   mItems.clear();
+  mVibe.clear();
   mSettings = SettingsRequest();
   mSleep = SleepRequest();
   mInputs.clear();
@@ -163,6 +188,7 @@ bool StateDoc::parse(const std::string& body) {
   mHasAccent = false;
 
   std::vector<Annotation> annotations;
+  std::vector<VibeRecord> vibeRecords;
   // Held raw and decoded after the walk, because the offsets in it are relative
   // to `lyricat` and a parser that depended on `lyricat` arriving first would be
   // keying off line ORDER — the same dependency `rev`/`ttl` repeat their id to
@@ -181,8 +207,15 @@ bool StateDoc::parse(const std::string& body) {
       continue;
     }
 
-    std::string fields[4];
-    const int n = splitTabs(line, fields, 4);
+    // SIX, not four. `vibem` is the one record with five separators, and it is
+    // shaped that way because the alternative — packing four numbers into one
+    // comma-separated field, the `lyricw` trick — buys nothing here: that table
+    // is unbounded and this one is exactly five columns wide. Widening the split
+    // only makes the arity checks below stricter (a five-field `item` now fails
+    // `n == 4` instead of quietly keeping the extra column inside its label),
+    // which is the direction this parser already wanted to be wrong in.
+    std::string fields[6];
+    const int n = splitTabs(line, fields, 6);
     if (n < 2) continue;
 
     if (fields[0] == "seq") {
@@ -191,6 +224,15 @@ bool StateDoc::parse(const std::string& body) {
       mPinned = (fields[1] == "1");
     } else if (fields[0] == "mirror") {
       mMirror = (fields[1] == "1");
+    } else if (fields[0] == "upgrade") {
+      // A console-initiated install request. A CHANGE of this number arms one
+      // download (HostLink::adoptDocument) and the resulting install is honoured
+      // once per boot, because the updater does not clear the image it flashed
+      // and a device that re-checked on its own would reinstall it every boot
+      // with a frozen screen. A change rather than an increase: the hub's
+      // counter is ordinary state in a Bun process and returns to 1 when the
+      // service restarts.
+      mUpgradeSeq = atoi(fields[1].c_str());
     } else if (fields[0] == "focus") {
       mFocus = fields[1];
     } else if (fields[0] == "setseq") {
@@ -271,6 +313,49 @@ bool StateDoc::parse(const std::string& body) {
       item.id = fields[2];
       item.label = fields[3];
       mItems.push_back(item);
+    } else if (fields[0] == "vibea" && n == 4) {
+      // Strict arity, like `item`: a record this parser cannot read in full is
+      // an agent it would draw a mark for and no numbers, which is worse than
+      // an agent that is simply absent.
+      if (fields[1].empty()) continue;
+      if ((int)mVibe.size() >= StateDoc::kMaxVibeAgents) continue;
+      // Indexed by id, so a document that repeats one updates it rather than
+      // putting the same vendor on the ring twice.
+      bool known = false;
+      for (size_t i = 0; i < mVibe.size(); ++i) {
+        if (mVibe[i].id != fields[1]) continue;
+        mVibe[i].label = fields[2];
+        mVibe[i].plan = fields[3];
+        known = true;
+        break;
+      }
+      if (known) continue;
+      VibeAgent agent;
+      agent.id = fields[1];
+      agent.label = fields[2];
+      agent.plan = fields[3];
+      mVibe.push_back(agent);
+    } else if (fields[0] == "vibes" && n >= 3) {
+      // Sent only when the agent IS stale, so its absence is the statement
+      // "these numbers are fresh" rather than a gap in the document.
+      if (fields[1].empty() || fields[2] != "1") continue;
+      VibeRecord record;
+      record.id = fields[1];
+      record.isMetric = false;
+      vibeRecords.push_back(record);
+    } else if (fields[0] == "vibem" && n == 6) {
+      if (fields[1].empty()) continue;
+      VibeRecord record;
+      record.id = fields[1];
+      record.isMetric = true;
+      record.metric.label = fields[2];
+      record.metric.used = clampVibeNumber(fields[3]);
+      record.metric.limit = clampVibeNumber(fields[4]);
+      // -1 is "the vendor did not say when", and every value below it means the
+      // same thing. Anything else is seconds from now.
+      record.metric.resetSec = atoi(fields[5].c_str());
+      if (record.metric.resetSec < -1) record.metric.resetSec = -1;
+      vibeRecords.push_back(record);
     } else if (fields[0] == "rev" && n >= 3) {
       Annotation note;
       note.id = fields[1];
@@ -290,7 +375,8 @@ bool StateDoc::parse(const std::string& body) {
         annotations.push_back(note);
       }
     }
-    // Everything else — including `menu`, which is only a hint — is ignored on
+    // Everything else — including `menu` and `vibe`, which are only counts, and
+    // this parser builds both lists from the records themselves — is ignored on
     // purpose, so the service can add fields without bricking deployed firmware.
     if (end >= body.size()) break;
   }
@@ -313,6 +399,26 @@ bool StateDoc::parse(const std::string& body) {
     // cannot be held for the next one: the document is a whole picture, and a
     // rev kept from a menu that no longer contains its channel would invalidate
     // whatever took that id later.
+  }
+
+  for (size_t r = 0; r < vibeRecords.size(); ++r) {
+    for (size_t i = 0; i < mVibe.size(); ++i) {
+      if (mVibe[i].id != vibeRecords[r].id) continue;
+      if (!vibeRecords[r].isMetric) {
+        mVibe[i].stale = true;
+      } else if ((int)mVibe[i].metrics.size() < StateDoc::kMaxVibeMetrics) {
+        // Order is the service's starred order, which is what decides which row
+        // a metric lands on, so metrics past the second are dropped rather than
+        // rotated in — a page that showed rows 2 and 3 would answer a question
+        // the user never starred.
+        mVibe[i].metrics.push_back(vibeRecords[r].metric);
+      }
+      break;
+    }
+    // A record naming an agent this document does not carry is dropped, for the
+    // same reason a rev for a departed channel is: the document is a whole
+    // picture, and holding it would attach yesterday's numbers to whoever takes
+    // that id next.
   }
   return mSeq >= 0;
 }

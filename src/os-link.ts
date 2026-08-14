@@ -16,12 +16,41 @@
 import { encodeLyricCells, lyricCells } from "./music/lyric-timing.ts";
 import type { MusicLyricWord } from "./music/core.ts";
 
+/**
+ * One agent's row on the panel's VIBE app.
+ *
+ * Percentages are already resolved here: the firmware draws, it does not do
+ * unit arithmetic. A metric the vendor sends in dollars or requests arrives as
+ * `limit: 0` and is shown as a bare number, because a meter without a ceiling
+ * would imply one we invented.
+ */
+export interface OsVibeMetric {
+  /** The vendor's own row label — "Session", "Weekly", "Credits". */
+  label: string;
+  used: number;
+  /** 0 when the vendor gave no ceiling; the panel then skips the meter. */
+  limit: number;
+  /** Seconds until this window resets, or -1 when the vendor sends none. */
+  resetSec: number;
+}
+
+export interface OsVibeAgent {
+  /** Catalog id — also the key into the firmware's mark table. */
+  id: string;
+  label: string;
+  plan: string;
+  /** True while this vendor's last good numbers are standing in for a failure. */
+  stale: boolean;
+  /** The starred metrics, in order; at most two reach the panel. */
+  metrics: OsVibeMetric[];
+}
+
 export interface OsMenuEntry {
   /** Stable id the firmware echoes back when the user activates it. */
   id: string;
   /** UTF-8 label as shown on the panel. */
   label: string;
-  kind: "channel" | "music" | "game" | "settings";
+  kind: "channel" | "music" | "game" | "settings" | "vibe";
   /**
    * Fingerprint of the frames behind this entry, when it has any.
    *
@@ -280,6 +309,15 @@ export interface OsTelemetry {
    */
   flashed: boolean;
   /**
+   * The request id the device has recorded on `/data` as installed.
+   *
+   * ABSENT on firmware that predates it, and that distinction is load-bearing:
+   * 0 means "this device has installed nothing", which is a fact the hub acts
+   * on, while undefined means "this device cannot tell me" and the hub falls
+   * back to watching for a reboot.
+   */
+  upgradeSeqInstalled?: number;
+  /**
    * 夜间休眠 as the DEVICE has it, plus whether the panel is dark right now.
    *
    * ABSENT means the firmware predates the feature — this is the capability
@@ -327,6 +365,10 @@ export const OS_PROTO_LYRIC_WINDOW = 2;
 
 const MAX_LABEL_CELLS = 24;
 const MAX_ENTRIES = 32;
+/** Ten vendors exist; the ring would be unusable long before that many sign in. */
+const MAX_VIBE_AGENTS = 10;
+/** Two starred metrics per vendor is the panel's own budget (two 3x5 rows). */
+const MAX_VIBE_METRICS = 2;
 // A second is the floor because the device re-fetches a whole frame bundle when
 // a ttl expires; anything shorter turns a clock face into a download loop on a
 // single-core device with a 15 ms panel. A day is the ceiling because a larger
@@ -338,6 +380,12 @@ function sanitizeField(value: string): string {
   // Tabs and newlines are the record separators, so they can never appear in a
   // value. Channel names are user-authored and arrive from workspace.json.
   return value.replace(/[\t\r\n]+/g, " ").trim();
+}
+
+/** Whole percent, floored into what three digit cells can show. */
+function clampVibeNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(999, Math.round(value)));
 }
 
 /** Hex-ish token or nothing; the device compares it, so shape beats meaning. */
@@ -409,6 +457,13 @@ function encodeLabelCells(
 export class OsLinkHub {
   private seq = 1;
   private menu: OsMenuEntry[] = [];
+  private vibe: OsVibeAgent[] = [];
+  private upgradeSeq = 0;
+  // The highest id ever issued, kept THROUGH a withdrawal. `upgradeSeq` goes
+  // back to 0 when a reboot consumes the request, and reusing an id from that
+  // zero would hand the device a number its own /data record already carries —
+  // which it correctly refuses as "already installed".
+  private upgradeSeqIssued = 0;
   private display: OsDisplayCommand = { focus: null, pinned: false };
   private telemetry: OsTelemetry | null = null;
   // Counts reports, not changes: a caller asking "has the device spoken since I
@@ -510,6 +565,63 @@ export class OsLinkHub {
     if (this.serializeMenu(next) === this.serializeMenu(this.menu)) return;
     this.menu = next;
     this.bump();
+  }
+
+  /**
+   * Publishes the AI-usage rows the panel's VIBE app draws.
+   *
+   * Idempotent like setMenu, and for the same reason: this is republished on a
+   * timer, and a payload that compares equal must not bump the sequence or
+   * every parked long poll wakes for nothing every five minutes.
+   */
+  setVibe(agents: OsVibeAgent[]): void {
+    const next = agents.slice(0, MAX_VIBE_AGENTS).map((agent) => ({
+      id: sanitizeField(agent.id),
+      label: clampLabel(sanitizeField(agent.label)),
+      plan: clampLabel(sanitizeField(agent.plan)),
+      stale: agent.stale,
+      metrics: agent.metrics.slice(0, MAX_VIBE_METRICS).map((metric) => ({
+        label: clampLabel(sanitizeField(metric.label)),
+        // The panel has three digit cells; anything wider is the vendor's
+        // problem, not something to draw off the edge of a 52 px screen.
+        used: clampVibeNumber(metric.used),
+        limit: clampVibeNumber(metric.limit),
+        resetSec: Number.isFinite(metric.resetSec) ? Math.max(-1, Math.round(metric.resetSec)) : -1,
+      })),
+    }));
+    if (this.serializeVibe(next) === this.serializeVibe(this.vibe)) return;
+    this.vibe = next;
+    this.bump();
+  }
+
+  getVibe(): OsVibeAgent[] {
+    return this.vibe.map((agent) => ({ ...agent, metrics: agent.metrics.map((metric) => ({ ...metric })) }));
+  }
+
+  /**
+   * Asks the panel to install whatever image is staged on it.
+   *
+   * A deliberate act with a human behind it, never a background poll: the
+   * device's own updater tears every service down and reboots, and it does not
+   * remove the image it flashed — so a device that checked on its own would
+   * reinstall the same image on every boot and never finish drawing a screen.
+   *
+   * The id is seconds-since-epoch, not a count, and that is load-bearing rather
+   * than cosmetic. The firmware records the id it installed on `/data` so a
+   * reboot does not read the still-standing request as a new one; a counter
+   * restarting at 1 whenever this process does would collide with an id the
+   * device had already installed, and that device could never be asked again.
+   * `Math.max` keeps it strictly increasing even for two presses in one second.
+   */
+  requestUpgrade(): number {
+    this.upgradeSeq = Math.max(this.upgradeSeqIssued + 1, Math.floor(Date.now() / 1000));
+    this.upgradeSeqIssued = this.upgradeSeq;
+    this.bump();
+    return this.upgradeSeq;
+  }
+
+  getUpgradeSeq(): number {
+    return this.upgradeSeq;
   }
 
   setDisplay(command: OsDisplayCommand): void {
@@ -824,8 +936,34 @@ export class OsLinkHub {
     // until the next lyric line happens to move.
     const changed = proto !== this.deviceProto;
     this.deviceProto = proto;
+    // A CONSUMED REQUEST IS WITHDRAWN. Leaving one standing is what turns a
+    // single install into a device that reinstalls on every boot forever, and
+    // the console is the half that can see it: the panel's own memory is wiped
+    // by the reboot the install ends in, but the process holding the request
+    // is not.
+    //
+    // The device's own record is the evidence, when it can send one. The
+    // fallback — an uptime that went backwards — is a GUESS, and it is wrong in
+    // a case that really happens: if the last report before the reboot came
+    // early in that boot, the first report after it carries a larger uptime and
+    // the reboot is invisible. So it is used only for firmware too old to
+    // answer the question directly.
+    //
+    // Withdrawn on failure too, and deliberately: retrying is the user pressing
+    // the button again, which is one act. A device retrying an image that just
+    // took it down is a device nobody can reach to stop.
+    const previous = this.telemetry;
+    const installed = telemetry.upgradeSeqInstalled;
+    const consumed = typeof installed === "number"
+      ? installed >= this.upgradeSeq
+      : previous !== null && telemetry.uptimeMs < previous.uptimeMs;
     this.telemetry = { ...telemetry, proto, receivedAt: this.now() };
     this.reportSeq += 1;
+    if (consumed && this.upgradeSeq > 0) {
+      this.upgradeSeq = 0;
+      this.bump();
+      return;
+    }
     if (changed) this.bump();
   }
 
@@ -906,6 +1044,28 @@ export class OsLinkHub {
     return entries
       .map((e) => `${e.kind}\t${e.id}\t${e.label}\t${e.rev ?? ""}\t${e.ttlMs ?? ""}`)
       .join("\n");
+  }
+
+  /**
+   * The VIBE block.
+   *
+   * New KEYS rather than new fields on an existing one — the same rule `rev`
+   * and `ttl` follow, and for the same reason: the deployed firmware arity-
+   * checks the keys it knows and ignores the ones it does not, so this ships
+   * safely to a panel that has never heard of VIBE. Every record repeats the
+   * agent id so a parser may index instead of relying on line order.
+   */
+  private serializeVibe(agents: OsVibeAgent[]): string {
+    if (agents.length === 0) return "vibe\t0";
+    const lines: string[] = [`vibe\t${agents.length}`];
+    for (const agent of agents) {
+      lines.push(`vibea\t${agent.id}\t${agent.label}\t${agent.plan}`);
+      if (agent.stale) lines.push(`vibes\t${agent.id}\t1`);
+      for (const metric of agent.metrics) {
+        lines.push(`vibem\t${agent.id}\t${metric.label}\t${metric.used}\t${metric.limit}\t${metric.resetSec}`);
+      }
+    }
+    return lines.join("\n");
   }
 
   serialize(): string {
@@ -1008,6 +1168,10 @@ export class OsLinkHub {
         }
       }
     }
+    // Emitted only once asked: a firmware that has never heard of the key
+    // ignores it, and one that has must not see it on every document.
+    if (this.upgradeSeq > 0) lines.push(`upgrade\t${this.upgradeSeq}`);
+    lines.push(this.serializeVibe(this.vibe));
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {
       lines.push(`item\t${entry.kind}\t${entry.id}\t${entry.label}`);

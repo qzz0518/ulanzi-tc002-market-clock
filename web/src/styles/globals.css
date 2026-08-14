@@ -687,6 +687,7 @@
 .studio-layout.is-library { grid-template-columns: 12.5rem minmax(0, 1fr); }
 .studio-layout.is-game { display: block; min-height: 0; overflow-y: auto; }
 .studio-layout.is-zos { display: block; min-height: 0; overflow-y: auto; }
+.studio-layout.is-vibe { display: block; min-height: 0; overflow-y: auto; }
 
 /* 游戏厅：顶栏（选游戏 + 上屏）+ 舞台（LED 屏 + HUD + 控制台）。
    LED 屏沿用 .pixel-lyric-screen 的网格质感配方。 */
@@ -817,7 +818,9 @@
 .channel-list { display: grid; align-content: start; gap: 0.25rem; padding-right: 0.25rem; }
 .channel-entry { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 2.25rem; align-items: center; border-left: 2px solid transparent; transition: background-color 160ms ease, border-color 160ms ease; }
 .channel-entry.is-active { border-left-color: var(--primary); background: color-mix(in oklch, var(--muted) 82%, transparent); }
-.channel-select { min-width: 0; padding: 0.78rem 0.35rem 0.72rem 0.65rem; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; outline: none; }
+/* user-select:none 是双击跳转的配套:没有它,第二次点击会把频道名当文字选中,
+   跳过去之后上一页还留着一段蓝色高亮。 */
+.channel-select { min-width: 0; padding: 0.78rem 0.35rem 0.72rem 0.65rem; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; outline: none; user-select: none; }
 .channel-select:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--ring) 55%, transparent); }
 .channel-title { display: flex; min-width: 0; align-items: center; gap: 0.55rem; }
 .channel-title strong { overflow: hidden; font-size: 0.8rem; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
@@ -1100,6 +1103,168 @@
 .load-error h1 { margin: 0; font-size: 1.6rem; }
 .load-error p { max-width: 30rem; margin: 0; }
 
+/* VIBE：AI 编码代理用量。一块面板四段——状态条、代理列表、LED 预览、频道布置。
+   类名用 vibe- 前缀（与 ZOS 的 zc- 同精神：与旧规则零交集）。这里只放布局；
+   颜色、圆角、控件形状交给 cladd 组件与 token，本段不重画任何一个 cladd 组件。 */
+.vibe-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
+.vibe-panel { width: min(100%, 72rem); margin-inline: auto; border-radius: 0.85rem; }
+
+.vibe-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  padding: 0.6rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+.vibe-strip__source { display: inline-flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.vibe-strip__icon { flex: none; width: 1rem; height: 1rem; color: var(--primary); }
+.vibe-strip__text { display: grid; gap: 0.05rem; min-width: 0; }
+.vibe-strip__text strong { font-size: 0.8rem; font-weight: 620; letter-spacing: -0.01em; line-height: 1.2; }
+/* 副标题从「上游 URL」变成一句话说明，所以不再走等宽。 */
+.vibe-strip__text small { color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.35; }
+.vibe-strip__state { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-left: auto; }
+.vibe-strip__age { color: var(--muted-foreground); font-size: 0.62rem; }
+.vibe-strip__refresh { flex: none; }
+
+/* 一台还没登录任何代理的机器看到的引导。没有下载链接可给——要装的东西
+   本来就是各家自己的 CLI，这里只说清楚「登录哪一个都行」。 */
+.vibe-setup {
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklch, var(--muted) 55%, transparent);
+}
+/* 「还没登录」是正常首次状态，走弱化墨色；只有真的采集失败才点亮琥珀警示。 */
+.vibe-setup > svg { flex: none; width: 1rem; height: 1rem; margin-top: 0.1rem; color: var(--muted-foreground); }
+.vibe-setup.is-error > svg { color: oklch(0.62 0.15 75); }
+.vibe-setup strong { font-size: 0.78rem; font-weight: 600; }
+.vibe-setup p { max-width: 44rem; margin: 0.25rem 0 0; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.55; text-wrap: pretty; }
+.vibe-setup p.vibe-setup__error { margin-top: 0.4rem; font-family: var(--mono); font-size: 0.62rem; }
+
+.vibe-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 24rem);
+  gap: 0.6rem 1.4rem;
+  align-items: start;
+  padding: 1rem 1.1rem 1.1rem;
+}
+.vibe-main { display: grid; align-content: start; gap: 1.2rem; min-width: 0; }
+.vibe-aside { display: grid; gap: 1.2rem; min-width: 0; }
+.vibe-section__head { padding-bottom: 0.55rem; }
+.vibe-section__head h2 { margin: 0; font-size: 0.9rem; font-weight: 570; }
+.vibe-section__head p { margin: 0.2rem 0 0; color: var(--muted-foreground); font-size: 0.65rem; line-height: 1.45; }
+.vibe-note { margin: 0; color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.5; }
+.vibe-note.is-alert { color: var(--destructive); }
+/* 载入失败标题走 strong：整页只有 app.tsx 的骨架能写 h1。 */
+.vibe-error-title { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.03em; }
+
+/* --- 代理列表（对齐 OpenUsage Customize） -------------------------------- */
+
+.vibe-providers { display: grid; margin: 0; padding: 0; list-style: none; }
+.vibe-provider { border-top: 1px solid var(--border); }
+.vibe-provider:last-child { border-bottom: 1px solid var(--border); }
+.vibe-provider.is-empty { color: var(--muted-foreground); opacity: 0.66; }
+.vibe-provider__head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 3.1rem;
+  padding: 0.4rem 0.3rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.vibe-provider__head:disabled { cursor: default; }
+.vibe-provider__head:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.vibe-provider__icon { display: inline-flex; flex: none; width: 1.25rem; height: 1.25rem; color: var(--foreground); }
+.vibe-provider.is-empty .vibe-provider__icon { color: var(--muted-foreground); }
+.vibe-provider__name { display: grid; gap: 0.08rem; min-width: 0; }
+.vibe-provider__name strong { font-size: 0.78rem; font-weight: 570; }
+.vibe-provider__name small { color: var(--muted-foreground); font-size: 0.6rem; }
+.vibe-provider__count { margin-left: auto; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.6rem; white-space: nowrap; }
+.vibe-provider__chevron { flex: none; width: 0.85rem; height: 0.85rem; color: var(--muted-foreground); transition: transform 160ms ease; }
+.vibe-provider__chevron.is-open { transform: rotate(180deg); }
+.vibe-provider__error { display: flex; align-items: center; gap: 0.35rem; margin: 0 0 0.5rem; padding-left: 0.3rem; color: oklch(0.55 0.14 60); font-size: 0.62rem; }
+.vibe-provider__error svg { flex: none; width: 0.75rem; height: 0.75rem; }
+/* note 是厂商给的提示（如「重新登录可恢复实时额度」），不是失败：走弱化墨色，
+   与上面那条红字明确分开。 */
+.vibe-provider__note { display: flex; align-items: center; gap: 0.35rem; margin: 0 0 0.5rem; padding-left: 0.3rem; color: var(--muted-foreground); font-size: 0.62rem; }
+.vibe-provider__note svg { flex: none; width: 0.75rem; height: 0.75rem; }
+.vibe-provider__detail { display: grid; gap: 0.5rem; padding: 0 0.3rem 0.75rem; }
+.vibe-outdated { margin: 0; color: oklch(0.55 0.14 75); font-size: 0.62rem; }
+
+.vibe-metrics { display: grid; gap: 0.1rem; margin: 0; padding: 0; list-style: none; }
+.vibe-metric {
+  display: grid;
+  grid-template-columns: 1.6rem minmax(4.5rem, 8rem) minmax(3rem, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2rem;
+}
+.vibe-metric__label { min-width: 0; overflow: hidden; font-size: 0.68rem; text-overflow: ellipsis; white-space: nowrap; }
+.vibe-metric__value { font-family: var(--mono); font-size: 0.68rem; font-variant-numeric: tabular-nums; text-align: right; }
+.vibe-metric__value.is-warning { color: oklch(0.6 0.14 75); }
+.vibe-metric__value.is-critical { color: var(--destructive); }
+/* 重置倒计时是第四列之后的补充说明，窄栏时整行折到下一行仍然读得通。 */
+.vibe-metric__reset { grid-column: 2 / -1; color: var(--muted-foreground); font-size: 0.58rem; }
+.vibe-star {
+  display: inline-flex;
+  place-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-cladd-md);
+  background: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.vibe-star svg { width: 0.85rem; height: 0.85rem; }
+.vibe-star.is-on { color: oklch(0.68 0.15 80); }
+.vibe-star.is-on svg { fill: currentColor; }
+.vibe-star:disabled { cursor: default; opacity: 0.5; }
+.vibe-star:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+/* meter 的三色 = OpenUsage 的绝对档位（80% 琥珀 / 90% 红）；LED 渲染器用同两个
+   阈值，屏上是什么颜色这里就是什么颜色。 */
+.vibe-meter { display: block; overflow: hidden; height: 0.32rem; border-radius: 999px; background: var(--border); }
+.vibe-meter__fill { display: block; height: 100%; border-radius: 999px; background: oklch(0.6 0.17 255); transition: width 200ms ease; }
+.vibe-meter.is-warning .vibe-meter__fill { background: oklch(0.72 0.16 80); }
+.vibe-meter.is-critical .vibe-meter__fill { background: oklch(0.6 0.2 25); }
+.vibe-spend { margin: 0.15rem 0 0; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; line-height: 1.5; text-wrap: pretty; }
+
+/* --- 屏幕预览（前端自绘：设备那页由固件画，这里复现同一排版） -------------- */
+
+.vibe-preview { display: grid; gap: 0.35rem; }
+.vibe-screen { margin: 0 0 0.4rem; }
+/* 与 .clock-screen img 同一套：52×16 原生分辨率，靠 pixelated 放大。 */
+.vibe-screen canvas { width: 100%; height: 100%; object-fit: fill; image-rendering: pixelated; }
+.vibe-screen figcaption { padding-top: 0.3rem; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; text-align: center; }
+.vibe-preview__pager { display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
+.vibe-preview__count { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.6rem; font-variant-numeric: tabular-nums; }
+
+/* --- API 密钥（OpenRouter / Z.ai：没有本地 CLI 登录可借） ------------------ */
+
+/* 跟代理列表同在左列（.vibe-main）：说的是同一件事——「哪些代理接进来了」。 */
+.vibe-keys { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
+.vibe-key-list { display: grid; gap: 0.7rem; margin: 0; padding: 0; list-style: none; }
+.vibe-key__head { display: flex; align-items: center; gap: 0.45rem; padding-bottom: 0.3rem; }
+.vibe-key__name { font-size: 0.72rem; font-weight: 570; }
+.vibe-key__form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+/* 输入框吃掉剩余宽度，两个按钮保持原尺寸；min-width 让它在窄列里能换行。 */
+.vibe-key__input { flex: 1 1 12rem; min-width: 0; }
+
+/* --- 上屏（VIBE 是 ZOS 根环上的 App，不再是频道） -------------------------- */
+
+.vibe-display { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
+.vibe-display__actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.vibe-note__icon { width: 0.75rem; height: 0.75rem; margin-right: 0.3rem; vertical-align: -0.1em; }
+.vibe-provider__stale { margin-left: 0.35rem; }
+
 @media (hover: hover) and (pointer: fine) {
   .channel-delete, .playlist-remove { opacity: 0; }
   .channel-entry:hover { background: color-mix(in oklch, var(--muted) 72%, transparent); }
@@ -1135,6 +1300,8 @@
   .canvas-inspector-scroll { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: visible; }
   .canvas-inspector-section { align-content: start; padding-inline: 0.75rem; border-right: 1px solid var(--border); }
   .canvas-inspector-section:last-child { border-right: 0; }
+  /* 侧栏低于 20rem 时 LED 机身照片会被压到看不清像素，早一档折成单列。 */
+  .vibe-body { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 52rem) {
@@ -1175,7 +1342,7 @@
     left: max(0.75rem, env(safe-area-inset-left));
     display: grid;
     /* 一列一个主视图；加视图必须同步这里，否则底部导航会挤成半个标签。 */
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     min-height: 3.45rem;
     justify-self: stretch;
     justify-content: stretch;
@@ -1208,7 +1375,11 @@
   .page-heading h1 { overflow: hidden; font-size: 1.12rem; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
   .page-heading > div:first-child > p { display: none; }
   .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library, .studio-layout.is-game { display: block; padding-top: 0; }
-  .studio-layout.is-zos { display: block; padding-top: 0; }
+  .studio-layout.is-zos, .studio-layout.is-vibe { display: block; padding-top: 0; }
+  /* 竖屏没有横屏门：VIBE 像 zos 一样直接纵向 reflow，屏幕预览与布置排到列表下面。 */
+  .vibe-body { grid-template-columns: minmax(0, 1fr); padding-inline: 0.9rem; }
+  .vibe-strip, .vibe-setup { padding-inline: 0.9rem; }
+  .vibe-metric { grid-template-columns: 2rem minmax(4rem, 1fr) minmax(2.5rem, 1fr) auto; }
   .game-shell { padding-top: 0.65rem; }
   .game-body { padding-top: 0.75rem; }
   .game-stage { width: 100%; }

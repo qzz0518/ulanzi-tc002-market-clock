@@ -62,6 +62,12 @@ class ProvisionLog {
    *  compare-first on every boot. Kills hypothesis zero ("the fix was never
    *  actually flashed") before any other line is trusted. */
   static const char* buildIdPath() { return "/data/zos-build.id"; }
+  /** The console request id we have already INSTALLED, kept across reboots.
+   *  In memory it is worthless: the install ends in a reboot, the counter comes
+   *  back as 0, the document still carries the same request — and the device
+   *  installs the same image again, forever. `/data` is mtd6 and survives the
+   *  mtd3 write, which is the whole reason this can live here. */
+  static const char* upgradeSeqPath() { return "/data/zos-upgrade.seq"; }
   static const int kRotateBytes = 32 * 1024;
 
   /** `ZOS_BUILD_ID` injected by the build (git rev + stamp), or

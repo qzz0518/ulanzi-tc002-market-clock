@@ -24,6 +24,7 @@ import { MarketIconStore } from "../src/market/icon-store.ts";
 import { MarketSearchService } from "../src/market/search.ts";
 import { MarketCatalogService } from "../src/market/catalog-service.ts";
 import { BundledCryptoLogoCatalog } from "../src/market/logo-catalog.ts";
+import type { VibeUsageSnapshot } from "../src/vibe/usage-service.ts";
 
 const directories: string[] = [];
 
@@ -1747,5 +1748,385 @@ describe("tc002-os night sleep", () => {
       on: true, startMin: 1439, endMin: 0, idleSec: 7200,
       asleep: false, clockSynced: false,
     });
+  });
+});
+
+// Self-update. The chain from the console to a rewritten mtd3 already exists —
+// requestUpgrade() bumps a counter, the pull document carries `upgrade\t<seq>`,
+// osLogic calls the vendor updater once per boot — but the image still had to
+// reach the device by hand. These are the routes that close that gap: the
+// device pulls its firmware over the same HTTP it already pulls its pixels on.
+describe("tc002-os firmware routes", () => {
+  const DIGEST = "0123456789abcdef0123456789abcdef";
+
+  /**
+   * A minimal ZKSWE container.
+   *
+   * The identity these routes publish is read out of the real header layout
+   * (device/tc002-os/release/pack-image.ts: magic, hdr[18] = ei offset, a
+   * 524-byte ei block, then the payload whose first 16 bytes are the MD5 of what
+   * lands in flash), so the fixture has to actually have one — a random blob
+   * would only prove the size+mtime fallback.
+   */
+  function zkswe(digest: string, payload = "res-filesystem"): Buffer {
+    const eiOffset = 48; // 20-byte prefix + one 28-byte item descriptor
+    const md5At = eiOffset + 524;
+    const bytes = Buffer.alloc(md5At + 16 + payload.length);
+    bytes.write("ZKSWEV1.0-180127", 0, "ascii");
+    bytes[16] = eiOffset;
+    bytes[17] = 1;
+    bytes[18] = eiOffset;
+    Buffer.from(digest, "hex").copy(bytes, md5At);
+    bytes.write(payload, md5At + 16, "ascii");
+    return bytes;
+  }
+
+  async function firmwareHandler() {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-os-firmware-"));
+    directories.push(directory);
+    const osFirmwarePath = join(directory, "update.img");
+    const osLink = new OsLinkHub();
+    return {
+      osLink,
+      osFirmwarePath,
+      handler: createControlHandler(fakeWorkspaceController(), { osLink, osFirmwarePath }),
+    };
+  }
+
+  test("the staged image is served with an identity read out of its own header", async () => {
+    const { handler, osFirmwarePath } = await firmwareHandler();
+
+    // Nothing packed yet. A 404 in the usual shape, not an empty 200: the device
+    // must be able to tell "no image" from "an image of zero bytes", because it
+    // is about to write whatever it gets to a partition with no A/B pair.
+    const missing = await handler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(missing.status).toBe(404);
+    expect((await missing.json() as { error: string }).error).toContain("packed");
+
+    const before = await handler(new Request("http://127.0.0.1/api/os/firmware/status"));
+    expect(await before.json()).toEqual({ packed: false, image: null, upgradeSeq: 0 });
+
+    const image = zkswe(DIGEST);
+    await Bun.write(osFirmwarePath, image);
+
+    const served = await handler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(served.status).toBe(200);
+    expect(served.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect(served.headers.get("Content-Length")).toBe(String(image.byteLength));
+    expect(served.headers.get("Cache-Control")).toBe("no-store");
+    // Derived from the file rather than invented, and the same number the
+    // device's own updater verifies before it erases anything.
+    expect(served.headers.get("ETag")).toBe(`"${DIGEST}"`);
+    expect(served.headers.get("X-Build-Id")).toBe(DIGEST);
+    expect(Buffer.from(await served.arrayBuffer()).equals(image)).toBe(true);
+
+    const status = await handler(new Request("http://127.0.0.1/api/os/firmware/status"));
+    const body = await status.json() as {
+      image: { bytes: number; buildId: string; builtAt: number };
+    };
+    expect(body.image.bytes).toBe(image.byteLength);
+    expect(body.image.buildId).toBe(DIGEST);
+    // The console reads this as "when was this packed", to answer the only
+    // question it can answer before the device reboots: is this the build I
+    // just made. Fed straight into describeImageAge in web/src/lib/zos-link.ts.
+    expect(body.image.builtAt).toBeGreaterThan(0);
+    expect(body.image.builtAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  // The route has no same-origin check — it is device-facing, and the device
+  // sends no Origin — so the only thing keeping it from being a file server is
+  // that the path is a constant from the composition root. Nothing on the URL
+  // may reach it.
+  test("nothing on the request can move the route off the packed image", async () => {
+    const { handler, osFirmwarePath } = await firmwareHandler();
+    await Bun.write(osFirmwarePath, zkswe(DIGEST));
+
+    const steered = await handler(new Request(
+      "http://127.0.0.1/api/os/firmware?path=/etc/passwd&app=../../etc/hosts",
+    ));
+    expect(steered.status).toBe(200);
+    expect(steered.headers.get("X-Build-Id")).toBe(DIGEST);
+    expect(new TextDecoder().decode(await steered.arrayBuffer())).toContain("res-filesystem");
+  });
+
+  test("an upgrade is refused while there is nothing to install", async () => {
+    const { handler, osLink, osFirmwarePath } = await firmwareHandler();
+    const origin = "http://127.0.0.1:43820";
+    const ask = () => handler(new Request(`${origin}/api/os/upgrade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: "{}",
+    }));
+
+    // 409, not 200: the sequence would reach the device, the device would fetch
+    // /api/os/firmware, find a 404 and stop — and the console would be left
+    // claiming an install that never started.
+    const refused = await ask();
+    expect(refused.status).toBe(409);
+    expect((await refused.json() as { error: string }).error).toContain("packed");
+    // Refused means refused: the document must not carry an upgrade the device
+    // would honour once per boot for an image that does not exist.
+    expect(osLink.getUpgradeSeq()).toBe(0);
+    expect(osLink.serialize()).not.toContain("upgrade\t");
+
+    await Bun.write(osFirmwarePath, zkswe(DIGEST));
+    const accepted = await ask();
+    expect(accepted.status).toBe(200);
+    const { seq } = await accepted.json() as { seq: number };
+    // Seconds-since-epoch, not a count. The firmware records the id it
+    // installed on /data so a reboot does not read the still-standing request
+    // as a new one; a counter restarting at 1 with this process would collide
+    // with that record and the device could never be asked again.
+    expect(seq).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) - 5);
+    expect(osLink.serialize().split("\n")).toContain(`upgrade\t${seq}`);
+
+    // The console's only receipt between the click and a device that vanishes
+    // for a minute to rewrite mtd3.
+    const state = await handler(new Request(`${origin}/api/os/state`));
+    expect((await state.json() as { upgradeSeq: number }).upgradeSeq).toBe(seq);
+
+    // Two presses in the same second must still move forward, or the second
+    // one is a request the device has already installed and will ignore.
+    const again = await ask();
+    expect((await again.json() as { seq: number }).seq).toBeGreaterThan(seq);
+  });
+
+  // Flashing a partition with no recovery slot behind it is the last thing that
+  // should be reachable from another origin's page.
+  test("a cross-origin upgrade is refused and moves nothing", async () => {
+    const { handler, osLink, osFirmwarePath } = await firmwareHandler();
+    await Bun.write(osFirmwarePath, zkswe(DIGEST));
+
+    const crossOrigin = await handler(new Request("http://127.0.0.1:43820/api/os/upgrade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example" },
+      body: "{}",
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect((await crossOrigin.json() as { error: string }).error).toContain("cross-origin");
+    expect(osLink.getUpgradeSeq()).toBe(0);
+
+    // JSON-only for the same reason, since a form POST cannot set the header
+    // without a preflight the browser will not send.
+    const formPost = await handler(new Request("http://127.0.0.1:43820/api/os/upgrade", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://127.0.0.1:43820" },
+      body: "{}",
+    }));
+    expect(formPost.status).toBe(400);
+    expect(osLink.getUpgradeSeq()).toBe(0);
+  });
+});
+
+describe("vibe usage routes", () => {
+  const ORIGIN = "http://127.0.0.1:43820";
+
+  function fakeSnapshot(): VibeUsageSnapshot {
+    return {
+      fetchedAt: "2026-08-14T09:00:00.000Z",
+      generatedAt: "2026-08-14T08:59:58.000Z",
+      providers: [{
+        id: "claude",
+        displayName: "Claude",
+        plan: "max",
+        fetchedAt: "2026-08-14T09:00:00.000Z",
+        stale: false,
+        metrics: [{
+          key: "session",
+          label: "Session",
+          kind: "consumption",
+          unit: "percent",
+          utilization: 0.42,
+        }],
+        spendLines: [{ label: "Today", value: "$1.20" }],
+      }],
+      errors: [],
+    };
+  }
+
+  // The real VibeStore behind the option, so the PUT rejections under test are
+  // the ones production actually raises rather than a stub's own opinion. Only
+  // `status` is faked — it is the half that talks to the vendors.
+  async function vibeOption(status: {
+    snapshot?: VibeUsageSnapshot | null;
+    error?: string | null;
+  } = {}) {
+    const { VibeStore } = await import("../src/vibe/vibe-store.ts");
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-control-vibe-"));
+    directories.push(directory);
+    const store = new VibeStore(join(directory, "vibe.json"));
+    await store.load();
+    const refreshCalls: boolean[] = [];
+    return {
+      store,
+      refreshCalls,
+      option: {
+        status: async (refresh: boolean) => {
+          refreshCalls.push(refresh);
+          return {
+            keys: { openrouter: "unset", zai: "unset" },
+            starred: store.getStarred(),
+            snapshot: status.snapshot === undefined ? fakeSnapshot() : status.snapshot,
+            error: status.error ?? null,
+          };
+        },
+        setStarred: (providerId: string, starred: unknown) => store.setStarred(providerId, starred),
+        setKey: async () => {},
+      },
+    };
+  }
+
+  test("status carries the whole catalog, the starred defaults, and the snapshot", async () => {
+    const { option, refreshCalls } = await vibeOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe: option });
+
+    const response = await handler(new Request(`${ORIGIN}/api/vibe/status`));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    // The GUI renders the catalog itself, so the route must ship all ten
+    // providers in the catalog's own order — not just the ones that answered
+    // for (the snapshot here only carries claude).
+    expect(body.catalog).toHaveLength(10);
+    expect(body.catalog.map((entry: { id: string }) => entry.id)).toEqual([
+      "claude", "codex", "cursor", "antigravity", "copilot",
+      "devin", "grok", "opencode", "openrouter", "zai",
+    ]);
+    expect(body.catalog.map((entry: { order: number }) => entry.order))
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(body.catalog[0]).toEqual({
+      id: "claude",
+      displayName: "Claude",
+      order: 1,
+      percentKeys: ["session", "weekly", "sonnet", "fable"],
+      defaultStarred: ["session", "weekly"],
+      metricLabels: {
+        session: "Session",
+        weekly: "Weekly",
+        sonnet: "Sonnet",
+        fable: "Fable",
+        extraUsage: "Extra Usage",
+      },
+    });
+
+    // A fresh store has pinned nothing, so every provider reports the catalog
+    // default — the table is complete rather than empty.
+    expect(Object.keys(body.starred)).toHaveLength(10);
+    expect(body.starred.claude).toEqual(["session", "weekly"]);
+    expect(body.starred.copilot).toEqual(["premiumCredits"]);
+    // baseUrl is gone with the third-party app; what the console needs now is
+    // which key-based vendors have a key, never the key itself.
+    expect(body.keys).toEqual({ openrouter: "unset", zai: "unset" });
+    expect(body.error).toBeNull();
+    expect(body.snapshot.providers[0].metrics[0].key).toBe("session");
+
+    // ?refresh=1 is the console's "重新读取" button; anything else must use the
+    // cache, or a chart that repaints on focus would hammer the vendors.
+    await handler(new Request(`${ORIGIN}/api/vibe/status?refresh=1`));
+    await handler(new Request(`${ORIGIN}/api/vibe/status?refresh=0`));
+    expect(refreshCalls).toEqual([false, true, false]);
+  });
+
+  test("nothing signed in is a 200 carrying the reason, not an error status", async () => {
+    const { option } = await vibeOption({
+      snapshot: null,
+      error: "no AI coding agent is signed in on this machine",
+    });
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe: option });
+
+    const response = await handler(new Request(`${ORIGIN}/api/vibe/status`));
+    // The console shows its install guide off this shape; a 503 would surface as
+    // an error toast and hide the one instruction that fixes it.
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.snapshot).toBeNull();
+    expect(typeof body.error).toBe("string");
+    expect(body.error).toContain("signed in");
+    // The catalog and the stars still render with nothing signed in.
+    expect(body.catalog).toHaveLength(10);
+    expect(body.starred.claude).toEqual(["session", "weekly"]);
+  });
+
+  test("starring a provider echoes the merged table and leaves the others on defaults", async () => {
+    const { option, store } = await vibeOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe: option });
+
+    const response = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ providerId: "claude", starred: ["weekly", "sonnet"] }),
+    }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.starred.claude).toEqual(["weekly", "sonnet"]);
+    expect(body.starred.codex).toEqual(["session", "weekly"]);
+    expect(Object.keys(body.starred)).toHaveLength(10);
+
+    // Emptying a provider is a legal state, not a reset to the default: the
+    // menu-bar strip is allowed to drop a provider entirely.
+    const cleared = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ providerId: "claude", starred: [] }),
+    }));
+    expect((await cleared.json()).starred.claude).toEqual([]);
+    await store.settled();
+  });
+
+  test("rejects a third star, an unknown provider, and a cross-origin write", async () => {
+    const { option } = await vibeOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe: option });
+
+    // Two pins per provider is the LED格 budget as much as OpenUsage's rule.
+    const tooMany = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ providerId: "claude", starred: ["session", "weekly", "sonnet"] }),
+    }));
+    expect(tooMany.status).toBe(400);
+    expect((await tooMany.json()).error).toContain("at most 2");
+
+    const unknown = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ providerId: "notaprovider", starred: ["session"] }),
+    }));
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).error).toContain("unknown vibe provider");
+
+    const missingProvider = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ starred: ["session"] }),
+    }));
+    expect(missingProvider.status).toBe(400);
+    expect((await missingProvider.json()).error).toContain("providerId is required");
+
+    const crossOrigin = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+      body: JSON.stringify({ providerId: "claude", starred: ["session"] }),
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect((await crossOrigin.json()).error).toContain("cross-origin");
+  });
+
+  test("both routes 404 when the vibe option is not wired", async () => {
+    const handler = createControlHandler(fakeWorkspaceController());
+
+    const status = await handler(new Request(`${ORIGIN}/api/vibe/status`));
+    expect(status.status).toBe(404);
+    expect((await status.json()).error).toContain("vibe usage is unavailable");
+
+    // The 404 has to come before the same-origin check, or a console probing a
+    // service without the collector would read "cross-origin" for a missing feature.
+    const starred = await handler(new Request(`${ORIGIN}/api/vibe/starred`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+      body: JSON.stringify({ providerId: "claude", starred: ["session"] }),
+    }));
+    expect(starred.status).toBe(404);
+    expect((await starred.json()).error).toContain("vibe usage is unavailable");
   });
 });

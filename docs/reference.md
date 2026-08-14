@@ -31,7 +31,6 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 | `APP_NAME` | `btc` | 全新安装或旧配置首次迁移时的默认频道名 |
 | `ADB_BIN` | 安装时自动检测 | `adb` 的绝对路径；LaunchAgent 不继承终端 PATH |
 | `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据）；**所有**设备请求都经过它，包括 live / notify |
-| `OPENUSAGE_URL` | `http://127.0.0.1:6736` | OpenUsage 本地 API 地址，VIBE 用量数据源；回环请求，与 `CLOCK_HTTP_PROXY` 无关 |
 
 ## 控制台行为
 
@@ -90,26 +89,64 @@ Frankfurter / Gold API，无备用路由），报价失败即降级显示。
 保留 GIF 帧时序，快照存于本机 `.runtime/pixel-assets`——之后预览和推送不依赖官方站点在线，
 也不会被上游改动静默替换。社区作品不随本仓库分发，界面保留作者与来源。
 
-## AI 用量（VIBE）
+## VIBE（VIBE）
 
-「AI 用量总览」（`tools:vibe-duo`，两个 AI 编码代理并排）与「AI 用量详情」
-（`tools:vibe-agent`，单个代理的指标行、进度条与重置时间）是两个常规内容类型，数值全部
-来自本机 OpenUsage 菜单栏应用的只读本地 API（`OPENUSAGE_URL`，默认
-`http://127.0.0.1:6736`）。不移植它那十个 Provider：读凭据、刷 OAuth、对接十家私有接口
-正是会烂掉的那部分代码，而走它的 API，屏上的数字与用户菜单栏里看到的**永远是同一个**
-（[ADR 0010](adr/0010-vibe-openusage-source.md)）。
+VIBE 是 **ZOS 上的一个独立 App**，在旋钮主菜单里与「音乐」「游戏」同级（顺序：音乐 / 游戏 /
+轮播 / **VIBE** / 设置）。进去以后旋钮翻页：第一页是两个代理并排的总览，之后每个代理一页
+（指标行、进度条、重置倒计时），按下在「已用」与「剩余」之间切换，长按返回。它**不是频道**——
+频道是一段定时重拉的动画，既没有输入也做不了推送，而 VIBE 之后要做本机 vibe coding 状态的
+实时联动（[ADR 0011](adr/0011-vibe-is-a-firmware-app.md)）。官方固件与两个侧载固件上没有根菜单
+可加，因此 **VIBE 只在 ZOS 上存在**。
 
-控制台的 **VIBE** 标签页对齐 OpenUsage 的 Customize：provider 列表、每个代理最多 2 个星标
-指标（`PUT /api/vibe/starred`；上屏显示的就是它们）、LED 预览，以及一键把频道布置到时钟。
-布置是按 App 名约定做的 read-modify-write：总览叫 `vibe`，每个代理的详情页叫 `vibe_<id>`
-（`vibe_claude`、`vibe_codex`……），于是旋钮直接翻页，不需要任何新协议、也不新增布置路由。
+数值由本服务自己采集，**不需要额外装任何应用**：每家一个适配器（`src/vibe/providers/<厂商>.ts`），
+读该家 CLI 自己已经留在这台 Mac 上的凭据，再直接调用该家的用量接口
+（[ADR 0010](adr/0010-vibe-native-usage-collection.md)）。
 
-**宁缺毋假**：快照缓存 15 分钟（OpenUsage 固定 5 分钟刷新的三倍，因此不复用
-`SOURCE_STALE_MS` 那 120 秒），抓取失败时在此期间沿用上一次的好数据，超过就报错而不是继续
-显示旧数字。OpenUsage 没在跑时 LED 画 `OPENUSAGE OFFLINE` 提示帧——与「未配置」的天气面
-一样，这是一种被命名的状态而不是频道故障，控制台则显示安装引导。快照超过 10 分钟会在右上角
-点一颗琥珀像素（与 OpenUsage 的 "Outdated" 同一阈值）；某个指标缺数据就整项隐藏，绝不画占位
-横杠。
+支持十家：**Claude**（钥匙串条目或 `~/.claude/.credentials.json`）、**Codex**
+（`~/.codex/auth.json` 或 `~/.config/codex/auth.json`）、**Cursor**、**Antigravity**、
+**Copilot**、**Devin**、**Grok**（`~/.grok/auth.json`）、**OpenCode**、**OpenRouter**、
+**Z.ai**。前八家借各自 CLI 的登录；**OpenRouter 与 Z.ai 本机没有 CLI 登录可借**，需要在控制台
+粘一次 API key，存于 `.runtime/vibe-keys.json`（权限 `0600`），也认各家自己的环境变量——
+OpenRouter 是 `OPENROUTER_API_KEY`，Z.ai 是 `ZAI_API_KEY` / `Z_AI_API_KEY` / `ZHIPUAI_API_KEY`；
+控制台里存的 key 优先级更高，可以盖掉服务启动时继承的那份 shell 导出。
+
+读钥匙串就是一次 `security` 调用，沿用你自己给该 CLI 条目的既有授权，**不会多弹一次授权框**；
+非 macOS 上钥匙串读取直接空转，那几家自然检测不到。凭据只在进程内读出来签一次请求就丢弃，不写
+日志、不落盘——唯一持久化的是你自己粘进来的那两把 API key。
+
+控制台的 **VIBE** 标签页列出十家代理、每家最多 2 个星标指标（`PUT /api/vibe/starred`；上屏显示
+的就是它们）、两页 LED 预览，以及一个「在时钟上打开」（走既有的 `PUT /api/os/display`
+`{focus:"vibe"}`）。指标目录、标签、默认星标与 80%/90% 两档告警颜色沿用 OpenUsage 的语义
+（它是这套采集的参考实现，运行时并不依赖它）。
+
+设备侧数据走**拉取文档的新键**，与菜单项同一份长轮询：`vibe`（代理数）、`vibea`（代理：
+id/名称/套餐）、`vibes`（该家正在顶上一次的好数据）、`vibem`（指标行：标签/已用/上限/
+重置剩余秒数）。全部是**新键**而不是给旧键加字段——已部署固件对 `item` 做严格字段数校验，
+多一个字段会让它整条丢弃，而未知的键是被静默忽略的，所以这些能安全地发给一台还不认识 VIBE 的
+面板。百分比在服务端就换算好，设备不做单位运算；没有上限的余额型指标 `limit` 发 0，面板画纯
+数值而不画进度条（凭空画一条就等于替厂商编了个上限）。星标一改就立刻重发一次，此外每 5 分钟
+一次——与采集下限同拍，所以重发不额外打厂商。
+
+**宁缺毋假，而且降级是逐家的**：
+
+- 本机没有该家凭据 → 它根本不出现在快照里。这是状态不是错误，控制台把它灰显并给一句登录提示。
+- 某家接口挂了 → 只损失它那一行：上一次的好数据继续顶 **15 分钟**并标记 `stale`，超过就整家消失，
+  只留错误；别家照常刷新。
+- 某家返回 429 → 把它挂起到 Retry-After 过去为止，冷却是逐家的，被限流的 Claude 不会拖住 Codex。
+- **一家都没登录**（或全部拒绝）→ 文档里是 `vibe\t0`，ZOS 面板画一个居中的中文词，而且**分得清
+  是哪一种空**：设备还没拿到控制台地址是「未配置」，有地址但什么都没到是「离线」，一路通到底、
+  只是本机一家都没登录才是「未登录」（`device/tc002-os/app/src/ui/VibeScreen.cpp`）——三种空共用
+  一个词，就会把用户打发去找一个他早就登录好的账号。控制台自己那块 52×16 预览画的仍是
+  `AI USAGE` / `NO LOGIN` 两行英文（`web/src/lib/vibe.ts`）。与「未配置」的天气面一样，这是一种
+  被命名的状态而不是故障，控制台侧同时显示登录/填 key 引导。
+
+控制器侧另有一层同样 15 分钟的快照缓存（`GET /api/vibe/status?refresh=1` 强制重采），因此不复用
+`SOURCE_STALE_MS` 那 120 秒。面板右上角那颗琥珀像素是**逐家**的，不是整份快照的年龄：只要当前
+这一页上有一家正顶着上一次的好数据（文档里的 `vibes` 键，也就是上面那 15 分钟的窗口），就点亮
+它——总览页是两家里任意一家，详情页就是这一家（`VibeScreen.cpp`，控制台预览同一规则）。数还是
+现有最好的那一个，所以标记而不是藏起来。某个指标缺数据则整项隐藏，绝不画占位横杠。控制台的
+代理列表另有一条 10 分钟的「Outdated」提示（`web/src/lib/vibe.ts` 的 `VIBE_OUTDATED_MS`，沿用
+OpenUsage 阈值），那是网页上整份快照的年龄，和面板上那颗像素不是一回事。
 
 ## 音乐
 
@@ -239,10 +276,11 @@ app，自己就是这台设备的系统，因此也继承了官方 app 的全部
 开机是 2460ms 的 ZOS 字标动画（火花 → 冲击波把字标从余烬里显影 → 三支笔描边 → 闪白 →
 CRT 式收拢），全程程序生成、不含任何字模，因此在字体表就位前就能跑；结束后交叉淡入主菜单。
 
-主菜单是**固定的四项**：音乐 / 游戏 / 轮播 / 设置。52×16 上放不下列表——12 像素中文格子
-横着只排得下四个，一旦要同时显示选中项和邻项就是三行都看不清——所以一页只有一项，满幅
-显示，旋钮一格滑进下一张卡片，底部一行像素轨道表示环的长度和当前位置。频道不在主菜单上：
-它们是内容不是目的地，十个频道会把另外三项挤出这个一次只显示一项的环，因此和七款游戏一样
+主菜单是**固定的五项**：音乐 / 游戏 / 轮播 / VIBE / 设置。52×16 上放不下列表——12 像素中文
+格子横着只排得下四个，一旦要同时显示选中项和邻项就是三行都看不清——所以一页只有一项，满幅
+显示，旋钮一格滑进下一张卡片，底部一行像素轨道表示环的长度和当前位置。VIBE 插在轮播与设置
+之间：前三项因此保住三个固件版本攒下来的肌肉记忆位置，设置仍旧收尾。频道不在主菜单上：
+它们是内容不是目的地，十个频道会把另外四项挤出这个一次只显示一项的环，因此和七款游戏一样
 放在下一层。
 
 | 输入 | 行为 |
@@ -257,10 +295,11 @@ CRT 式收拢），全程程序生成、不含任何字模，因此在字体表�
 静音，暗屏上加一档亮度看不出来）。它是**叠加层不是页面**——调音量不该把用户带离正在看的
 东西，也不该让长按的含义变得含糊。横条亮着的时候短按继续调亮度，不会中途跳回音量。
 
-四个入口各有各的进场动画，取自被它替换掉的两套固件的开机画面：轮播是 CRT 开机（320ms）、
+五个入口共用四种进场动画，取自被它替换掉的两套固件的开机画面：轮播是 CRT 开机（320ms）、
 音乐是均衡器升起（300ms）、游戏是卡带式扫光（280ms）、设置是抽屉落下并回弹（260ms）。
-每个都是两张成品位图之间的纯合成算子，退出就是同一个函数把进度倒着走一遍，因此进出永远
-不会跑偏。
+**VIBE 复用音乐那条均衡器**（300ms）而不是再凑第六种：刚按下的那张卡片本来就是三根顶着
+天花板往上长的柱子，柱子涨满整屏是同一个手势接着做完，不是借来一个。每个都是两张成品位图
+之间的纯合成算子，退出就是同一个函数把进度倒着走一遍，因此进出永远不会跑偏。
 
 - **轮播**：控制台里已启用的频道，一页一个，**每一页就是那个频道**——没有图标也没有名字。
   画面是服务端已经排好的内容，在它前面再画一个标签等于描述用户正在看的东西；名字只在帧还
@@ -274,6 +313,8 @@ CRT 式收拢），全程程序生成、不含任何字模，因此在字体表�
 - **音乐**：控制台当前在放什么（曲名、歌手、当前歌词行、进度）。设备侧没有音频，按键是转成
   Connect 命令由服务端执行的；进度由本地时钟按服务端给的时间戳外推，所以在几分钟才更新一次
   的链路上也能 25fps 平滑走动。侧键**不**被接管——放音乐时用户最可能去够的就是音量。
+- **VIBE**：各家 AI 编码代理的额度，一页总览加每家一页详情，内容与降级规则见上面
+  [VIBE](#vibevibe) 一节。
 - **设置**：网络、IP、控制台地址、音量、亮度、MAC、配网页地址、运行时长、版本。面板只有一
   行文字（两套字模都是 12 像素高，屏高 16），所以标签和值**在时间上**分享这一行：落到某项
   先显示标签，停留 1100ms 后标签上滑、值下滑进来，转动旋钮又倒回标签。
@@ -622,8 +663,9 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` / `POST` | `/api/market/instruments` | 列出已添加资产；按候选引用注册新资产 |
 | `GET` | `/api/market/icons/:iconRef.png` | 运行时资产的 16×16 像素图标（不可变缓存） |
 | `GET` | `/api/weather/geocode` | 按地名搜索定位候选（`?q=` 1–64 字符；Open-Meteo 免 key，服务端缓存 10 分钟） |
-| `GET` | `/api/vibe/status` | VIBE 用量快照，连同 provider 目录与星标表（只读，免同源）。`?refresh=1` 强制向 OpenUsage 抓一次，默认走缓存。OpenUsage 不可达**不算 HTTP 错误**：仍返回 200，`snapshot` 为 `null` 并附 `error`，控制台据此显示安装引导 |
+| `GET` | `/api/vibe/status` | VIBE 用量快照，连同 provider 目录、星标表与 `keys`（每个需要 key 的代理是 `stored` / `environment` / `unset`，**绝不含 key 本身**）（只读，免同源）。`?refresh=1` 强制重新采集一次，默认走缓存。一家都没登录**不算 HTTP 错误**：仍返回 200，`snapshot` 为 `null` 并附 `error`，控制台据此显示登录/填 key 引导 |
 | `PUT` | `/api/vibe/starred` | 设置某个代理上屏显示哪些指标：`{providerId, starred}`，`starred` 去重后最多 2 项；应答是与目录默认合并后的完整星标表（同源 + JSON，校验失败 400） |
+| `PUT` | `/api/vibe/key` | 为 OpenRouter / Z.ai 存一把 API key：`{providerId, key}`，`key` 传空串即清除；应答只有 `keys` 那张状态表，**绝不回显 key**（同源 + JSON，校验失败 400） |
 | `GET` | `/api/presets`、`/api/icons/:id.png` | 兼容旧客户端的市场预设与内置资产图标 |
 | `GET` / `PUT` | `/api/settings` | 兼容旧版单市场轮播设置 |
 | `POST` | `/api/preview` | 兼容旧版：直接返回渲染的 GIF/PNG 字节 |
@@ -651,10 +693,13 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` / `POST` | `/api/os/device-app/*` | ZOS 的同一套侧载生命周期（确认口令 `START_TC002_OS_SESSION`） |
 | `GET` | `/api/os/pull` | ZOS 长轮询状态文档（`?seq=`，最多挂起 8 秒；行式 `KEY\tVALUE` 纯文本，免同源） |
 | `GET` | `/api/os/frames` | ZOS 按 `?app=` 拉取一个频道渲染好的帧包（`TCF1` 原始 RGB 二进制，免同源） |
+| `GET` | `/api/os/firmware` | 设备自取要安装的固件镜像（`.runtime/tc002-os/update.img`，`mise run os-image` 打出来的 ZKSWE 容器；免同源）。带 `Content-Length` 与 `ETag` / `X-Build-Id`——**这个 id 是容器头里那份 MD5**，也就是更新器自己校验的那一份，不是 `ZOS_BUILD_ID`：git rev 编在 libzkgui.so 里，隔着一层 xz squashfs，为一个状态接口解压一兆不值当。没打包过就是 404。路径是组合根里写死的常量，请求里的任何东西都挪不动它 |
 | `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto, sleep?}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq）。`sleep` 形如 `{on, startMin, endMin, idleSec, asleep, clockSynced}`，**它在不在就是夜间息屏的能力探测**；块内数值越界按范围夹住而不是让整条心跳 400 |
 | `POST` | `/api/os/mirror` | ZOS 回传面板实拍帧（正文即 2496 字节原始 RGB，免同源）；应答 `{wanted}` 告诉设备是否继续推 |
 | `GET` | `/api/os/mirror` | 控制台取最新一帧，**取本身就是订阅**：10 秒不取设备自动停流 |
-| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
+| `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, upgradeSeq, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`upgradeSeq` 是至今要求过多少次安装，控制台靠它看出「请求还悬着」——设备装完就重启，这中间没有别的回执。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
+| `GET` | `/api/os/firmware/status` | 控制台读镜像状态：`{packed, image, upgradeSeq}`，`image` 是 `{bytes, buildId, builtAt}` 或 `null`。`builtAt` 是镜像文件的 mtime，回答的是「这是不是我刚打的那一份」；`packed` 明写而不靠字段有无去猜——它旁边就是那颗改写闪存的按钮 |
+| `POST` | `/api/os/upgrade` | 要求设备安装已打包的镜像：正文 `{}`，应答 `{seq}`。**没打包过是 409**——序列照发的话，设备去取镜像只会拿到 404 然后停下，控制台却在那儿显示「正在安装」。设备对同一个序列每次开机只认一次；安装会重启设备，链路中途必然断，这是设计使然而不是故障 |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
 | `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值。只写请求里点名的那一项：另一项也会随 `setvolseq` / `setbriseq` 一起留在文档里，但序列不动，面板因此只为用户真正动过的那一项亮 bar |
@@ -672,7 +717,8 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/music/device/now`、`/api/music/device/audio` | 固件读取当前曲目歌词与下载音频。`/now` 按查询参数版本化：不带 `?v` 逐字节返回原格式 `DUR\t<ms>` + `<startMs>\t<text>`（已部署的解析器把非 `DUR` 的键当起点，新增记录类型会被渲染成乱码行），`?v=2` 返回 `V\t2`、`DUR`、`L\t<startMs>\t<sungEndMs>\t<text>`，以及紧跟其后可选的 `W\t<d0,w0,…>` 逐字表 |
 
 写接口仅接受 JSON 并执行同源检查（设备上报的 `report` / `heartbeat` 以及 ZOS 的
-`/api/os/pull`、`/api/os/frames`、`/api/os/report`、`POST /api/os/mirror` 除外，它们的调用方
+`/api/os/pull`、`/api/os/frames`、`/api/os/firmware`、`/api/os/report`、`POST /api/os/mirror`
+除外，它们的调用方
 是时钟固件，不是浏览器，没有 Origin 可发；`POST /api/os/mirror` 的正文也不是 JSON 而是原始
 RGB——套一层 base64 JSON 信封要多花三分之一的字节，换不来固件用得上的任何东西）；请求体
 上限 256 KiB。工作区最多 24 个频道、每频道 48 项、

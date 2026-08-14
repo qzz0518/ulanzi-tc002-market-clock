@@ -133,6 +133,11 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
  *   lyricend\t21500
  *   lyricuntil\t34800
  *   lyricw\t0,420,420,380,800,300,…
+ *   vibe\t2
+ *   vibea\tclaude\tClaude\tMax 20x
+ *   vibem\tclaude\tSession\t11\t100\t18000
+ *   vibea\tcodex\tCodex\tPlus
+ *   vibes\tcodex\t1
  *
  * Parsing is total: any line it does not recognise is skipped rather than
  * failing the document. A firmware that refuses to parse a response it half
@@ -159,7 +164,11 @@ class StateDoc {
    */
   static const int kProtocol = 2;
 
-  enum Kind { kChannel, kMusic, kGame, kSettings };
+  // Appended rather than slotted in beside kGame, where 「VIBE」 sits on the
+  // ring: nothing persists these integers, but menuSignature prints them, and
+  // renumbering an existing kind would make every stored signature compare
+  // unequal once — a free rebuild of the channel ring for no news at all.
+  enum Kind { kChannel, kMusic, kGame, kSettings, kVibe };
 
   struct Item {
     Kind kind;
@@ -205,6 +214,73 @@ class StateDoc {
    */
   static const int kMinTtlMs = 5000;
 
+  /**
+   * One quota row of one AI coding agent, already reduced to integers.
+   *
+   * The service does every unit conversion: percent-shaped metrics arrive as
+   * used/limit out of the vendor's own ceiling, and the panel does no arithmetic
+   * beyond used/limit. That is deliberate — "is this metric a percentage, a
+   * dollar balance or a credit count" is the kind of question that grows a table
+   * of vendor rules, and a table of vendor rules is the one thing this device
+   * must never hold: it cannot be updated without a reflash.
+   */
+  struct VibeMetric {
+    /**
+     * The vendor's own row label — Session, Weekly, Credits.
+     *
+     * Not translated and not normalised, so what the console shows and what the
+     * panel shows are the same word. The panel has room for one character of it
+     * (see ui/VibeScreen), which is a layout decision and not a wire one.
+     */
+    std::string label;
+    int used;   // 0..999; the service clamps, so three digit cells always suffice
+    /**
+     * The vendor's ceiling, or 0 when it named none.
+     *
+     * Zero is a STATE, not a missing value: a credit balance genuinely has no
+     * ceiling, and a screen that divided by it would invent a percentage nobody
+     * quoted. Such a row draws a bare number and no meter.
+     */
+    int limit;
+    /**
+     * Seconds until this quota resets, RELATIVE, or -1 when unknown.
+     *
+     * Relative because this device's wall clock may never have been synced —
+     * "resets in 6 days" needs no calendar, and an absolute timestamp compared
+     * against an unsynced clock would count down to a moment in the past.
+     */
+    int resetSec;
+
+    VibeMetric() : used(0), limit(0), resetSec(-1) {}
+  };
+
+  /**
+   * One signed-in agent, as the service last read it from that vendor.
+   *
+   * `stale` means the vendor refused this round and the numbers are the last
+   * good ones still being held up — the panel marks it rather than hiding it,
+   * because a number the user cannot see is worse than one they can distrust.
+   */
+  struct VibeAgent {
+    std::string id;     // catalog id, also the key into visual/VibeIcons.h
+    std::string label;  // the vendor's display name
+    std::string plan;   // the vendor's own plan string, e.g. "Max 20x"
+    bool stale;
+    std::vector<VibeMetric> metrics;  // at most kMaxVibeMetrics, in starred order
+
+    VibeAgent() : stale(false) {}
+  };
+
+  /**
+   * Caps, matched to the service's MAX_VIBE_AGENTS / MAX_VIBE_METRICS.
+   *
+   * Enforced again here rather than trusted: the service clamps what it sends,
+   * but the page has exactly two metric rows and a ring the knob has to be able
+   * to get around, and neither should depend on the other end behaving.
+   */
+  static const int kMaxVibeAgents = 10;
+  static const int kMaxVibeMetrics = 2;
+
   StateDoc();
 
   /** Returns false only when the document carried no usable `seq`. */
@@ -214,11 +290,22 @@ class StateDoc {
   bool pinned() const { return mPinned; }
   /** True while the console is watching; the device streams frames only then. */
   bool mirror() const { return mMirror; }
+  /** Console-initiated install request; 0 when never asked. */
+  int upgradeSeq() const { return mUpgradeSeq; }
   const std::string& focus() const { return mFocus; }
   const std::vector<Item>& items() const { return mItems; }
 
   /** Index of `focus` in items(), or -1. */
   int focusIndex() const;
+
+  /**
+   * The usage rows behind 「VIBE」, in the service's catalog order.
+   *
+   * Empty means "nobody is signed in on the host", which is a state the screen
+   * has words for — and it is also what a service older than this firmware
+   * looks like, which is the same situation from the panel's side.
+   */
+  const std::vector<VibeAgent>& vibe() const { return mVibe; }
 
   /**
    * Now playing, resolved to text by the service.
@@ -340,8 +427,10 @@ class StateDoc {
   int mSeq;
   bool mPinned;
   bool mMirror;
+  int mUpgradeSeq;
   std::string mFocus;
   std::vector<Item> mItems;
+  std::vector<VibeAgent> mVibe;
   SettingsRequest mSettings;
   SleepRequest mSleep;
   std::vector<Input> mInputs;

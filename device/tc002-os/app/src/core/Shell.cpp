@@ -157,6 +157,9 @@ void Shell::deliverRawButton(Input which, bool down, int nowMs) {
 
 bool Shell::isAnimating(int nowMs) const {
   if (mOverlay.visible(nowMs)) return true;
+  // The install takeover animates on its own: a sweeping pixel and a bar that
+  // fills with bytes rather than with time.
+  if (mUpgrade.visible(nowMs)) return true;
   if (mMotion != kIdle && (nowMs - mTransitionStartMs) < mMotionMs) return true;
   Screen* current = top();
   return current != 0 && current->isAnimating(nowMs);
@@ -171,6 +174,10 @@ void Shell::render(Surface& out, int nowMs) {
   if (mMotion == kIdle || elapsed >= mMotionMs || !mHasOutgoing) {
     current->render(out, nowMs);
     mOverlay.render(out, nowMs);
+    // Last, because it outranks everything: it replaces the frame rather than
+    // compositing over it, and a volume bar drawn on top of 安装中 would be the
+    // panel arguing with itself about what is happening.
+    mUpgrade.render(out, nowMs);
     return;
   }
 
@@ -190,6 +197,7 @@ void Shell::render(Surface& out, int nowMs) {
   // Composited last, and over the transition too: a volume press mid-move must
   // still show its bar rather than being swallowed by the animation.
   mOverlay.render(out, nowMs);
+  mUpgrade.render(out, nowMs);
 }
 
 }  // namespace tcos

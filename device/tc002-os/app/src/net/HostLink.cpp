@@ -6,6 +6,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "net/FirmwareUpdate.h"
+#include "platform/ProvisionLog.h"
 #include "net/HttpClient.h"
 
 namespace tcos {
@@ -84,6 +86,10 @@ HostLink::HostLink()
       mFetchingSeq(0),
       mFetchFailed(false),
       mPendingReady(false),
+      mUpgradeArmedSeq(0),
+      mUpgradeStartedSeq(0),
+      mUpgradeInstallReady(false),
+      mUpgradeSeqPath(ProvisionLog::upgradeSeqPath()),
       mMirrorDirty(false),
       mTelRestarts(0),
       mTelBattery(-1),
@@ -233,6 +239,18 @@ void HostLink::runWorker() {
       ::pthread_mutex_unlock(&mLock);
     }
 
+    // --- firmware image ----------------------------------------------------
+    //
+    // On this thread, and not on a fourth one, for the reason the frame fetch
+    // is here: an ~1 MB download is the same shape of job, and a thread that
+    // exists to be blocked once in the life of a device is a thread that is
+    // never exercised. What it costs is honest — the mirror and the telemetry
+    // stall for the length of the download, so the console's preview freezes
+    // while the panel keeps rendering — and it is bounded by the fact that the
+    // device reboots into the new firmware immediately afterwards.
+    const int upgradeSeq = takeUpgradeRequest();
+    if (upgradeSeq != 0) runUpgrade(upgradeSeq);
+
     // --- transport commands ------------------------------------------------
     // Drained before the mirror so a button press is not stuck behind a frame
     // upload: the mirror can miss a frame, a press cannot miss at all.
@@ -325,6 +343,7 @@ void HostLink::runWorker() {
       report.sleepIdleSec = sleepIdleSec;
       report.sleepAsleep = sleepAsleep;
       report.sleepClockSynced = sleepClockSynced;
+      report.upgradeSeqInstalled = installedUpgradeSeq();
 
       HttpClient::Response response;
       HttpClient::perform(mBaseUrl + "/api/os/report", "POST", "application/json",
@@ -333,6 +352,146 @@ void HostLink::runWorker() {
 
     ::usleep(30000);  // 30 ms: fine enough to hit the 100 ms mirror cadence
   }
+}
+
+void HostLink::runUpgrade(int seq) {
+  // A local, so the staging file's owner dies with the attempt: the destructor
+  // unlinks a partial that nothing else got round to cleaning up.
+  FirmwareUpdate update;
+  const FirmwareUpdate::Verdict verdict =
+      update.fetch(mBaseUrl + "/api/os/firmware", FirmwareUpdate::stagingDir(),
+                   kFirmwareTimeoutMs, &HostLink::upgradeProgress, this);
+  noteUpgradeResult(seq, static_cast<int>(verdict));
+}
+
+void HostLink::upgradeProgress(void* self, long received, long total) {
+  static_cast<HostLink*>(self)->noteUpgradeProgress(received, total);
+}
+
+int HostLink::takeUpgradeRequest() {
+  ::pthread_mutex_lock(&mLock);
+  int seq = 0;
+  if (mUpgradeArmedSeq != 0 && mUpgradeArmedSeq != mUpgradeStartedSeq) {
+    seq = mUpgradeArmedSeq;
+    mUpgradeStartedSeq = seq;
+    mUpgrade.stage = UpgradeState::kDownloading;
+    mUpgrade.seq = seq;
+    mUpgrade.received = 0;
+    mUpgrade.total = 0;
+    mUpgrade.verdict = 0;
+  }
+  ::pthread_mutex_unlock(&mLock);
+  return seq;
+}
+
+void HostLink::noteUpgradeProgress(long received, long total) {
+  ::pthread_mutex_lock(&mLock);
+  mUpgrade.received = received;
+  mUpgrade.total = total;
+  ::pthread_mutex_unlock(&mLock);
+}
+
+void HostLink::noteUpgradeResult(int seq, int verdict) {
+  ::pthread_mutex_lock(&mLock);
+  if (seq == mUpgrade.seq) {
+    if (verdict == static_cast<int>(FirmwareUpdate::kOk)) {
+      mUpgrade.stage = UpgradeState::kInstalling;
+      mUpgradeInstallReady = true;
+    } else {
+      mUpgrade.stage = UpgradeState::kFailed;
+      mUpgrade.verdict = verdict;
+    }
+  }
+  ::pthread_mutex_unlock(&mLock);
+}
+
+int HostLink::readUpgradeSeq(const char* path) {
+  FILE* f = ::fopen(path, "rb");
+  if (f == 0) return 0;
+  char buf[32];
+  const size_t got = ::fread(buf, 1, sizeof(buf) - 1, f);
+  ::fclose(f);
+  // A record longer than the buffer is not a record we wrote. Refusing it whole
+  // beats parsing its first 31 bytes, which is how "12 gigabytes of zeroes that
+  // happen to start with a digit" becomes a valid id.
+  if (got >= sizeof(buf) - 1) return 0;
+  buf[got] = '\0';
+
+  // THE ASYMMETRY IS THE WHOLE DESIGN. Reading a good record as 0 costs one
+  // extra install. Reading junk as a large number costs the device: the guard
+  // is "newer than what I installed", so a record of INT_MAX can never be
+  // beaten and that unit is off the update path permanently.
+  //
+  // Hand-rolled rather than strtol, and the reason is testability, not taste.
+  // `long` is 32 bits on the ARM this ships to, so strtol clamps an overflowing
+  // value to LONG_MAX == 0x7fffffff — indistinguishable from a legal id, and a
+  // `> 0x7fffffff` range test waves it straight through. That test lived here
+  // and PASSED the self-check for one reason only: the self-check builds LP64
+  // on the host, where `long` is wider and the same line behaves the opposite
+  // way. A digit loop with an explicit ceiling checked on EVERY digit behaves
+  // identically at both widths, which is what makes the host assertion below
+  // evidence about the device rather than about the build machine.
+  const char* p = buf;
+  if (*p < '0' || *p > '9') return 0;  // not a number at all
+  long long value = 0;
+  for (; *p >= '0' && *p <= '9'; ++p) {
+    value = value * 10 + (*p - '0');
+    if (value > 2147483647LL) return 0;
+  }
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+  if (*p != '\0') return 0;  // trailing junk: not ours, do not guess
+  if (value <= 0) return 0;
+  return static_cast<int>(value);
+}
+
+bool HostLink::writeUpgradeSeq(const char* path, int seq) {
+  if (seq <= 0) return false;
+  char buf[32];
+  ::snprintf(buf, sizeof(buf), "%d\n", seq);
+  // Compare-first and fsync'd: /data is jffs2, and this record is read exactly
+  // once, on the far side of a reboot the vendor chain performs without asking.
+  if (!ProvisionLog::writeFileIfChanged(path, buf)) return false;
+  // Read it back through the guard's own parser. fwrite reporting success says
+  // the bytes left this process; what matters is the value a LATER BOOT will
+  // parse, and those are not the same claim.
+  return readUpgradeSeq(path) == seq;
+}
+
+int HostLink::installedUpgradeSeq() const {
+  return readUpgradeSeq(mUpgradeSeqPath.c_str());
+}
+
+void HostLink::setUpgradeSeqPath(const char* path) {
+  if (path != 0) mUpgradeSeqPath = path;
+}
+
+bool HostLink::noteUpgradeInstalled(int seq) {
+  return writeUpgradeSeq(mUpgradeSeqPath.c_str(), seq);
+}
+
+void HostLink::noteInstallFailed(int reason) {
+  ::pthread_mutex_lock(&mLock);
+  mUpgrade.stage = UpgradeState::kFailed;
+  mUpgrade.verdict = kInstallVerdictBase + reason;
+  // The install flag goes with it. A reason to stop is not a reason to leave a
+  // loaded trigger behind for the next tick to pull.
+  mUpgradeInstallReady = false;
+  ::pthread_mutex_unlock(&mLock);
+}
+
+bool HostLink::takeUpgradeInstallReady() {
+  ::pthread_mutex_lock(&mLock);
+  const bool ready = mUpgradeInstallReady;
+  mUpgradeInstallReady = false;
+  ::pthread_mutex_unlock(&mLock);
+  return ready;
+}
+
+HostLink::UpgradeState HostLink::upgradeState() const {
+  ::pthread_mutex_lock(&mLock);
+  const UpgradeState copy = mUpgrade;
+  ::pthread_mutex_unlock(&mLock);
+  return copy;
 }
 
 std::string HostLink::reportBody(const Report& report) {
@@ -372,7 +531,11 @@ std::string HostLink::reportBody(const Report& report) {
              // than show a black rectangle; the config is the EFFECTIVE one,
              // which is the only truth a settings form should render.
              "\"sleep\":{\"on\":%s,\"startMin\":%d,\"endMin\":%d,\"idleSec\":%d,"
-             "\"asleep\":%s,\"clockSynced\":%s}}",
+             "\"asleep\":%s,\"clockSynced\":%s},"
+             // What this device has already installed, so the console can
+             // retire a standing request on evidence rather than on a reboot
+             // it inferred from an uptime that happened to go backwards.
+             "\"upgradeSeqInstalled\":%d}",
              screen.c_str(), focus.c_str(), wifi.c_str(), ip.c_str(),
              static_cast<unsigned long long>(report.uptimeMs), report.freeKb,
              report.supplicantRestarts, report.batteryPercent,
@@ -380,7 +543,7 @@ std::string HostLink::reportBody(const Report& report) {
              StateDoc::kProtocol,
              report.sleepOn ? "true" : "false", report.sleepStartMin, report.sleepEndMin,
              report.sleepIdleSec, report.sleepAsleep ? "true" : "false",
-             report.sleepClockSynced ? "true" : "false");
+             report.sleepClockSynced ? "true" : "false", report.upgradeSeqInstalled);
   // Rebuilt from the C string so the result ends at the terminator rather than
   // carrying the buffer's slack as trailing NULs.
   return std::string(buffer.c_str());
@@ -394,6 +557,38 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   mSnapshot.mirrorWanted = doc.mirror();
   mSnapshot.focus = doc.focus();
   mSnapshot.items = doc.items();
+  // Copied here with everything else. A document with no VIBE block means the
+  // host has nobody signed in, and keeping the previous agents alive through it
+  // would leave quota numbers on the panel that the service has stopped
+  // standing behind.
+  mSnapshot.vibe = doc.vibe();
+  mSnapshot.upgradeSeq = doc.upgradeSeq();
+  // The console asking for an install ARMS A DOWNLOAD; nothing is installed
+  // until a whole image is on the device. The gate is here rather than in the
+  // UI tick because the download belongs to the worker, and because this
+  // function is the one entry point a host self-check can drive — the pull
+  // thread's body needs a socket, and a check that re-implemented the gate
+  // would agree with a runPull that dropped the field.
+  //
+  // TWO GUARDS, and they are asking different questions. `!= mUpgradeArmedSeq`
+  // is in memory and means "this is not the request I am already working on" —
+  // the document repeats the same id on every poll, and without it each poll
+  // would start another download. It is inequality because a CHANGE of id is
+  // what arms one.
+  // ...and not one we have already installed. That record is on disk, because
+  // a successful install REBOOTS: an in-memory guard is guaranteed to be gone
+  // exactly when it is needed, and the device reinstalls the same image on
+  // every boot until someone withdraws the request. Measured on hardware —
+  // the loop is real and it takes the panel down with it.
+  if (doc.upgradeSeq() > 0 && doc.upgradeSeq() != mUpgradeArmedSeq &&
+      doc.upgradeSeq() > installedUpgradeSeq()) {
+    mUpgradeArmedSeq = doc.upgradeSeq();
+    mUpgrade.stage = UpgradeState::kPending;
+    mUpgrade.seq = mUpgradeArmedSeq;
+    mUpgrade.received = 0;
+    mUpgrade.total = 0;
+    mUpgrade.verdict = 0;
+  }
   mSnapshot.consecutiveFailures = 0;
   // Every now-playing field, unconditionally — including the ones the document
   // left out. A document with no `np` block means nothing is playing, and

@@ -53,6 +53,54 @@ class HttpClient {
 
   static bool get(const std::string& url, Response* out, int timeoutMs);
 
+  /**
+   * Where a streamed body goes. Two function pointers rather than an abstract
+   * class: this device has one streaming caller and a vtable per sink is a cost
+   * with nothing to buy.
+   *
+   * `ready` is called ONCE, after the status line and the headers are complete
+   * and before a single body byte has been delivered, with the length the peer
+   * declared or -1 when it declared none. Returning false abandons the exchange
+   * having written nothing anywhere — which is the point of the callback: the
+   * firmware image's size and status checks have to happen before a file is
+   * opened, not after 8 MiB has landed on flash.
+   *
+   * `data` receives the body in arrival-sized pieces and returns false to abort.
+   */
+  struct Stream {
+    bool (*ready)(void* ctx, const Response& head, long declaredBytes);
+    bool (*data)(void* ctx, const char* bytes, size_t count);
+    void* ctx;
+
+    Stream() : ready(0), data(0), ctx(0) {}
+  };
+
+  /**
+   * A GET whose body is handed to `sink` instead of being buffered.
+   *
+   * This exists because `get()` cannot serve the firmware image. It buffers the
+   * whole reply and then copies the body out of it, so a 1.5 MB image is ~3 MB
+   * of peak heap on a box with ~1 MB free — and the partition it is staged for
+   * is 8 MiB, so the honest ceiling is over five times worse. The image also has
+   * to reach a file rather than a string: it is written to flash afterwards, and
+   * a truncated image that got that far is the one failure this whole path
+   * exists to make impossible.
+   *
+   * Returns true ONLY when the exchange completed: headers parsed, `ready`
+   * accepted, every `data` call accepted, and — when the peer declared a
+   * Content-Length — exactly that many bytes delivered. A short read is
+   * therefore false rather than a partial success, which is what lets the caller
+   * treat `true` as "the whole image arrived".
+   *
+   * A reply that is not a plain 2xx, or one that is chunked, never reaches the
+   * sink at all: it is buffered into `out->body` (bounded) and reported as a
+   * failure. Error pages are small and worth reading; a chunked image cannot be
+   * checked for completeness against a declared length, and "cannot be checked"
+   * and "must not be flashed" are the same thing here.
+   */
+  static bool streamGet(const std::string& url, Response* out, const Stream& sink,
+                        int timeoutMs);
+
   // Pure and therefore directly assertable, including on the malformed replies
   // a half-open connection produces.
   static bool parseUrl(const std::string& url, std::string* host, int* port,
@@ -88,6 +136,10 @@ class HttpClient {
   // service that has lost its mind, and buffering it would take the device with
   // it.
   static const int kMaxResponseBytes = 2 * 1024 * 1024;
+
+  // A header block larger than this is a peer that has lost the plot, and
+  // streamGet has to stop growing its buffer somewhere before the body starts.
+  static const int kMaxHeaderBytes = 8192;
 
  private:
   HttpClient();
