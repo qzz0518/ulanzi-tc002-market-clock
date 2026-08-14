@@ -1,13 +1,14 @@
 /**
- * Turns a hand-picked rectangle of an uploaded picture into the whole 52×16
- * panel. There is exactly one knob — the crop — because the panel's size and
- * aspect are fixed and everything else is a decision the code can make better
- * than a slider can.
+ * Turns a hand-picked rectangle of an uploaded picture into the 52×16 panel.
+ * Two knobs, and only two: the shape the selection box is allowed to take, and
+ * what to do when that shape is not the panel's. Everything downstream of the
+ * sampling grid — tone, saturation, sharpening — is a decision the code makes
+ * better than a slider can.
  */
 
 export const PANEL_WIDTH = 52;
 export const PANEL_HEIGHT = 16;
-/** 52:16 = 13:4 = 3.25. Any other crop shape would have to letterbox or squash. */
+/** 52:16 = 13:4 = 3.25. A selection of any other shape must letterbox or squash. */
 export const PANEL_ASPECT = PANEL_WIDTH / PANEL_HEIGHT;
 const PANEL_CELLS = PANEL_WIDTH * PANEL_HEIGHT;
 
@@ -17,6 +18,27 @@ const PANEL_CELLS = PANEL_WIDTH * PANEL_HEIGHT;
  * pixels; anything below it is a mis-drag, not an intention.
  */
 const MIN_CROP_WIDTH = 13;
+/** The same floor stated for the other axis, for boxes that are not 13:4. */
+const MIN_CROP_HEIGHT = MIN_CROP_WIDTH / PANEL_ASPECT;
+
+/**
+ * The shape the selection box holds while it is dragged. A panel-shaped box can
+ * only ever frame a 3.25:1 band, which on a square app icon is a strip through
+ * the middle with the top and bottom of the logo unreachable — hence the other
+ * two. "panel" stays the default: it is the only shape that reaches the panel
+ * with nothing cut and nothing left dark.
+ */
+export type CropRatio = "panel" | "free" | "square";
+
+/** How a selection that is not 52:16 is mapped onto the panel. */
+export type FitMode = "cover" | "contain" | "stretch";
+
+/** The ratio the box is pinned to, or null when the two axes move apart. */
+function lockedAspect(ratio: CropRatio): number | null {
+  if (ratio === "panel") return PANEL_ASPECT;
+  if (ratio === "square") return 1;
+  return null;
+}
 
 export interface PixelView {
   width: number;
@@ -40,25 +62,40 @@ function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
 }
 
-/** The widest 52:16 rectangle this image can hold, ignoring where it sits. */
-function maxCropWidth(view: PixelView): number {
-  return Math.max(1, Math.min(view.width, view.height * PANEL_ASPECT));
+/** The widest rectangle of this shape the image can hold, ignoring where it sits. */
+function maxCropWidth(view: PixelView, ratio: CropRatio): number {
+  const aspect = lockedAspect(ratio);
+  return Math.max(1, aspect === null ? view.width : Math.min(view.width, view.height * aspect));
 }
 
-function minCropWidth(view: PixelView): number {
+/** Only a free box needs this: for a locked one the height follows the width. */
+function maxCropHeight(view: PixelView, ratio: CropRatio): number {
+  const aspect = lockedAspect(ratio);
+  return Math.max(1, aspect === null ? view.height : maxCropWidth(view, ratio) / aspect);
+}
+
+function minCropWidth(view: PixelView, ratio: CropRatio): number {
   // A source smaller than the floor still deserves a crop, so the floor gives
   // way to the image rather than the other way round.
-  return Math.min(MIN_CROP_WIDTH, maxCropWidth(view));
+  return Math.min(MIN_CROP_WIDTH, maxCropWidth(view, ratio));
+}
+
+function minCropHeight(view: PixelView, ratio: CropRatio): number {
+  return Math.min(MIN_CROP_HEIGHT, maxCropHeight(view, ratio));
 }
 
 /**
- * Keeps a rectangle legal: locked to the panel ratio, no smaller than the
- * floor, no larger than the image, and fully inside it. Width is authoritative
- * because the panel is wide — height is always derived from it.
+ * Keeps a rectangle legal: held to the chosen shape, no smaller than the floor,
+ * no larger than the image, and fully inside it. Under a locked ratio the width
+ * is authoritative and the height is derived from it, because the panel is wide
+ * and the width is the extent the user is really choosing.
  */
-export function clampCrop(view: PixelView, rect: CropRect): CropRect {
-  const width = clamp(rect.width, minCropWidth(view), maxCropWidth(view));
-  const height = width / PANEL_ASPECT;
+export function clampCrop(view: PixelView, rect: CropRect, ratio: CropRatio = "panel"): CropRect {
+  const aspect = lockedAspect(ratio);
+  const width = clamp(rect.width, minCropWidth(view, ratio), maxCropWidth(view, ratio));
+  const height = aspect === null
+    ? clamp(rect.height, minCropHeight(view, ratio), maxCropHeight(view, ratio))
+    : width / aspect;
   return {
     x: clamp(rect.x, 0, Math.max(0, view.width - width)),
     y: clamp(rect.y, 0, Math.max(0, view.height - height)),
@@ -68,12 +105,15 @@ export function clampCrop(view: PixelView, rect: CropRect): CropRect {
 }
 
 /**
- * The largest panel-shaped rectangle, centred. This is what the user sees
- * before touching anything, so it has to be the answer for "just pixelize it".
+ * The largest rectangle of this shape, centred. This is what the user sees
+ * before touching anything, so it has to be the answer for "just pixelize it" —
+ * and under "square" it is the whole of a square icon, framed by picking the
+ * ratio and nothing else.
  */
-export function defaultCrop(view: PixelView): CropRect {
-  const width = maxCropWidth(view);
-  const height = width / PANEL_ASPECT;
+export function defaultCrop(view: PixelView, ratio: CropRatio = "panel"): CropRect {
+  const aspect = lockedAspect(ratio);
+  const width = maxCropWidth(view, ratio);
+  const height = aspect === null ? maxCropHeight(view, ratio) : width / aspect;
   return {
     x: (view.width - width) / 2,
     y: (view.height - height) / 2,
@@ -83,15 +123,23 @@ export function defaultCrop(view: PixelView): CropRect {
 }
 
 /** Drag inside the box: same size, new top-left, clamped to the image. */
-export function moveCrop(view: PixelView, rect: CropRect, x: number, y: number): CropRect {
-  return clampCrop(view, { ...rect, x, y });
+export function moveCrop(
+  view: PixelView,
+  rect: CropRect,
+  x: number,
+  y: number,
+  ratio: CropRatio = "panel",
+): CropRect {
+  return clampCrop(view, { ...rect, x, y }, ratio);
 }
 
 /**
- * Drag a corner: the opposite corner of `rect` stays pinned and the ratio never
- * moves. The dragged pointer rarely sits on a 52:16 diagonal, so the axis the
+ * Drag a corner: the opposite corner of `rect` stays pinned. Under a locked
+ * ratio the dragged pointer rarely sits on the box's diagonal, so the axis the
  * user pulled hardest wins and the other one follows — dragging sideways and
  * dragging down both grow the box, which is what a corner handle promises.
+ * Under "free" there is nothing to reconcile: each axis takes its own pointer
+ * distance, and the corner is the only handle needed to reach any rectangle.
  *
  * `rect` must be the rectangle the drag *started* from, not the previous
  * frame's: the anchor is read off it, so feeding it the box's own output makes
@@ -103,6 +151,7 @@ export function resizeCrop(
   handle: CropHandle,
   pointerX: number,
   pointerY: number,
+  ratio: CropRatio = "panel",
 ): CropRect {
   const anchorX = handle === "nw" || handle === "sw" ? rect.x + rect.width : rect.x;
   const anchorY = handle === "nw" || handle === "ne" ? rect.y + rect.height : rect.y;
@@ -112,18 +161,25 @@ export function resizeCrop(
   // How far the box may grow before it walks off the image on either axis.
   const roomX = deltaX >= 0 ? view.width - anchorX : anchorX;
   const roomY = deltaY >= 0 ? view.height - anchorY : anchorY;
-  const width = clamp(
-    Math.max(Math.abs(deltaX), Math.abs(deltaY) * PANEL_ASPECT),
-    minCropWidth(view),
-    Math.max(minCropWidth(view), Math.min(roomX, roomY * PANEL_ASPECT)),
-  );
-  const height = width / PANEL_ASPECT;
+  const aspect = lockedAspect(ratio);
+  const floorX = minCropWidth(view, ratio);
+  const floorY = minCropHeight(view, ratio);
+  const width = aspect === null
+    ? clamp(Math.abs(deltaX), floorX, Math.max(floorX, roomX))
+    : clamp(
+      Math.max(Math.abs(deltaX), Math.abs(deltaY) * aspect),
+      floorX,
+      Math.max(floorX, Math.min(roomX, roomY * aspect)),
+    );
+  const height = aspect === null
+    ? clamp(Math.abs(deltaY), floorY, Math.max(floorY, roomY))
+    : width / aspect;
   return clampCrop(view, {
     x: deltaX >= 0 ? anchorX : anchorX - width,
     y: deltaY >= 0 ? anchorY : anchorY - height,
     width,
     height,
-  });
+  }, ratio);
 }
 
 /**
@@ -152,6 +208,7 @@ export function beginCropDrag(
   handle: CropHandle | null,
   pointerX: number,
   pointerY: number,
+  ratio: CropRatio = "panel",
 ): { drag: CropDrag; rect: CropRect } {
   if (handle) return { drag: { kind: "resize", handle, baseRect: rect }, rect };
   const inside = pointerX >= rect.x
@@ -172,7 +229,7 @@ export function beginCropDrag(
     width: 0,
     height: 0,
   };
-  return { drag: { kind: "resize", handle: "se", baseRect }, rect: clampCrop(view, baseRect) };
+  return { drag: { kind: "resize", handle: "se", baseRect }, rect: clampCrop(view, baseRect, ratio) };
 }
 
 /** The box for one pointer position, always measured from where the drag began. */
@@ -181,10 +238,130 @@ export function applyCropDrag(
   drag: CropDrag,
   pointerX: number,
   pointerY: number,
+  ratio: CropRatio = "panel",
 ): CropRect {
   return drag.kind === "move"
-    ? moveCrop(view, drag.baseRect, pointerX - drag.grabX, pointerY - drag.grabY)
-    : resizeCrop(view, drag.baseRect, drag.handle, pointerX, pointerY);
+    ? moveCrop(view, drag.baseRect, pointerX - drag.grabX, pointerY - drag.grabY, ratio)
+    : resizeCrop(view, drag.baseRect, drag.handle, pointerX, pointerY, ratio);
+}
+
+/** A rectangle in whole panel cells — the only unit an LED grid has. */
+export interface PanelRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * What a fit mode decided: which part of the source is read, where it lands on
+ * the panel, and the two facts a readout has to be able to state — that
+ * something was thrown away, and that something is left dark.
+ */
+export interface PixelizePlan {
+  /** The region actually sampled. Smaller than the selection only under cover. */
+  source: CropRect;
+  /** Where it lands. Cells outside it stay off; nothing else is ever drawn. */
+  destination: PanelRect;
+  /** True when the fit discarded part of what the user framed. */
+  cropped: boolean;
+  /**
+   * Which axis ends up dark because the picture could not fill it. Never both:
+   * contain scales until one edge is touched, so one extent always lands on the
+   * panel's own.
+   */
+  padding: "none" | "sides" | "bands";
+  /**
+   * Source pixels per cell, per axis — the one number that predicts whether the
+   * result will read at all. Stretch scales the axes by different amounts and
+   * contain rounds to whole cells, so `uniform` says whether quoting a single
+   * factor is the whole truth or half of it.
+   */
+  shrink: { x: number; y: number; uniform: boolean };
+}
+
+/**
+ * Non-finite and zero extents are mis-drags, not intentions, but they still
+ * have to produce a plan; 1e-3 is the same floor boxSample applies, so a
+ * degenerate rect divides by the same number everywhere.
+ */
+const MIN_EXTENT = 1e-3;
+
+function extent(value: number): number {
+  return Number.isFinite(value) && value > MIN_EXTENT ? value : MIN_EXTENT;
+}
+
+/**
+ * Anything inside this of the panel ratio counts as the panel ratio. A
+ * panel-locked box gets its height by dividing by 3.25, so its aspect is only
+ * 13:4 up to one rounding step; treating that as "needs cutting" would shave a
+ * sub-pixel off the default crop of every picture and move every cell boundary.
+ */
+const RATIO_EPSILON = 1e-9;
+
+/** The largest 52:16 rectangle inside the selection, centred — cover's source. */
+function coverSource(rect: CropRect): CropRect {
+  const skew = rect.width * PANEL_HEIGHT - rect.height * PANEL_WIDTH;
+  const magnitude = Math.abs(rect.width * PANEL_HEIGHT) + Math.abs(rect.height * PANEL_WIDTH);
+  // Negated so a NaN extent lands here and the rect passes through untouched.
+  if (!(Math.abs(skew) > RATIO_EPSILON * magnitude)) return rect;
+  if (skew > 0) {
+    const width = rect.height * PANEL_ASPECT;
+    return { x: rect.x + (rect.width - width) / 2, y: rect.y, width, height: rect.height };
+  }
+  const height = rect.width / PANEL_ASPECT;
+  return { x: rect.x, y: rect.y + (rect.height - height) / 2, width: rect.width, height };
+}
+
+/** The largest whole-cell box of the selection's shape, centred — contain's target. */
+function containDestination(rect: CropRect): PanelRect {
+  const width = extent(rect.width);
+  const height = extent(rect.height);
+  const scale = Math.min(PANEL_WIDTH / width, PANEL_HEIGHT / height);
+  const columns = clamp(Math.round(width * scale), 1, PANEL_WIDTH);
+  const rows = clamp(Math.round(height * scale), 1, PANEL_HEIGHT);
+  return {
+    // An odd leftover cannot be split, so it goes to the right and the bottom.
+    x: Math.floor((PANEL_WIDTH - columns) / 2),
+    y: Math.floor((PANEL_HEIGHT - rows) / 2),
+    width: columns,
+    height: rows,
+  };
+}
+
+/**
+ * Resolves a selection plus a fit mode into the sampling geometry. Split out
+ * from pixelizeCrop because the readout has to promise exactly what the
+ * generate will do — a chip computed from a second, similar formula is a chip
+ * that will one day lie.
+ *
+ * `rect` is taken to be inside the image, which clampCrop guarantees for every
+ * rectangle the UI can produce. A rect hanging off the edge still plans and
+ * still renders, but its destination describes the rectangle asked for rather
+ * than the smaller one boxSample can actually reach.
+ */
+export function planPixelize(rect: CropRect, fit: FitMode = "cover"): PixelizePlan {
+  const source = fit === "cover" ? coverSource(rect) : rect;
+  const destination = fit === "contain"
+    ? containDestination(rect)
+    : { x: 0, y: 0, width: PANEL_WIDTH, height: PANEL_HEIGHT };
+  const sidesDark = destination.width < PANEL_WIDTH;
+  const bandsDark = destination.height < PANEL_HEIGHT;
+  const shrinkX = extent(source.width) / destination.width;
+  const shrinkY = extent(source.height) / destination.height;
+  return {
+    source,
+    destination,
+    cropped: source.width + RATIO_EPSILON < rect.width || source.height + RATIO_EPSILON < rect.height,
+    padding: sidesDark ? "sides" : bandsDark ? "bands" : "none",
+    shrink: {
+      x: shrinkX,
+      y: shrinkY,
+      // A twentieth is below what the readout's one decimal place can show, so
+      // agreeing this closely means one number tells the user everything.
+      uniform: Math.abs(shrinkX - shrinkY) <= 0.05 * Math.max(shrinkX, shrinkY),
+    },
+  };
 }
 
 const LUMA_RED = 0.2126;
@@ -234,12 +411,23 @@ function writeToned(
  * 99% of a photo and aliases: a 451px-wide crop is 8.7 source pixels per cell.
  * Alpha composites over black because black is the panel's "LED off".
  *
+ * The grid is `columns × rows`, not always the panel: under "contain" the
+ * picture occupies a sub-rectangle, and sampling straight into a 52×16 buffer
+ * would feed the dark surround to the tone and sharpen passes — the black bars
+ * would set the histogram the picture is stretched against and bleed a halo
+ * along its edge.
+ *
  * Returns null when the crop covers no opaque pixel at all — a fully
  * transparent region, or a decode that produced nothing. Both would otherwise
- * come out as 832 legitimate-looking black cells.
+ * come out as legitimate-looking black cells.
  */
-function boxSample(view: PixelView, rect: CropRect): Float32Array | null {
-  const out = new Float32Array(PANEL_CELLS * 3);
+function boxSample(
+  view: PixelView,
+  rect: CropRect,
+  columns: number,
+  rows: number,
+): Float32Array | null {
+  const out = new Float32Array(columns * rows * 3);
   let coverage = 0;
   // A degenerate rect (a click without a drag, a 1px-tall band) must still
   // produce a frame rather than divide by zero, so both extents get a floor.
@@ -248,14 +436,14 @@ function boxSample(view: PixelView, rect: CropRect): Float32Array | null {
   const width = clamp(rect.width, 1e-3, Math.max(1e-3, view.width - left));
   const height = clamp(rect.height, 1e-3, Math.max(1e-3, view.height - top));
 
-  for (let cellY = 0; cellY < PANEL_HEIGHT; cellY += 1) {
-    const y0 = top + cellY * height / PANEL_HEIGHT;
-    const y1 = top + (cellY + 1) * height / PANEL_HEIGHT;
+  for (let cellY = 0; cellY < rows; cellY += 1) {
+    const y0 = top + cellY * height / rows;
+    const y1 = top + (cellY + 1) * height / rows;
     const pixelY0 = Math.max(0, Math.floor(y0));
     const pixelY1 = Math.min(view.height, Math.max(pixelY0 + 1, Math.ceil(y1)));
-    for (let cellX = 0; cellX < PANEL_WIDTH; cellX += 1) {
-      const x0 = left + cellX * width / PANEL_WIDTH;
-      const x1 = left + (cellX + 1) * width / PANEL_WIDTH;
+    for (let cellX = 0; cellX < columns; cellX += 1) {
+      const x0 = left + cellX * width / columns;
+      const x1 = left + (cellX + 1) * width / columns;
       const pixelX0 = Math.max(0, Math.floor(x0));
       const pixelX1 = Math.min(view.width, Math.max(pixelX0 + 1, Math.ceil(x1)));
       let red = 0;
@@ -278,7 +466,7 @@ function boxSample(view: PixelView, rect: CropRect): Float32Array | null {
           total += weight;
         }
       }
-      const offset = (cellY * PANEL_WIDTH + cellX) * 3;
+      const offset = (cellY * columns + cellX) * 3;
       if (total <= 0) continue;
       out[offset] = red / total;
       out[offset + 1] = green / total;
@@ -387,35 +575,35 @@ function saturate(rgb: Float32Array): Float32Array {
  */
 const SHARPEN = 0.6;
 
-function sharpen(rgb: Float32Array): Float32Array {
+function sharpen(rgb: Float32Array, columns: number, rows: number): Float32Array {
   const kernel = [1, 2, 1];
   const horizontal = new Float32Array(rgb.length);
   const blurred = new Float32Array(rgb.length);
-  for (let y = 0; y < PANEL_HEIGHT; y += 1) {
-    for (let x = 0; x < PANEL_WIDTH; x += 1) {
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < columns; x += 1) {
       for (let channel = 0; channel < 3; channel += 1) {
         let sum = 0;
         let weight = 0;
         for (let step = -1; step <= 1; step += 1) {
-          const sampleX = clamp(x + step, 0, PANEL_WIDTH - 1);
-          sum += (rgb[(y * PANEL_WIDTH + sampleX) * 3 + channel] ?? 0) * (kernel[step + 1] ?? 0);
+          const sampleX = clamp(x + step, 0, columns - 1);
+          sum += (rgb[(y * columns + sampleX) * 3 + channel] ?? 0) * (kernel[step + 1] ?? 0);
           weight += kernel[step + 1] ?? 0;
         }
-        horizontal[(y * PANEL_WIDTH + x) * 3 + channel] = sum / weight;
+        horizontal[(y * columns + x) * 3 + channel] = sum / weight;
       }
     }
   }
-  for (let y = 0; y < PANEL_HEIGHT; y += 1) {
-    for (let x = 0; x < PANEL_WIDTH; x += 1) {
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < columns; x += 1) {
       for (let channel = 0; channel < 3; channel += 1) {
         let sum = 0;
         let weight = 0;
         for (let step = -1; step <= 1; step += 1) {
-          const sampleY = clamp(y + step, 0, PANEL_HEIGHT - 1);
-          sum += (horizontal[(sampleY * PANEL_WIDTH + x) * 3 + channel] ?? 0) * (kernel[step + 1] ?? 0);
+          const sampleY = clamp(y + step, 0, rows - 1);
+          sum += (horizontal[(sampleY * columns + x) * 3 + channel] ?? 0) * (kernel[step + 1] ?? 0);
           weight += kernel[step + 1] ?? 0;
         }
-        blurred[(y * PANEL_WIDTH + x) * 3 + channel] = sum / weight;
+        blurred[(y * columns + x) * 3 + channel] = sum / weight;
       }
     }
   }
@@ -428,28 +616,41 @@ function sharpen(rgb: Float32Array): Float32Array {
 }
 
 /**
- * The crop becomes the whole panel: exactly 52×16 packed 0xRRGGBB cells, ready
+ * The crop becomes a panel: always exactly 52×16 packed 0xRRGGBB cells, ready
  * to replace the board. No palette snapping — the device path keeps full RGB
  * (see paletteForFrames in src/pixel-ui.ts: a frame under 256 unique colours is
  * carried verbatim), so there is nothing to snap to.
+ *
+ * Under "contain" the picture occupies only part of that grid and the rest is
+ * left at 0. The panel has no alpha channel, so black is the only "off" there
+ * is — which is also what the LEDs do with it.
  *
  * Null means "no picture here": an unusable buffer, or a crop over nothing but
  * transparency. The caller must leave the board alone and say so — a black
  * panel reported as a success would silently overwrite the user's artwork.
  */
-export function pixelizeCrop(view: PixelView, rect: CropRect): number[] | null {
+export function pixelizeCrop(
+  view: PixelView,
+  rect: CropRect,
+  fit: FitMode = "cover",
+): number[] | null {
   if (view.width < 1 || view.height < 1 || view.data.length < view.width * view.height * 4) {
     return null;
   }
-  const sampled = boxSample(view, rect);
+  const { source, destination } = planPixelize(rect, fit);
+  const sampled = boxSample(view, source, destination.width, destination.height);
   if (!sampled) return null;
-  const rgb = sharpen(saturate(stretchLevels(sampled)));
-  const pixels = new Array<number>(PANEL_CELLS);
-  for (let cell = 0; cell < PANEL_CELLS; cell += 1) {
-    const red = clamp(Math.round(rgb[cell * 3] ?? 0), 0, 255);
-    const green = clamp(Math.round(rgb[cell * 3 + 1] ?? 0), 0, 255);
-    const blue = clamp(Math.round(rgb[cell * 3 + 2] ?? 0), 0, 255);
-    pixels[cell] = (red << 16) | (green << 8) | blue;
+  const rgb = sharpen(saturate(stretchLevels(sampled)), destination.width, destination.height);
+  const pixels = new Array<number>(PANEL_CELLS).fill(0);
+  for (let row = 0; row < destination.height; row += 1) {
+    for (let column = 0; column < destination.width; column += 1) {
+      const offset = (row * destination.width + column) * 3;
+      const red = clamp(Math.round(rgb[offset] ?? 0), 0, 255);
+      const green = clamp(Math.round(rgb[offset + 1] ?? 0), 0, 255);
+      const blue = clamp(Math.round(rgb[offset + 2] ?? 0), 0, 255);
+      pixels[(destination.y + row) * PANEL_WIDTH + destination.x + column] =
+        (red << 16) | (green << 8) | blue;
+    }
   }
   return pixels;
 }

@@ -6,12 +6,15 @@ import {
   defaultCrop,
   moveCrop,
   pixelizeCrop,
+  planPixelize,
   resizeCrop,
   PANEL_ASPECT,
   PANEL_HEIGHT,
   PANEL_WIDTH,
   type CropHandle,
+  type CropRatio,
   type CropRect,
+  type FitMode,
   type PixelView,
 } from "../web/src/lib/canvas-pixelize";
 
@@ -42,9 +45,38 @@ function solid(width: number, height: number, rgba: [number, number, number, num
 
 const cell = (pixels: number[], x: number, y: number) => pixels[y * PANEL_WIDTH + x];
 
+/**
+ * A picture with structure on both axes and no flat regions, so every stage of
+ * the pipeline — area average, levels, saturation, sharpen — contributes to the
+ * result and any change to any of them moves the digest.
+ */
+function textured(width: number, height: number): PixelView {
+  const view = blank(width, height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 4;
+      view.data[index] = (x * 7 + y * 3) % 256;
+      view.data[index + 1] = (x * x + y * 11) % 256;
+      view.data[index + 2] = (x + y * 5) % 256;
+      view.data[index + 3] = 255;
+    }
+  }
+  return view;
+}
+
+/** FNV-1a over the packed cells: one number that changes if any cell does. */
+function digest(pixels: number[]): string {
+  let hash = 0x811c9dc5;
+  for (const pixel of pixels) {
+    hash ^= pixel;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16);
+}
+
 /** Null means "no picture here"; every case below has one, so unwrap loudly. */
-function panel(view: PixelView, rect: CropRect): number[] {
-  const pixels = pixelizeCrop(view, rect);
+function panel(view: PixelView, rect: CropRect, fit?: FitMode): number[] {
+  const pixels = pixelizeCrop(view, rect, fit);
   if (!pixels) throw new Error("expected a panel, got null");
   return pixels;
 }
@@ -60,13 +92,14 @@ function replayDrag(
   handle: CropHandle | null,
   down: readonly [number, number],
   moves: readonly (readonly [number, number])[],
+  ratio: CropRatio = "panel",
 ): CropRect[] {
-  const started = beginCropDrag(view, crop, handle, down[0], down[1]);
+  const started = beginCropDrag(view, crop, handle, down[0], down[1], ratio);
   let live = started.rect;
   const frames = [live];
   for (const [x, y] of moves) {
     // The live rect is passed nowhere: that is the invariant under test.
-    live = applyCropDrag(view, started.drag, x, y);
+    live = applyCropDrag(view, started.drag, x, y, ratio);
     frames.push(live);
   }
   return frames;
@@ -410,5 +443,311 @@ describe("crop pixelization", () => {
 
     // A crop straddling the edge still has signal, so it generates.
     expect(pixelizeCrop(view, { x: 150, y: 40, width: 130, height: 40 })).not.toBeNull();
+  });
+});
+
+describe("the untouched default path", () => {
+  /**
+   * Digests taken from the build before the ratio and fit controls existed.
+   * A user who opens neither control must get the same 832 cells they always
+   * got, so these are frozen: if one moves, the default path moved with it and
+   * the change is a regression until proven otherwise.
+   */
+  const GOLDEN: readonly (readonly [number, number, string])[] = [
+    [300, 300, "8e053215"],
+    // 400x123 is 3.2520:1 — near enough to the panel that the default crop is
+    // 399.75 wide, whose ratio is only 13:4 to within a rounding step. Cover
+    // must treat that as "already panel-shaped" and cut nothing; shaving a
+    // sub-pixel off it moves every cell boundary in the image.
+    [400, 123, "b6f4e539"],
+    [640, 480, "4ae120a5"],
+    [40, 40, "ace261d"],
+  ];
+
+  test("renders every fixture exactly as it did before fit modes existed", () => {
+    for (const [width, height, expected] of GOLDEN) {
+      const view = textured(width, height);
+      expect(digest(panel(view, defaultCrop(view)))).toBe(expected);
+    }
+  });
+
+  test("spelling the defaults out loud changes nothing", () => {
+    for (const [width, height] of GOLDEN) {
+      const view = textured(width, height);
+      expect(defaultCrop(view, "panel")).toEqual(defaultCrop(view));
+      const crop = defaultCrop(view);
+      expect(pixelizeCrop(view, crop, "cover")).toEqual(panel(view, crop));
+    }
+  });
+
+  test("cover leaves a panel-locked box alone when its ratio only rounds to 13:4", () => {
+    // A panel box gets its height by dividing by 3.25, and for 445 of the first
+    // 4000 integer widths multiplying back does not land on the width exactly —
+    // these are eight of them. The residue is ~1e-12, but a cover that treats
+    // it as "needs cutting" re-centres every default crop by a hair and every
+    // cell boundary with it, which is a silent change to every existing image.
+    for (const width of [15, 27, 30, 54, 57, 63, 107, 113]) {
+      const crop = defaultCrop(blank(width, width * 4));
+      expect(crop.width * PANEL_HEIGHT - crop.height * PANEL_WIDTH).not.toBe(0);
+      const plan = planPixelize(crop, "cover");
+      expect(plan.source).toEqual(crop);
+      expect(plan.cropped).toBe(false);
+      expect(plan.padding).toBe("none");
+    }
+  });
+
+  test("a panel-shaped selection is left alone by every mode that can", () => {
+    const view = textured(640, 480);
+    const crop = defaultCrop(view);
+    // Cover has nothing to cut and contain has nothing to letterbox, so all
+    // three modes agree — the only shape for which that is true.
+    expect(pixelizeCrop(view, crop, "contain")).toEqual(panel(view, crop));
+    expect(pixelizeCrop(view, crop, "stretch")).toEqual(panel(view, crop));
+
+    const plan = planPixelize(crop);
+    expect(plan.source).toEqual(crop);
+    expect(plan.cropped).toBe(false);
+    expect(plan.padding).toBe("none");
+    expect(plan.destination).toEqual({ x: 0, y: 0, width: PANEL_WIDTH, height: PANEL_HEIGHT });
+  });
+});
+
+describe("selection ratios", () => {
+  test("square frames the whole of a square picture, which panel never can", () => {
+    const icon = blank(512, 512);
+    const panelCrop = defaultCrop(icon, "panel");
+    // The complaint: a 3.25:1 box on a square logo reaches a band through the
+    // middle and nothing else. 157 of 512 rows, top and bottom unreachable.
+    expect(panelCrop.height).toBeCloseTo(512 / PANEL_ASPECT, 10);
+    expect(panelCrop.height).toBeLessThan(icon.height / 3);
+
+    const squareCrop = defaultCrop(icon, "square");
+    expect(squareCrop).toEqual({ x: 0, y: 0, width: 512, height: 512 });
+    expect(defaultCrop(icon, "free")).toEqual({ x: 0, y: 0, width: 512, height: 512 });
+  });
+
+  test("square on a wide picture is the largest centred square", () => {
+    const crop = defaultCrop(blank(400, 300), "square");
+    expect(crop).toEqual({ x: 50, y: 0, width: 300, height: 300 });
+  });
+
+  test("a free corner drag moves the two axes independently", () => {
+    const view = blank(2000, 2000);
+    const start = { x: 100, y: 100, width: 130, height: 40 };
+    const dragged = resizeCrop(view, start, "se", 900, 240, "free");
+    // Panel would have taken the harder-pulled axis for both; free takes each
+    // axis from its own pointer distance.
+    expect(dragged.width).toBeCloseTo(800, 10);
+    expect(dragged.height).toBeCloseTo(140, 10);
+    expect(resizeCrop(view, start, "se", 900, 240).height).toBeCloseTo(800 / PANEL_ASPECT, 10);
+  });
+
+  test("a square corner drag stays square whichever way it is pulled", () => {
+    const view = blank(2000, 2000);
+    const start = { x: 100, y: 100, width: 130, height: 130 };
+    for (const [x, y] of [[900, 240], [240, 900], [600, 600]] as const) {
+      const dragged = resizeCrop(view, start, "se", x, y, "square");
+      expect(dragged.width).toBeCloseTo(dragged.height, 10);
+    }
+  });
+
+  test("every ratio stays inside the picture and above the floor", () => {
+    const view = blank(400, 300);
+    for (const ratio of ["panel", "free", "square"] as const) {
+      const huge = clampCrop(view, { x: -80, y: -80, width: 9000, height: 9000 }, ratio);
+      expect(huge.x).toBeGreaterThanOrEqual(0);
+      expect(huge.y).toBeGreaterThanOrEqual(0);
+      expect(huge.x + huge.width).toBeLessThanOrEqual(400 + 1e-9);
+      expect(huge.y + huge.height).toBeLessThanOrEqual(300 + 1e-9);
+
+      // A press with no drag at all is a mis-click, not a request for a zero box.
+      const nothing = clampCrop(view, { x: 10, y: 10, width: 0, height: 0 }, ratio);
+      expect(nothing.width).toBeGreaterThan(0);
+      expect(nothing.height).toBeGreaterThan(0);
+
+      // …and a picture smaller than the floor still gets a box that fits in it.
+      const stamp = clampCrop(blank(6, 6), { x: 0, y: 0, width: 0, height: 0 }, ratio);
+      expect(stamp.width).toBeLessThanOrEqual(6);
+      expect(stamp.height).toBeLessThanOrEqual(6);
+      expect(stamp.width).toBeGreaterThan(0);
+      expect(stamp.height).toBeGreaterThan(0);
+    }
+  });
+
+  test("only free lets a corner-to-corner marquee keep the corners", () => {
+    const view = blank(300, 300);
+    const small = { x: 100, y: 100, width: 50, height: 50 };
+    // The same gesture — press one corner of the picture, drag to the other —
+    // under each lock. Free takes it literally; panel can only answer with the
+    // band the ratio allows, which is the whole of the user's complaint.
+    const free = replayDrag(view, small, null, [0, 0], [[299, 299]], "free").at(-1)!;
+    expect(free.width).toBeCloseTo(299, 10);
+    expect(free.height).toBeCloseTo(299, 10);
+
+    const locked = replayDrag(view, small, null, [0, 0], [[299, 299]]).at(-1)!;
+    expect(locked.height).toBeLessThan(view.height / 3);
+    expect(locked.width / locked.height).toBeCloseTo(PANEL_ASPECT, 10);
+
+    const square = replayDrag(view, small, null, [0, 0], [[299, 299]], "square").at(-1)!;
+    expect(square.width).toBeCloseTo(square.height, 10);
+    expect(square.width).toBeCloseTo(299, 10);
+  });
+});
+
+describe("fit modes", () => {
+  test("contain centres a square in the panel and leaves the sides dark", () => {
+    const plan = planPixelize({ x: 0, y: 0, width: 512, height: 512 }, "contain");
+    expect(plan.destination).toEqual({ x: 18, y: 0, width: 16, height: 16 });
+    expect(plan.padding).toBe("sides");
+    expect(plan.cropped).toBe(false);
+    // Nothing is thrown away: the source is the selection, whole.
+    expect(plan.source).toEqual({ x: 0, y: 0, width: 512, height: 512 });
+  });
+
+  test("cover cuts the selection down to the panel's shape, centred", () => {
+    const square = planPixelize({ x: 0, y: 0, width: 512, height: 512 }, "cover");
+    expect(square.cropped).toBe(true);
+    expect(square.source.width).toBe(512);
+    expect(square.source.height).toBeCloseTo(512 / PANEL_ASPECT, 10);
+    expect(square.source.y).toBeCloseTo((512 - 512 / PANEL_ASPECT) / 2, 10);
+    expect(square.padding).toBe("none");
+
+    // A selection wider than the panel loses its sides instead.
+    const banner = planPixelize({ x: 0, y: 0, width: 1000, height: 100 }, "cover");
+    expect(banner.source.width).toBeCloseTo(325, 10);
+    expect(banner.source.x).toBeCloseTo(337.5, 10);
+    expect(banner.source.height).toBe(100);
+  });
+
+  test("stretch keeps the whole selection and the whole panel, and distorts", () => {
+    const plan = planPixelize({ x: 4, y: 8, width: 512, height: 512 }, "stretch");
+    expect(plan.source).toEqual({ x: 4, y: 8, width: 512, height: 512 });
+    expect(plan.destination).toEqual({ x: 0, y: 0, width: PANEL_WIDTH, height: PANEL_HEIGHT });
+    expect(plan.cropped).toBe(false);
+    expect(plan.padding).toBe("none");
+  });
+
+  test("contain reports the letterbox on whichever axes are short", () => {
+    // Taller than the panel is wide: bars on the sides.
+    expect(planPixelize({ x: 0, y: 0, width: 100, height: 400 }, "contain").padding).toBe("sides");
+    // 4:1 is wider than 3.25:1, so the panel fills across and bars appear above
+    // and below: 52 columns, 13 rows.
+    const wide = planPixelize({ x: 0, y: 0, width: 400, height: 100 }, "contain");
+    expect(wide.destination).toEqual({ x: 0, y: 1, width: 52, height: 13 });
+    expect(wide.padding).toBe("bands");
+  });
+
+  test("contain always touches one edge, so it never darkens both axes", () => {
+    // The invariant behind the padding union having no "both": the scale is
+    // chosen to make one extent exact, so a shape that letterboxes on all four
+    // sides cannot exist and the readout never has to describe one.
+    for (let width = 1; width <= 400; width += 1) {
+      for (const height of [1, 7, 16, 53, 160, 399]) {
+        const { destination, padding } = planPixelize({ x: 0, y: 0, width, height }, "contain");
+        expect(destination.width === PANEL_WIDTH || destination.height === PANEL_HEIGHT).toBe(true);
+        expect(destination.width).toBeGreaterThanOrEqual(1);
+        expect(destination.height).toBeGreaterThanOrEqual(1);
+        expect(destination.x + destination.width).toBeLessThanOrEqual(PANEL_WIDTH);
+        expect(destination.y + destination.height).toBeLessThanOrEqual(PANEL_HEIGHT);
+        // And the label the UI picks always matches the geometry it describes.
+        expect(padding).toBe(
+          destination.width < PANEL_WIDTH ? "sides" : destination.height < PANEL_HEIGHT ? "bands" : "none",
+        );
+      }
+    }
+  });
+
+  test("a square icon lands centred, whole, and undistorted", () => {
+    // A 32x32 white block centred in a 64x64 icon: at 4 source pixels per cell
+    // it must come back as an 8x8 block, equal on both axes, or the fit
+    // squashed it.
+    const icon = solid(64, 64, [0, 0, 0, 255]);
+    paint(icon, { x: 16, y: 16, width: 32, height: 32 }, [255, 255, 255, 255]);
+    const pixels = panel(icon, defaultCrop(icon, "square"), "contain");
+
+    const lit = (x: number, y: number) => ((cell(pixels, x, y) ?? 0) >> 16 & 0xff) > 128;
+    const litColumns = Array.from({ length: PANEL_WIDTH }, (_, x) => x).filter((x) => lit(x, 8));
+    const litRows = Array.from({ length: PANEL_HEIGHT }, (_, y) => y).filter((y) => lit(22, y));
+    expect(litColumns).toEqual([22, 23, 24, 25, 26, 27, 28, 29]);
+    expect(litRows).toEqual([4, 5, 6, 7, 8, 9, 10, 11]);
+
+    // The 18 columns either side are off, not dark grey, not a smear.
+    for (let y = 0; y < PANEL_HEIGHT; y += 1) {
+      for (const x of [0, 17, 34, PANEL_WIDTH - 1]) expect(cell(pixels, x, y)).toBe(0x000000);
+    }
+  });
+
+  test("the dark surround never reaches the tone pipeline", () => {
+    // Flat mid-grey has no range to stretch, so it must come back untouched.
+    // Sampling into a 52x16 buffer and blacking the bars afterwards would put a
+    // 0..120 histogram in front of the levels pass and lift the grey to 0xc0.
+    const grey = solid(64, 64, [120, 120, 120, 255]);
+    const pixels = panel(grey, defaultCrop(grey, "square"), "contain");
+    expect(cell(pixels, 26, 8)).toBe(0x787878);
+    expect(cell(pixels, 4, 8)).toBe(0x000000);
+  });
+
+  test("every fit mode survives the degenerate selections", () => {
+    for (const fit of ["cover", "contain", "stretch"] as const) {
+      // A source narrower than the panel itself, so cells are smaller than one
+      // source pixel; a 1px band; a press with no drag; a box off the edge; and
+      // a picture already at exactly 52:16.
+      const cases: readonly (readonly [PixelView, CropRect])[] = [
+        [solid(20, 20, [200, 40, 40, 255]), { x: 0, y: 0, width: 20, height: 20 }],
+        [solid(60, 20, [200, 40, 40, 255]), { x: 0, y: 5, width: 60, height: 1 }],
+        [solid(60, 20, [200, 40, 40, 255]), { x: 0, y: 0, width: 0, height: 0 }],
+        [solid(60, 20, [200, 40, 40, 255]), { x: 30, y: 10, width: Number.NaN, height: Number.NaN }],
+        [solid(60, 20, [200, 40, 40, 255]), { x: -50, y: -50, width: 5000, height: 5000 }],
+        [solid(520, 160, [200, 40, 40, 255]), { x: 0, y: 0, width: 520, height: 160 }],
+      ];
+      for (const [view, rect] of cases) {
+        const pixels = pixelizeCrop(view, rect, fit);
+        expect(pixels).toHaveLength(PANEL_WIDTH * PANEL_HEIGHT);
+        expect(pixels!.every((pixel) => Number.isInteger(pixel) && pixel >= 0 && pixel <= 0xffffff))
+          .toBe(true);
+        // Whatever the geometry decided, at least one cell has to carry the
+        // picture — a plan that letterboxes everything away is a blank panel.
+        expect(pixels!.some((pixel) => pixel !== 0)).toBe(true);
+      }
+    }
+  });
+
+  test("the reduction factor stays the number the panel path always quoted", () => {
+    // The chip has always read crop.width / 52. Nothing about the default path
+    // may change that, and on a shape that does not distort one factor is still
+    // the whole truth.
+    const view = textured(640, 480);
+    const crop = defaultCrop(view);
+    const plan = planPixelize(crop);
+    expect(plan.shrink.x).toBeCloseTo(crop.width / PANEL_WIDTH, 10);
+    expect(plan.shrink.uniform).toBe(true);
+    expect(planPixelize({ x: 0, y: 0, width: 512, height: 512 }, "contain").shrink.uniform).toBe(true);
+  });
+
+  test("a distorting fit refuses to be described by one number", () => {
+    // Stretch squeezes 512 rows into 16 and 512 columns into 52 — 32x against
+    // 9.8x. Quoting only the width would tell the user the picture keeps three
+    // times more detail than it does.
+    const stretched = planPixelize({ x: 0, y: 0, width: 512, height: 512 }, "stretch");
+    expect(stretched.shrink.x).toBeCloseTo(512 / 52, 10);
+    expect(stretched.shrink.y).toBeCloseTo(32, 10);
+    expect(stretched.shrink.uniform).toBe(false);
+
+    // Contain distorts too once a row cannot be split any finer: a 1px band is
+    // 52x1, so the axes disagree wildly and the readout has to say so.
+    const band = planPixelize({ x: 0, y: 0, width: 1000, height: 1 }, "contain");
+    expect(band.destination).toEqual({ x: 0, y: 7, width: 52, height: 1 });
+    expect(band.shrink.uniform).toBe(false);
+  });
+
+  test("a 52:16 source is a fixed point of the plan under every mode", () => {
+    const rect = { x: 0, y: 0, width: 520, height: 160 };
+    for (const fit of ["cover", "contain", "stretch"] as const) {
+      const plan = planPixelize(rect, fit);
+      expect(plan.source).toEqual(rect);
+      expect(plan.destination).toEqual({ x: 0, y: 0, width: PANEL_WIDTH, height: PANEL_HEIGHT });
+      expect(plan.cropped).toBe(false);
+      expect(plan.padding).toBe("none");
+    }
   });
 });

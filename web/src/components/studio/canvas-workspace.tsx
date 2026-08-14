@@ -28,10 +28,14 @@ import {
   defaultCrop,
   moveCrop,
   pixelizeCrop,
+  planPixelize,
   resizeCrop,
   type CropDrag,
   type CropHandle,
+  type CropRatio,
   type CropRect,
+  type FitMode,
+  type PixelizePlan,
   type PixelView,
 } from "@/lib/canvas-pixelize";
 import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
@@ -67,9 +71,30 @@ const PALETTE = [
   0xffffff, 0x00ff66, 0xff3030, 0xffd000, 0x4285f4, 0xf25022,
   0x34a853, 0x00a4ef, 0x9aa0a6, 0xea4335, 0xffb900, 0x000000,
 ];
-// Corner handles only. The crop is locked to the panel's 3.25:1, so an edge
-// handle would move both axes anyway and read as broken.
+// Corner handles only. Under a locked ratio an edge handle moves both axes
+// anyway and reads as broken; under the free ratio a corner already reaches
+// every rectangle, so edge handles would buy a second hit target and no shape.
 const CROP_HANDLES: readonly CropHandle[] = ["nw", "ne", "sw", "se"];
+// The panel ratio is first and stays the default: it is the only shape that
+// reaches all 832 cells with nothing cut and nothing left dark. The other two
+// exist because a 3.25:1 box on a square app icon can only frame a band through
+// the middle — the top and bottom of the logo are unreachable by dragging.
+const CROP_RATIOS: readonly CropRatio[] = ["panel", "free", "square"];
+const CROP_RATIO_META: Record<CropRatio, { name: string; note: string }> = {
+  panel: { name: "面板 52:16", note: "和面板同比例，生成后一格不浪费" },
+  free: { name: "自由", note: "长宽各拖各的，想框多大框多大" },
+  square: { name: "正方形 1:1", note: "方形图标、头像用这个" },
+};
+const FIT_MODES: readonly FitMode[] = ["cover", "contain", "stretch"];
+const FIT_META: Record<FitMode, { name: string; note: string }> = {
+  cover: { name: "裁切铺满", note: "放大到铺满面板，多出来的边裁掉" },
+  contain: { name: "完整放入", note: "整块都放进来，空出的地方留白" },
+  stretch: { name: "拉伸填满", note: "不管比例直接拉满，画面会变形" },
+};
+const PADDING_LABEL: Record<Exclude<PixelizePlan["padding"], "none">, string> = {
+  sides: "两侧留白",
+  bands: "上下留白",
+};
 // Long-edge cap on the decoded buffer, for two measured reasons. A 6000x4000
 // phone photo is 24M px, past iOS Safari's ~16.7M px canvas-area ceiling, where
 // drawImage quietly no-ops and getImageData hands back a fully transparent
@@ -313,6 +338,10 @@ export function CanvasWorkspace({
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string | null>(null);
   const [crop, setCrop] = useState<CropRect | null>(null);
+  // Both default to the shape and the fit the panel-locked box has always had,
+  // so a user who never opens either control gets the result they got before.
+  const [cropRatio, setCropRatio] = useState<CropRatio>("panel");
+  const [imageFit, setImageFit] = useState<FitMode>("cover");
   const [exportScale, setExportScale] = useState(12);
   const [live, setLive] = useState(false);
   const [liveInviteOpen, setLiveInviteOpen] = useState(false);
@@ -764,12 +793,13 @@ export function CanvasWorkspace({
       setImageName(file.name);
       setImageView(view);
       // Framed before the user touches anything, so "just pixelize it" already
-      // has an answer — the widest panel-shaped rectangle this picture holds.
-      setCrop(defaultCrop(view));
+      // has an answer — the widest rectangle of the current shape this picture
+      // holds, which under the default shape is the panel-shaped one.
+      setCrop(defaultCrop(view, cropRatio));
       setTool("image");
       applySelection(null);
       const resized = scale < 1 ? `，已缩到 ${data.width}×${data.height} 处理` : "";
-      setStatus(`图片已读取（${natural.width}×${natural.height}${resized}）；拖动方框选好区域，生成后铺满整块面板。`);
+      setStatus(`图片已读取（${natural.width}×${natural.height}${resized}）；拖动方框选好区域，下面可以改方框比例和适配方式。`);
     } catch {
       URL.revokeObjectURL(url);
       toast.error("图片读取失败");
@@ -792,9 +822,18 @@ export function CanvasWorkspace({
     const [x, y] = cropPoint(event, imageView);
     event.currentTarget.setPointerCapture(event.pointerId);
     const handle = (event.target as HTMLElement).dataset.handle as CropHandle | undefined;
-    const started = beginCropDrag(imageView, crop, handle ?? null, x, y);
+    const started = beginCropDrag(imageView, crop, handle ?? null, x, y, cropRatio);
     cropDragRef.current = started.drag;
     setCrop(started.rect);
+  };
+
+  const changeCropRatio = (ratio: CropRatio) => {
+    setCropRatio(ratio);
+    // A box of the old shape is not a box of the new one, so the switch reframes
+    // from the largest rectangle the picture holds rather than squeezing what is
+    // there. That is the whole point on a square icon: picking 1:1 puts the
+    // entire logo inside the box in one click, with no dragging at all.
+    if (imageView) setCrop(defaultCrop(imageView, ratio));
   };
 
   const continueCropAction = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -803,7 +842,7 @@ export function CanvasWorkspace({
     const [x, y] = cropPoint(event, imageView);
     // Measured from the box as it stood at pointerdown, never from the box on
     // screen: feeding a drag its own output moves the corner it is pinning.
-    setCrop(applyCropDrag(imageView, drag, x, y));
+    setCrop(applyCropDrag(imageView, drag, x, y, cropRatio));
   };
 
   const nudgeCrop = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -811,14 +850,14 @@ export function CanvasWorkspace({
     // A tenth of the crop per press, so one keystroke is visible on a 4000px
     // photo and still fine-grained on a 200px sprite.
     const step = (event.shiftKey ? 0.3 : 0.1) * crop.width;
-    if (event.key === "ArrowLeft") setCrop(moveCrop(imageView, crop, crop.x - step, crop.y));
-    else if (event.key === "ArrowRight") setCrop(moveCrop(imageView, crop, crop.x + step, crop.y));
-    else if (event.key === "ArrowUp") setCrop(moveCrop(imageView, crop, crop.x, crop.y - step));
-    else if (event.key === "ArrowDown") setCrop(moveCrop(imageView, crop, crop.x, crop.y + step));
+    if (event.key === "ArrowLeft") setCrop(moveCrop(imageView, crop, crop.x - step, crop.y, cropRatio));
+    else if (event.key === "ArrowRight") setCrop(moveCrop(imageView, crop, crop.x + step, crop.y, cropRatio));
+    else if (event.key === "ArrowUp") setCrop(moveCrop(imageView, crop, crop.x, crop.y - step, cropRatio));
+    else if (event.key === "ArrowDown") setCrop(moveCrop(imageView, crop, crop.x, crop.y + step, cropRatio));
     else if (event.key === "+" || event.key === "=") {
-      setCrop(resizeCrop(imageView, crop, "se", crop.x + crop.width * 1.15, crop.y + crop.height * 1.15));
+      setCrop(resizeCrop(imageView, crop, "se", crop.x + crop.width * 1.15, crop.y + crop.height * 1.15, cropRatio));
     } else if (event.key === "-" || event.key === "_") {
-      setCrop(resizeCrop(imageView, crop, "se", crop.x + crop.width * 0.85, crop.y + crop.height * 0.85));
+      setCrop(resizeCrop(imageView, crop, "se", crop.x + crop.width * 0.85, crop.y + crop.height * 0.85, cropRatio));
     } else return;
     event.preventDefault();
   };
@@ -828,7 +867,7 @@ export function CanvasWorkspace({
       toast.error("请先上传一张图片");
       return;
     }
-    const pixelized = pixelizeCrop(imageView, crop);
+    const pixelized = pixelizeCrop(imageView, crop, imageFit);
     if (!pixelized) {
       // A crop over nothing but transparency reduces to 832 black cells, which
       // would look like a successful generate while wiping the board. Refuse
@@ -838,11 +877,27 @@ export function CanvasWorkspace({
     }
     snapshot();
     setPixels(pixelized);
-    // The crop *is* the panel now, so there is no block left to place and
-    // nothing for a selection to point at.
+    // The generated frame *is* the board now, so there is no block left to
+    // place and nothing for a selection to point at.
     applySelection(null);
-    setStatus(`已把 ${Math.round(crop.width)}×${Math.round(crop.height)} 的框选区域铺满整块 ${WIDTH}×${HEIGHT} 面板；不满意就挪一下方框再生成。`);
+    const plan = planPixelize(crop, imageFit);
+    const framed = `${Math.round(plan.source.width)}×${Math.round(plan.source.height)}`;
+    const landed = plan.padding !== "none"
+      ? `完整放进 ${WIDTH}×${HEIGHT} 面板中央的 ${plan.destination.width}×${plan.destination.height}，${PADDING_LABEL[plan.padding]}`
+      : imageFit === "stretch"
+        ? `拉伸铺满整块 ${WIDTH}×${HEIGHT} 面板`
+        : `铺满整块 ${WIDTH}×${HEIGHT} 面板`;
+    setStatus(`已把 ${framed} 的框选区域${landed}；不满意就挪一下方框再生成。`);
   };
+
+  // The readout runs the same resolver the generate does, so a chip can never
+  // promise a framing the button does not deliver.
+  const imagePlan = crop ? planPixelize(crop, imageFit) : null;
+  const shrinkLabel = !imagePlan
+    ? ""
+    : imagePlan.shrink.uniform
+      ? `${imagePlan.shrink.x.toFixed(1)}×`
+      : `${imagePlan.shrink.x.toFixed(1)}×/${imagePlan.shrink.y.toFixed(1)}×`;
 
   const exportCanvas = () => {
     const output = document.createElement("canvas");
@@ -1209,7 +1264,7 @@ export function CanvasWorkspace({
           <section className={cn("canvas-inspector-section", tool === "image" && "is-active")}>
             <div className="canvas-tool-heading">
               <ImagePlus aria-hidden="true" />
-              <div><h3>图片像素化</h3><p>框出要用的那块，生成后铺满整块面板。</p></div>
+              <div><h3>图片像素化</h3><p>框出要用的那块，生成到 52×16 面板上。</p></div>
             </div>
             <Button as="label" className="file-trigger" htmlFor="canvas-image"><ImagePlus />选择图片</Button>
             <input
@@ -1255,20 +1310,63 @@ export function CanvasWorkspace({
               ) : <span>尚未选择图片</span>}
             </div>
             {imageName && <span className="canvas-file-name" title={imageName}>{imageName}</span>}
+            <label className="canvas-field" htmlFor="canvas-crop-ratio">
+              <span>方框比例</span>
+              <Select
+                id="canvas-crop-ratio"
+                aria-label="裁切方框的比例"
+                title="方框比例"
+                value={cropRatio}
+                options={CROP_RATIOS as CropRatio[]}
+                renderOption={({ value }) => CROP_RATIO_META[value].name}
+                renderOptionInfo={({ value }) => CROP_RATIO_META[value].note}
+                onChange={(value) => changeCropRatio(value)}
+              >
+                {CROP_RATIO_META[cropRatio].name}
+              </Select>
+            </label>
+            <label className="canvas-field" htmlFor="canvas-image-fit">
+              <span>适配方式</span>
+              <Select
+                id="canvas-image-fit"
+                aria-label="框选区域落到面板上的方式"
+                title="适配方式"
+                value={imageFit}
+                options={FIT_MODES as FitMode[]}
+                renderOption={({ value }) => FIT_META[value].name}
+                renderOptionInfo={({ value }) => FIT_META[value].note}
+                onChange={(value) => setImageFit(value)}
+              >
+                {FIT_META[imageFit].name}
+              </Select>
+            </label>
             {/* The reduction factor is the one number that predicts whether the
                 result will read: 8× keeps a cat's eye, 50× keeps nothing. */}
-            {imageView && crop && (
+            {imageView && crop && imagePlan && (
               <div className="flex flex-wrap items-center gap-1">
                 <Chip size="sm" variant="transparent" color="neutral">
-                  裁切 {Math.round(crop.width)}×{Math.round(crop.height)}
+                  裁切 {Math.round(imagePlan.source.width)}×{Math.round(imagePlan.source.height)}
                 </Chip>
                 <Chip size="sm" variant="transparent" color="neutral">
-                  缩小 {(crop.width / WIDTH).toFixed(1)}× → {WIDTH}×{HEIGHT}
+                  缩小 {shrinkLabel}
+                  {imagePlan.padding === "none" && ` → ${WIDTH}×${HEIGHT}`}
                 </Chip>
+                {imagePlan.padding !== "none" && (
+                  <Chip size="sm" variant="transparent" color="brand">
+                    完整放入 {imagePlan.destination.width}×{imagePlan.destination.height}，
+                    {PADDING_LABEL[imagePlan.padding]}
+                  </Chip>
+                )}
+                {imagePlan.cropped && (
+                  <Chip size="sm" variant="transparent" color="brand">
+                    铺满会切掉{imagePlan.source.width < crop.width ? "两侧" : "上下"}
+                  </Chip>
+                )}
               </div>
             )}
             <p className="m-0 text-[0.6rem] leading-[1.5] text-cladd-fg-softer">
-              方框锁定成面板的 52:16，拖内部挪位置、拖四角改大小，空白处按下可以重新框。框得越小画面越清楚。
+              拖内部挪位置、拖四角改大小，空白处按下可以重新框；换比例会重新框住整张图。
+              方形图标想整个进来，就选「正方形 1:1」加「完整放入」。框得越小画面越清楚。
             </p>
             <Button type="button" color="brand" disabled={!imageView} onClick={generateImage}><ImagePlus />生成到画布</Button>
           </section>
