@@ -918,11 +918,15 @@
   height: 0.85rem;
 }
 
-/* The 52×16 preview is a monitor, not a poster: cap it so the transport and
-   the library never compete with an oversized canvas. */
+/* The 52×16 preview fills its column now. The old 26rem cap was written when
+   this sat beside the transport and the library and would have crowded them;
+   in the two-column stage it shares a column with nothing, so the cap bought
+   nothing and cost a band of dead space to the right of the panel as wide as
+   the panel itself. The remaining ceiling is only to stop a 4K window turning
+   one device pixel into a 30px tile. */
 .pixel-lyric-screen {
   margin: 0;
-  max-width: 26rem;
+  max-width: min(100%, 52rem);
 }
 
 .pixel-lyric-screen__frame {
@@ -1250,9 +1254,14 @@
 .music-now-playing__main {
   display: grid;
   min-width: 0;
-  grid-template-columns: auto minmax(0, max-content) auto;
+  /* The transport is RIGHT-ALIGNED, so the identity column takes the slack.
+     This was briefly `max-content` + `justify-content: start`, to close the gap
+     a short title left between the name and the buttons — which did close that
+     gap and opened an identical one on the far side, leaving the controls
+     floating mid-row. The space between a title and a transport is alignment;
+     the space after a right-aligned transport is a mistake. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: start;
   gap: 1rem 1.1rem;
   padding: 0.95rem 0;
 }

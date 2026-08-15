@@ -797,12 +797,13 @@ describe("music player UI", () => {
     expect(playerSource).toContain("tape.scrollHeight <= tape.clientHeight + 1");
     expect(playerSource).toContain('window.matchMedia("(prefers-reduced-motion: reduce)")');
 
-    // The console header no longer stretches the title's column to the full
-    // width, which is what pushed the transport to a far edge.
-    expect(css).toMatch(
-      /\.music-now-playing__main\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, max-content\) auto;/s,
-    );
-    expect(css).toMatch(/\.music-now-playing__main\s*\{[^}]*justify-content:\s*start;/s);
+    // Right-aligned: the identity column takes the slack so the transport sits
+    // on the row's edge. Pinned because the opposite was tried — hugging the
+    // start closed the gap before the buttons and opened one after them.
+    expect(css).toMatch(/\.music-now-playing__main\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto;/s);
+    expect(css).not.toMatch(/\.music-now-playing__main\s*\{[^}]*justify-content:\s*start;/s);
+    // And the preview is no longer capped below its column's width.
+    expect(css).toMatch(/\.pixel-lyric-screen\s*\{[^}]*max-width:\s*min\(100%, 52rem\);/s);
   });
 
   test("holds the whole song in the rail and a window around the playhead when stacked", async () => {
