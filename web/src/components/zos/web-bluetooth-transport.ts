@@ -89,6 +89,32 @@ export function createWebBluetoothTransport(): BleTransport {
   let device: BluetoothDeviceLike | null = null;
   let rx: GattCharacteristic | null = null;
   let closed = false;
+  // ONE GATT OPERATION AT A TIME, PER DEVICE. That is the Web Bluetooth rule,
+  // not a suggestion: a second operation issued while one is outstanding is
+  // rejected with "GATT operation already in progress", and on this hardware the
+  // link then drops. Nothing here used to enforce it, and the flow only got away
+  // with it because a human typing six digits sat between the writes. Taking the
+  // code out of the common path removed that accidental serialisation and the
+  // collision surfaced on the very first exchange — the clock logged `hello`
+  // twice, 0 ms apart, then `BLE_DISC reason=hup`.
+  let gattQueue: Promise<unknown> = Promise.resolve();
+  const serialise = <T>(operation: () => Promise<T>): Promise<T> => {
+    // `catch` before chaining so one failed write does not poison every later
+    // one; the caller still sees its own rejection through the returned promise.
+    const next = gattQueue.then(operation, operation);
+    gattQueue = next.catch(() => undefined);
+    return next;
+  };
+  // Chrome hands back the SAME BluetoothDevice object for a device the user has
+  // already picked, so a listener added per connect() accumulates across
+  // retries: after one 重新连接 a single drop calls onDisconnect twice, which
+  // restarts the session twice, which is how two connects end up in flight.
+  let onDropped: (() => void) | null = null;
+  // Same accumulation, same cause: Chrome hands back the same characteristic
+  // object too, so a notification listener added per connect() means one inbound
+  // chunk is fed to the reassembler once per past attempt.
+  let onNotify: ((event: Event) => void) | null = null;
+  let notifySource: GattCharacteristic | null = null;
 
   return {
     async connect(handlers: BleTransportHandlers) {
@@ -106,40 +132,57 @@ export function createWebBluetoothTransport(): BleTransport {
 
       // Registered before the first write: a drop during the join is the normal
       // shape of success on this hardware, and the session has to see it.
-      device.addEventListener("gattserverdisconnected", () => {
+      if (onDropped !== null) device.removeEventListener("gattserverdisconnected", onDropped);
+      onDropped = () => {
         if (closed) return;
         handlers.onDisconnect();
-      });
+      };
+      device.addEventListener("gattserverdisconnected", onDropped);
 
       handlers.onStage("connecting");
       const gatt = device.gatt;
       if (gatt === undefined) throw new DOMException("device exposes no GATT", "NotSupportedError");
-      const server = await gatt.connect();
+      const server = await serialise(() => gatt.connect());
 
       handlers.onStage("service");
-      const service = await server.getPrimaryService(ZOS_BLE_SERVICE_UUID);
-      rx = await service.getCharacteristic(ZOS_BLE_RX_UUID);
-      const tx = await service.getCharacteristic(ZOS_BLE_TX_UUID);
+      const service = await serialise(() => server.getPrimaryService(ZOS_BLE_SERVICE_UUID));
+      rx = await serialise(() => service.getCharacteristic(ZOS_BLE_RX_UUID));
+      const tx = await serialise(() => service.getCharacteristic(ZOS_BLE_TX_UUID));
 
       handlers.onStage("subscribing");
-      tx.addEventListener("characteristicvaluechanged", (event) => {
+      if (notifySource !== null && onNotify !== null) {
+        notifySource.removeEventListener("characteristicvaluechanged", onNotify);
+      }
+      onNotify = (event: Event) => {
         const value = (event.target as GattCharacteristic).value;
         if (value === undefined) return;
         handlers.onChunk(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-      });
-      await tx.startNotifications();
+      };
+      notifySource = tx;
+      tx.addEventListener("characteristicvaluechanged", onNotify);
+      await serialise(() => tx.startNotifications());
       handlers.onStage("ready");
     },
 
     async write(chunk: Uint8Array) {
       if (rx === null) throw new Error("蓝牙尚未连接");
-      await rx.writeValueWithResponse(chunk);
+      const target = rx;
+      await serialise(() => target.writeValueWithResponse(chunk));
     },
 
     disconnect() {
       closed = true;
       rx = null;
       const gatt = device?.gatt;
+      if (device !== null && onDropped !== null) {
+        device.removeEventListener("gattserverdisconnected", onDropped);
+      }
+      onDropped = null;
+      if (notifySource !== null && onNotify !== null) {
+        notifySource.removeEventListener("characteristicvaluechanged", onNotify);
+      }
+      notifySource = null;
+      onNotify = null;
       device = null;
       if (gatt?.connected === true) gatt.disconnect();
     },
