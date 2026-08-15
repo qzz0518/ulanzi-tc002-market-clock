@@ -723,6 +723,12 @@
 }
 
 .music-stage {
+  /* The column split below is decided by the stage's own width, not the
+     viewport's: past 70rem the stage is 1.28fr of the page, so any @media
+     breakpoint would be a guess — the same reason the theme panel is a
+     container. cladd portals its popovers to the body, so the containment
+     this introduces cannot displace any of them. */
+  container-type: inline-size;
   padding: clamp(1.15rem, 3vw, 2rem);
   border-top: 1px solid var(--music-line);
   background: transparent;
@@ -731,28 +737,99 @@
 /* The lyric skin drives ONLY the pixel preview canvas + the device — never the
    page chrome. The web UI keeps its fixed brand palette regardless of skin. */
 
+/* Stacked by default: console, preview, theme, lyrics — DOM order, and the
+   only thing that decides the narrow layout. The class name is historical;
+   nothing here has been position:sticky since the page became one scrolling
+   document, and the rail below is the single exception. */
 .music-stage__sticky {
+  /* The container query below is the only place the split is decided, and the
+     lyric tape has to branch on it in JS too — the whole song in the rail, a
+     window around the playhead when stacked (music-player.tsx). Rather than
+     restate 49rem there, where it would be free to drift, the query flips this
+     flag and the component reads it back off this element. 0 = stacked. */
+  --music-lyrics-rail: 0;
   display: grid;
   min-width: 0;
   max-height: none;
+  align-content: start;
   gap: 1.3rem;
+  grid-template-columns: minmax(0, 1fr);
   overflow: visible;
   overscroll-behavior: auto;
 }
 
-/* Screen + timed lyrics sit side by side once the column is wide enough:
-   both are monitors of the same lyric surface, neither is the hero. */
-.music-lyric-band {
-  display: grid;
-  align-items: start;
-  gap: 1.15rem;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+.music-lyrics-rail {
+  min-width: 0;
 }
 
 .music-screen {
   display: grid;
   min-width: 0;
   gap: 0.9rem;
+}
+
+/* Wide enough for two columns, and the lyrics take the whole of the second
+   one. They are the only section here whose length is the song's, not the
+   layout's, so pairing them with any single left-hand section (the preview,
+   as before) guarantees one of the two ends short — which is exactly the
+   hole that used to open under the 52×16. Against the full stack there is
+   nothing left to mismatch.
+
+   39rem was the old screen+lyrics threshold; the left column now carries the
+   transport too, and that needs ~28rem before the cover, title and buttons
+   stop fighting — hence 49rem. */
+@container (min-width: 49rem) {
+  .music-stage__sticky {
+    /* The rail is up: the tape may hold the whole song, because it now has a
+       column to fill and a scroller of its own (see the base rule). */
+    --music-lyrics-rail: 1;
+    /* One row per left-hand section: console, preview, theme. They have to be
+       explicit, because `grid-row: 1 / -1` counts lines of the EXPLICIT grid —
+       with auto rows alone, line -1 collapses onto line 1 and the rail silently
+       stops spanning. Add a fourth section and this needs bumping. */
+    grid-template-rows: repeat(3, auto);
+    grid-template-columns: minmax(0, 1fr) minmax(19rem, 0.62fr);
+    gap: 1.3rem 1.5rem;
+    /* Makes the grid the containing block for the rail below, which is what
+       turns its grid area into a real box to position against. */
+    position: relative;
+  }
+
+  .music-stage__sticky > * {
+    grid-column: 1;
+  }
+
+  /* Out of flow on purpose. An in-flow rail contributes its own height to the
+     three rows it spans, and a 60-line song then stretches those rows — the
+     console, the preview and the theme panel drift apart and the page grows to
+     the length of the lyrics, which is the opposite of the point. Absolute
+     placement takes the rail out of track sizing entirely: the rows are the
+     left column's, and `inset: 0` gives the rail exactly that height back. */
+  .music-stage__sticky > .music-lyrics-rail {
+    position: absolute;
+    grid-column: 2;
+    grid-row: 1 / -1;
+    inset: 0;
+  }
+
+  /* Now `100%` is a real height, so the card is never taller than the column
+     beside it and never taller than the viewport either. Sticky travel is
+     whatever slack is left between the two: a short song's card follows the
+     scroll, a long song's fills the column and scrolls its own tape. */
+  .music-lyrics-rail > .music-lyrics-panel {
+    position: sticky;
+    top: 1rem;
+    max-height: min(calc(100dvh - 2rem), 100%);
+  }
+
+  /* The one nested scroller on this page, and it is bounded above by both of
+     those. The stacked layout keeps the tape in document flow (see the base
+     rule), which is what stops a phone from ever growing a scroll trap. */
+  .music-lyrics-rail .music-lyric-tape {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
 }
 
 .music-stage__header {
@@ -1164,11 +1241,18 @@
   font-weight: 500;
 }
 
+/* The identity column is sized to the title, not to whatever is left over.
+   As a `1fr` it always took the full width, so a short name like "Yes" left
+   180px of nothing between the words and the transport — the hairline read as
+   a break rather than as a divider. `max-content` plus `justify-content: start`
+   moves the slack to the outside edge of the row, where it reads as margin;
+   the `0` floor keeps the title's ellipsis working when space runs short. */
 .music-now-playing__main {
   display: grid;
   min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, max-content) auto;
   align-items: center;
+  justify-content: start;
   gap: 1rem 1.1rem;
   padding: 0.95rem 0;
 }
@@ -1333,7 +1417,13 @@
   line-height: 1.45;
 }
 
+/* Header pinned, tape taking the rest: the `minmax(0, 1fr)` row is what lets
+   the tape become a scroller in the rail without the header scrolling away.
+   Height stays auto here, so stacked it is still exactly as tall as its lines. */
 .music-lyrics-panel {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--music-line);
   border-radius: 0.72rem;

@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   DeviceReconnectGuidance,
+  lyricTapeRows,
   MusicAccountAvatar,
   MusicPlayer,
 } from "../web/src/components/music/music-player";
@@ -696,9 +697,12 @@ describe("music player UI", () => {
     expect(css).toMatch(/\.music-track-list__viewport\s*\{[^}]*overscroll-behavior:\s*auto;/s);
     expect(css).not.toMatch(/\.music-track-list__viewport\s*\{[^}]*overflow-y:\s*auto;/s);
     expect(css).not.toMatch(/\.music-track-list__viewport\s*\{[^}]*overscroll-behavior:\s*contain;/s);
-    expect(css).toMatch(/\.music-lyric-tape\s*\{[^}]*max-height:\s*none;/s);
-    expect(css).toMatch(/\.music-lyric-tape\s*\{[^}]*overflow:\s*visible;/s);
-    expect(css).not.toMatch(/\.music-lyric-tape\s*\{[^}]*overscroll-behavior:\s*contain;/s);
+    // Stacked — which is every phone, and any desktop narrow enough to collapse
+    // the stage — the lyric tape stays in document flow. It holds the whole
+    // song now, so bounding it here would be a scroll trap under a thumb.
+    expect(css).toMatch(/\n\.music-lyric-tape\s*\{[^}]*max-height:\s*none;/s);
+    expect(css).toMatch(/\n\.music-lyric-tape\s*\{[^}]*overflow:\s*visible;/s);
+    expect(css).not.toMatch(/\n\.music-lyric-tape\s*\{[^}]*overscroll-behavior:\s*contain;/s);
     expect(css).toMatch(/\.music-stage__sticky\s*\{[^}]*overflow:\s*visible;/s);
     expect(css).not.toMatch(/\.music-stage__sticky\s*\{[^}]*overflow-y:\s*auto;/s);
     expect(css).not.toMatch(/\.music-stage__sticky\s*\{[^}]*overscroll-behavior:\s*contain;/s);
@@ -711,6 +715,164 @@ describe("music player UI", () => {
     expect(globals).toMatch(
       /@media \(max-width: 60rem\) and \(max-height: 34rem\)[\s\S]*?\.main-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(7, minmax\(0, 1fr\)\);/,
     );
+  });
+
+  test("gives the lyrics the whole second column so no section can end short", async () => {
+    const [css, playerSource] = await Promise.all([
+      Bun.file(new URL("../web/src/styles/music-player.css", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
+    ]);
+
+    // The screen+lyrics band is gone. Pairing the 52×16 with the lyrics put a
+    // fixed-height section next to an unbounded one, and the shorter of the two
+    // left a hole underneath itself at every width.
+    expect(css).not.toContain(".music-lyric-band");
+    expect(playerSource).not.toContain("music-lyric-band");
+
+    // The split is decided by the stage's own width, not the viewport's: at
+    // ≥70rem the stage is only 1.28fr of the page.
+    expect(css).toMatch(/\.music-stage\s*\{[^}]*container-type:\s*inline-size;/s);
+    expect(css).toMatch(/\.music-stage__sticky\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/s);
+
+    // Two columns, and the lyrics own the second one across every row.
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(19rem, 0\.62fr\);/,
+    );
+    // `grid-row: 1 / -1` counts explicit lines, so the three left-hand sections
+    // must be declared or the rail quietly spans one row.
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky\s*\{[^}]*grid-template-rows:\s*repeat\(3, auto\);/,
+    );
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky > \.music-lyrics-rail\s*\{[^}]*grid-column:\s*2;/,
+    );
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky > \.music-lyrics-rail\s*\{[^}]*grid-row:\s*1 \/ -1;/,
+    );
+    // Out of flow, or a long song's rail sizes the rows it spans and drags the
+    // console, preview and theme panel apart down the left.
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky > \.music-lyrics-rail\s*\{[^}]*position:\s*absolute;/,
+    );
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky > \.music-lyrics-rail\s*\{[^}]*inset:\s*0;/,
+    );
+    // Capped by the column beside it AND by the viewport; the card sticks and
+    // the tape inside it scrolls, which is the whole point of the rail.
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-lyrics-rail > \.music-lyrics-panel\s*\{[^}]*position:\s*sticky;/,
+    );
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-lyrics-rail > \.music-lyrics-panel\s*\{[^}]*max-height:\s*min\(calc\(100dvh - 2rem\), 100%\);/,
+    );
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-lyrics-rail \.music-lyric-tape\s*\{[^}]*overflow-y:\s*auto;/,
+    );
+    // The nested scroller must not hand its overscroll back to the document.
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-lyrics-rail \.music-lyric-tape\s*\{[^}]*overscroll-behavior:\s*contain;/,
+    );
+    // Header pinned, tape taking the rest.
+    expect(css).toMatch(/\.music-lyrics-panel\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\);/s);
+
+    // Stacked order is player → preview → theme → lyrics, which DOM order alone
+    // decides: the rail is placed by the grid when the columns split, so being
+    // last costs nothing there and keeps a phone's theme panel above a few
+    // thousand pixels of lyrics.
+    expect(playerSource).toContain('<div className="music-lyrics-rail">');
+    expect(playerSource.indexOf("<MusicThemePanel"))
+      .toBeLessThan(playerSource.indexOf('className="music-lyrics-rail"'));
+    expect(playerSource.indexOf('className="music-screen"'))
+      .toBeLessThan(playerSource.indexOf("<MusicThemePanel"));
+
+    // A rail has to be filled by the song, not by a five-line window — five
+    // rows cannot reach the bottom of a column, so the hole would just move
+    // inside the card. Following the playhead becomes a scroll instead.
+    // (The stacked half of that branch is pinned in the next test.)
+    expect(playerSource).toContain("(selected?.lyrics ?? []).map");
+    expect(playerSource).toContain('.music-lyric-row.is-active');
+    expect(playerSource).toContain("tape.scrollTo(");
+    // …and only where the tape is actually the scroller. Stacked it is not,
+    // and scrolling it there would steal the page's scroll.
+    expect(playerSource).toContain("tape.scrollHeight <= tape.clientHeight + 1");
+    expect(playerSource).toContain('window.matchMedia("(prefers-reduced-motion: reduce)")');
+
+    // The console header no longer stretches the title's column to the full
+    // width, which is what pushed the transport to a far edge.
+    expect(css).toMatch(
+      /\.music-now-playing__main\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, max-content\) auto;/s,
+    );
+    expect(css).toMatch(/\.music-now-playing__main\s*\{[^}]*justify-content:\s*start;/s);
+  });
+
+  test("holds the whole song in the rail and a window around the playhead when stacked", async () => {
+    const song = Array.from({ length: 60 }, (_, index) => `line ${index}`);
+
+    // The rail is a full-height column with its own scroller: five rows could
+    // never reach the bottom of it, so the void the rail exists to close would
+    // simply reopen inside the card. It gets the song, and the same array back —
+    // slicing would hand React new references every line change.
+    const rail = lyricTapeRows(song, 20, true);
+    expect(rail).toEqual(song);
+    expect(rail).toBe(song);
+
+    // Stacked, the same tape is in document flow with nothing bounding it, and
+    // the whole song there is a ~3400px wall the reader has to scroll past to
+    // reach the theme panel below. A window instead — five rows, the playhead
+    // second from the top, one line of lead-in above it.
+    const stacked = lyricTapeRows(song, 20, false);
+    expect(stacked).toHaveLength(5);
+    expect(stacked).toEqual(["line 19", "line 20", "line 21", "line 22", "line 23"]);
+    expect(stacked.indexOf("line 20")).toBe(1);
+
+    // Re-cut every time the playhead moves on, which IS the auto-follow when
+    // there is no scroller to drive.
+    expect(lyricTapeRows(song, 21, false)).toEqual(
+      ["line 20", "line 21", "line 22", "line 23", "line 24"],
+    );
+
+    // Both ends clamp, so the card is one height for the whole song instead of
+    // growing a row twice in the opening bars and losing rows at the close.
+    expect(lyricTapeRows(song, -1, false)).toHaveLength(5);
+    expect(lyricTapeRows(song, 0, false)).toEqual(song.slice(0, 5));
+    expect(lyricTapeRows(song, 59, false)).toEqual(song.slice(55));
+    // A song shorter than the window is not padded, and an empty one still
+    // yields the empty state rather than an empty list.
+    expect(lyricTapeRows(song.slice(0, 3), 1, false)).toHaveLength(3);
+    expect(lyricTapeRows([], 0, false)).toHaveLength(0);
+
+    const [css, playerSource] = await Promise.all([
+      Bun.file(new URL("../web/src/styles/music-player.css", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
+    ]);
+
+    // Which branch is live has to be asked of the stage, because the split is a
+    // container query — a media query would be answering a different question.
+    // The threshold stays in the stylesheet and rides over on a custom property
+    // the query flips, so the two sides cannot drift.
+    expect(css).toMatch(/\.music-stage__sticky\s*\{[^}]*--music-lyrics-rail:\s*0;/s);
+    expect(css).toMatch(
+      /@container \(min-width: 49rem\)[\s\S]*?\.music-stage__sticky\s*\{[^}]*--music-lyrics-rail:\s*1;/,
+    );
+    expect(playerSource).toContain('const LYRICS_RAIL_FLAG = "--music-lyrics-rail"');
+    expect(playerSource).toContain("new ResizeObserver(read)");
+    expect(playerSource).toContain("getPropertyValue(LYRICS_RAIL_FLAG)");
+    expect(playerSource).toContain('<div className="music-stage__sticky" ref={stageGridRef}>');
+
+    // …and the window must never come with a scrollport. `music-lyric-tape` is
+    // bounded only inside the container query; the base rule is what keeps a
+    // ~60dvh scroll trap from landing under a thumb.
+    expect(css).toMatch(/\n\.music-lyric-tape\s*\{[^}]*overflow:\s*visible;/s);
+    expect(css).not.toMatch(/\n\.music-lyric-tape\s*\{[^}]*max-height:\s*\d/s);
+
+    // No JS, no observer, no effects: SSR and the first paint get the whole
+    // song. The window is only correct while something re-cuts it; the rail's
+    // content is correct even if nothing ever runs again. The render below is
+    // the other half of that — it would throw if the branch reached for
+    // ResizeObserver or getComputedStyle anywhere but an effect.
+    expect(playerSource)
+      .toContain("const [lyricsRailActive, setLyricsRailActive] = useState(true);");
+    expect(renderToStaticMarkup(createElement(MusicPlayer))).toContain("music-lyrics-panel");
   });
 
   test("shares the app heading scale and gives the preview the wider desktop column", async () => {

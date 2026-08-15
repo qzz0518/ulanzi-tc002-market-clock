@@ -122,6 +122,55 @@ const MUSIC_SKIN_STORAGE_KEY = "pixel-market.music-skin";
 const MUSIC_MODE_STORAGE_KEY = "pixel-market.music-mode";
 const MUSIC_ACCENT_STORAGE_KEY = "pixel-market.music-accent";
 
+/**
+ * Custom property `music-player.css` flips inside its `@container` query.
+ *
+ * The rail/stack split is decided by the stage's own inline size, not the
+ * viewport's, so JS cannot answer it with a media query — and restating `49rem`
+ * here would be a second threshold free to drift away from the first. Instead
+ * the container query itself hands the answer over: `0` stacked, `1` in the
+ * rail. One number, and it lives where the layout does.
+ */
+const LYRICS_RAIL_FLAG = "--music-lyrics-rail";
+
+/**
+ * How many rows the stacked tape shows, and where the playhead sits in them.
+ * The active line lands second from the top: one line of where the song has
+ * been, three of what is coming.
+ */
+const STACKED_LYRIC_LEAD = 1;
+const STACKED_LYRIC_ROWS = 5;
+
+/**
+ * Which lyric rows the tape shows, given the layout it is in.
+ *
+ * In the rail the tape is a full-height column with its own scroller, so it
+ * holds the whole song and follows the playhead by scrolling: five rows could
+ * never reach the bottom of that column, and the void would just move inside
+ * the card. Stacked, the tape is in document flow with nothing bounding it —
+ * the whole song there ends the page in a few thousand pixels of lyrics and
+ * buries the sections below it, and bounding it instead would put a scroll
+ * trap under a thumb. So stacked it goes back to a window re-cut around the
+ * playhead, which is what following the song looked like before the rail.
+ *
+ * The rail branch returns `rows` itself and the window is a slice of those
+ * same elements, so neither branch re-creates a row: whatever memoisation the
+ * caller did survives both.
+ */
+export function lyricTapeRows<Row>(
+  rows: readonly Row[],
+  activeIndex: number,
+  railActive: boolean,
+): readonly Row[] {
+  if (railActive) return rows;
+  // Clamped at both ends rather than offset from the playhead: the old slice
+  // was `activeIndex - 1 … activeIndex + 4`, which showed three rows before the
+  // first line landed and four on it, so the card grew by a row twice in the
+  // opening bars. Anchoring the length instead keeps it one height throughout.
+  const start = Math.max(0, Math.min(activeIndex - STACKED_LYRIC_LEAD, rows.length - STACKED_LYRIC_ROWS));
+  return rows.slice(start, start + STACKED_LYRIC_ROWS);
+}
+
 function formatTime(milliseconds: number): string {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return "0:00";
   const seconds = Math.floor(milliseconds / 1_000);
@@ -279,6 +328,37 @@ export function MusicPlayer({
   // continuous slider onChange is still flushing through React state.
   const dragMsRef = useRef<number | null>(null);
   const draggingRef = useRef(false);
+  // The rail card, not the tape: `List` and `ListButton` are cladd components,
+  // so the two elements the auto-follow needs are reached by query from the one
+  // plain DOM node this file owns rather than by trusting them to forward refs.
+  const lyricsPanelRef = useRef<HTMLElement | null>(null);
+  // The grid the container query styles. Its inline size IS the query's, so one
+  // node answers both halves of the question below: how wide, and what the CSS
+  // decided at that width.
+  const stageGridRef = useRef<HTMLDivElement | null>(null);
+  // True while the lyrics are the full-height rail, false while the stage is
+  // stacked. Starts true because that is the branch that is correct with no JS
+  // at all — SSR, and the frame before the observer first reports. The window
+  // is only right if something keeps re-cutting it; the whole song is right
+  // even if nothing ever runs again.
+  const [lyricsRailActive, setLyricsRailActive] = useState(true);
+
+  useEffect(() => {
+    const stage = stageGridRef.current;
+    if (!stage || typeof ResizeObserver === "undefined") return;
+    // Reading the flag rather than comparing widths keeps the threshold in the
+    // stylesheet; the observer is only here to say *when* to re-read it. It
+    // fires once on observe, so the first paint's guess is corrected before the
+    // user can act on it. Re-reading is a style recalc, but only on resize.
+    const read = () => {
+      setLyricsRailActive(
+        getComputedStyle(stage).getPropertyValue(LYRICS_RAIL_FLAG).trim() === "1",
+      );
+    };
+    const observer = new ResizeObserver(read);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
 
   const activeProviderId: MusicProviderId = overview?.active ?? "netease";
   const activeProvider = overview?.providers.find((entry) => entry.id === activeProviderId);
@@ -933,9 +1013,70 @@ export function MusicPlayer({
           : deviceOnline
             ? "音乐固件就绪 · 选一首歌"
             : "等待选歌";
-  const visibleLyrics = selected?.lyrics.length
-    ? selected.lyrics.slice(Math.max(0, activeLyricIndex - 1), activeLyricIndex + 4)
-    : [];
+  // Every line of the song, whichever layout is up: `lyricTapeRows` narrows this
+  // to a window when the stage is stacked, and a slice of these elements costs
+  // nothing next to rebuilding them.
+  // Memoised because `positionMs` re-renders this component several times a
+  // second while only a line change can alter these rows; handing React the
+  // same element references lets it skip the whole subtree in between, so a
+  // 60-line song costs no more per tick than the 5-line window did.
+  const lyricRows = useMemo(
+    () => (selected?.lyrics ?? []).map((line, index) => (
+      <ListButton
+        type="button"
+        key={line.startMs + "-" + line.text}
+        // Index, not startMs: two lines can share a timestamp (a line and its
+        // romaji), and the window used to hide that by never showing both.
+        className={`music-lyric-row${index === activeLyricIndex ? " is-active" : ""}`}
+        contentClassName="music-lyric-row__content"
+        innerContentClassName="music-lyric-row__copy"
+        titleClassName="music-lyric-row__title"
+        footerClassName="music-lyric-row__translation"
+        icon={<time>{formatTime(line.startMs)}</time>}
+        footer={line.translation}
+        color={index === activeLyricIndex ? "brand" : "neutral"}
+        rounded={false}
+        tightFocusRing
+        aria-current={index === activeLyricIndex ? "true" : undefined}
+        aria-label={"跳转到 " + formatTime(line.startMs) + "，" + line.text}
+        onClick={() => handleSeek(line.startMs)}
+      >
+        {line.text}
+      </ListButton>
+    )),
+    [activeLyricIndex, handleSeek, selected],
+  );
+
+  // What the tape actually shows: the whole song in the rail, a window around
+  // the playhead when stacked. Slicing the memoised rows rather than mapping a
+  // slice is what keeps the rail free of per-tick churn — both branches hand
+  // React the same element objects until a line change rebuilds them.
+  const visibleLyricRows = lyricTapeRows(lyricRows, activeLyricIndex, lyricsRailActive);
+
+  // Bring the current line to the reader — the rail's tape holds the whole song,
+  // so following the playhead there is a scroll. Stacked there is nothing to
+  // scroll (the window above is the follow, and the tape is in document flow),
+  // and scrolling it would hijack the page, so the rail check leaves this a
+  // no-op. The overflow test then covers the short song whose rail never fills.
+  useEffect(() => {
+    if (!lyricsRailActive) return;
+    const panel = lyricsPanelRef.current;
+    if (!panel) return;
+    const tape = panel.querySelector<HTMLElement>(".music-lyric-tape");
+    const row = panel.querySelector<HTMLElement>(".music-lyric-row.is-active");
+    if (!tape || !row) return;
+    if (tape.scrollHeight <= tape.clientHeight + 1) return;
+    // A third of the way down, which is where the old window put it: enough
+    // lead-in above to see where the song has been, most of the column below
+    // for what is coming. Measured against the tape rather than read off
+    // offsetTop, which would be relative to whichever ancestor is positioned.
+    const delta = row.getBoundingClientRect().top - tape.getBoundingClientRect().top;
+    const target = tape.scrollTop + delta - tape.clientHeight * 0.32;
+    tape.scrollTo({
+      top: Math.max(0, target),
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  }, [activeLyricIndex, lyricsRailActive, selected?.track.id]);
   // 两个入口都读账号私有数据（每日推荐按 Cookie 计算、喜欢的歌曲按 uid 取），
   // 所以 Spotify 之下和未登录时都不该出现——按不动的按钮不如没有。
   const neteaseSignedIn = activeProviderId === "netease" && session?.loggedIn === true;
@@ -1295,7 +1436,7 @@ export function MusicPlayer({
       </section>
 
       <div className="music-stage">
-        <div className="music-stage__sticky">
+        <div className="music-stage__sticky" ref={stageGridRef}>
           {/* The console leads the column: what's playing and how to control it
               come before the preview and every configuration concern. */}
           <section
@@ -1491,193 +1632,133 @@ export function MusicPlayer({
                 Connect player is the output and no element exists at all. */}
           </section>
 
-          {/* The device screen and the timed lyrics form one band: both are
-              views of the same lyric surface, sized as monitors, not heroes. */}
-          <div className="music-lyric-band">
-            <section className="music-screen" aria-labelledby="music-preview-title">
-              <header className="music-stage__header">
-                <div className="music-stage__heading">
-                  <span className="music-stage__eyebrow">
-                    <Radio aria-hidden="true" />
-                    <span className="music-stage__eyebrow-label">LIVE PREVIEW</span>
-                    <em className={"music-stage__pulse" + (playing ? " is-live" : "")} aria-live="polite">
-                      <i aria-hidden="true" />{previewStatus}
-                    </em>
-                  </span>
-                  <h2 id="music-preview-title">52 × 16 像素屏</h2>
-                </div>
-                <div className="music-stage__header-actions">
-                  {zos ? (
-                    // 官方固件的同屏通道在 ZOS 上是 503，但设备自己有一页音乐界面，
-                    // 而固件现在认 focus:"music"。所以这里与 内容 页同一个 idiom：
-                    // 接管旋钮把时钟切过去，再按一次交还。标签特意不叫「在时钟上显示」——
-                    // 它就挨着这块 52×16 预览，那样写会被读成把预览镜像过去，而那正是
-                    // ZOS 上做不到的事：设备那页由它自己渲染。
-                    <Button
-                      type="button"
-                      className="music-mirror-toggle"
-                      size="sm"
-                      color={zosMusicPinned ? "brand" : "neutral"}
-                      variant="transparent"
-                      outline
-                      tightFocusRing
-                      aria-pressed={zosMusicPinned}
-                      aria-busy={zosFocus.busy}
-                      disabled={zosFocus.busy}
-                      title={zosMusicPinned
-                        ? "交还旋钮，时钟恢复自己切台"
-                        : "把时钟切到它自己的音乐页并锁住旋钮；那一页由设备渲染，不是这块预览的镜像"}
-                      onClick={() => zosFocus.toggle(ZOS_MUSIC_FOCUS)}
-                    >
-                      {zosMusicPinned
-                        ? <PinOff aria-hidden="true" />
-                        : <MonitorCog aria-hidden="true" />}
-                      {zosMusicPinned ? "交还旋钮" : "切到时钟音乐页"}
-                    </Button>
-                  ) : deviceOnline ? (
-                    <Button
-                      type="button"
-                      className="music-mirror-toggle"
-                      size="sm"
-                      color="neutral"
-                      variant="transparent"
-                      outline
-                      tightFocusRing
-                      aria-disabled="true"
-                      title="设备正在运行音乐固件，直接原生播放"
-                    >
-                      <HardDrive aria-hidden="true" />设备直连
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      className="music-mirror-toggle"
-                      size="sm"
-                      color={mirrorOn ? "brand" : "neutral"}
-                      variant="transparent"
-                      outline
-                      tightFocusRing
-                      aria-pressed={mirrorOn}
-                      disabled={!selected}
-                      title="把当前歌词帧推送到官方固件的自定义应用位，不需要刷机"
-                      onClick={() => void toggleMirror()}
-                    >
-                      <Cast aria-hidden="true" />设备同屏
-                    </Button>
-                  )}
+          {/* aria-label 而不是 aria-labelledby:标题本身删掉了——预览下方的
+              「屏幕 52 × 16 · 字模 12 × 12」已经把同一件事说过一遍,而屏幕规格
+              不是这块区域的名字。无障碍名字不能跟着一起消失,所以搬到这里。 */}
+          <section className="music-screen" aria-label="52 × 16 像素屏预览">
+            <header className="music-stage__header">
+              <div className="music-stage__heading">
+                <span className="music-stage__eyebrow">
+                  <Radio aria-hidden="true" />
+                  <span className="music-stage__eyebrow-label">LIVE PREVIEW</span>
+                  <em className={"music-stage__pulse" + (playing ? " is-live" : "")} aria-live="polite">
+                    <i aria-hidden="true" />{previewStatus}
+                  </em>
+                </span>
+              </div>
+              <div className="music-stage__header-actions">
+                {zos ? (
+                  // 官方固件的同屏通道在 ZOS 上是 503，但设备自己有一页音乐界面，
+                  // 而固件现在认 focus:"music"。所以这里与 内容 页同一个 idiom：
+                  // 接管旋钮把时钟切过去，再按一次交还。标签特意不叫「在时钟上显示」——
+                  // 它就挨着这块 52×16 预览，那样写会被读成把预览镜像过去，而那正是
+                  // ZOS 上做不到的事：设备那页由它自己渲染。
                   <Button
                     type="button"
-                    className="music-device-trigger"
-                    contentClassName="music-device-trigger__content"
+                    className="music-mirror-toggle"
+                    size="sm"
+                    color={zosMusicPinned ? "brand" : "neutral"}
+                    variant="transparent"
+                    outline
+                    tightFocusRing
+                    aria-pressed={zosMusicPinned}
+                    aria-busy={zosFocus.busy}
+                    disabled={zosFocus.busy}
+                    title={zosMusicPinned
+                      ? "交还旋钮，时钟恢复自己切台"
+                      : "把时钟切到它自己的音乐页并锁住旋钮；那一页由设备渲染，不是这块预览的镜像"}
+                    onClick={() => zosFocus.toggle(ZOS_MUSIC_FOCUS)}
+                  >
+                    {zosMusicPinned
+                      ? <PinOff aria-hidden="true" />
+                      : <MonitorCog aria-hidden="true" />}
+                    {zosMusicPinned ? "交还旋钮" : "切到时钟音乐页"}
+                  </Button>
+                ) : deviceOnline ? (
+                  <Button
+                    type="button"
+                    className="music-mirror-toggle"
                     size="sm"
                     color="neutral"
                     variant="transparent"
                     outline
                     tightFocusRing
-                    aria-haspopup="dialog"
-                    aria-label={`侧载音乐固件，${firmwarePanel.statusLabel}`}
-                    onClick={firmwarePanel.openPanel}
+                    aria-disabled="true"
+                    title="设备正在运行音乐固件，直接原生播放"
                   >
-                    <HardDrive aria-hidden="true" />
-                    <span>侧载音乐固件</span>
-                    <ChevronRight aria-hidden="true" />
+                    <HardDrive aria-hidden="true" />设备直连
                   </Button>
-                </div>
-              </header>
-
-              <PixelLyricsPreview
-                currentText={displayCurrent}
-                hasLyric={Boolean(activeLyric && activeLyric.text.trim().length > 0)}
-                line={activeLine}
-                trackProgress={trackProgress}
-                timeMs={currentMs}
-                playing={playing && !loadingTrack}
-                skin={skin}
-                accent={accent}
-                mode={mode}
-                spectrum={activeSpectrum}
-              />
-
-              {loadingTrack && (
-                <div className="music-sync-hint" role="status" aria-live="polite">
-                  <span aria-hidden="true"><Spinner size="xs" color="brand" /></span>
-                  <span>正在同步到设备，请稍候…</span>
-                </div>
-              )}
-
-              {/* The sync hint that used to sit here explained which side owns
-                  playback and warned that the NetEase path needed this page kept
-                  open. Playback now lives in a module-level store, so leaving the
-                  tab no longer stops it and the warning had become false. The
-                  true half — that the clock follows whatever is playing — is
-                  something the panel demonstrates by doing it. */}
-
-              {zos && zosFocus.error && (
-                <p className="music-inline-error" role="alert">切换时钟界面失败：{zosFocus.error}</p>
-              )}
-
-              {mirrorError && <p className="music-inline-error" role="alert">同屏推送失败：{mirrorError}</p>}
-
-            </section>
-
-            <section className="music-lyrics-panel" aria-labelledby="music-lyrics-title">
-            <header>
-              <div><span>LYRICS</span><h3 id="music-lyrics-title">歌词轨</h3></div>
-              {/*
-                Say out loud which kind of timing the current line has.
-                A word-timed line and a rate-estimated one look identical on the
-                panel until you watch one finish early, and the estimate really
-                can cut a long held note short — so the console names it rather
-                than presenting a guess as a measurement.
-              */}
-              {lyricTimingBadge && (
-                <Chip
-                  size="sm"
-                  color={lyricTimingBadge.exact ? "brand" : "neutral"}
-                  variant="transparent"
-                  aria-live="polite"
-                  title={lyricTimingBadge.hint}
-                >
-                  {lyricTimingBadge.label}
-                </Chip>
-              )}
-              <small>{selected ? "点击歌词可跳转" : "选择歌曲后显示"}</small>
-            </header>
-            {visibleLyrics.length > 0 ? (
-              <List className="music-lyric-tape" aria-label="歌词时间轴">
-                {visibleLyrics.map((line) => (
-                  <ListButton
+                ) : (
+                  <Button
                     type="button"
-                    key={line.startMs + "-" + line.text}
-                    className={`music-lyric-row${activeLyric?.startMs === line.startMs ? " is-active" : ""}`}
-                    contentClassName="music-lyric-row__content"
-                    innerContentClassName="music-lyric-row__copy"
-                    titleClassName="music-lyric-row__title"
-                    footerClassName="music-lyric-row__translation"
-                    icon={<time>{formatTime(line.startMs)}</time>}
-                    footer={line.translation}
-                    color={activeLyric?.startMs === line.startMs ? "brand" : "neutral"}
-                    rounded={false}
+                    className="music-mirror-toggle"
+                    size="sm"
+                    color={mirrorOn ? "brand" : "neutral"}
+                    variant="transparent"
+                    outline
                     tightFocusRing
-                    aria-current={activeLyric?.startMs === line.startMs ? "true" : undefined}
-                    aria-label={"跳转到 " + formatTime(line.startMs) + "，" + line.text}
-                    onClick={() => handleSeek(line.startMs)}
+                    aria-pressed={mirrorOn}
+                    disabled={!selected}
+                    title="把当前歌词帧推送到官方固件的自定义应用位，不需要刷机"
+                    onClick={() => void toggleMirror()}
                   >
-                    {line.text}
-                  </ListButton>
-                ))}
-              </List>
-            ) : (
-              <div className="music-lyrics-empty">
-                <Music2 aria-hidden="true" />
-                <div>
-                  <strong>{selected ? "当前歌曲暂无可用歌词" : "歌词会在这里跟随播放"}</strong>
-                  <span>{selected ? "仍可使用上方进度条试听歌曲。" : "选择歌曲后，可点击任意歌词跳转。"}</span>
-                </div>
+                    <Cast aria-hidden="true" />设备同屏
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  className="music-device-trigger"
+                  contentClassName="music-device-trigger__content"
+                  size="sm"
+                  color="neutral"
+                  variant="transparent"
+                  outline
+                  tightFocusRing
+                  aria-haspopup="dialog"
+                  aria-label={`侧载音乐固件，${firmwarePanel.statusLabel}`}
+                  onClick={firmwarePanel.openPanel}
+                >
+                  <HardDrive aria-hidden="true" />
+                  <span>侧载音乐固件</span>
+                  <ChevronRight aria-hidden="true" />
+                </Button>
+              </div>
+            </header>
+
+            <PixelLyricsPreview
+              currentText={displayCurrent}
+              hasLyric={Boolean(activeLyric && activeLyric.text.trim().length > 0)}
+              line={activeLine}
+              trackProgress={trackProgress}
+              timeMs={currentMs}
+              playing={playing && !loadingTrack}
+              skin={skin}
+              accent={accent}
+              mode={mode}
+              spectrum={activeSpectrum}
+            />
+
+            {loadingTrack && (
+              <div className="music-sync-hint" role="status" aria-live="polite">
+                <span aria-hidden="true"><Spinner size="xs" color="brand" /></span>
+                <span>正在同步到设备，请稍候…</span>
               </div>
             )}
-            </section>
-          </div>
+
+            {/* The sync hint that used to sit here explained which side owns
+                playback and warned that the NetEase path needed this page kept
+                open. Playback now lives in a module-level store, so leaving the
+                tab no longer stops it and the warning had become false. The
+                true half — that the clock follows whatever is playing — is
+                something the panel demonstrates by doing it. */}
+
+            {zos && zosFocus.error && (
+              <p className="music-inline-error" role="alert">切换时钟界面失败：{zosFocus.error}</p>
+            )}
+
+            {mirrorError && <p className="music-inline-error" role="alert">同屏推送失败：{mirrorError}</p>}
+
+          </section>
 
           {/* Appearance is configuration: kept whole, but demoted below
               everything a player needs at hand. */}
@@ -1697,6 +1778,62 @@ export function MusicPlayer({
             // player does; neither runs an FFT, so the preview must not either.
             simulatedSpectrum={remoteMode || deviceOnline || zos}
           />
+
+          {/* The lyrics are the one section with unbounded content, so they own
+              the second column outright and everything else stacks in the first
+              (music-player.css). The rail div is the spanning cell; the card
+              inside it is what sticks and scrolls, and it cannot be the same
+              element — a stretched grid item has no room left to travel.
+
+              Last in the DOM, which decides only the stacked order: side by
+              side the rail is placed by the grid regardless. A phone gets the
+              whole song's lyrics here, and burying the theme panel under a
+              few thousand pixels of them would be the price of putting this
+              third. Reading order then matches the stack on a phone, and on a
+              desktop it is the ordinary "sidebar last" arrangement. */}
+          <div className="music-lyrics-rail">
+            <section
+              className="music-lyrics-panel"
+              aria-labelledby="music-lyrics-title"
+              ref={lyricsPanelRef}
+            >
+              <header>
+                <div><span>LYRICS</span><h3 id="music-lyrics-title">歌词轨</h3></div>
+                {/*
+                  Say out loud which kind of timing the current line has.
+                  A word-timed line and a rate-estimated one look identical on the
+                  panel until you watch one finish early, and the estimate really
+                  can cut a long held note short — so the console names it rather
+                  than presenting a guess as a measurement.
+                */}
+                {lyricTimingBadge && (
+                  <Chip
+                    size="sm"
+                    color={lyricTimingBadge.exact ? "brand" : "neutral"}
+                    variant="transparent"
+                    aria-live="polite"
+                    title={lyricTimingBadge.hint}
+                  >
+                    {lyricTimingBadge.label}
+                  </Chip>
+                )}
+                <small>{selected ? "点击歌词可跳转" : "选择歌曲后显示"}</small>
+              </header>
+              {visibleLyricRows.length > 0 ? (
+                <List className="music-lyric-tape" aria-label="歌词时间轴">
+                  {visibleLyricRows}
+                </List>
+              ) : (
+                <div className="music-lyrics-empty">
+                  <Music2 aria-hidden="true" />
+                  <div>
+                    <strong>{selected ? "当前歌曲暂无可用歌词" : "歌词会在这里跟随播放"}</strong>
+                    <span>{selected ? "仍可使用上方进度条试听歌曲。" : "选择歌曲后，可点击任意歌词跳转。"}</span>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
         </div>
       </div>
 
