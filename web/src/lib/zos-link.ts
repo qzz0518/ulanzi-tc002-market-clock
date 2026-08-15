@@ -999,6 +999,18 @@ export interface ZosLink {
    * so a missing receipt must not read as a failure.
    */
   requestUpgrade(): Promise<number | null>;
+  /**
+   * POST /api/os/ble. Asks the clock to put its Bluetooth advertisement back on
+   * the air for five minutes, which is the only way the pairing wizard can find
+   * a clock that is ONLINE — an online clock advertises nothing, so the
+   * browser's chooser came up empty on exactly the device somebody was trying to
+   * move to a new router.
+   *
+   * Resolves with the sequence the service recorded, or null when it named none.
+   * The caller must let the user carry on either way: a clock too offline to
+   * ever read this request is a clock already advertising on its own.
+   */
+  requestBleOpen(): Promise<number | null>;
 }
 
 async function describeFailure(response: Response): Promise<string> {
@@ -1160,6 +1172,19 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
         headers: { "Content-Type": "application/json" },
         body: "{}",
       }));
+    },
+    async requestBleOpen() {
+      // An empty JSON body, like requestUpgrade: the route takes JSON because a
+      // cross-origin form cannot set the header, and this request carries no
+      // arguments — how long the window stays open is the firmware's own
+      // constant, not something a browser gets to name.
+      const body = await readJson<unknown>("/api/os/ble", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const seq = asPositive(asRecord(body)?.seq);
+      return seq === null ? null : Math.round(seq);
     },
   };
 }

@@ -171,6 +171,17 @@ export interface OsSleepRequestSink {
 
 // Bounds shared by the route and the hub. Below 30 s the panel blanks while the
 // user is looking at it; above two hours the window is doing all the work.
+/**
+ * How long a 「打开蓝牙」 request stays in the pull document.
+ *
+ * Matches the firmware's own forced window (kBleForcedMs, 5 minutes): past it
+ * the device has already closed the radio, so a request still on the wire is
+ * asking for something that is no longer happening — and worse, it is a request
+ * a power-cycled clock would read as new, opening its radio on boot with nobody
+ * present. Requests that nobody is waiting on have to stop being requests.
+ */
+export const BLE_OPEN_WINDOW_SEC = 300;
+
 export const OS_SLEEP_MIN_IDLE_SEC = 30;
 export const OS_SLEEP_MAX_IDLE_SEC = 7200;
 export const OS_SLEEP_MAX_MINUTE = 1439;
@@ -464,6 +475,14 @@ export class OsLinkHub {
   // zero would hand the device a number its own /data record already carries —
   // which it correctly refuses as "already installed".
   private upgradeSeqIssued = 0;
+  // 蓝牙配网, asked for by the console. No `issued` twin beside it, unlike the
+  // upgrade above: this request is never withdrawn, so the field itself is
+  // already the highest id ever handed out.
+  private bleOpenSeq = 0;
+  // The wall-clock second the request stops being published. The device's own
+  // window is five minutes (kBleForcedMs), so a request that outlives it is
+  // asking for something the firmware has already stopped doing.
+  private bleOpenUntil = 0;
   private display: OsDisplayCommand = { focus: null, pinned: false };
   private telemetry: OsTelemetry | null = null;
   // Counts reports, not changes: a caller asking "has the device spoken since I
@@ -622,6 +641,39 @@ export class OsLinkHub {
 
   getUpgradeSeq(): number {
     return this.upgradeSeq;
+  }
+
+  /**
+   * Asks the panel to put its Bluetooth advertisement back on the air.
+   *
+   * The console's 蓝牙配网 wizard can only SCAN, and the clock advertises in
+   * exactly two situations: while it is offline, and for five minutes after
+   * somebody walks up and presses 设置 → 配网 (`sBleForcedUntilMs`). So on the
+   * clock this feature is actually for — one that is online and working, whose
+   * owner is moving it to a new router — nothing is on the air and the browser's
+   * chooser is empty. This is the missing half: the console asks, the device
+   * opens the window.
+   *
+   * Seconds-since-epoch and strictly increasing, exactly like requestUpgrade,
+   * and for the same reason — see its comment. The device honours a RISING
+   * sequence, so a counter restarting at 1 with this Bun process would hand a
+   * long-lived device a number it has already acted on and the request would be
+   * silently ignored for the rest of that boot.
+   *
+   * Nothing withdraws it, unlike an install: opening the radio does not reboot
+   * the device, a repeat is harmless, and the window closes itself after five
+   * minutes. That is also why there is no `/data` record on the device side —
+   * the only guard needed is "greater than the last one I acted on this boot".
+   */
+  requestBleOpen(): number {
+    this.bleOpenSeq = Math.max(this.bleOpenSeq + 1, Math.floor(Date.now() / 1000));
+    this.bleOpenUntil = Math.floor(this.now() / 1000) + BLE_OPEN_WINDOW_SEC;
+    this.bump();
+    return this.bleOpenSeq;
+  }
+
+  getBleOpenSeq(): number {
+    return this.bleOpenSeq;
   }
 
   setDisplay(command: OsDisplayCommand): void {
@@ -1171,6 +1223,27 @@ export class OsLinkHub {
     // Emitted only once asked: a firmware that has never heard of the key
     // ignores it, and one that has must not see it on every document.
     if (this.upgradeSeq > 0) lines.push(`upgrade\t${this.upgradeSeq}`);
+    // 蓝牙配网, and a NEW KEY rather than a field on anything that exists — the
+    // same rule `rev`, `ttl` and `setvolseq` follow, for the reason spelled out
+    // at the `item` records below: the deployed firmware arity-checks the keys
+    // it knows and drops a line that grew a field, while it ignores keys it has
+    // never heard of by design. That asymmetry is what lets this reach a panel
+    // flashed before the feature existed without taking anything away from it.
+    //
+    // Repeated on every document once asked, like `upgrade`, because the
+    // document is PULLED: a request the device has not polled for yet has to
+    // still be in it. Which is exactly why the device gates on a rising
+    // sequence rather than on the key's presence — see HostLink::adoptDocument.
+    // EXPIRED REQUESTS ARE NOT PUBLISHED. The device arms on an id greater than
+    // the one it last acted on, and that memory dies with a power cycle — so a
+    // request left standing is a clock that opens its radio and jumps to the
+    // provisioning screen on every boot, with nobody having asked. The same
+    // shape as the install request's boot loop, and the same lesson: a request
+    // nobody is waiting on any more has to stop being a request. Five minutes,
+    // matching the window the firmware itself opens.
+    if (this.bleOpenSeq > 0 && Math.floor(this.now() / 1000) < this.bleOpenUntil) {
+      lines.push(`bleopen\t${this.bleOpenSeq}`);
+    }
     lines.push(this.serializeVibe(this.vibe));
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {

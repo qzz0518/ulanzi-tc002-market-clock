@@ -204,6 +204,26 @@ bool pskIsSafe(const std::string& psk);
  */
 bool hostIsSafe(const std::string& host);
 
+/**
+ * The URL this firmware would poll for `value` — the one definition of it.
+ *
+ * `host`, `host:port` and a complete `http://…` all name the same console, and
+ * a user writing /res/etc/zos-host by hand writes whichever they think of; the
+ * three shapes are folded here so nothing downstream has to know there were
+ * three. Empty in, empty out: "no console" is a state, not an address, and
+ * "http://:43820" would be a very confident way of saying nothing.
+ *
+ * It lives HERE rather than next to readHostAddress() because it is now load-
+ * bearing twice over. logic/osLogic.cc is #included by the activity translation units and so is
+ * compiled by no host check, while BleProvisionSession's takeover rule decides
+ * whether a join needs a pairing code by comparing this function's output for
+ * an over-the-air `host` against the URL the pull loop is actually using. A
+ * second, drifting copy of the ":43820" default would mean either a code
+ * demanded on every ordinary join or no code demanded on a real takeover, and
+ * neither would be visible until it was on someone's shelf.
+ */
+std::string consoleUrl(const std::string& value);
+
 // --- the advertisement ------------------------------------------------------
 
 /**

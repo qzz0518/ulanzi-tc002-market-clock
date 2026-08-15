@@ -292,6 +292,21 @@ class StateDoc {
   bool mirror() const { return mMirror; }
   /** Console-initiated install request; 0 when never asked. */
   int upgradeSeq() const { return mUpgradeSeq; }
+  /**
+   * Console-initiated 蓝牙配网 request; 0 when never asked.
+   *
+   * The console's wizard can only SCAN, and this device advertises only while
+   * it is offline or inside the five-minute window 设置 → 配网 opens. A clock
+   * that is online and working — the one whose owner is moving it to another
+   * router — is therefore invisible to the chooser unless somebody walks up to
+   * it. This is the console asking for that window from across the LAN.
+   *
+   * A RISING value is the request, never the key's presence: the document is
+   * pulled and repeats what it carries on every poll, so acting on presence
+   * would re-arm the window on each long poll and the panel could never leave
+   * the provisioning screen. See HostLink::adoptDocument.
+   */
+  int bleOpenSeq() const { return mBleOpenSeq; }
   const std::string& focus() const { return mFocus; }
   const std::vector<Item>& items() const { return mItems; }
 
@@ -428,6 +443,7 @@ class StateDoc {
   bool mPinned;
   bool mMirror;
   int mUpgradeSeq;
+  int mBleOpenSeq;
   std::string mFocus;
   std::vector<Item> mItems;
   std::vector<VibeAgent> mVibe;

@@ -11,6 +11,9 @@ export interface AppConfig {
   sourceStaleMs: number;
   displayDurationSeconds: number;
   healthPort: number;
+  /** The LAN beacon that lets a clock whose console moved find it again. */
+  consoleDiscovery: boolean;
+  consoleDiscoveryPort: number;
 }
 
 function validateClockHttpProxy(value: string | undefined): string | undefined {
@@ -42,6 +45,13 @@ const DEFAULTS = {
   sourceStaleMs: 120_000,
   displayDurationSeconds: 90,
   healthPort: 43_820,
+  // ON by default: the failure it repairs (a DHCP lease moving under a clock
+  // that polls a static address) is silent from both ends, so a device that
+  // needs this is by definition one nobody has thought to go and configure.
+  consoleDiscovery: true,
+  // Fixed rather than derived from healthPort — the device's listener is a
+  // compile-time constant. See BEACON_PORT in console-beacon.ts.
+  consoleDiscoveryPort: 43_821,
 } satisfies Omit<AppConfig, "clockHost" | "clockHttpProxy" | "notifyToken">;
 
 function validateControlHost(value: string): AppConfig["controlHost"] {
@@ -64,6 +74,21 @@ function parseInteger(
     throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
   }
   return parsed;
+}
+
+/**
+ * A yes/no switch, strict like parseInteger above.
+ *
+ * An unrecognised value throws rather than falling back to the default: this
+ * one turns a network broadcast off, and `CONSOLE_DISCOVERY=disabled` silently
+ * meaning "on" is the shape of a setting someone believes they have changed.
+ */
+function parseBoolean(name: string, value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "on", "yes"].includes(normalized)) return true;
+  if (["0", "false", "off", "no"].includes(normalized)) return false;
+  throw new Error(`${name} must be one of on/off, true/false, 1/0, yes/no`);
 }
 
 export function loadRequestTimeoutMs(
@@ -143,5 +168,17 @@ export function loadConfig(
       86_400,
     ),
     healthPort: loadHealthPort(env),
+    consoleDiscovery: parseBoolean(
+      "CONSOLE_DISCOVERY",
+      env.CONSOLE_DISCOVERY,
+      DEFAULTS.consoleDiscovery,
+    ),
+    consoleDiscoveryPort: parseInteger(
+      "CONSOLE_DISCOVERY_PORT",
+      env.CONSOLE_DISCOVERY_PORT,
+      DEFAULTS.consoleDiscoveryPort,
+      1_024,
+      65_535,
+    ),
   };
 }

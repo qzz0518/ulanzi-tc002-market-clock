@@ -90,6 +90,8 @@ HostLink::HostLink()
       mUpgradeStartedSeq(0),
       mUpgradeInstallReady(false),
       mUpgradeSeqPath(ProvisionLog::upgradeSeqPath()),
+      mBleOpenArmedSeq(0),
+      mBleOpenPendingSeq(0),
       mMirrorDirty(false),
       mTelRestarts(0),
       mTelBattery(-1),
@@ -384,6 +386,18 @@ int HostLink::takeUpgradeRequest() {
   return seq;
 }
 
+int HostLink::takeBleOpenRequest() {
+  ::pthread_mutex_lock(&mLock);
+  const int seq = mBleOpenPendingSeq;
+  // Cleared, not compared against a "started" twin like the upgrade's: there is
+  // no second phase to report progress for, so the pending id IS the whole
+  // state. mBleOpenArmedSeq keeps the high-water mark, which is what makes the
+  // document repeating this request on every poll a no-op.
+  mBleOpenPendingSeq = 0;
+  ::pthread_mutex_unlock(&mLock);
+  return seq;
+}
+
 void HostLink::noteUpgradeProgress(long received, long total) {
   ::pthread_mutex_lock(&mLock);
   mUpgrade.received = received;
@@ -589,7 +603,27 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
     mUpgrade.total = 0;
     mUpgrade.verdict = 0;
   }
+  // 蓝牙配网. Armed here rather than in the UI tick for the same reason the
+  // install is: this function is the one entry point a host self-check can
+  // drive, and a gate re-implemented anywhere else would agree with a runPull
+  // that dropped the field.
+  //
+  // GREATER THAN, not different from. There is no /data record behind this one
+  // (nothing reboots), so the in-memory high-water mark is the only guard there
+  // is — and it has to be one the standing document cannot beat, because the
+  // console keeps publishing the same id on every poll for as long as it
+  // remembers it. `!=` would be enough for that alone, but `>` also makes a
+  // service that restarted its counter unable to re-open the window with an id
+  // this boot already honoured.
+  if (doc.bleOpenSeq() > 0 && doc.bleOpenSeq() > mBleOpenArmedSeq) {
+    mBleOpenArmedSeq = doc.bleOpenSeq();
+    mBleOpenPendingSeq = doc.bleOpenSeq();
+  }
   mSnapshot.consecutiveFailures = 0;
+  // The one stamp that says the console link is ALIVE, set here because this
+  // function runs on exactly one event: a document that parsed. See the field's
+  // comment for why it is not the now-playing stamp a few lines down.
+  mSnapshot.lastPullMonoMs = stampMonoMs;
   // Every now-playing field, unconditionally — including the ones the document
   // left out. A document with no `np` block means nothing is playing, and
   // keeping the previous song's title alive through it would put a track on the

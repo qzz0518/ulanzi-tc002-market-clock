@@ -23,6 +23,7 @@ import type { MusicLyricLine, MusicLyricWord } from "./music/core.ts";
 import { LrclibLyricsClient } from "./music/lyrics.ts";
 import { SpotifyAppStore, SpotifyMusicService, SpotifySessionStore } from "./music/spotify.ts";
 import { createGameSocketHub } from "./game-socket.ts";
+import { ConsoleBeacon } from "./console-beacon.ts";
 import { discoverControlAccess } from "./network-access.ts";
 import { WorkspaceStore, createDefaultWorkspace } from "./workspace.ts";
 import { WorkspaceController } from "./workspace-controller.ts";
@@ -631,6 +632,31 @@ const controlServer = Bun.serve({
   websocket: gameSockets.websocket,
 });
 
+// The LAN beacon. Started after the listener, because what it announces is where
+// that listener can be reached and there is no point telling a device to poll a
+// port nothing is bound to yet. Failure to start is logged and survivable: this
+// repairs a link that is already broken, so it must never be the reason a
+// console that would otherwise work does not come up.
+const consoleBeacon = config.consoleDiscovery
+  ? new ConsoleBeacon({
+    consolePort: config.healthPort,
+    announcePort: config.consoleDiscoveryPort,
+    // A getter, like the installers': the clock is repointable at runtime and
+    // the interface choice follows it rather than freezing at boot (ADR 0005).
+    clockHost: () => config.clockHost,
+    log,
+  })
+  : undefined;
+if (consoleBeacon) {
+  try {
+    await consoleBeacon.start();
+  } catch (error) {
+    log("console_beacon_start_failed", { error: errorMessage(error) });
+  }
+} else {
+  log("console_beacon_disabled", { reason: "CONSOLE_DISCOVERY" });
+}
+
 function beginShutdown(signal: string): void {
   if (stopping) return;
   stopping = true;
@@ -638,6 +664,7 @@ function beginShutdown(signal: string): void {
   wakeSleep?.();
   // Closes game sockets and flushes the doodle wall before the listener dies.
   void gameSockets.stop();
+  consoleBeacon?.stop();
   controlServer.stop(true);
 }
 

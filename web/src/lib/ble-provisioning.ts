@@ -358,6 +358,19 @@ export type ProvisionPhase =
 
 export type ProvisionErr =
   | "no-code"
+  /**
+   * The join would re-point the clock at a console it is not currently on, and
+   * the device wants the panel's six digits before it does that.
+   *
+   * The ONLY error in this list that is a prompt rather than a fault. The device
+   * demands a code for exactly one capability — see the firmware's
+   * BleProvisionSession header — so this arrives at most once per flow, in
+   * answer to a join the console can re-send verbatim afterwards. Kept separate
+   * from `no-code` because that one means "the six digits you already typed were
+   * wrong", and showing that sentence on a field the user has never seen would
+   * be the console blaming them for its own first attempt.
+   */
+  | "host-code"
   | "locked-out"
   | "bad-psk"
   | "no-ap"
@@ -422,7 +435,8 @@ const PHASES: readonly ProvisionPhase[] = [
   "locked", "idle", "scanning", "joining", "addressing", "online", "failed",
 ];
 const ERRS: readonly ProvisionErr[] = [
-  "no-code", "locked-out", "bad-psk", "no-ap", "dhcp", "link-locked", "scan-empty", "frame",
+  "no-code", "host-code", "locked-out", "bad-psk", "no-ap", "dhcp", "link-locked",
+  "scan-empty", "frame",
 ];
 
 function toInt(value: string | undefined, fallback: number): number {
@@ -758,6 +772,22 @@ export function describeProvisionFailure(
         retryTo: "discover",
         retryLabel: "重新连接",
       };
+    case "host-code":
+      // Normally intercepted before it can become a failure — it opens the code
+      // screen instead. This copy exists for the case where it arrives without a
+      // join to resume, so it is never a mystery, and it goes back to the
+      // password rather than the chooser: the link and the credentials are both
+      // still good.
+      return {
+        code,
+        title: "这一步需要面板上的验证码",
+        detail:
+          "这次配网会把时钟指向另一个控制台——之后它只听那一台的。"
+          + "改设备只连哪个网络不用验证码，改它听谁的要，所以时钟要你证明人就在它面前："
+          + "输入面板上正在显示的六位数字。",
+        retryTo: "password",
+        retryLabel: "重新提交",
+      };
     case "locked-out":
       return {
         code,
@@ -901,6 +931,17 @@ export interface BleTransport {
 
 // --- Session ----------------------------------------------------------------
 
+/**
+ * `code` is no longer a step every flow walks through.
+ *
+ * The device demands the six digits for one capability — re-pointing an already
+ * adopted console — so the console stops asking up front and instead ATTEMPTS
+ * the operation. The code screen appears only when the device answers a join
+ * with `host-code`, which means the common paths (first-run setup, changing
+ * Wi-Fi, re-provisioning against the same console) never show a code field at
+ * all. Asking for it earlier would be asking on behalf of a refusal that is not
+ * coming.
+ */
 export type ProvisionStep =
   | "ready"
   | "connecting"
@@ -917,6 +958,14 @@ export interface ProvisionState {
   device: { name: string; build: string; mac: string } | null;
   /** The device reported `phase=locked` on hello: say so before asking for anything. */
   linkLocked: boolean;
+  /**
+   * Why the code screen is up — never null while `step === "code"`.
+   *
+   * There is only one reason today, and it is deliberately a named reason rather
+   * than a boolean: the screen has to say what this particular code buys, and
+   * "验证码" with no object is what made the old flow feel like a toll booth.
+   */
+  codeReason: "takeover" | null;
   codeError: string | null;
   codeAttempts: number;
   /** Epoch ms the device will accept codes again, from `retry`. */
@@ -1019,6 +1068,7 @@ function initialState(): ProvisionState {
     connectStage: null,
     device: null,
     linkLocked: false,
+    codeReason: null,
     codeError: null,
     codeAttempts: 0,
     lockedOutUntilMs: null,
@@ -1057,6 +1107,17 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
   // `telemetry.seq` as it stood when the join was handed to the radio; null when
   // the probe could not be taken. See `witnessesJoin`.
   let lanWatermark: number | null = null;
+  /**
+   * The passphrase of a join the device paused to ask for the code, held only
+   * until that join can be re-sent.
+   *
+   * Deliberately NOT a field of ProvisionState: that object is spread into React
+   * state on every change and handed straight to a renderer, and the one rule
+   * this flow has about the passphrase is that it never lands anywhere it could
+   * be painted, serialised or logged. Cleared on every path that ends the
+   * attempt, so a stale one cannot ride a later join.
+   */
+  let pendingJoinPsk: string | null = null;
   const reassembler = createBleReassembler();
 
   const emit = () => options.onChange?.({ ...state });
@@ -1089,6 +1150,7 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
     clearReplyTimer();
     clearLanTimer();
     awaiting = null;
+    pendingJoinPsk = null;
     patch({
       step: "failed",
       busy: false,
@@ -1116,6 +1178,7 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
     clearReplyTimer();
     clearLanTimer();
     awaiting = null;
+    pendingJoinPsk = null;
     patch({
       step: "done",
       busy: false,
@@ -1194,10 +1257,37 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
       return;
     }
 
+    // The device wants presence proven for the one capability it gates: this
+    // join would re-point the clock at a console it is not on. NOT a failure —
+    // the credentials are good, the link is up, and the device deliberately
+    // changed nothing, so the flow pauses on the code and re-sends the identical
+    // join afterwards rather than starting over and costing the user the GATT
+    // link (and a code the device would by then have re-minted).
+    if (event.err === "host-code") {
+      clearReplyTimer();
+      awaiting = null;
+      patch({ step: "code", busy: false, codeReason: "takeover", codeError: null });
+      return;
+    }
+
     if (awaiting === "hello") {
       clearReplyTimer();
       awaiting = null;
-      patch({ step: "code", busy: false, phase: event.phase, connectStage: "ready" });
+      // Straight to the network list. The console no longer volunteers a code it
+      // has no reason to think will be wanted: three of the four things a device
+      // can be asked for need none, so the flow attempts the work and lets the
+      // device say if and when presence actually matters.
+      patch({
+        step: "networks",
+        busy: false,
+        phase: event.phase,
+        connectStage: "ready",
+        networks: [],
+        networkTotal: null,
+        scanning: true,
+        scanCached: false,
+      });
+      void requestScan();
       return;
     }
 
@@ -1221,12 +1311,23 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
         });
         return;
       }
-      // Anything that is not a code rejection means the code was taken; the
-      // device moves itself to 扫描中 (panel state D) at the same moment.
+      // Anything that is not a code rejection means the code was taken.
+      if (pendingJoinPsk !== null) {
+        // The code exists to unblock ONE join, and that join is still valid —
+        // re-send it verbatim. Dropping the user back into a network list they
+        // had already finished with would be the console forgetting what it
+        // asked them for.
+        patch({ busy: true, codeError: null, codeReason: null });
+        void sendJoin(pendingJoinPsk);
+        return;
+      }
+      // A code with no join waiting on it: nothing to resume, so continue where
+      // a flow that has not chosen a network yet belongs.
       patch({
         step: "networks",
         busy: false,
         codeError: null,
+        codeReason: null,
         phase: event.phase,
         networks: [],
         networkTotal: null,
@@ -1404,6 +1505,54 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
     await send(bleScanCommand());
   }
 
+  /**
+   * Hand a join to the device — from the password screen, or from the code
+   * screen that interrupted one.
+   *
+   * ONE body for both, and that is the point. The device refuses a takeover by
+   * answering and changing nothing at all, so once the code is proven the
+   * console's whole job is to re-send what it already sent. Rebuilding the
+   * document at a second call site is how the two quietly stop being identical —
+   * a different `host` on the retry would be a different question, answered
+   * against a code that was granted for the first one.
+   */
+  async function sendJoin(psk: string): Promise<void> {
+    patch({
+      step: "joining",
+      busy: true,
+      phase: "idle",
+      bleDropped: false,
+      credentialError: null,
+      failure: null,
+    });
+    // Taken BEFORE the join goes out, and awaited: the answer is a local HTTP
+    // call to the same service that served this page. A watermark taken after
+    // the drop would already include a report from the network we are trying
+    // to leave. A probe that resolves late is safe in the only direction that
+    // matters — it can cost one extra 10 s heartbeat, never a false success.
+    lanWatermark = await options.readOsState()
+      .then((osState) => osState.reportSeq)
+      .catch(() => null);
+    // Best effort, and deliberately after the watermark: this is a nicety
+    // riding an already-committed join, never a reason for one to fail.
+    let consoleHost: string | null = null;
+    if (options.readAccess) {
+      const access = await options.readAccess().catch(() => null);
+      consoleHost = consoleHostForJoin({
+        pageProtocol: options.pageProtocol ?? "http:",
+        pageHost: options.pageHost ?? "",
+        serviceAddress: access?.address ?? null,
+        servicePort: access?.port ?? null,
+      });
+    }
+    // Held from here so a `host-code` refusal has something to resume. The
+    // device answers that one without touching its own state, so the retry is
+    // this same call with this same passphrase.
+    pendingJoinPsk = psk;
+    armReply("join", REPLY_TIMEOUT_MS, () => fail("no-reply"));
+    await send(bleJoinCommand(state.ssid, psk, consoleHost));
+  }
+
   const session: ProvisionSession = {
     getState: () => ({ ...state }),
 
@@ -1456,12 +1605,17 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
 
     chooseNetwork(ssid) {
       const network = state.networks.find((candidate) => candidate.ssid === ssid);
+      // Any join that was waiting on a code is abandoned here: the user picked a
+      // different network, so the passphrase held for the old one is not the
+      // answer to anything.
+      pendingJoinPsk = null;
       patch({
         step: "password",
         ssid,
         manualSsid: false,
         secured: network?.secured ?? true,
         credentialError: null,
+        codeReason: null,
         failure: null,
       });
     },
@@ -1479,12 +1633,14 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
         patch({ credentialError: invalid });
         return;
       }
+      pendingJoinPsk = null;
       patch({
         step: "password",
         ssid,
         manualSsid: true,
         secured: true,
         credentialError: null,
+        codeReason: null,
         failure: null,
       });
     },
@@ -1496,50 +1652,26 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
         patch({ credentialError: invalid });
         return;
       }
-      patch({
-        step: "joining",
-        busy: true,
-        phase: "idle",
-        bleDropped: false,
-        credentialError: null,
-        failure: null,
-      });
-      // Taken BEFORE the join goes out, and awaited: the answer is a local HTTP
-      // call to the same service that served this page. A watermark taken after
-      // the drop would already include a report from the network we are trying
-      // to leave. A probe that resolves late is safe in the only direction that
-      // matters — it can cost one extra 10 s heartbeat, never a false success.
-      lanWatermark = await options.readOsState()
-        .then((osState) => osState.reportSeq)
-        .catch(() => null);
-      // Best effort, and deliberately after the watermark: this is a nicety
-      // riding an already-committed join, never a reason for one to fail.
-      let consoleHost: string | null = null;
-      if (options.readAccess) {
-        const access = await options.readAccess().catch(() => null);
-        consoleHost = consoleHostForJoin({
-          pageProtocol: options.pageProtocol ?? "http:",
-          pageHost: options.pageHost ?? "",
-          serviceAddress: access?.address ?? null,
-          servicePort: access?.port ?? null,
-        });
-      }
-      armReply("join", REPLY_TIMEOUT_MS, () => fail("no-reply"));
-      await send(bleJoinCommand(state.ssid, psk, consoleHost));
+      await sendJoin(psk);
     },
 
     backToNetworks() {
-      patch({ step: "networks", credentialError: null, failure: null });
+      pendingJoinPsk = null;
+      patch({ step: "networks", credentialError: null, codeReason: null, failure: null });
     },
 
     async retry() {
       const target = state.failure?.retryTo ?? "discover";
       if (target === "password" && connected) {
-        patch({ step: "password", failure: null, credentialError: null, busy: false });
+        patch({
+          step: "password", failure: null, credentialError: null, codeReason: null, busy: false,
+        });
         return;
       }
       if (target === "networks" && connected) {
-        patch({ step: "networks", failure: null, credentialError: null, busy: false });
+        patch({
+          step: "networks", failure: null, credentialError: null, codeReason: null, busy: false,
+        });
         await requestScan();
         return;
       }
@@ -1554,6 +1686,7 @@ export function createProvisionSession(options: ProvisionSessionOptions): Provis
       clearReplyTimer();
       clearLanTimer();
       awaiting = null;
+      pendingJoinPsk = null;
       if (connected) {
         // Best effort: the device should stop advertising a live session rather
         // than wait out a timeout, but a closing dialog must never block on it.

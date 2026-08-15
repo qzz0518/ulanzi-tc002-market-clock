@@ -82,7 +82,10 @@ class ProvisionScreen : public Screen {
    */
   struct Inputs {
     Inputs()
-        : bleAdvertising(false),
+        // Declaration order, which is the order these actually run in: `requested`
+        // is declared first because it is the question the rest of them answer to.
+        : requested(false),
+          bleAdvertising(false),
           bleBlocked(false),
           guardLocked(false),
           centralConnected(false),
@@ -91,6 +94,21 @@ class ProvisionScreen : public Screen {
           joining(false),
           online(false),
           failed(false) {}
+    /**
+     * A person asked for this, on the device, just now.
+     *
+     * Without it an ONLINE clock had no way to be re-provisioned even though
+     * the machinery worked: 设置 → 配网 puts the advertisement back on the air,
+     * but this screen answered "已联网" and never printed the name or the code,
+     * so there was nothing to pair with and nothing to type. The entry point
+     * existed and looked like it did not.
+     *
+     * It is deliberately an INPUT rather than something inferred from the radio:
+     * "the advertisement is up" is also true of a device that is merely offline,
+     * and those two want different screens — one is an answer to a question the
+     * user asked, the other is an interruption.
+     */
+    bool requested;
     bool bleAdvertising;    // the controller confirmed LE Set Advertise Enable
     bool bleBlocked;        // the guard closed before anything was attempted
     bool guardLocked;       // install::linkChangesAllowed() is false

@@ -79,6 +79,37 @@ if [ "$sleepowners" != "device/tc002-os/app/src/ui/SleepPolicy.cpp device/tc002-
   echo "$sleepowners" >&2
   exit 1
 fi
+# 蓝牙配网 has TWO entry points — the 设置 → 配网 row and the console's
+# POST /api/os/ble — and they must be the same six statements. The checks below
+# can drive the wire and the arming gate, but not this: openProvisioning lives
+# in logic/osLogic.cc, which is #included by activity/*.cpp and therefore
+# compiled by no host check. So the guard is structural. Forgetting
+# `sBle.setWanted(true)` in a hand-copied second entry point yields a panel
+# showing a pairing code for an advertisement that is not on the air.
+oslogic=device/tc002-os/app/src/logic/osLogic.cc
+opens=$(grep -c 'sBleForcedUntilMs = nowMs + kBleForcedMs' "$oslogic" || true)
+if [ "$opens" != "1" ]; then
+  echo "FAIL the 配网 forced window belongs to openProvisioning() alone; found $opens sites" >&2
+  exit 1
+fi
+entries=$(grep -c 'openProvisioning(nowMs);' "$oslogic" || true)
+if [ "$entries" != "2" ]; then
+  echo "FAIL both 配网 entry points (设置 row, console request) must call openProvisioning(); found $entries" >&2
+  exit 1
+fi
+# Same guard, for the rule that decides whether a BLE join needs the pairing
+# code. `host`, `host:port` and `http://host:port` all name one console, and
+# BleProvisionSession::hostIsTakeover folds an over-the-air host through
+# ble::consoleUrl before comparing it with the URL the pull loop is really using.
+# A second copy of the ":43820" default in logic/osLogic.cc — the file no host
+# check compiles — could drift from the one the checks below drive, and the
+# symptom is invisible until it is on a shelf: either a code demanded on every
+# ordinary join, or no code demanded on a real console takeover.
+hosturl=$(grep -rlF -- '+ ":43820"' device/tc002-os/app/src | sort | xargs)
+if [ "$hosturl" != "device/tc002-os/app/src/net/BleProtocol.cpp" ]; then
+  echo "FAIL the console-URL normaliser belongs to net/BleProtocol.cpp alone; found: $hosturl" >&2
+  exit 1
+fi
 # The seven game engines are compiled in unchanged from the arcade tree, so its
 # src is on the include path AFTER this firmware's own: utils/Surface.h resolves
 # to the bridge here, visual/PixelFont.h falls through to the arcade's.

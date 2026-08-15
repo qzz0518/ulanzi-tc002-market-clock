@@ -34,13 +34,43 @@ namespace tcos {
  * a field of any `evt`, never a parameter to ProvisionLog, and never reaches the
  * panel — buildState has no slot for it and this class never formats one.
  *
- * AUTHORISATION IS NOT CONFIDENTIALITY. The six-digit code stops the neighbour
- * from reconfiguring the clock. It does not stop a sniffer: this link runs at
- * BT_SECURITY_LOW with no pairing, exactly as the vendor's own firmware does, so
- * the passphrase crosses the air in cleartext for the ~30 s a provisioning
- * session lasts. That is written down rather than papered over — raising the ATT
- * security level pulls in SMP pairing, which is unproven on this radio, and a
- * failed pairing on the only remaining provisioning path is a brick.
+ * WHEN THE SIX-DIGIT CODE IS DEMANDED, and why it is not demanded more often.
+ *
+ * The code is gated on the CAPABILITY, not on the flow. Three of the four things
+ * a console can ask for are exactly as powerful as the stock Ulanzi firmware,
+ * which ships with no code, no PIN and no QR at all — it provisions over
+ * BT_SECURITY_LOW with proximity as the entire authentication — so demanding one
+ * for them buys nothing and costs every user a squint at a 6 px panel:
+ *
+ *   scan                       no code. It lists SSIDs already on the air.
+ *   join ssid/psk              no code. Same power as stock: it can put this
+ *                              clock on a network, and that is all.
+ *   join + host, none adopted  no code. There is no console to take over, and
+ *                              this is the first-run setup the vendor makes
+ *                              seamless.
+ *   join + a DIFFERENT host    CODE. See below.
+ *
+ * The asymmetry is the whole rule. A stock join can only choose a network; ours
+ * can additionally carry `host`, which is promoted to mAdoptedHost, written to
+ * /data/zos-host and becomes the URL this firmware polls for the rest of its
+ * life. Accepting a network from a stranger is a nuisance; accepting a console
+ * address from a stranger is handing them the device. So presence is proven at
+ * exactly the one point where it is the difference — and nowhere else.
+ *
+ * The comparison is against noteConsole(), which the caller keeps pointed at the
+ * URL the pull loop is ACTUALLY using, not at a copy taken when the radio came
+ * up. A join can change it mid-session (takeConsoleHost -> adoptConsoleHost),
+ * and a stale copy would let the second join of one session re-point the clock
+ * for free.
+ *
+ * AUTHORISATION IS NOT CONFIDENTIALITY. The code stops the neighbour from
+ * re-pointing the clock at their own console. It does not stop a sniffer: this
+ * link runs at BT_SECURITY_LOW with no pairing, exactly as the vendor's own
+ * firmware does, so the passphrase crosses the air in cleartext for the ~30 s a
+ * provisioning session lasts. That is written down rather than papered over —
+ * raising the ATT security level pulls in SMP pairing, which is unproven on this
+ * radio, and a failed pairing on the only remaining provisioning path is a
+ * brick.
  */
 class BleProvisionSession {
  public:
@@ -93,6 +123,32 @@ class BleProvisionSession {
 
   /** Identity for `evt hello`. Safe to call before anything else. */
   void configure(const std::string& name, const std::string& build, const std::string& mac);
+
+  /**
+   * The console this device is pointed at right now — empty when it has none.
+   *
+   * Fed every poll rather than once at configure(), because it is the thing the
+   * takeover rule compares against and it changes underneath us: a join that
+   * carries a `host` restarts the pull loop at a new address without restarting
+   * anything else. Pass what the loop is actually polling (HostLink::baseUrl),
+   * not what some file said at boot; a bare `host` or `host:port` is accepted
+   * too and folded through ble::consoleUrl like the candidate is.
+   */
+  void noteConsole(const std::string& url);
+
+  /**
+   * Would accepting this `host` re-point the device at a DIFFERENT console?
+   *
+   * The one question the six-digit code exists to answer, static so the host
+   * check can drive every branch of it directly. False — no code needed — for
+   * all three of the cases that take nothing over: an absent field, a field
+   * ble::hostIsSafe rejects (it is IGNORED downstream, so it cannot point
+   * anywhere), and a device with no console adopted yet. Hostnames compare
+   * case-insensitively because DNS does; `host`, `host:port` and `http://host`
+   * all fold to one URL first, so writing the same address a different way is
+   * not a takeover either.
+   */
+  static bool hostIsTakeover(const std::string& host, const std::string& consoleUrl);
 
   /**
    * A new advertising session: mints the code the panel shows.
@@ -186,7 +242,15 @@ class BleProvisionSession {
   void queue(const std::string& message);
   void emitState();
   void setPhase(Phase phase, const char* error);
-  bool requireAuthorised(int nowMs);
+  /**
+   * The code gate, named for the only thing it still guards.
+   *
+   * Answers `host-code` rather than `no-code` on purpose: the console has to
+   * tell "you have not proved presence yet, and here is the one reason it
+   * matters" apart from "those digits were wrong", because the first is a
+   * prompt it must raise on demand and the second is a retry.
+   */
+  bool requireTakeoverCode(int nowMs);
   bool requireUnlocked();
   void checkCode(const std::string& supplied, int nowMs);
   void observeWpaState(const std::string& state);
@@ -227,6 +291,8 @@ class BleProvisionSession {
   // stale address cannot ride a later, unrelated success.
   std::string mRequestHost;
   std::string mAdoptedHost;
+  // The console the pull loop is on, as of the caller's last noteConsole().
+  std::string mConsoleUrl;
 
   std::vector<std::string> mOutbound;
   std::vector<std::string> mAudit;

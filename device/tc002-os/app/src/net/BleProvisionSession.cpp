@@ -8,6 +8,12 @@ namespace {
 // held without allocation. Every one of them appears on the wire verbatim.
 const char* kErrNone = "";
 const char* kErrNoCode = "no-code";
+// The join would re-point this device at a console it is not on. Distinct from
+// `no-code` because the console reacts to them differently: this one raises the
+// code prompt (with the reason), `no-code` only says the last six digits were
+// wrong. Sharing one code would put a "wrong code" error on a field the user
+// has not been shown yet.
+const char* kErrHostCode = "host-code";
 const char* kErrLockedOut = "locked-out";
 const char* kErrLinkLocked = "link-locked";
 const char* kErrBadPsk = "bad-psk";
@@ -27,6 +33,23 @@ const char* kErrCmd = "cmd";
 const char* kErrArg = "arg";
 const char* kErrScan = "scan-empty";
 const char* kErrBusy = "busy";
+
+// ASCII case-insensitive equality. DNS is case-insensitive and so is the
+// authority half of a URL, so `Studio.local` and `studio.local` are the same
+// console; comparing them byte-for-byte would demand a pairing code for a join
+// that changes nothing, which is the exact friction this rule exists to remove.
+// Deliberately ASCII-only: an IDN arrives already punycoded.
+bool equalFold(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    char x = a[i];
+    char y = b[i];
+    if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
+    if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
+    if (x != y) return false;
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -51,6 +74,24 @@ void BleProvisionSession::configure(const std::string& name, const std::string& 
   mName = name;
   mBuild = build;
   mMac = mac;
+}
+
+void BleProvisionSession::noteConsole(const std::string& url) { mConsoleUrl = url; }
+
+bool BleProvisionSession::hostIsTakeover(const std::string& host,
+                                         const std::string& consoleUrl) {
+  // No field at all: the join leaves the address alone.
+  if (host.empty()) return false;
+  // A field the validator refuses is dropped rather than acted on (see the join
+  // branch), so it cannot re-point anything and must not cost a code — a
+  // console bug would otherwise turn into a pairing prompt nobody can explain.
+  if (!ble::hostIsSafe(host)) return false;
+  // Nothing adopted: there is no console to take over. This is first-run setup,
+  // and it is the case the vendor's firmware makes seamless.
+  if (consoleUrl.empty()) return false;
+  // Both sides through the one normaliser, so `host`, `host:port` and
+  // `http://host:port` are compared as the single URL they all name.
+  return !equalFold(ble::consoleUrl(host), ble::consoleUrl(consoleUrl));
 }
 
 void BleProvisionSession::beginAdvertising(uint32_t seed, int nowMs) {
@@ -173,7 +214,7 @@ void BleProvisionSession::setPhase(Phase phase, const char* error) {
   mError = error;
 }
 
-bool BleProvisionSession::requireAuthorised(int nowMs) {
+bool BleProvisionSession::requireTakeoverCode(int nowMs) {
   if (mAuthorised) return true;
   const int remaining = lockoutRemainingMs(nowMs);
   if (remaining > 0) {
@@ -181,7 +222,7 @@ bool BleProvisionSession::requireAuthorised(int nowMs) {
                           (remaining + 999) / 1000));
     return false;
   }
-  queue(ble::buildState(phase(), mTargetSsid, mIp, kErrNoCode, -1));
+  queue(ble::buildState(phase(), mTargetSsid, mIp, kErrHostCode, -1));
   return false;
 }
 
@@ -254,10 +295,10 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
     mLastStateDoc.clear();
     if (mLocked) setPhase(kPhaseLocked, kErrLinkLocked);
     audit("hello", "ok");
-    if (!mAuthorised && !mLocked) {
-      queue(ble::buildState(phase(), mTargetSsid, mIp, kErrNoCode, -1));
-      return;
-    }
+    // No `no-code` here any more. hello used to answer with it unconditionally,
+    // which told the console to put a six-digit field in front of a user who,
+    // on every path but a console takeover, is never going to be asked for one.
+    // The device now says what it is doing and waits to be asked for something.
     emitState();
     return;
   }
@@ -286,10 +327,9 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
   }
 
   if (cmd == "scan") {
-    if (!requireAuthorised(nowMs)) {
-      audit("scan", "no-code");
-      return;
-    }
+    // No code. A scan lists SSIDs that are already being broadcast to everyone
+    // in the building; there is nothing here a code could protect. The guard
+    // file still applies, because a sweep does touch the radio adb rides on.
     if (!requireUnlocked()) {
       audit("scan", "link-locked");
       return;
@@ -308,10 +348,6 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
   }
 
   if (cmd == "join") {
-    if (!requireAuthorised(nowMs)) {
-      audit("join", "no-code");
-      return;
-    }
     if (!requireUnlocked()) {
       audit("join", "link-locked");
       return;
@@ -319,7 +355,9 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
     const std::string ssid = message.get("ssid");
     const std::string psk = message.get("psk");
     // Validated before it is stored, let alone before it reaches the control
-    // socket. See ble::ssidIsSafe for the quote-and-backslash reason.
+    // socket. See ble::ssidIsSafe for the quote-and-backslash reason. This
+    // survives the code no longer being demanded here: it is the hardening the
+    // stock firmware appears to lack, not the ceremony this change removed.
     if (!ble::ssidIsSafe(ssid) || !ble::pskIsSafe(psk)) {
       queue(ble::buildErr(kErrArg));
       audit("join", "arg");
@@ -328,6 +366,16 @@ void BleProvisionSession::onMessage(const std::string& body, int nowMs) {
     // Optional console address. Invalid means IGNORED, not rejected — the join
     // must not fail over a field the firmware can live without.
     const std::string host = message.get("host");
+    // THE ONE THING THE CODE STILL GUARDS. Everything above this line is within
+    // a stock Ulanzi join's power and is answered without a code; re-pointing an
+    // already-adopted console is not, and is refused until presence is proven.
+    // Checked here, after validation and before anything is stored, so a refusal
+    // leaves the session exactly as it found it — the console re-sends the
+    // identical join once the user has typed the digits.
+    if (hostIsTakeover(host, mConsoleUrl) && !requireTakeoverCode(nowMs)) {
+      audit("join", "host-code");
+      return;
+    }
     if (!host.empty() && ble::hostIsSafe(host)) {
       mRequestHost = host;
     } else {

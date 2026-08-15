@@ -11,10 +11,21 @@ export interface ControlAccessInfo {
   sameSubnetAsClock: boolean;
 }
 
-type InterfaceMap = NodeJS.Dict<NetworkInterfaceInfo[]>;
+export type InterfaceMap = NodeJS.Dict<NetworkInterfaceInfo[]>;
 
-interface SelectedAddress {
+export interface SelectedAddress {
   address: string;
+  /**
+   * The directed broadcast of that interface's subnet (address | ~netmask).
+   *
+   * Carried alongside the address because the LAN beacon has to reach the clock
+   * on the interface the address belongs to, and 255.255.255.255 does not do
+   * that: macOS answers a send to it with EADDRNOTAVAIL on an unbound socket
+   * (measured), and where it does work it leaves the kernel to pick a route —
+   * which on a laptop with a VPN or a container bridge up is the wrong one.
+   * Null when the netmask is not a usable IPv4 mask.
+   */
+  broadcast: string | null;
   sameSubnetAsClock: boolean;
 }
 
@@ -47,6 +58,14 @@ function isPrivateIpv4(address: string): boolean {
     || (octets[0] === 192 && octets[1] === 168);
 }
 
+function broadcastAddress(address: string, netmask: string): string | null {
+  const local = ipv4Number(address);
+  const mask = ipv4Number(netmask);
+  if (local === null || mask === null) return null;
+  const value = ((local | (~mask >>> 0)) >>> 0);
+  return [24, 16, 8, 0].map((shift) => (value >>> shift) & 0xff).join(".");
+}
+
 export function selectControlAddress(
   clockAddress: string | null,
   interfaces: InterfaceMap = networkInterfaces(),
@@ -59,16 +78,26 @@ export function selectControlAddress(
     const matching = candidates.find((entry) =>
       isSameSubnet(entry.address, entry.netmask, clockAddress)
     );
-    if (matching) return { address: matching.address, sameSubnetAsClock: true };
+    if (matching) {
+      return {
+        address: matching.address,
+        broadcast: broadcastAddress(matching.address, matching.netmask),
+        sameSubnetAsClock: true,
+      };
+    }
   }
 
   const fallback = candidates.find((entry) => isPrivateIpv4(entry.address)) ?? candidates[0];
   return fallback
-    ? { address: fallback.address, sameSubnetAsClock: false }
+    ? {
+      address: fallback.address,
+      broadcast: broadcastAddress(fallback.address, fallback.netmask),
+      sameSubnetAsClock: false,
+    }
     : null;
 }
 
-async function resolveClockIpv4(clockHost: string): Promise<string | null> {
+export async function resolveClockIpv4(clockHost: string): Promise<string | null> {
   if (isIP(clockHost) === 4) return clockHost;
   try {
     return (await lookup(clockHost, { family: 4 })).address;

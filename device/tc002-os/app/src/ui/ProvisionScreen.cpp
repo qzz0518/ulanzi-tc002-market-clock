@@ -92,11 +92,21 @@ ProvisionScreen::Stage ProvisionScreen::stageFor(const Inputs& in) {
   // both are claims about what is on the air. Only the controller's own
   // acknowledgement of LE Set Advertise Enable gets past here.
   if (!in.bleAdvertising) return kRadioDown;
-  if (in.online) return kOnline;
+  // Online is a RESTING state, not an outcome, and it must not swallow a
+  // request. A user who pressed 配网 on a working clock is asking to move it to
+  // another network; answering with the network it is already on is answering a
+  // question nobody asked, and it hides the only two things they need — the
+  // name to pick in the chooser and the code to type. The pairing stages below
+  // are what they came for, and they run to their own end: the session's own
+  // progress (link up, authorised, joining) still outranks this.
+  if (in.online && !in.requested) return kOnline;
   if (in.joining) return kJoining;
   if (in.scanning) return kAuthorised;
   if (in.failed) return kFailed;
   if (in.centralConnected && !in.authorised) return kLinkUp;
+  // A requested session on a clock that is already online: same pages, because
+  // the user needs exactly what an offline device's user needs. `joining` and
+  // `online` together are what end it, and the caller drops `requested` then.
   return kAdvertising;
 }
 

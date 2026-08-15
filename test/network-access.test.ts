@@ -32,8 +32,28 @@ describe("mobile control access discovery", () => {
   test("selects the local IPv4 interface on the clock subnet", () => {
     expect(selectControlAddress("192.0.2.240", interfaces)).toEqual({
       address: "192.0.2.12",
+      broadcast: "192.0.2.255",
       sameSubnetAsClock: true,
     });
+  });
+
+  // The LAN beacon sends to this, not to 255.255.255.255: an unbound socket is
+  // refused outright on macOS, and where a global broadcast does work it leaves
+  // the kernel to pick the route — which on a laptop with a VPN or a container
+  // bridge up is the wrong interface.
+  test("carries the directed broadcast of the interface it chose", () => {
+    expect(selectControlAddress("198.51.100.240", interfaces)?.broadcast)
+      .toBe("198.51.100.255");
+    expect(selectControlAddress(null, {
+      en0: [{
+        address: "10.1.2.3",
+        netmask: "255.255.0.0",
+        family: "IPv4",
+        mac: "00:00:00:00:00:03",
+        internal: false,
+        cidr: "10.1.2.3/16",
+      }],
+    } as never)?.broadcast).toBe("10.1.255.255");
   });
 
   test("returns a usable phone URL only when the LAN listener is enabled", async () => {

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "net/BleProvisionSession.h"
+#include "net/ConsoleDiscovery.h"
 #include "net/FirmwareUpdate.h"
 #include "net/HostLink.h"
 #include "net/PortalService.h"
@@ -149,6 +150,14 @@ tcos::ProvisionScreen sProvision;
 // must not start before the framework is up.
 tcos::HostLink& hostLink() {
 	static tcos::HostLink instance;
+	return instance;
+}
+
+// The console beacon listener, for the day the console's DHCP lease moves and
+// the address above stops answering. Same function-local-static discipline as
+// the link, and for the same reason: it owns a thread.
+tcos::ConsoleDiscovery& consoleDiscovery() {
+	static tcos::ConsoleDiscovery instance;
 	return instance;
 }
 
@@ -668,10 +677,16 @@ void handleHold(int code, int nowMs) {
 // file is not an error — the firmware runs standalone, it just has no channels.
 // Accept the three shapes a human would write, so a redeploy cannot be broken
 // by the obvious spelling of the same address.
+//
+// Delegated rather than written out here, and that is load-bearing. This file is
+// #included by activity/*.cpp and is therefore compiled by no host check, while
+// ble::consoleUrl is also what BleProvisionSession's takeover rule folds an
+// over-the-air `host` through before comparing it with the URL below. A second
+// copy of the ":43820" default living here could drift from that one, and the
+// symptom would be either a pairing code demanded on every ordinary join or no
+// code demanded on a real console takeover.
 std::string normalizeHostAddress(const std::string& value) {
-	if (value.compare(0, 7, "http://") == 0) return value;
-	if (value.find(':') != std::string::npos) return "http://" + value;
-	return "http://" + value + ":43820";
+	return tcos::ble::consoleUrl(value);
 }
 
 std::string readHostAddress() {
@@ -835,6 +850,16 @@ bool bleWanted(int nowMs) {
 
 void pumpBle(int nowMs) {
 	refreshNetInfo();
+
+	// The console the pull loop is on RIGHT NOW, before a single inbound message
+	// is handled. This is what BleProvisionSession::hostIsTakeover compares an
+	// over-the-air `host` against, so it must be the address the device will
+	// actually poll rather than a copy taken when the radio came up: a join that
+	// carries a host calls adoptConsoleHost() below and restarts the loop at a new
+	// address mid-session, and a stale value here would let the very next join of
+	// that same session re-point the clock again without a code. baseUrl() is the
+	// one field that is true by construction — it is the string the loop uses.
+	sBleSession.noteConsole(hostLink().baseUrl());
 
 	// Started late rather than in onUI_init, and gated on the MAC: the name on
 	// the panel, in the phone's chooser and in the advertisement is derived from
@@ -1040,6 +1065,12 @@ void pumpBle(int nowMs) {
 	inputs.joining = sBleSession.joining();
 	inputs.online = link.online;
 	inputs.failed = sBleSession.failed();
+	// The forced window IS the request: 配网 opens it, and it is the only thing
+	// that puts the advertisement on the air while the clock is online. Reading
+	// it here rather than latching a separate flag keeps the screen and the
+	// radio saying the same thing — when the window closes, BLE goes down and
+	// the pairing pages stop claiming a code that is no longer being broadcast.
+	inputs.requested = sBleForcedUntilMs > nowMs;
 
 	tcos::ProvisionScreen::State panel;
 	panel.stage = tcos::ProvisionScreen::stageFor(inputs);
@@ -1055,6 +1086,41 @@ void pumpBle(int nowMs) {
 		panel.portal = portal;
 	}
 	sProvision.setState(panel, nowMs);
+}
+
+/**
+ * Open 蓝牙配网 deliberately: put the advertisement back on the air and show it.
+ *
+ * TWO CALLERS, ONE BODY. 设置 → 配网 is a person standing in front of the clock;
+ * POST /api/os/ble is the same person sitting at the console, which is the only
+ * way to reach a clock that is online — an online clock advertises nothing, so
+ * the browser's chooser is empty exactly when someone wants to move it to a new
+ * router. They must do the identical thing, and while this was six statements
+ * written out at the settings row the only thing keeping a second entry point
+ * equal to it would have been somebody remembering to copy all six. Missing the
+ * `setWanted(true)` alone yields a screen that shows a pairing code for an
+ * advertisement that is not up until bleWanted() is next evaluated.
+ *
+ * The window is re-opened even when the screen is already up — that is what a
+ * second ask means, since the forced window is exactly what the panel reads to
+ * decide it is 配网中 (ProvisionScreen::Inputs::requested) — but the PUSH is
+ * guarded, because Shell::push does not deduplicate: stacking the provisioning
+ * screen on itself would cost the user one hold per ask to get back out. The
+ * settings row can never hit that guard (it presses from 设置), so the row
+ * behaves exactly as it did; only the console can ask from this screen.
+ */
+void openProvisioning(int nowMs) {
+	// A deliberate ask, so the advertisement goes back up even on a clock that
+	// is perfectly online, and a stack that had given up re-arms.
+	sBleForcedUntilMs = nowMs + kBleForcedMs;
+	sBle.setWanted(true);
+	sProvisionDismissed = false;
+	if (shell().top() != &sProvision) shell().push(&sProvision, nowMs);
+	sProvisionPushed = true;
+	// Never auto: whoever asked for this screen asked for it, so the 3 s
+	// success pop that an offline episode gets does not apply.
+	sProvisionAuto = false;
+	sProvisionOnlineMs = -1;
 }
 
 std::string formatUptime(uint64_t ms) {
@@ -1373,6 +1439,12 @@ static void onUI_init() {
 	// Started here rather than in onUI_show: onUI_show runs on every return to
 	// this activity, and the link's threads must be created exactly once.
 	hostLink().start(readHostAddress());
+	// Started unconditionally, INCLUDING on a unit that has no address at all:
+	// with no console adopted the link can never come up, so such a device is
+	// "lost" from its sixtieth second and the first console that both shouts on
+	// its /24 and answers as one becomes its console. That is the same fact the
+	// four gates already encode, not an extra rule.
+	consoleDiscovery().start(tcos::ConsoleDiscovery::kPort);
 	// Nothing else in this firmware has ever called settimeofday. Sideloaded that
 	// was invisible: the stock app NTP-synced at startup and the kernel keeps the
 	// time across a framework restart, so ZOS inherited a correct clock it never
@@ -1725,6 +1797,36 @@ static bool onUI_Timer(int id) {
 
 		sLink = hostLink().snapshot();
 
+		// --- the console beacon ----------------------------------------------
+		// Three assignments handed to the listener thread, and one mailbox read.
+		// Everything that DECIDES lives in net/ConsoleDiscovery, where the host
+		// check can drive it; this file is #included by activity/*.cpp and is
+		// compiled by no check, so a gate written here would be a gate nothing
+		// ever asserts.
+		//
+		// sNetIp is wlan0's address, refreshed by refreshNetInfo() inside
+		// pumpBle() a few lines up. baseUrl() is the address the pull loop is
+		// really using — the same field the BLE takeover rule compares against,
+		// and true by construction rather than a copy taken at boot.
+		{
+			tcos::ConsoleDiscovery::Link discovery;
+			discovery.deviceIp = sNetIp;
+			discovery.baseUrl = hostLink().baseUrl();
+			discovery.lastPullMs = sLink.lastPullMonoMs;
+			discovery.nowMs = monoMs();
+			consoleDiscovery().noteLink(discovery);
+
+			// The adoption itself goes through adoptConsoleHost — the same six
+			// statements the BLE join path uses. A second copy of the
+			// /data/zos-host.tmp -> rename write is a second place to get a
+			// power-cut-during-write wrong, on the one file that decides whether
+			// this device can ever be reached again.
+			std::string discovered;
+			if (consoleDiscovery().takeAdoption(&discovered)) {
+				adoptConsoleHost(discovered);
+			}
+		}
+
 		// The first document only establishes where the sequences already are.
 		// Acting on it would replay whatever the console did before this boot.
 		if (!sConsoleSeqPrimed && sLink.online) {
@@ -1919,6 +2021,23 @@ static bool onUI_Timer(int id) {
 		} else if (offline) {
 			sProvisionOnlineMs = -1;
 		}
+	}
+
+	// 蓝牙配网 the console explicitly asked for.
+	//
+	// The other half of 设置 → 配网, and the one that makes the console's wizard
+	// work at all on a healthy clock: this device advertises only while offline
+	// or inside the forced window, so a browser scanning for an online clock
+	// finds nothing. The console cannot open a radio from across the LAN, so it
+	// asks and this runs the same six statements the settings row runs.
+	//
+	// TAKEN, not read: the request stands in every document the console serves
+	// from the moment it is made, so a tick that read the value would re-open the
+	// window and re-arm the screen 6 times a second for as long as the console
+	// remembered it. HostLink hands it over exactly once per rising sequence.
+	{
+		const int bleOpenSeq = hostLink().takeBleOpenRequest();
+		if (bleOpenSeq != 0) openProvisioning(nowMs);
 	}
 
 	// An install the console explicitly asked for.
@@ -2137,15 +2256,9 @@ static bool onUI_Timer(int id) {
 		}
 		const int settingsPick = sSettings.takeActivated();
 		if (settingsPick == ACTION_PROVISION) {
-			// A deliberate ask, so the advertisement goes back up even on a clock
-			// that is perfectly online, and a stack that had given up re-arms.
-			sBleForcedUntilMs = nowMs + kBleForcedMs;
-			sBle.setWanted(true);
-			sProvisionDismissed = false;
-			shell().push(&sProvision, nowMs);
-			sProvisionPushed = true;
-			sProvisionAuto = false;
-			sProvisionOnlineMs = -1;
+			// The body is shared with the console's POST /api/os/ble; see
+			// openProvisioning for why the two entry points may not drift.
+			openProvisioning(nowMs);
 		} else if (settingsPick == ACTION_SLEEP_WINDOW || settingsPick == ACTION_SLEEP_IDLE) {
 			// The cycle itself is in ui/SleepPolicy.cpp; this is only the wiring.
 			sSleepConfig = settingsPick == ACTION_SLEEP_WINDOW

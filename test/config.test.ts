@@ -16,6 +16,11 @@ describe("loadConfig", () => {
       sourceStaleMs: 120_000,
       displayDurationSeconds: 90,
       healthPort: 43_820,
+      // On by default: the failure it repairs — a DHCP lease moving under a
+      // clock that polls a static address — is silent from both ends, so a
+      // device that needs it is one nobody has thought to configure.
+      consoleDiscovery: true,
+      consoleDiscoveryPort: 43_821,
     });
   });
 

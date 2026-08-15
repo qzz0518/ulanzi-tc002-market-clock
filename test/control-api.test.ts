@@ -1892,6 +1892,61 @@ describe("tc002-os firmware routes", () => {
     expect((await again.json() as { seq: number }).seq).toBeGreaterThan(seq);
   });
 
+  test("the console can ask the clock to open Bluetooth", async () => {
+    const { handler, osLink } = await firmwareHandler();
+    const origin = "http://127.0.0.1:43820";
+    const ask = () => handler(new Request(`${origin}/api/os/ble`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: origin },
+      body: "{}",
+    }));
+
+    // NO PRECONDITION, unlike /api/os/upgrade's 409. That one refuses because a
+    // request for an image nobody packed is a guaranteed disappointment; there
+    // is nothing equivalent to be missing here, and a clock too offline to read
+    // the request is a clock that is already advertising by itself.
+    const accepted = await ask();
+    expect(accepted.status).toBe(200);
+    const { seq } = await accepted.json() as { seq: number };
+    // Seconds-since-epoch, not a count: the device acts on an id HIGHER than the
+    // last one it acted on this boot, so a counter restarting with this process
+    // would hand a long-lived clock an id it has already honoured.
+    expect(seq).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) - 5);
+    expect(osLink.getBleOpenSeq()).toBe(seq);
+    expect(osLink.serialize().split("\n")).toContain(`bleopen\t${seq}`);
+
+    // Pressing 开始配网 twice in one second must still move forward, or the
+    // second press is an id the device has already acted on and ignores.
+    const again = await ask();
+    expect((await again.json() as { seq: number }).seq).toBeGreaterThan(seq);
+  });
+
+  // Opening a radio that is otherwise only reachable by standing in front of the
+  // clock does not belong to another origin's page either.
+  test("a cross-origin request to open Bluetooth is refused and moves nothing", async () => {
+    const { handler, osLink } = await firmwareHandler();
+
+    const crossOrigin = await handler(new Request("http://127.0.0.1:43820/api/os/ble", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://evil.example" },
+      body: "{}",
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect((await crossOrigin.json() as { error: string }).error).toContain("cross-origin");
+    expect(osLink.getBleOpenSeq()).toBe(0);
+
+    // JSON-only for the same reason: a form POST cannot set the header without a
+    // preflight the browser will not send.
+    const formPost = await handler(new Request("http://127.0.0.1:43820/api/os/ble", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://127.0.0.1:43820" },
+      body: "{}",
+    }));
+    expect(formPost.status).toBe(400);
+    expect(osLink.getBleOpenSeq()).toBe(0);
+    expect(osLink.serialize()).not.toContain("bleopen");
+  });
+
   // Flashing a partition with no recovery slot behind it is the last thing that
   // should be reachable from another origin's page.
   test("a cross-origin upgrade is refused and moves nothing", async () => {

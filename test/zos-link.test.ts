@@ -722,6 +722,58 @@ describe("zos input and settings transport", () => {
     expect(event).toEqual({ seq: 7, action: "cw" });
   });
 
+  test("requestBleOpen asks the clock to advertise, and reports what the service recorded", async () => {
+    // The wizard can only SCAN, and an ONLINE clock advertises nothing — which
+    // is the clock somebody is moving to a new router. This POST is the console
+    // pressing 设置 → 配网 from across the LAN.
+    const requests: { url: string; method: string; type: string | null; body: unknown }[] = [];
+    const link = createZosLink({
+      fetcher: (url, init) => {
+        requests.push({
+          url,
+          method: init?.method ?? "GET",
+          type: new Headers(init?.headers).get("Content-Type"),
+          body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+        });
+        return Promise.resolve(Response.json({ seq: 1755000000 }));
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+
+    expect(await link.requestBleOpen()).toBe(1755000000);
+    expect(requests[0]).toEqual({
+      url: "/api/os/ble",
+      method: "POST",
+      // JSON-only, which is what a cross-origin form cannot produce without a
+      // preflight the browser will not send. There are no fields: how long the
+      // window stays open is the firmware's constant, not the browser's.
+      type: "application/json",
+      body: {},
+    });
+  });
+
+  test("a missing open-Bluetooth receipt is not a failure", async () => {
+    // The request still stands whether or not the service named a sequence, and
+    // the console must carry the user on to the chooser either way — an offline
+    // clock is already advertising, so the old path works untouched.
+    const link = createZosLink({
+      fetcher: () => Promise.resolve(Response.json({})),
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    expect(await link.requestBleOpen()).toBeNull();
+  });
+
+  test("a refused open-Bluetooth request surfaces the service's own message", async () => {
+    const link = createZosLink({
+      fetcher: () => Promise.resolve(Response.json({ error: "os link is unavailable" }, { status: 404 })),
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    expect(link.requestBleOpen()).rejects.toThrow("os link is unavailable");
+  });
+
   test("a refused input surfaces the service's own message", async () => {
     const link = createZosLink({
       fetcher: () => Promise.resolve(

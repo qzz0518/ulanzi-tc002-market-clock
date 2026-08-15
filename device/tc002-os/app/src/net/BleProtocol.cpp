@@ -353,6 +353,15 @@ bool hostIsSafe(const std::string& host) {
   return true;
 }
 
+std::string consoleUrl(const std::string& value) {
+  // Empty stays empty: see the header. Every caller treats "" as "this device
+  // is pointed at no console", and that is a different fact from a bad address.
+  if (value.empty()) return std::string();
+  if (value.compare(0, 7, "http://") == 0) return value;
+  if (value.find(':') != std::string::npos) return "http://" + value;
+  return "http://" + value + ":43820";
+}
+
 // --- the advertisement --------------------------------------------------------
 
 bool buildAdvertisingData(const std::string& name, std::vector<uint8_t>* out) {

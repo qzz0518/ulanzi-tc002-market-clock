@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { OsLinkHub, OS_PROTO_LYRIC_WINDOW, type OsMenuEntry } from "../src/os-link.ts";
+import { BLE_OPEN_WINDOW_SEC, OsLinkHub, OS_PROTO_LYRIC_WINDOW, type OsMenuEntry } from "../src/os-link.ts";
 
 const entry = (id: string, label: string, kind: OsMenuEntry["kind"] = "channel"): OsMenuEntry => ({
   id,
@@ -289,6 +289,76 @@ describe("tc002-os host link", () => {
     // device's own /data record would read it as one it already installed.
     const again = hub.requestUpgrade();
     expect(again).toBeGreaterThan(asked);
+  });
+
+  test("asks the clock to open Bluetooth, and only once it has been asked", () => {
+    // The console's 蓝牙配网 wizard can only SCAN. ZOS advertises while it is
+    // offline, or for five minutes after somebody presses 设置 → 配网 on the
+    // device itself — so on a clock that is online and working, which is exactly
+    // the one whose owner is moving it to a new router, the browser's chooser is
+    // empty. This key is the console asking for that window from the LAN.
+    const hub = new OsLinkHub();
+    expect(hub.getBleOpenSeq()).toBe(0);
+    // Withheld until asked, like `upgrade`: a firmware that has never heard of
+    // the key ignores it, and one that has must not see it on every document.
+    expect(hub.serialize()).not.toContain("bleopen");
+
+    const seq = hub.requestBleOpen();
+    expect(hub.getBleOpenSeq()).toBe(seq);
+    expect(hub.serialize().split("\n")).toContain(`bleopen\t${seq}`);
+
+    // Two presses in one second must still move forward: the device honours a
+    // RISING sequence, so a repeated id is a request it silently ignores.
+    const again = hub.requestBleOpen();
+    expect(again).toBeGreaterThan(seq);
+    expect(hub.serialize().split("\n")).toContain(`bleopen\t${again}`);
+
+    // And it keeps being carried, because the document is PULLED: a request the
+    // device has not polled for yet has to still be in it. Which is why the
+    // device gates on the rising edge rather than on the key being present.
+    hub.setDisplay({ focus: "btc", pinned: false });
+    expect(hub.serialize().split("\n")).toContain(`bleopen\t${again}`);
+  });
+
+  test("but it STOPS being carried once the device's own window has closed", () => {
+    // The firmware opens the radio for five minutes and then closes it. A
+    // request that outlives that is asking for something that is no longer
+    // happening — and it is worse than useless: the device arms on an id
+    // greater than the one it last acted on, and that memory dies with a power
+    // cycle. A standing request is therefore a clock that opens its radio and
+    // jumps to the provisioning screen on EVERY boot, with nobody present.
+    // Exactly the shape of the install request's boot loop.
+    let clock = 1_700_000_000_000;
+    const hub = new OsLinkHub(() => clock);
+    const seq = hub.requestBleOpen();
+    expect(hub.serialize().split("\n")).toContain(`bleopen\t${seq}`);
+
+    clock += (BLE_OPEN_WINDOW_SEC - 5) * 1000;
+    expect(hub.serialize().split("\n")).toContain(`bleopen\t${seq}`);
+
+    clock += 10_000;
+    expect(hub.serialize()).not.toContain("bleopen");
+
+    // And asking again re-opens it, rather than being permanently spent.
+    const again = hub.requestBleOpen();
+    expect(again).toBeGreaterThan(seq);
+    expect(hub.serialize().split("\n")).toContain(`bleopen\t${again}`);
+  });
+
+  test("the open-Bluetooth id survives a service restart", () => {
+    // Seconds-since-epoch, not a count, for the same reason requestUpgrade is:
+    // the device compares against the highest id it has already acted on, and a
+    // counter that restarts at 1 with this Bun process would hand a device that
+    // stayed up an id it has already honoured — the request would be dropped and
+    // the user would press 开始配网 forever with nothing happening on the clock.
+    const before = new OsLinkHub();
+    const asked = before.requestBleOpen();
+    expect(asked).toBeGreaterThanOrEqual(Math.floor(Date.now() / 1000) - 5);
+
+    const restarted = new OsLinkHub();
+    expect(restarted.getBleOpenSeq()).toBe(0);
+    // A counter would answer 1 here, which is below every id the device has seen.
+    expect(restarted.requestBleOpen()).toBeGreaterThanOrEqual(asked);
   });
 
   test("still produces the exact bytes the firmware's parser is tested against", () => {

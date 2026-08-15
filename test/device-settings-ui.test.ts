@@ -123,4 +123,33 @@ describe("device settings UI", () => {
     expect(overridden).toContain("恢复安装时地址");
     expect(overridden).toContain("192.168.8.240");
   });
+
+  // 开始配网 has to ask the clock BEFORE it opens the chooser, and it must open
+  // the chooser even when the ask fails. cladd's Dialog portals and server-
+  // renders to nothing, so the handler cannot be clicked from here; the source
+  // is the seam, the same one zos-panel.test.ts uses for the install button.
+  test("开始配网 asks the clock to open Bluetooth first, and opens the wizard regardless", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/studio/device-settings-dialog.tsx", import.meta.url),
+    ).text();
+
+    const start = source.indexOf("const openProvision = async () => {");
+    expect(start).toBeGreaterThan(0);
+    const body = source.slice(start, source.indexOf("\n  };", start));
+
+    // The whole point: an ONLINE clock advertises nothing, so a wizard that only
+    // scanned found an empty chooser on exactly the device the user was trying
+    // to move to another router.
+    expect(body).toContain("link.requestBleOpen()");
+    // A failed ask is reported, never thrown at the user as a dead button.
+    expect(body).toContain("} catch (error) {");
+
+    // LAST STATEMENT, outside every branch. A clock that is offline is already
+    // advertising, so the old path still works and the wizard must open whether
+    // the request reached the clock, failed, or was never sent at all.
+    const statements = body.trimEnd().split("\n");
+    expect(statements[statements.length - 1]!.trim()).toBe("setProvisionOpen(true);");
+    // And it opens in exactly one place, so no branch can quietly skip it.
+    expect(source.split("setProvisionOpen(true)").length - 1).toBe(1);
+  });
 });

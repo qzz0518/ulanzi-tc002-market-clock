@@ -152,7 +152,8 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
 }
 
 StateDoc::StateDoc()
-    : mSeq(-1), mPinned(false), mMirror(false), mUpgradeSeq(0), mHasNowPlaying(false),
+    : mSeq(-1), mPinned(false), mMirror(false), mUpgradeSeq(0), mBleOpenSeq(0),
+      mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
       mLyricEndMs(-1), mLyricUntilMs(-1), mLyricMode(kDefaultMode),
       mLyricSkin(kDefaultSkin), mAccentRgb(0), mHasAccent(false) {}
@@ -161,6 +162,11 @@ bool StateDoc::parse(const std::string& body) {
   mSeq = -1;
   mPinned = false;
   mMirror = false;
+  // Cleared, so an absent key reads as "this document carries no request"
+  // rather than as whatever the last one said. It costs nothing — the caller
+  // gates on a RISING sequence, not on presence — but it keeps the rule this
+  // parser states for the theme: a document is a whole picture.
+  mBleOpenSeq = 0;
   mFocus.clear();
   mItems.clear();
   mVibe.clear();
@@ -233,6 +239,14 @@ bool StateDoc::parse(const std::string& body) {
       // counter is ordinary state in a Bun process and returns to 1 when the
       // service restarts.
       mUpgradeSeq = atoi(fields[1].c_str());
+    } else if (fields[0] == "bleopen") {
+      // 蓝牙配网, asked for by the console. An INCREASE of this number opens the
+      // same five-minute advertising window the 配网 row opens, and nothing
+      // else: no reboot, no flash, so a repeat is harmless and there is no
+      // /data record behind it. An increase rather than a change, because the
+      // hub issues seconds-since-epoch and the only question the device has is
+      // "is this newer than the one I already acted on this boot".
+      mBleOpenSeq = atoi(fields[1].c_str());
     } else if (fields[0] == "focus") {
       mFocus = fields[1];
     } else if (fields[0] == "setseq") {

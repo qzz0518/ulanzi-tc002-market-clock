@@ -34,6 +34,8 @@ port 43820.
 | `APP_NAME` | `btc` | Default channel name for fresh installs and first-run legacy migration |
 | `ADB_BIN` | auto-detected at install | Absolute `adb` path; a LaunchAgent doesn't inherit the shell PATH |
 | `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials); **every** device request goes through it, live and notify included |
+| `CONSOLE_DISCOVERY` | `on` | LAN beacon: announces the console's address to the local subnet every 10 s so a ZOS device that lost it can find it again. `off`/`0`/`false` disables it; an unrecognised value throws rather than defaulting to on |
+| `CONSOLE_DISCOVERY_PORT` | `43821` | UDP port the beacon is sent to. **The firmware's listener is a compile-time constant**, so changing this makes the device deaf; the console's own port travels in the payload instead |
 
 ## Control-panel behavior
 
@@ -746,6 +748,96 @@ usable it sends **nothing** and the device keeps the address it has: the write i
 and a confidently wrong address costs more than silence. https is never sent — the firmware only
 builds `http://` URLs.
 
+**The six-digit code guards this one field and nothing else.** The code on the panel is gated on
+the **capability**, not on the flow:
+
+| Command | Code? |
+|---|---|
+| `scan` | No. It lists SSIDs already being broadcast to everyone in range |
+| `join` with only `ssid`/`psk` | No. Exactly the stock firmware's power — and stock ships with **no** code, PIN or QR at all |
+| `join` with a `host`, on a device that has adopted no console yet | No. There is nothing to take over; this is first-run setup |
+| `join` with a `host` that **differs** from the adopted one | **Yes.** After this the clock answers to a different console |
+
+The asymmetry is the whole rule. A stock join can only put the clock on a Wi-Fi network; ours can
+also rewrite `/data/zos-host` — the address this firmware will poll for the rest of its life.
+Accepting Wi-Fi credentials from a stranger is a nuisance; accepting a console address from a
+stranger is handing over the device. So presence is proven at that one point and on none of the
+other three paths.
+
+The comparison is against the address the device is **actually polling** (`HostLink::baseUrl`, fed
+to the session on every 160 ms tick) rather than a copy taken at boot — a single join changes it in
+place. `host`, `host:port` and `http://host:port` are folded through `ble::consoleUrl` first and
+hostnames compare case-insensitively (DNS does), so spelling the same address differently is not a
+takeover. A refusal answers `evt state err=host-code` and changes **nothing**: the console raises
+the code prompt, and on success re-sends the identical join — the password is not retyped. The code
+itself is unchanged: minted per advertising session, five wrong tries then a 60 s lockout, never
+logged.
+
+### Console discovery (the LAN beacon)
+
+The `host` file above is written **once**: the device records the address in `/data/zos-host`
+and polls it for the rest of its life. But the console is a Bun process on a laptop holding a
+DHCP lease. The day that lease moved from `.108` to `.114`, the clock kept knocking on `.108`.
+The panel still told the time, so nothing looked wrong — but telemetry stopped, the console
+could not see the device, and an OTA request could never reach it. **Silent from both ends**,
+and the only fix was a cable and `adb push`.
+
+So the console broadcasts a hint; the device takes it only when it is already lost, and only
+after proving the hint is real.
+
+**The payload.** One ASCII line, UDP, to the local subnet's *directed* broadcast address
+(`address | ~netmask`, e.g. `192.168.8.255`), port 43821, roughly every 10 s:
+
+```
+ZOSCON1\t<host>\t<port>\n
+```
+
+`ZOSCON1` is a version tag — a future change gets a new tag so a device that only understands
+this one cannot misread it. `<host>` is the address the device should poll: the machine's LAN
+IPv4, not `127.0.0.1` and not a hostname. **The trailing newline is the frame**: a datagram
+without it was cut short and is rejected, rather than read as a shorter address. Nothing is
+sent to `255.255.255.255` — an unbound socket is refused with `EADDRNOTAVAIL` on macOS
+(measured), and where a global broadcast does work it leaves the kernel to pick a route, which
+on a laptop with a VPN or a container bridge up is the wrong interface.
+
+**Which interface.** This reuses the console's existing rule (`selectControlAddress`, the same
+one behind the phone-control popover): **the interface whose subnet contains the clock wins**,
+then any private IPv4, then the first non-internal one. That is a deliberate refinement of
+"prefer the interface carrying the default route", and the two diverge on a machine this
+project actually runs on: with a corporate VPN up the default route is the tunnel, whose
+address the clock cannot reach, while the clock's own /24 is unambiguous about which NIC faces
+its LAN. Remaining ties fall to enumeration order, and the result is logged
+(`console_beacon_announcing`, on **change** only).
+
+**Four gates on the device, all of which must hold**
+(`device/tc002-os/app/src/net/ConsoleDiscovery.*`):
+
+| # | Gate | Test |
+|---|---|---|
+| 1 | **Already lost** | No successful pull for ≥ 60 s. A clock that is talking to its console does **not even parse** these — the datagram is drained and dropped |
+| 2 | **On the device's own /24** | Compared with wlan0's current address (`platform/NetInfo`). Not much of a boundary, but it stops a hint from another subnet |
+| 3 | **Different from the address in use** | All three spellings folded through `ble::consoleUrl` first, or every beacon would pointlessly restart the pull loop |
+| 4 | **The candidate answers as a console** | **One** `GET /health` *before* `/data/zos-host` is touched, requiring a 200 whose body contains `"service":"ulanzi-tc002-content-hub"`. A host that merely shouts on the wire is not a console |
+
+Only then is `/data/zos-host` rewritten (temp file, fsync, rename) and the pull loop restarted
+in place — through the same `adoptConsoleHost` the BLE path already uses, not a second copy of
+it. The event goes to `ProvisionLog` as
+`host-discover from=<old> to=<new> outcome=adopt|not-a-console`. logcat is banned on this unit,
+so that file is the **entire** record of a device that changed the address it polls; a refusal
+is logged too, because otherwise a clock that stays lost while a console is plainly on the air
+leaves no trace at all.
+
+A device that was never given a console (`/data/zos-host` empty) counts as lost from its
+sixtieth second, so it adopts the first service that both broadcasts on its subnet and answers
+as a console. That is not an extra rule — it falls straight out of the four gates above.
+
+**No crypto, no shared secret, no HMAC — deliberately.** The console's write API is guarded
+only by a same-origin check, and a same-origin check stops browsers, not `curl`: anyone already
+on this LAN can push firmware to the clock today. **The LAN is therefore already the trust
+boundary** and this feature does not widen it. What the BLE pairing code guards is a
+*different* attacker — someone in Bluetooth range who is **not** on the Wi-Fi — and that
+defence is untouched.
+
 ### Wi-Fi and provisioning: how far it goes
 
 **Working today:** the firmware runs its own HTTP server and serves the provisioning page on
@@ -867,6 +959,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/os/state` | Link snapshot `{seq, menu, display, telemetry, live, mirrorWanted, upgradeSeq, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}` (live means a report arrived within 15 s). `upgradeSeq` counts installs ever asked for, so the console can see a request is outstanding — the device reboots to install, and there is no other receipt in between. `telemetry` also carries `ageMs` and `seq`: `seq` counts reports ever received and never resets — `live` only says the device spoke recently, which is still true of a clock being re-provisioned that never left its old network, so "the device came back" has to be decided against a `seq` captured before the join |
 | `GET` | `/api/os/firmware/status` | For the console: `{packed, image, upgradeSeq}`, where `image` is `{bytes, buildId, builtAt}` or `null`. `builtAt` is the image file's mtime and answers the only question available before the device reboots — is this the build I just packed. `packed` is stated rather than inferred from the presence of the other fields; it sits next to a button that rewrites flash |
 | `POST` | `/api/os/upgrade` | Ask the device to install the packed image: body `{}`, reply `{seq}`. **409 when nothing is packed** — the sequence would reach the device, the device would fetch the image, get a 404 and stop, while the console claimed an install was under way. The device honours a given sequence once per boot; installing reboots it, so the link going quiet mid-way is by design rather than a fault |
+| `POST` | `/api/os/ble` | Ask the clock to advertise over Bluetooth for five minutes: body `{}`, reply `{seq}`. The remote equivalent of pressing 设置 → 配网 on the device — ZOS advertises only **while offline** or inside the five minutes that row opens, so a clock that is online and working (exactly the one whose owner is moving it to a new router) does not exist in the browser's chooser. **No precondition**, unlike `/api/os/upgrade`'s 409: there is nothing equivalent to "not packed" to be missing, and a clock too offline to read the request is already advertising by itself. The sequence is seconds-since-epoch and the device acts **only on a rising edge**, so a repeated `bleopen` does not re-open the window on every long poll |
 | `PUT` | `/api/os/display` | Send ZOS to a channel and lock the knob: `{focus, pinned}` |
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned. Only the field named in the request is stamped: the other one stays in the document with its own `setvolseq` / `setbriseq` unmoved, so the panel raises a bar only for the level the user actually touched |

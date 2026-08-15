@@ -28,6 +28,7 @@
 #include "core/Transitions.h"
 #include "net/BleProtocol.h"
 #include "net/BleProvisionSession.h"
+#include "net/ConsoleDiscovery.h"
 #include "net/FirmwareUpdate.h"
 #include "net/FrameBundle.h"
 #include "net/HostLink.h"
@@ -4580,6 +4581,77 @@ void checkFirmwareUpdate() {
   ::rmdir("/tmp/zos-fw-test");
 }
 
+// 蓝牙配网 asked for from the console — the other half of 设置 → 配网.
+//
+// The bug this closes: the console's wizard only SCANS, and this device
+// advertises only while it is offline or inside the five-minute window the 配网
+// row opens. On an online clock — the one whose owner is moving it to a new
+// router — nothing was on the air and the browser's chooser was empty.
+//
+// Driven through adoptDocument for the same reason the install is: it is the
+// one seam a host check can reach (the pull thread's body needs a socket), and
+// the consumer lives in logic/osLogic.cc, which no host check compiles. What is
+// asserted here is the half that CAN be: once per rising sequence, never once
+// per poll.
+void checkBleOpenRequest() {
+  tcos::HostLink link;
+  check(link.takeBleOpenRequest() == 0, "a fresh link has no 配网 request");
+
+  tcos::StateDoc quiet;
+  check(quiet.parse("seq\t1\n"), "a document with no request parses");
+  check(quiet.bleOpenSeq() == 0, "and names none");
+  link.adoptDocument(quiet, 1000);
+  check(link.takeBleOpenRequest() == 0, "so nothing opens the radio");
+
+  // Seconds-since-epoch, the shape the hub really issues.
+  tcos::StateDoc asked;
+  check(asked.parse("seq\t2\nbleopen\t1755000000\n"), "a document carrying the request parses");
+  check(asked.bleOpenSeq() == 1755000000, "and the key reaches the parser");
+  link.adoptDocument(asked, 2000);
+  check(link.takeBleOpenRequest() == 1755000000, "the UI thread is handed the request");
+  check(link.takeBleOpenRequest() == 0, "exactly once");
+
+  // THE ONE THAT MATTERS. The console publishes this id in every document from
+  // the moment it is made — the document is pulled, so a request the device has
+  // not read yet must still be in it. A gate keyed on presence rather than on
+  // the rising edge would re-open the window and re-push the provisioning
+  // screen on every long poll, and the user could never leave it.
+  link.adoptDocument(asked, 3000);
+  check(link.takeBleOpenRequest() == 0,
+        "and the document repeating it forever is honoured ONCE, not once per poll");
+
+  tcos::StateDoc again;
+  again.parse("seq\t3\nbleopen\t1755000009\n");
+  link.adoptDocument(again, 4000);
+  check(link.takeBleOpenRequest() == 1755000009, "pressing the button again is a new ask");
+  check(link.takeBleOpenRequest() == 0, "also honoured once");
+
+  // Older than the high-water mark: a service that somehow went backwards must
+  // not re-open a window with an id this boot already acted on. There is no
+  // /data record behind this request — nothing reboots — so this in-memory mark
+  // is the only guard there is.
+  tcos::StateDoc stale;
+  stale.parse("seq\t4\nbleopen\t1755000000\n");
+  link.adoptDocument(stale, 5000);
+  check(link.takeBleOpenRequest() == 0, "an id older than the last one acted on opens nothing");
+
+  tcos::StateDoc withdrawn;
+  withdrawn.parse("seq\t5\n");
+  check(withdrawn.bleOpenSeq() == 0,
+        "an absent key reads as no request rather than as the previous document's");
+  link.adoptDocument(withdrawn, 6000);
+  check(link.takeBleOpenRequest() == 0, "so a document that stops asking asks for nothing");
+
+  // The two console requests share a document and nothing else: one reboots the
+  // device and one opens a radio, and a gate that confused them would install
+  // firmware because somebody pressed 配网.
+  tcos::StateDoc both;
+  both.parse("seq\t6\nupgrade\t1755000100\nbleopen\t1755000100\n");
+  link.adoptDocument(both, 7000);
+  check(link.takeBleOpenRequest() == 1755000100, "both requests survive one document");
+  check(link.takeUpgradeRequest() == 1755000100, "each on its own gate");
+}
+
 // The state machine between the console's request and the vendor updater.
 //
 // HostLink's threads are never started here: every seam this drives is public
@@ -8091,6 +8163,273 @@ void checkBleHostField() {
   std::printf("  ble host field ok\n");
 }
 
+// ---------------------------------------------------------------------------
+// BLE provisioning: WHEN the six-digit code is demanded.
+//
+// The rule is gated on the capability, not on the flow. Everything a stock
+// Ulanzi firmware can be asked to do over BLE — it ships with no code, no PIN
+// and no QR, at BT_SECURITY_LOW, with proximity as the whole authentication —
+// is answered here with no code either. The one thing ours can do that stock
+// cannot is carry a `host`, which becomes the URL this device polls for the rest
+// of its life; re-pointing an already-adopted console is the only place presence
+// is proven, because it is the only place the answer is a device takeover rather
+// than a nuisance.
+//
+// Every branch below is a branch of that sentence. If the rule is ever collapsed
+// back to "authorise everything" or forward to "authorise nothing", one of these
+// says so by name.
+void checkBleTakeoverCode() {
+  using tcos::BleProvisionSession;
+
+  // --- ble::consoleUrl: the single normaliser both sides are folded through.
+  // Three spellings of one address must not read as three consoles. ---
+  check(tcos::ble::consoleUrl("192.168.8.108") == "http://192.168.8.108:43820",
+        "a bare address gets the scheme and the default port");
+  check(tcos::ble::consoleUrl("192.168.8.108:43820") == "http://192.168.8.108:43820",
+        "an address with a port keeps it");
+  check(tcos::ble::consoleUrl("http://192.168.8.108:43820") == "http://192.168.8.108:43820",
+        "a complete URL is left alone");
+  check(tcos::ble::consoleUrl("").empty(),
+        "and nothing stays nothing — 'no console' is a state, not the address "
+        "http://:43820");
+
+  // --- the rule as a pure question, answered without a session at all. ---
+  const std::string adopted = "http://192.168.8.108:43820";
+  check(!BleProvisionSession::hostIsTakeover("", adopted),
+        "a join with no host field takes nothing over");
+  check(!BleProvisionSession::hostIsTakeover("192.168.8.108", adopted),
+        "the console it is already on, written short, is not a takeover");
+  check(!BleProvisionSession::hostIsTakeover("192.168.8.108:43820", adopted),
+        "nor written long");
+  check(!BleProvisionSession::hostIsTakeover("Studio.local", "http://studio.local:43820"),
+        "nor written in another case — DNS does not care, so neither may this");
+  check(!BleProvisionSession::hostIsTakeover("192.168.9.2", ""),
+        "with no console adopted there is nothing to take over: first-run setup "
+        "is the case the vendor makes seamless, and it stays seamless");
+  check(!BleProvisionSession::hostIsTakeover("192.168.8.108/pull", adopted),
+        "a host the validator refuses is IGNORED downstream, so it can point at "
+        "nothing and must not cost a pairing code");
+  check(BleProvisionSession::hostIsTakeover("192.168.9.2:43820", adopted),
+        "a different address IS a takeover");
+  check(BleProvisionSession::hostIsTakeover("192.168.8.108:8080", adopted),
+        "and so is the same machine on another port — that is a different console");
+
+  // A session that is advertising and connected and has proved NOTHING. Every
+  // block below starts here, because "no code has been typed" is the state the
+  // whole rule is about.
+  struct Fixture {
+    BleProvisionSession session;
+    Fixture() {
+      session.configure("ZOS-A772", "test-build", "CC:C4:B2:77:A7:72");
+      session.beginAdvertising(4242, 0);
+      session.onConnect(0);
+    }
+    void drain() {
+      std::string out;
+      while (session.takeOutbound(&out)) last = out;
+      std::string a;
+      while (session.takeAudit(&a)) audits.push_back(a);
+    }
+    bool audited(const char* needle) const {
+      for (size_t i = 0; i < audits.size(); ++i) {
+        if (audits[i].find(needle) != std::string::npos) return true;
+      }
+      return false;
+    }
+    static BleProvisionSession::Link online() {
+      BleProvisionSession::Link link;
+      link.online = true;
+      link.ssid = "home";
+      link.ip = "192.168.8.42";
+      link.wpaState = "COMPLETED";
+      return link;
+    }
+    std::string last;
+    std::vector<std::string> audits;
+  };
+
+  const std::string takeover =
+      "cmd\tjoin\nssid\thome\npsk\thunter22\nhost\t192.168.9.2:43820\n";
+
+  // 1. A scan needs no code. It lists names already being broadcast to the whole
+  // building; there was never anything here for a code to protect.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    f.session.onMessage("cmd\tscan\n", 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestScan,
+          "an unauthorised scan reaches the radio: it needs no code");
+    f.drain();
+    check(f.last.find("err\thost-code\n") == std::string::npos &&
+              f.last.find("err\tno-code\n") == std::string::npos,
+          "and is never answered with a demand for one");
+  }
+
+  // 2. A join carrying only credentials needs no code. This is exactly a stock
+  // join's power — it can put this clock on a network, and nothing else.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestJoin,
+          "a join with only ssid/psk needs no code — same power as the stock "
+          "firmware, which ships with none");
+    check(ssid == "home" && psk == "hunter22", "and both credentials arrive whole");
+    check(std::string(f.session.phase()) == "joining", "with the phase following");
+  }
+
+  // 3. A host on a device that has adopted no console needs no code either.
+  {
+    Fixture f;
+    f.session.noteConsole("");
+    f.session.onMessage(takeover, 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestJoin,
+          "a host on a device with none adopted needs no code");
+    f.session.noteLink(Fixture::online(), 500);
+    check(f.session.takeConsoleHost() == "192.168.9.2:43820",
+          "and is really adopted, not merely tolerated");
+  }
+
+  // 4. A DIFFERENT host is refused, by its own name, and banks nothing.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    f.session.onMessage(takeover, 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "re-pointing an adopted console is refused without the code");
+    f.drain();
+    check(f.last.find("err\thost-code\n") != std::string::npos,
+          "with an error of its own: the console must tell 'prove you are here, "
+          "and here is why it matters' apart from 'those digits were wrong'");
+    check(f.last.find("err\tno-code\n") == std::string::npos,
+          "which is NOT the wrong-digits code");
+    check(std::string(f.session.phase()) != "joining",
+          "and the refusal leaves the session exactly where it found it, so the "
+          "console can re-send the identical join");
+    check(f.audited("host-code"), "the refusal leaves a breadcrumb");
+
+    // The refused address must not have been stashed on the way out: authorise,
+    // join again WITHOUT a host, and nothing may ride that success.
+    f.session.onMessage("cmd\tcode\ncode\t" + f.session.code() + "\n", 150);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\n", 200);
+    f.session.takeRequest(&ssid, &psk);
+    f.session.noteLink(Fixture::online(), 600);
+    check(f.session.takeConsoleHost().empty(),
+          "a refused host is dropped, not held — it must never ride the next join");
+  }
+
+  // 5. The same join, once the six digits are proven. The console re-sends the
+  // identical document; nothing about it had to change.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    f.session.onMessage(takeover, 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "refused while unauthorised");
+    f.session.onMessage("cmd\tcode\ncode\t" + f.session.code() + "\n", 150);
+    check(f.session.authorised(), "the panel's digits authorise the session");
+    f.session.onMessage(takeover, 200);
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestJoin,
+          "and the identical join is then accepted");
+    f.session.noteLink(Fixture::online(), 600);
+    check(f.session.takeConsoleHost() == "192.168.9.2:43820",
+          "carrying the new console address with it");
+  }
+
+  // 6. The SAME host needs no code. Re-sending the address the device is already
+  // pointed at changes nothing, and a rule that charged for it would put a code
+  // in front of every ordinary re-provision — which is the friction being removed.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    f.session.onMessage("cmd\tjoin\nssid\thome\npsk\thunter22\nhost\t192.168.8.108\n", 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestJoin,
+          "the console the device is already on needs no code, however it is spelled");
+    f.drain();
+    check(f.last.find("err\thost-code\n") == std::string::npos,
+          "and is not asked for one");
+  }
+
+  // 7. The lockout still bites, and it bites the takeover.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    for (int i = 0; i < BleProvisionSession::kMaxCodeAttempts; ++i) {
+      f.session.onMessage("cmd\tcode\ncode\t000000\n", 100 + i);
+    }
+    f.drain();
+    check(f.last.find("err\tlocked-out\n") != std::string::npos,
+          "five wrong codes still lock the session out");
+    check(f.last.find("retry\t60\n") != std::string::npos,
+          "with the countdown the console shows");
+    f.session.onMessage("cmd\tcode\ncode\t" + f.session.code() + "\n", 200);
+    check(!f.session.authorised(),
+          "and the correct code is still refused while the lockout runs");
+    f.session.onMessage(takeover, 250);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "so a takeover cannot be walked through a lockout");
+    f.drain();
+    check(f.last.find("err\tlocked-out\n") != std::string::npos,
+          "and the console is handed the countdown rather than a code prompt it "
+          "cannot satisfy yet");
+    // ...but the lockout is a limit on GUESSING, not a sanction on the device.
+    // Neither of these ever needed a code, so neither may be collateral.
+    f.session.onMessage("cmd\tscan\n", 300);
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestScan,
+          "a scan still works during a lockout — it never needed a code");
+  }
+
+  // 8. Ordering: a malformed join is a malformed join. Credentials are validated
+  // BEFORE the takeover gate, so a console bug reads as a field to fix rather
+  // than as a pairing code that would not have helped.
+  {
+    Fixture f;
+    f.session.noteConsole(adopted);
+    f.session.onMessage("cmd\tjoin\nssid\tho\"me\npsk\thunter22\nhost\t192.168.9.2\n", 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "an SSID with a quote is still refused before it can reach SET_NETWORK");
+    f.drain();
+    check(f.last.find("code\targ\n") != std::string::npos,
+          "as `arg`, not as a demand for a code that would not fix it");
+  }
+
+  // 9. The guard file still outranks all of it: a locked link never produces a
+  // request, whatever the host field says.
+  {
+    Fixture f;
+    BleProvisionSession::Link locked;
+    locked.locked = true;
+    f.session.noteConsole(adopted);
+    f.session.noteLink(locked, 50);
+    f.session.onMessage(takeover, 100);
+    std::string ssid;
+    std::string psk;
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
+          "a locked link refuses a join before the takeover rule is even reached");
+    f.drain();
+    check(f.last.find("err\tlink-locked\n") != std::string::npos,
+          "and says so, rather than asking for a code it would then ignore");
+  }
+
+  std::printf("  ble takeover code ok\n");
+}
+
 void checkBleSession() {
   using tcos::BleProvisionSession;
 
@@ -8118,17 +8457,21 @@ void checkBleSession() {
     std::vector<std::string> audits;
   };
 
-  // Authorisation gates BOTH mutators, and it answers rather than ignoring:
-  // silence would leave the console waiting for something that is not coming.
+  // Authorisation gates ONE capability — re-pointing an adopted console — and
+  // checkBleTakeoverCode owns that rule branch by branch. What belongs here is
+  // the consequence for this state machine: the mutators are no longer gated on
+  // it, so an unauthorised scan is work, not an error.
   {
     Fixture f;
     f.session.onMessage("cmd\tscan\n", 100);
     std::string ssid;
     std::string psk;
-    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestNone,
-          "an unauthorised scan reaches the radio not at all");
+    check(f.session.takeRequest(&ssid, &psk) == BleProvisionSession::kRequestScan,
+          "an unauthorised scan reaches the radio — listing SSIDs already on the "
+          "air is not a capability a pairing code was ever protecting");
     f.drain();
-    check(f.last.find("err\tno-code\n") != std::string::npos, "and is answered with no-code");
+    check(f.last.find("err\tno-code\n") == std::string::npos,
+          "and it is not answered with a demand for a code");
   }
 
   {
@@ -8410,8 +8753,10 @@ void checkBleSession() {
     check(f.last == "evt\terr\ncode\tcmd\n", "an unknown command is refused by name");
   }
 
-  // hello answers before authorisation, and says which of the two reasons the
-  // console cannot proceed for.
+  // hello identifies the device and reports the link. It no longer opens with a
+  // demand for the code: on every path but a console takeover the user will
+  // never be asked for one, and a console that put a six-digit field in front of
+  // them at hello would be asking for it on all four.
   {
     Fixture f;
     f.session.onMessage("cmd\thello\n", 100);
@@ -8421,8 +8766,10 @@ void checkBleSession() {
     check(sent.size() >= 2 && sent[0].find("evt\thello\n") == 0, "hello identifies the device");
     check(sent[0].find("name\tZOS-A772\n") != std::string::npos,
           "with the same name the panel and the advertisement carry");
-    check(sent[1].find("err\tno-code\n") != std::string::npos,
-          "and the state that follows asks for the code");
+    check(sent[1].find("evt\tstate\n") == 0,
+          "and the state that follows reports the link");
+    check(sent[1].find("err\tno-code\n") == std::string::npos,
+          "WITHOUT asking for a code the flow has no reason to want yet");
   }
   {
     Fixture f;
@@ -8483,6 +8830,53 @@ void checkProvisionScreen() {
     on.online = true;
     on.joining = true;
     check(ProvisionScreen::stageFor(on) == ProvisionScreen::kOnline, "an address wins over trying");
+
+    // ...but it does not win over being ASKED. 设置 → 配网 on a working clock
+    // is a request to move it to another network, and answering with the
+    // network it is already on hides the only two things the user needs: the
+    // name to pick in the chooser and the code to type. The machinery was
+    // always there — this screen was the reason the entry point looked absent.
+    ProvisionScreen::Inputs asked;
+    asked.bleAdvertising = true;
+    asked.online = true;
+    asked.requested = true;
+    check(ProvisionScreen::stageFor(asked) == ProvisionScreen::kAdvertising,
+          "A DELIBERATE ASK ON AN ONLINE CLOCK SHOWS THE CODE, not the address");
+    {
+      ProvisionScreen::State st;
+      st.stage = ProvisionScreen::stageFor(asked);
+      st.name = "ZOS-1A2B";
+      st.code = "417203";
+      const std::vector<ProvisionScreen::Page> pages = ProvisionScreen::pagesFor(st);
+      bool sawName = false, sawCode = false;
+      for (size_t i = 0; i < pages.size(); ++i) {
+        if (pages[i].text == st.name) sawName = true;
+        if (pages[i].text == st.code) sawCode = true;
+      }
+      check(sawName && sawCode, "and both of them are actually on the panel");
+    }
+
+    // The session's own progress still outranks it: once the user has typed the
+    // password and the join is running, they want to watch the join.
+    asked.centralConnected = true;
+    check(ProvisionScreen::stageFor(asked) == ProvisionScreen::kLinkUp,
+          "a central that has not proved the code still parks, request or not");
+    asked.authorised = true;
+    asked.scanning = true;
+    check(ProvisionScreen::stageFor(asked) == ProvisionScreen::kAuthorised,
+          "and an authorised session shows its own progress");
+    asked.scanning = false;
+    asked.joining = true;
+    check(ProvisionScreen::stageFor(asked) == ProvisionScreen::kJoining,
+          "including the join itself");
+
+    // And an unasked online device is untouched — this must not turn every
+    // online clock into one that advertises a code nobody wants.
+    ProvisionScreen::Inputs quiet;
+    quiet.bleAdvertising = true;
+    quiet.online = true;
+    check(ProvisionScreen::stageFor(quiet) == ProvisionScreen::kOnline,
+          "an online clock nobody asked about still just says so");
 
     ProvisionScreen::Inputs link;
     link.bleAdvertising = true;
@@ -8781,6 +9175,348 @@ void checkHotspotHold() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Console discovery: the console's LAN beacon, and the four gates a hint has to
+// clear before it becomes the address this device polls forever.
+//
+// These are not hygiene checks. What is on the other side of them is a rewrite
+// of /data/zos-host, which is the ONE value that decides whether this device can
+// ever be reached again — get it wrong and the fix is a cable and an adb push on
+// a unit whose only other diagnostic channel (logcat) is banned. So every gate
+// is asserted from both sides: a hint that must pass, and the nearest hint that
+// must not.
+
+void checkConsoleDiscovery() {
+  using tcos::ConsoleDiscovery;
+  typedef ConsoleDiscovery::Hint Hint;
+
+  // --- the wire ------------------------------------------------------------
+  // These literals ARE the protocol. src/console-beacon.ts builds the same bytes
+  // and test/console-beacon.test.ts pins them there; if the two ever disagree
+  // the clock stops hearing a console that is plainly shouting.
+  {
+    const char kGood[] = "ZOSCON1\t192.168.8.114\t43820\n";
+    Hint hint;
+    check(ConsoleDiscovery::parseBeacon(kGood, (int)sizeof(kGood) - 1, &hint),
+          "the console's own payload parses");
+    check(hint.host == "192.168.8.114" && hint.port == 43820,
+          "host and port come out of it whole");
+    check(ConsoleDiscovery::hintHost(hint) == "192.168.8.114:43820",
+          "and fold into the host:port form /data/zos-host holds");
+    check(ConsoleDiscovery::hintUrl(hint) == "http://192.168.8.114:43820",
+          "and into the URL the pull loop would use");
+
+    // TRUNCATED. The newline is the frame: without it there is no way to know
+    // the address is all there, and half an address that still parses is exactly
+    // the value that must never reach /data/zos-host.
+    const char kCut[] = "ZOSCON1\t192.168.8.114\t438";
+    check(!ConsoleDiscovery::parseBeacon(kCut, (int)sizeof(kCut) - 1, &hint),
+          "a datagram cut short is refused rather than read as a shorter port");
+    const char kCutHost[] = "ZOSCON1\t192.168.8.1";
+    check(!ConsoleDiscovery::parseBeacon(kCutHost, (int)sizeof(kCutHost) - 1, &hint),
+          "and one cut inside the address is refused too");
+    const char kNoNewline[] = "ZOSCON1\t192.168.8.114\t43820";
+    check(!ConsoleDiscovery::parseBeacon(kNoNewline, (int)sizeof(kNoNewline) - 1, &hint),
+          "a complete-looking line with no terminator is still unframed");
+
+    // WRONG MAGIC. The version tag is what stops a future payload from being
+    // read by a device that only understands this one.
+    const char kMagic2[] = "ZOSCON2\t192.168.8.114\t43820\n";
+    check(!ConsoleDiscovery::parseBeacon(kMagic2, (int)sizeof(kMagic2) - 1, &hint),
+          "a future version is not guessed at");
+    const char kOther[] = "HELLO\t192.168.8.114\t43820\n";
+    check(!ConsoleDiscovery::parseBeacon(kOther, (int)sizeof(kOther) - 1, &hint),
+          "somebody else's broadcast is not a beacon");
+    const char kPrefix[] = "ZOSCON1X\t192.168.8.114\t43820\n";
+    check(!ConsoleDiscovery::parseBeacon(kPrefix, (int)sizeof(kPrefix) - 1, &hint),
+          "the magic must end where the tab does, not merely start the line");
+
+    // BAD PORT.
+    const char kPortWord[] = "ZOSCON1\t192.168.8.114\tport\n";
+    check(!ConsoleDiscovery::parseBeacon(kPortWord, (int)sizeof(kPortWord) - 1, &hint),
+          "an alphabetic port is not a port");
+    const char kPortZero[] = "ZOSCON1\t192.168.8.114\t0\n";
+    check(!ConsoleDiscovery::parseBeacon(kPortZero, (int)sizeof(kPortZero) - 1, &hint),
+          "port zero is not a port");
+    const char kPortHuge[] = "ZOSCON1\t192.168.8.114\t65536\n";
+    check(!ConsoleDiscovery::parseBeacon(kPortHuge, (int)sizeof(kPortHuge) - 1, &hint),
+          "one past the last port is not a port");
+    const char kPortEmpty[] = "ZOSCON1\t192.168.8.114\t\n";
+    check(!ConsoleDiscovery::parseBeacon(kPortEmpty, (int)sizeof(kPortEmpty) - 1, &hint),
+          "an absent port is not a port");
+    const char kPortLast[] = "ZOSCON1\t192.168.8.114\t65535\n";
+    check(ConsoleDiscovery::parseBeacon(kPortLast, (int)sizeof(kPortLast) - 1, &hint) &&
+              hint.port == 65535,
+          "the last port fits");
+
+    // SHAPE. Extra fields, missing fields, and a host the over-the-air
+    // validator would already refuse — the destination file is the same one, so
+    // the same rule applies.
+    const char kExtra[] = "ZOSCON1\t192.168.8.114\t43820\tmore\n";
+    check(!ConsoleDiscovery::parseBeacon(kExtra, (int)sizeof(kExtra) - 1, &hint),
+          "a fourth field is a payload this version does not understand");
+    const char kOneField[] = "ZOSCON1\t192.168.8.114\n";
+    check(!ConsoleDiscovery::parseBeacon(kOneField, (int)sizeof(kOneField) - 1, &hint),
+          "a beacon with no port is incomplete");
+    const char kScheme[] = "ZOSCON1\thttp://192.168.8.114\t43820\n";
+    check(!ConsoleDiscovery::parseBeacon(kScheme, (int)sizeof(kScheme) - 1, &hint),
+          "a scheme in the host field is refused, as it is over the air");
+    const char kPath[] = "ZOSCON1\t192.168.8.114/x\t43820\n";
+    check(!ConsoleDiscovery::parseBeacon(kPath, (int)sizeof(kPath) - 1, &hint),
+          "so is a path");
+    check(!ConsoleDiscovery::parseBeacon("", 0, &hint), "an empty datagram is not a beacon");
+    std::string huge = "ZOSCON1\t" + std::string(200, 'a') + "\t43820\n";
+    check(!ConsoleDiscovery::parseBeacon(huge.data(), (int)huge.size(), &hint),
+          "an oversized datagram is refused before it is parsed");
+  }
+
+  // --- gate 2, the same /24 ------------------------------------------------
+  check(ConsoleDiscovery::sameSlash24("192.168.8.240", "192.168.8.114"),
+        "a console on the device's own /24 passes");
+  check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "192.168.9.114"),
+        "the neighbouring /24 does not");
+  check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "10.0.0.5"),
+        "and neither does another network entirely");
+  check(!ConsoleDiscovery::sameSlash24("", "192.168.8.114"),
+        "a device with no address of its own cannot compare, so it refuses");
+  check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "studio.local"),
+        "a name cannot be checked against a subnet, so it is refused too");
+  check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "192.168.8"),
+        "three octets are not an address");
+  check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "192.168.8.114.5"),
+        "and neither are five");
+  check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "192.168.8.999"),
+        "an octet out of range is not an address");
+
+  // --- gate 1, lost for 60 s ------------------------------------------------
+  check(!ConsoleDiscovery::lost(59999, 0),
+        "a device 59.999 s into its life is booting, not lost");
+  check(ConsoleDiscovery::lost(60000, 0),
+        "one that has never pulled in 60 s is lost");
+  check(!ConsoleDiscovery::lost(500000, 460001),
+        "a pull 59.999 s ago still counts as talking to the console");
+  check(ConsoleDiscovery::lost(500000, 440000),
+        "60 s of silence is lost");
+  check(!ConsoleDiscovery::lost(1000, 500000),
+        "a stamp from the future is not 'lost' - it is a caller confusing epochs");
+
+  // --- gate 3, and the three folded together --------------------------------
+  {
+    Hint hint;
+    hint.host = "192.168.8.114";
+    hint.port = 43820;
+
+    ConsoleDiscovery::Link link;
+    link.deviceIp = "192.168.8.240";
+    link.baseUrl = "http://192.168.8.108:43820";
+    link.lastPullMs = 0;
+    link.nowMs = 200000;
+    check(ConsoleDiscovery::candidate(link, hint) == "http://192.168.8.114:43820",
+          "a lost device on the same /24 takes a different address as a candidate");
+
+    ConsoleDiscovery::Link talking = link;
+    talking.lastPullMs = 199000;
+    check(ConsoleDiscovery::candidate(talking, hint).empty(),
+          "a device that is talking to its console ignores the hint entirely");
+
+    ConsoleDiscovery::Link elsewhere = link;
+    elsewhere.deviceIp = "192.168.9.240";
+    check(ConsoleDiscovery::candidate(elsewhere, hint).empty(),
+          "a hint from another subnet cannot redirect the clock");
+
+    // THE HINT IS WHAT WE ALREADY POLL. Nothing to do, and doing it would stop
+    // and restart the pull loop on every beacon for as long as the device is
+    // out of touch — which is exactly when it can least afford it.
+    ConsoleDiscovery::Link same = link;
+    same.baseUrl = "http://192.168.8.114:43820";
+    check(ConsoleDiscovery::candidate(same, hint).empty(),
+          "a hint identical to the current host is not a change");
+    same.baseUrl = "192.168.8.114:43820";
+    check(ConsoleDiscovery::candidate(same, hint).empty(),
+          "nor is the same address spelled without a scheme");
+    same.baseUrl = "192.168.8.114";
+    check(ConsoleDiscovery::candidate(same, hint).empty(),
+          "nor spelled with neither scheme nor port, since the port is the default");
+
+    // A unit that has never been told where its console is: no base URL at all.
+    // It is lost from its sixtieth second, and this is the case that makes a
+    // freshly flashed clock usable without a cable.
+    ConsoleDiscovery::Link fresh = link;
+    fresh.baseUrl = "";
+    check(ConsoleDiscovery::candidate(fresh, hint) == "http://192.168.8.114:43820",
+          "a device that has never had a console adopts the first real one");
+  }
+
+  // --- gate 4, against a real HTTP server -----------------------------------
+  // A mock would only prove the probe agrees with my reading of what a console
+  // answers. This drives the real HttpClient against a real net::HttpServer, and
+  // asserts the whole point of the gate: a host that SHOUTS is not a console,
+  // and only the one that answers as one gets to rewrite /data/zos-host.
+  check(ConsoleDiscovery::probeUrl("http://192.168.8.114:43820") ==
+            "http://192.168.8.114:43820/health",
+        "the probe asks for the state route");
+  check(ConsoleDiscovery::probeUrl("http://192.168.8.114:43820/") ==
+            "http://192.168.8.114:43820/health",
+        "a trailing slash does not become a double one");
+  check(ConsoleDiscovery::consoleReply(200, "{\"service\":\"ulanzi-tc002-content-hub\",\"x\":1}"),
+        "a 200 carrying the service name is a console");
+  check(!ConsoleDiscovery::consoleReply(200, "{\"service\":\"something-else\"}"),
+        "a 200 from something else is not");
+  check(!ConsoleDiscovery::consoleReply(404, "{\"service\":\"ulanzi-tc002-content-hub\"}"),
+        "and neither is a 404 that happens to mention it");
+
+  {
+    // Answers like the console for /health, and like a stranger for anything
+    // else — so one server covers both halves of the gate.
+    class Console : public tcos::HttpServer::Handler {
+     public:
+      tcos::HttpServer::Response handle(const tcos::HttpServer::Request& request) {
+        tcos::HttpServer::Response response;
+        response.contentType = "application/json";
+        if (request.path == "/health") {
+          response.body =
+              "{\"service\":\"ulanzi-tc002-content-hub\",\"healthy\":true}";
+        } else {
+          response.body = "{\"ok\":true}";
+        }
+        return response;
+      }
+    };
+    class Impostor : public tcos::HttpServer::Handler {
+     public:
+      tcos::HttpServer::Response handle(const tcos::HttpServer::Request&) {
+        tcos::HttpServer::Response response;
+        response.contentType = "application/json";
+        // A 200, on the right port, at the right path. Everything a beacon can
+        // prove about a host, and still not a console.
+        response.body = "{\"service\":\"some-other-daemon\"}";
+        return response;
+      }
+    };
+
+    Console real;
+    tcos::HttpServer server;
+    const int bound = server.start(0, &real);
+    check(bound > 0, "the fake console binds an ephemeral port");
+    if (bound > 0) {
+      char beacon[64];
+      std::snprintf(beacon, sizeof(beacon), "ZOSCON1\t127.0.0.1\t%d\n", bound);
+
+      ConsoleDiscovery discovery;
+      ConsoleDiscovery::Link link;
+      link.deviceIp = "127.0.0.2";  // same /24 as the loopback server
+      link.baseUrl = "http://127.0.0.1:1";
+      link.lastPullMs = 0;
+      link.nowMs = 200000;
+      discovery.noteLink(link);
+      discovery.onDatagram(beacon, (int)std::strlen(beacon));
+
+      // serveOnce blocks, so the exchange is driven the way checkHttpClient
+      // drives its own: serve from this thread, probe from another.
+      struct Args {
+        ConsoleDiscovery* discovery;
+        bool probed;
+      };
+      static Args args;
+      args.discovery = &discovery;
+      args.probed = false;
+      pthread_t thread;
+      pthread_create(&thread, 0, [](void*) -> void* {
+        args.probed = args.discovery->pumpProbe();
+        return 0;
+      }, 0);
+      check(server.serveOnce(4000), "the fake console is asked exactly once");
+      pthread_join(thread, 0);
+      check(args.probed, "the candidate was probed");
+      check(discovery.probeCount() == 1, "once, not once per beacon");
+
+      std::string adopted;
+      check(discovery.takeAdoption(&adopted), "a console-shaped 200 arms the adoption");
+      char expected[32];
+      std::snprintf(expected, sizeof(expected), "127.0.0.1:%d", bound);
+      check(adopted == expected, "and it carries the host:port /data/zos-host holds");
+      check(!discovery.takeAdoption(&adopted),
+            "and it is surrendered exactly once - a repeat would restart the pull loop");
+      server.stop();
+    }
+
+    Impostor fake;
+    tcos::HttpServer liar;
+    const int lied = liar.start(0, &fake);
+    check(lied > 0, "the impostor binds an ephemeral port");
+    if (lied > 0) {
+      char beacon[64];
+      std::snprintf(beacon, sizeof(beacon), "ZOSCON1\t127.0.0.1\t%d\n", lied);
+
+      ConsoleDiscovery discovery;
+      ConsoleDiscovery::Link link;
+      link.deviceIp = "127.0.0.2";
+      link.baseUrl = "http://127.0.0.1:1";
+      link.lastPullMs = 0;
+      link.nowMs = 200000;
+      discovery.noteLink(link);
+      discovery.onDatagram(beacon, (int)std::strlen(beacon));
+
+      struct Args2 {
+        ConsoleDiscovery* discovery;
+        bool probed;
+      };
+      static Args2 args2;
+      args2.discovery = &discovery;
+      args2.probed = false;
+      pthread_t thread;
+      pthread_create(&thread, 0, [](void*) -> void* {
+        args2.probed = args2.discovery->pumpProbe();
+        return 0;
+      }, 0);
+      check(liar.serveOnce(4000), "the impostor is asked too");
+      pthread_join(thread, 0);
+      check(args2.probed, "and the probe completes");
+      std::string adopted;
+      check(!discovery.takeAdoption(&adopted),
+            "a host that shouts on the wire but does not answer as a console is refused");
+      liar.stop();
+    }
+
+    // A device that is TALKING never even gets as far as a probe: gate 1 drops
+    // the datagram before it is parsed.
+    {
+      ConsoleDiscovery discovery;
+      ConsoleDiscovery::Link link;
+      link.deviceIp = "192.168.8.240";
+      link.baseUrl = "http://192.168.8.108:43820";
+      link.lastPullMs = 199000;
+      link.nowMs = 200000;
+      discovery.noteLink(link);
+      const char beacon[] = "ZOSCON1\t192.168.8.114\t43820\n";
+      discovery.onDatagram(beacon, (int)sizeof(beacon) - 1);
+      check(!discovery.pumpProbe(), "an online device never opens a probe socket");
+      check(discovery.probeCount() == 0, "and never counts one");
+    }
+  }
+
+  // --- the stamp the whole thing hangs on -----------------------------------
+  // lastPullMonoMs is set by the ONE event that means the link is alive, and it
+  // is set by adoptDocument rather than anywhere the pull thread's body could
+  // hide it: a check that re-implemented the stamping would agree with a runPull
+  // that never stamped, and the symptom is a perfectly healthy clock that adopts
+  // the first hint it hears.
+  {
+    tcos::HostLink link;
+    check(link.snapshot().lastPullMonoMs == 0,
+          "a device that has never pulled carries no stamp");
+    tcos::StateDoc doc;
+    check(doc.parse("seq\t7\n"), "a minimal document parses");
+    link.adoptDocument(doc, 123456);
+    check(link.snapshot().lastPullMonoMs == 123456,
+          "a document that arrived stamps the moment it did");
+    check(!ConsoleDiscovery::lost(123456 + 59000, link.snapshot().lastPullMonoMs),
+          "which keeps the device deaf to beacons for a full minute after");
+    check(ConsoleDiscovery::lost(123456 + 60000, link.snapshot().lastPullMonoMs),
+          "and no longer");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -8813,6 +9549,8 @@ int main() {
   std::printf("  firmware update ok\n");
   checkUpgradePath();
   std::printf("  upgrade path ok\n");
+  checkBleOpenRequest();
+  std::printf("  ble open request ok\n");
   checkSetupPortal();
   std::printf("  setup portal ok\n");
   checkGameScreen();
@@ -8867,7 +9605,10 @@ int main() {
   std::printf("  ble protocol ok\n");
   checkBleSession();
   checkBleHostField();
+  checkBleTakeoverCode();
   std::printf("  ble session ok\n");
+  checkConsoleDiscovery();
+  std::printf("  console discovery ok\n");
   checkProvisionScreen();
   std::printf("  provision screen ok\n");
   checkProvisionLog();

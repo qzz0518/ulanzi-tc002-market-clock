@@ -708,6 +708,41 @@ export function DeviceSettingsDialog({
   // 在设备正在上报时才是 zos）——总比在一台掉线的钟上先画一屏在线的样子好。
   const zosLive = zosState !== null ? zosState.live === true : firmwareMode === "zos";
 
+  // 开始配网 asks the clock first, and only then opens the wizard.
+  //
+  // The wizard can only SCAN. ZOS advertises while it is offline, or for the
+  // five minutes after somebody presses 设置 → 配网 on the device itself — so a
+  // clock that is online and working, which is exactly the one whose owner is
+  // moving it to a new router, does not appear in the browser's chooser at all.
+  // This POST is the console pressing that row from across the LAN.
+  //
+  // NOTHING IS SENT WHEN THE CLOCK IS NOT REPORTING, and the user is told why
+  // rather than left with a dead button: an offline clock is already
+  // advertising, so the old path works untouched — and a request left standing
+  // in the state document would push the provisioning screen again the moment
+  // the clock joined the new network. Both branches end at the same line, so
+  // the button never fails because the ask did.
+  const openProvision = async () => {
+    const link = zosLinkRef.current;
+    if (link && zosLive) {
+      try {
+        await link.requestBleOpen();
+        toast.success("已让时钟打开蓝牙", {
+          description: "时钟面板上会显示配对码，蓝牙大约开 5 分钟，足够走完下面几步。",
+        });
+      } catch (error) {
+        toast.error("没能让时钟打开蓝牙", {
+          description: `${errorMessage(error)}。可以先在时钟上按 设置 → 配网，再回来继续。`,
+        });
+      }
+    } else {
+      toast.error("时钟没在上报，没能让它打开蓝牙", {
+        description: "掉线的时钟本来就在广播，直接往下选就行；要是它其实在线，先在时钟上按 设置 → 配网。",
+      });
+    }
+    setProvisionOpen(true);
+  };
+
   return (
     <>
     <Dialog
@@ -883,7 +918,7 @@ export function DeviceSettingsDialog({
           bleSupport={bleSupport}
           onSend={(patch) => void sendZosSettings(patch)}
           onSleepSend={(patch) => void sendZosSleep(patch)}
-          onProvision={() => setProvisionOpen(true)}
+          onProvision={() => void openProvision()}
         />
       ) : surface === "sideload" ? (
         // 侧载固件占着设备，官方接口没了、也没有替代品——这一页是真的空的。
@@ -1371,7 +1406,7 @@ export function ZosGeneralPanel({
             <SettingField
               id="zos-provision"
               label="蓝牙配网"
-              help="不用拆机也不用接线；时钟掉线时也能配。"
+              help="按一下会先让时钟打开蓝牙；不用拆机也不用接线，掉线时也能配。"
             >
               <Button type="button" size="md" color="brand" onClick={onProvision}>
                 <Bluetooth />开始配网

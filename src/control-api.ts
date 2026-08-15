@@ -2216,6 +2216,32 @@ export function createControlHandler(
         return jsonResponse({ seq: options.osLink.requestUpgrade() });
       }
 
+      // Asks the clock to put its Bluetooth advertisement back on the air.
+      //
+      // Without this the console's 蓝牙配网 wizard could only scan, and a clock
+      // that is online advertises nothing — the chooser came up empty on exactly
+      // the device somebody was trying to move to a new router. The window is
+      // the same five minutes 设置 → 配网 opens, because it is the same code
+      // (osLogic's openProvisioning).
+      //
+      // NO PRECONDITION, deliberately unlike /api/os/upgrade's 409. That one
+      // refuses because a request for an image that is not packed is a
+      // guaranteed disappointment; there is nothing equivalent to be missing
+      // here, and a clock too offline to read the request is a clock already
+      // advertising on its own — the console says so and lets the user carry on
+      // to the chooser.
+      if (request.method === "POST" && url.pathname === "/api/os/ble") {
+        if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
+        assertSameOrigin(request);
+        // JSON-only like every other write route. There are no fields; the point
+        // is the Content-Type, which a cross-origin form cannot set without a
+        // preflight the browser will not send.
+        await readJson(request);
+        // The sequence is the receipt: it proves the request reached the hub,
+        // which is all the console can know before the device's next poll.
+        return jsonResponse({ seq: options.osLink.requestBleOpen() });
+      }
+
       if (request.method === "GET" && url.pathname === "/api/os/state") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
         const telemetry = options.osLink.getTelemetry();

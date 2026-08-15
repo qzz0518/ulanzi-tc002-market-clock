@@ -53,6 +53,23 @@ class HostLink {
      */
     int upgradeSeq;
     int consecutiveFailures;
+    /**
+     * Raw monotonic ms of the last document that arrived; 0 when none ever has.
+     *
+     * A SECOND FIELD rather than a read of `stampMonoMs` below, which today
+     * holds the same number. That one is documented as the now-playing stamp and
+     * belongs to the music screen; this one is the input to
+     * ConsoleDiscovery's "the device is already lost" gate, which decides
+     * whether a stranger's broadcast may rewrite /data/zos-host. Sharing the
+     * field would mean a later change scoped to now-playing — "only stamp it
+     * when the document carries an `np` block" is the obvious one — silently
+     * turns a device that is perfectly online into one that adopts hints.
+     *
+     * `online` cannot serve either: it goes false after three consecutive
+     * failures, which is ~30 s of backoff, and it says nothing about HOW LONG
+     * the device has been out of touch.
+     */
+    uint64_t lastPullMonoMs;
 
     // Now playing, resolved to text by the service. `stampMonoMs` is the raw
     // monotonic clock when the document arrived, not the UI's zero-based one:
@@ -104,7 +121,8 @@ class HostLink {
     // the first document has even arrived.
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
                  upgradeSeq(0),
-                 consecutiveFailures(0), nowPlaying(false), playing(false),
+                 consecutiveFailures(0), lastPullMonoMs(0),
+                 nowPlaying(false), playing(false),
                  positionMs(0), durationMs(0), stampMonoMs(0),
                  lyricStartMs(-1), lyricEndMs(-1), lyricUntilMs(-1),
                  lyricMode(StateDoc::kDefaultMode), lyricSkin(StateDoc::kDefaultSkin),
@@ -358,6 +376,33 @@ class HostLink {
    *  real guard end to end against a scratch file; the device never calls it. */
   void setUpgradeSeqPath(const char* path);
 
+  // -------------------------------------------------------------------------
+  // 蓝牙配网, requested by the console.
+  //
+  // Same shape as the install above and a fraction of its weight: a rising
+  // `bleopen` sequence in the pull document arms a request (adoptDocument) and
+  // the UI thread takes it (takeBleOpenRequest) to open the advertising window.
+  // The UI thread, not the worker, because what it runs is a screen push and a
+  // radio flag that only osLogic owns — nothing is downloaded and nothing is
+  // written to flash.
+  //
+  // NO /data RECORD, unlike the install. That one needs one because it ENDS IN
+  // A REBOOT, which wipes the in-memory guard exactly when it is needed; this
+  // one leaves the device up, so the member below survives for as long as the
+  // request can still be standing. And a request honoured twice costs five more
+  // minutes of advertising, not a reflash.
+
+  /**
+   * The UI thread's gate: the sequence to open the window for, or 0.
+   *
+   * ONCE PER RISING SEQUENCE, which is the whole reason it is a gate and not a
+   * field read. The console's request sits in every document from the moment it
+   * is made, so a UI tick that acted on the value would re-open the window and
+   * re-push the provisioning screen on every poll — a device the user could
+   * never navigate away from until the console forgot.
+   */
+  int takeBleOpenRequest();
+
   /**
    * Hands the finished frame to the mirror uploader. Cheap and non-blocking:
    * it copies 2496 bytes under a lock the worker holds only to take them.
@@ -526,6 +571,12 @@ class HostLink {
   int mUpgradeStartedSeq;
   bool mUpgradeInstallReady;
   std::string mUpgradeSeqPath;
+
+  // 蓝牙配网. mBleOpenArmedSeq is the highest request ever seen this boot —
+  // never cleared, because it is what makes a repeated document a no-op —
+  // and mBleOpenPendingSeq is the one the UI thread has not taken yet.
+  int mBleOpenArmedSeq;
+  int mBleOpenPendingSeq;
 
   std::vector<uint8_t> mMirrorFrame;
   bool mMirrorDirty;

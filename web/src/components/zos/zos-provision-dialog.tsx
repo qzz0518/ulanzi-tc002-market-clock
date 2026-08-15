@@ -9,6 +9,7 @@ import {
   Lock,
   LockOpen,
   RefreshCw,
+  ShieldAlert,
   Signal,
   TriangleAlert,
   Wifi,
@@ -70,20 +71,33 @@ interface StepStripProps {
   step: ProvisionState["step"];
 }
 
-const STRIP: Array<{ key: ProvisionState["step"][]; label: string }> = [
-  { key: ["ready", "connecting"], label: "选择时钟" },
-  { key: ["code"], label: "验证" },
-  { key: ["networks"], label: "选网络" },
-  { key: ["password"], label: "密码" },
-  { key: ["joining", "done"], label: "连接" },
-];
+/**
+ * 验证 is not a step every flow walks through, so it is not always in the strip.
+ *
+ * The device asks for the six digits only when a join would re-point the clock
+ * at another console; on every other path — first-run setup, a new Wi-Fi
+ * password, the same console again — it is never asked for. A strip that showed
+ * 验证 regardless would promise a toll booth to the many users who will never
+ * reach one, which is the whole thing this change removes. It appears between
+ * 密码 and 连接 because that is exactly where it interrupts.
+ */
+function stripFor(step: ProvisionState["step"]): Array<{ key: ProvisionState["step"][]; label: string }> {
+  return [
+    { key: ["ready", "connecting"], label: "选择时钟" },
+    { key: ["networks"], label: "选网络" },
+    { key: ["password"], label: "密码" },
+    ...(step === "code" ? [{ key: ["code"] as ProvisionState["step"][], label: "验证" }] : []),
+    { key: ["joining", "done"], label: "连接" },
+  ];
+}
 
 function StepStrip({ step }: StepStripProps) {
-  const current = STRIP.findIndex((entry) => entry.key.includes(step));
+  const strip = stripFor(step);
+  const current = strip.findIndex((entry) => entry.key.includes(step));
   if (current < 0) return null;
   return (
     <ol className="flex flex-wrap items-center gap-1.5" aria-label="配网步骤">
-      {STRIP.map((entry, index) => (
+      {strip.map((entry, index) => (
         <li key={entry.label} className="flex items-center gap-1.5">
           <span
             className={index <= current ? "text-cladd-primary text-cladd-xs" : "text-cladd-fg-softest text-cladd-xs"}
@@ -91,7 +105,7 @@ function StepStrip({ step }: StepStripProps) {
           >
             {entry.label}
           </span>
-          {index < STRIP.length - 1 && (
+          {index < strip.length - 1 && (
             <span aria-hidden="true" className="text-cladd-fg-softest text-cladd-xs">›</span>
           )}
         </li>
@@ -183,9 +197,25 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
     return (
       <div className="flex flex-col gap-3">
         <StepStrip step={state.step} />
+        {/*
+          Lead with WHY, not with "a code is required". This screen now appears
+          for exactly one reason, it appears mid-flow after the user thought they
+          were done, and a bare six-digit field at that moment reads as the
+          device being difficult. Naming the capability is what makes the ask
+          land as a safeguard instead of a toll booth.
+        */}
+        <Surface variant="solid" outline color="neutral" contentClassName="flex flex-col gap-1.5 p-3">
+          <span className="flex items-center gap-2 text-cladd-fg">
+            <ShieldAlert aria-hidden="true" className="size-4" />
+            <strong>这一步会把时钟指向另一个控制台</strong>
+          </span>
+          <span className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
+            之后频道、镜像、升级都只从那一台来。让时钟换个网络不用验证码，
+            改它听谁的要——所以它要你先证明人就在它面前。
+          </span>
+        </Surface>
         <p className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
-          输入时钟面板上正在显示的六位数字。它每次配网都会重新生成，
-          既是授权，也是「你选的确实是眼前这台」的凭据。
+          输入面板上正在显示的六位数字。密码不用重填：验证通过后，刚才那条配网指令会原样再发一次。
         </p>
         <OTPField
           maxLength={CODE_LENGTH}
@@ -354,7 +384,8 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
         ) : null}
         <p className="text-cladd-fg-softest text-cladd-xs leading-relaxed">
           密码只经蓝牙发给时钟，不写日志、不回显、也不经过服务。
-          这一版蓝牙链路没有加密，六位数字是授权而不是保密——它挡得住邻居改你的时钟，挡不住同一房间里的嗅探。
+          这一版蓝牙链路没有加密，靠的是「人得在时钟旁边」——原厂固件也是这样，它连验证码都没有。
+          只有把时钟改指到另一个控制台才会另外要面板上的六位数字：那一步交出去的是整台设备，不只是一个网络。
         </p>
       </div>
     );

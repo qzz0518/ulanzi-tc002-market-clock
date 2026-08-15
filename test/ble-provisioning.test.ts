@@ -151,6 +151,14 @@ interface Harness {
   state(): ProvisionState;
   osState: { live: boolean; ip: string | null; ssid: string | null; reportSeq: number };
   osReads: number;
+  /**
+   * Every step this session has ever been in, in order.
+   *
+   * A final-state assertion cannot see a screen the flow passed THROUGH, and
+   * "the user was never shown a six-digit field" is a claim about the whole
+   * walk, not about where it stopped.
+   */
+  steps: ProvisionState["step"][];
 }
 
 function harness(): Harness {
@@ -161,6 +169,7 @@ function harness(): Harness {
     transport,
     osState: { live: false, ip: null, ssid: null, reportSeq: 0 },
     osReads: 0,
+    steps: [],
     state: () => context.session.getState(),
     session: null as unknown as ProvisionSession,
   };
@@ -173,19 +182,53 @@ function harness(): Harness {
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
+    onChange: (next) => {
+      if (context.steps[context.steps.length - 1] !== next.step) context.steps.push(next.step);
+    },
   });
   return context;
 }
 
-/** Walk the flow to the network list, which is where most cases start. */
-async function connectedAndAuthorised(): Promise<Harness> {
+/**
+ * Walk the flow to the network list, which is where most cases start.
+ *
+ * Note what is NOT in here any more: a code. hello is answered with a plain
+ * state and the console goes straight to scanning, because scanning and an
+ * ordinary join are within a stock firmware's power and the device gates
+ * neither. Reaching a six-digit field now takes a deliberate detour —
+ * `atTakeoverPrompt` below is the only route to it.
+ */
+async function atNetworkList(): Promise<Harness> {
   const context = harness();
   await context.session.start();
   context.transport.emit("evt\thello\nname\tZOS-A772\nbuild\tzos-2026-08\nmac\tCC:C4:B2:77:A7:72\n");
   context.transport.emit("evt\tstate\nphase\tidle\n");
-  await context.session.submitCode("418327");
   context.transport.emit("evt\tstate\nphase\tscanning\n");
   await Promise.resolve();
+  return context;
+}
+
+/**
+ * Let an awaited chain inside the session settle.
+ *
+ * Resuming a join after the code crosses several awaits (the `/api/os/state`
+ * watermark, then the write loop), and a fixed number of `Promise.resolve()`
+ * ticks is a guess about how many. A real macrotask drains every microtask
+ * queued behind them, whatever the count. The session's own timers are the fake
+ * clock's, so this cannot advance them by accident.
+ */
+const settle = () => new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+
+/**
+ * The one path to the code screen: a join the device refuses because it would
+ * re-point the clock at a console it is not currently on.
+ */
+async function atTakeoverPrompt(): Promise<Harness> {
+  const context = await atNetworkList();
+  context.transport.emit("evt\tnet\ni\t0\nn\t1\nssid\thome-2g\nrssi\t-41\nsec\twpa2\ncached\t0\n");
+  context.session.chooseNetwork("home-2g");
+  await context.session.submitPassword("hunter22");
+  context.transport.emit("evt\tstate\nphase\tidle\nerr\thost-code\n");
   return context;
 }
 
@@ -483,7 +526,10 @@ describe("join progress", () => {
 // --- Session ----------------------------------------------------------------
 
 describe("provision session", () => {
-  test("subscribing is followed by hello, and the device's state opens the code screen", async () => {
+  test("subscribing is followed by hello, and the device's state opens the NETWORK list", async () => {
+    // No code screen. The device gates one capability — re-pointing an already
+    // adopted console — and the console stops asking on behalf of a refusal that
+    // is not coming: it attempts the work and lets the device speak up.
     const context = harness();
     await context.session.start();
     expect(context.transport.sent).toEqual(["cmd\thello\n"]);
@@ -491,10 +537,70 @@ describe("provision session", () => {
 
     context.transport.emit("evt\thello\nname\tZOS-A772\nbuild\tzos-2026-08\nmac\tCC:C4:B2:77:A7:72\n");
     context.transport.emit("evt\tstate\nphase\tidle\n");
-    expect(context.state().step).toBe("code");
+    expect(context.state().step).toBe("networks");
+    expect(context.state().codeReason).toBeNull();
+    expect(context.transport.sent).toContain("cmd\tscan\n");
     expect(context.state().device).toEqual({
       name: "ZOS-A772", build: "zos-2026-08", mac: "CC:C4:B2:77:A7:72",
     });
+  });
+
+  test("a whole successful flow can happen without a six-digit field ever appearing", async () => {
+    // The headline of this change, asserted end to end: scan, pick, password,
+    // online. The stock firmware asks for nothing on this path, and neither does
+    // ours any more. If the code gate is ever widened back out, this is the test
+    // that says the common case regressed.
+    const context = await atNetworkList();
+    context.transport.emit("evt\tnet\ni\t0\nn\t1\nssid\thome-2g\nrssi\t-41\nsec\twpa2\ncached\t0\n");
+    context.session.chooseNetwork("home-2g");
+    await context.session.submitPassword("hunter22");
+    context.transport.emit("evt\tstate\nphase\tjoining\nssid\thome-2g\n");
+    context.transport.emit("evt\tstate\nphase\tonline\nssid\thome-2g\nip\t192.168.8.42\n");
+
+    expect(context.state().step).toBe("done");
+    expect(context.state().codeReason).toBeNull();
+    expect(context.transport.sent.some((message) => message.startsWith("cmd\tcode\n"))).toBe(false);
+    // The whole walk, not just where it stopped: the code screen was never even
+    // passed through, so no user on this path ever saw a six-digit field.
+    expect(context.steps).not.toContain("code");
+    // `ready` is the initial state and never emitted — the first change is the
+    // one `start()` makes.
+    expect(context.steps).toEqual(["connecting", "networks", "password", "joining", "done"]);
+  });
+
+  test("a join that would re-point the console pauses for the code, then re-sends itself verbatim", async () => {
+    const context = await atTakeoverPrompt();
+    // Paused, not failed: the credentials are good and the link is still up.
+    expect(context.state().step).toBe("code");
+    expect(context.state().codeReason).toBe("takeover");
+    expect(context.state().failure).toBeNull();
+    expect(context.state().codeError).toBeNull();
+    expect(context.transport.connected).toBe(true);
+
+    const join = "cmd\tjoin\nssid\thome-2g\npsk\thunter22\n";
+    expect(context.transport.sent.filter((message) => message === join)).toHaveLength(1);
+
+    await context.session.submitCode("418327");
+    expect(context.transport.sent).toContain("cmd\tcode\ncode\t418327\n");
+    context.transport.emit("evt\tstate\nphase\tidle\n");
+    await settle();
+
+    // The SAME document goes back out — the user does not retype the password,
+    // and the second question is not a different question from the first.
+    expect(context.transport.sent.filter((message) => message === join)).toHaveLength(2);
+    expect(context.state().step).toBe("joining");
+    expect(context.state().codeReason).toBeNull();
+
+    context.transport.emit("evt\tstate\nphase\tonline\nssid\thome-2g\nip\t192.168.8.42\n");
+    expect(context.state().step).toBe("done");
+  });
+
+  test("the paused passphrase is never a field of the state the renderer sees", async () => {
+    // Same rule the firmware keeps structurally (buildState has no slot for it).
+    // Here it is a closure variable, so the assertion is that nothing carrying it
+    // leaks into the object that is spread into React state on every change.
+    const context = await atTakeoverPrompt();
+    expect(JSON.stringify(context.state())).not.toContain("hunter22");
   });
 
   test("a locked link is reported before a password is ever asked for", async () => {
@@ -518,9 +624,10 @@ describe("provision session", () => {
   });
 
   test("a wrong code keeps the field and counts attempts; a lockout carries its countdown", async () => {
-    const context = harness();
-    await context.session.start();
-    context.transport.emit("evt\tstate\nphase\tidle\n");
+    // Reached through the takeover prompt, because that is now the only way a
+    // code is ever asked for — but everything past that point is unchanged, and
+    // the lockout is exactly as sharp as it was.
+    const context = await atTakeoverPrompt();
 
     await context.session.submitCode("000000");
     expect(context.transport.sent).toContain("cmd\tcode\ncode\t000000\n");
@@ -540,14 +647,14 @@ describe("provision session", () => {
   });
 
   test("a good code moves to the list and asks the device to scan", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     expect(context.state().step).toBe("networks");
     expect(context.transport.sent).toContain("cmd\tscan\n");
     expect(context.state().scanning).toBe(true);
   });
 
   test("the list fills against the device's own total and the cache is labelled", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.transport.emit("evt\tnet\ni\t0\nn\t2\nssid\thome-2g\nrssi\t-41\nsec\twpa2\ncached\t1\n");
     expect(context.state().networkTotal).toBe(2);
     expect(context.state().scanning).toBe(true);
@@ -560,7 +667,7 @@ describe("provision session", () => {
   });
 
   test("an empty sweep ends instead of spinning, and manual entry still works", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.transport.emit("evt\tnet\ni\t-1\nn\t0\n");
     expect(context.state().scanning).toBe(false);
     expect(context.state().networks).toHaveLength(0);
@@ -574,7 +681,7 @@ describe("provision session", () => {
   });
 
   test("an open network is remembered as open so the password screen can say so", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.transport.emit("evt\tnet\ni\t0\nn\t1\nssid\tcafe\nrssi\t-60\nsec\topen\ncached\t0\n");
     context.session.chooseNetwork("cafe");
     expect(context.state().secured).toBe(false);
@@ -584,7 +691,7 @@ describe("provision session", () => {
   });
 
   test("a join that succeeds over a live BLE link reports the address it was given", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.transport.emit("evt\tnet\ni\t0\nn\t1\nssid\thome-2g\nrssi\t-41\nsec\twpa2\ncached\t0\n");
     context.session.chooseNetwork("home-2g");
     await context.session.submitPassword("hunter22");
@@ -603,7 +710,7 @@ describe("provision session", () => {
     // One aic8800 carries both radios, so the link dying at exactly this moment
     // is the expected shape of SUCCESS. Reporting failure here would report
     // failure on every successful join.
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.chooseNetwork("home-2g");
     await context.session.submitPassword("hunter22");
     context.transport.emit("evt\tstate\nphase\tjoining\nssid\thome-2g\n");
@@ -624,7 +731,7 @@ describe("provision session", () => {
   });
 
   test("a drop with no LAN recovery inside the window fails, and says why it cannot tell", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.chooseNetwork("home-2g");
     await context.session.submitPassword("hunter22");
     context.transport.drop();
@@ -639,7 +746,7 @@ describe("provision session", () => {
   });
 
   test("a device-reported failure keeps its own cause all the way to the screen", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.chooseNetwork("home-2g");
     await context.session.submitPassword("wrongpass");
     context.transport.emit("evt\tstate\nphase\tfailed\nssid\thome-2g\nerr\tbad-psk\n");
@@ -654,7 +761,7 @@ describe("provision session", () => {
   });
 
   test("no-ap sends the user back to a fresh scan, not back to the password", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.chooseNetwork("home-5g-only");
     await context.session.submitPassword("hunter22");
     context.transport.emit("evt\tstate\nphase\tfailed\nssid\thome-5g-only\nerr\tno-ap\n");
@@ -672,7 +779,7 @@ describe("provision session", () => {
     // working clock to a new network" ALWAYS starts from a clock that is online
     // and reporting. `live` is then true from the first poll — at the old
     // network's address — and the console used to call that success.
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.osState = { live: true, ip: "192.168.1.50", ssid: "old-2g", reportSeq: 7 };
     context.session.chooseNetwork("new-2g");
     await context.session.submitPassword("wrongpass");
@@ -700,7 +807,7 @@ describe("provision session", () => {
   });
 
   test("a report that is both newer and on the right network completes the join", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.osState = { live: true, ip: "192.168.1.50", ssid: "old-2g", reportSeq: 7 };
     context.session.chooseNetwork("new-2g");
     await context.session.submitPassword("goodpass");
@@ -716,7 +823,7 @@ describe("provision session", () => {
   });
 
   test("a password the device would reject never reaches the radio", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.chooseNetwork("home-2g");
     const before = context.transport.sent.length;
     await context.session.submitPassword("short");
@@ -730,7 +837,7 @@ describe("provision session", () => {
   });
 
   test("a manual SSID the device would reject never becomes the target", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.useManualSsid('quo"te');
     expect(context.state().step).toBe("networks");
     expect(context.state().ssid).toBe("");
@@ -746,7 +853,7 @@ describe("provision session", () => {
     // the join it answers. Treating it as a version mismatch cost the user the
     // GATT link AND the six-digit code, which the device re-mints on every new
     // advertising session.
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.chooseNetwork("home-2g");
     await context.session.submitPassword("longenough");
     context.transport.emit("evt\terr\ncode\targ\n");
@@ -764,12 +871,12 @@ describe("provision session", () => {
     // is permanent, and `frame` is a lost chunk, which is not. Reading `doc` as
     // recoverable left the reply timer to expire and reported 时钟没有应答 —
     // false about a device that answered at once and said no.
-    const silent = await connectedAndAuthorised();
+    const silent = await atNetworkList();
     silent.transport.emit("evt\terr\ncode\tframe\n");
     expect(silent.state().step).toBe("networks");
     expect(silent.state().failure).toBeNull();
 
-    const loud = await connectedAndAuthorised();
+    const loud = await atNetworkList();
     loud.transport.emit("evt\terr\ncode\tdoc\n");
     expect(loud.state().step).toBe("failed");
     expect(loud.state().failure?.code).toBe("protocol");
@@ -785,7 +892,7 @@ describe("provision session", () => {
   });
 
   test("closing aborts on the device and leaves nothing running", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.session.close();
     expect(context.transport.sent).toContain("cmd\tabort\n");
     expect(context.transport.connected).toBe(false);
@@ -794,7 +901,7 @@ describe("provision session", () => {
   });
 
   test("a corrupt notification is dropped, never rendered as data", async () => {
-    const context = await connectedAndAuthorised();
+    const context = await atNetworkList();
     context.transport.emit("evt\tnet\ni\t0\nn\t2\nssid\treal\nrssi\t-41\nsec\twpa2\ncached\t0\n");
     expect(context.state().networks).toHaveLength(1);
 
@@ -882,6 +989,28 @@ describe("provision dialog body", () => {
     });
     expect(markup).toContain("蓝牙断开了，这在连上 Wi-Fi 时是正常的");
     expect(markup).toContain("正在关联");
+  });
+
+  test("the code screen says what the code buys, not merely that one is required", () => {
+    // This screen appears once, mid-flow, after the user believed they were
+    // done. A bare six-digit field at that moment reads as the device being
+    // difficult; naming the capability is what makes it land as a safeguard.
+    const markup = body({ state: stateWith({ step: "code", codeReason: "takeover" }) });
+    expect(markup).toContain("这一步会把时钟指向另一个控制台");
+    expect(markup).toContain("密码不用重填");
+  });
+
+  test("验证 is only in the step strip when a code is actually being asked for", () => {
+    // Matched as a whole strip label (`>验证<`) rather than as a substring: the
+    // password screen's own footnote says 验证码 while explaining that this path
+    // does not need one, and a loose match would read that as a step.
+    const gated = body({ state: stateWith({ step: "code", codeReason: "takeover" }) });
+    expect(gated).toContain(">验证<");
+
+    // The common path never sees it — promising a toll booth to users who will
+    // never reach one is the friction this whole change removes.
+    const ordinary = body({ state: stateWith({ step: "password", ssid: "home-2g" }) });
+    expect(ordinary).not.toContain(">验证<");
   });
 
   test("a failure screen carries the device's own words plus the on-device log path", () => {
