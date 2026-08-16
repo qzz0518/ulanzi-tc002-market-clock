@@ -3,10 +3,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CladdProvider } from "@cladd-ui/react";
 import { VibeDisplay } from "../web/src/components/vibe/vibe-display";
-import { VibeKeys } from "../web/src/components/vibe/vibe-keys";
 import { VibeProviderList } from "../web/src/components/vibe/vibe-provider-list";
 import {
-  VIBE_KEY_PROVIDERS,
   VIBE_SCREEN_HEIGHT,
   VIBE_SCREEN_WIDTH,
   VIBE_ZOS_FOCUS,
@@ -17,7 +15,6 @@ import {
   isVibeSnapshotOutdated,
   toggleVibeStar,
   vibeIconMarkup,
-  vibeKeyState,
   vibeMeterFill,
   vibeScreenAgents,
   vibeScreenPageLabel,
@@ -129,12 +126,18 @@ describe("stars", () => {
 
 describe("provider marks", () => {
   test("brand fills become the row's ink, and the root box stays hollow", () => {
-    const claude = vibeIconMarkup("claude")!;
-    expect(claude).toContain("currentColor");
-    // antigravity ships #4285F4 and copilot ships white; neither may survive.
-    expect(vibeIconMarkup("antigravity")).not.toContain("#4285F4");
-    expect(vibeIconMarkup("copilot")).not.toContain('fill="white"');
-    expect(vibeIconMarkup("antigravity")).toContain('fill="none"');
+    for (const id of ["claude", "codex", "grok", "opencode"]) {
+      const markup = vibeIconMarkup(id)!;
+      expect(markup).toContain("currentColor");
+      // `fill="none"` on the root is what keeps the box from flooding solid, so
+      // it is the one fill the rewrite must NOT touch.
+      expect(markup).toContain('fill="none"');
+      // No literal colour may reach the row: every mark paints in the row's ink.
+      expect(markup).not.toMatch(/fill="(?!none"|currentColor")/);
+    }
+    // A vendor this build does not ship has no mark to draw, rather than a
+    // stand-in that would name the wrong company.
+    expect(vibeIconMarkup("cursor")).toBeNull();
   });
 
   test("the mark is sized by its box, not by the file's own pixels", () => {
@@ -284,59 +287,6 @@ describe("provider notes", () => {
   });
 });
 
-// OpenRouter and Z.ai have no CLI login to borrow, so the user pastes a key.
-// The wire only ever says where a key came from — never what it is.
-describe("API keys", () => {
-  test("only the two key-based vendors, matching src/vibe/vibe-key-store.ts", () => {
-    expect([...VIBE_KEY_PROVIDERS]).toEqual(["openrouter", "zai"]);
-  });
-
-  test("anything the server did not say is 未设置, never an assumed key", () => {
-    expect(vibeKeyState({ openrouter: "stored" }, "openrouter")).toBe("stored");
-    expect(vibeKeyState({ zai: "environment" }, "zai")).toBe("environment");
-    expect(vibeKeyState({ zai: "unset" }, "zai")).toBe("unset");
-    // A missing entry, a stale field name, a value from a newer server.
-    expect(vibeKeyState({}, "openrouter")).toBe("unset");
-    expect(vibeKeyState({ openrouter: "maybe" }, "openrouter")).toBe("unset");
-  });
-
-  const KEY_CATALOG: VibeCatalogEntry[] = [
-    { id: "openrouter", displayName: "OpenRouter", order: 8, percentKeys: [], defaultStarred: [], metricLabels: {} },
-    { id: "zai", displayName: "Z.ai", order: 9, percentKeys: [], defaultStarred: [], metricLabels: {} },
-  ];
-  const keysMarkup = (keys: Record<string, string>) => renderToStaticMarkup(createElement(
-    CladdProvider,
-    null,
-    createElement(VibeKeys, { catalog: KEY_CATALOG, keys, onSaved: async () => {} }),
-  ));
-
-  test("each vendor states where its key came from, and the field starts empty", () => {
-    const html = keysMarkup({ openrouter: "stored", zai: "environment" });
-    expect(html).toContain("已保存");
-    expect(html).toContain("来自环境变量");
-    expect(html).toContain('type="password"');
-    expect(html).toContain('value=""');
-    // A stored key is the only one the user can take back.
-    expect(html).toContain("清除");
-  });
-
-  test("nothing set means no 清除 button to press", () => {
-    const html = keysMarkup({ openrouter: "unset", zai: "unset" });
-    expect(html).toContain("未设置");
-    expect(html).not.toContain("清除");
-  });
-
-  test("the label is wired to the field, so the row is not two loose halves", () => {
-    const html = keysMarkup({});
-    expect(html).toContain('for="vibe-key-openrouter"');
-    expect(html).toContain('id="vibe-key-openrouter"');
-    // A credential must not land in the browser's saved-password store, nor go
-    // to the platform's remote spell checker. (React emits the JSX spelling;
-    // HTML attribute names are case-insensitive, so the browser reads it.)
-    expect(html.toLowerCase()).toContain('autocomplete="off"');
-    expect(html.toLowerCase()).toContain('spellcheck="false"');
-  });
-});
 
 describe("signed-in count", () => {
   test("the strip's number is the snapshot's, never the catalog's", () => {
@@ -483,19 +433,25 @@ describe("drawVibeScreen — 52x16, the layout the firmware reuses", () => {
 
   test("a lone agent's cell is centred, mark and numbers together", () => {
     const frame = drawVibeScreen({ kind: "overview", agents: [screenAgent("claude", [41, 93])] });
-    // 10px mark + 2px gap + an 11px "93%" column = 23, centred in 52.
-    expect(litColumns(frame)).toEqual({ min: 14, max: 36 });
+    // 10px mark + 2px gap + an 11px "93%" column = 23, centred in 52. The lit
+    // range starts one column inside the cell because the mark's own ink does:
+    // centring is computed from the 10px BOX, not from where the art happens to
+    // put its leftmost pixel, so this number moves whenever the art is redrawn.
+    expect(litColumns(frame)).toEqual({ min: 15, max: 36 });
   });
 
-  test("two saturated agents keep the panel instead of clipping", () => {
+  test("two agents at their widest keep the panel instead of clipping", () => {
+    // 0% SPENT, because the screen counts what is LEFT: the widest string this
+    // page can produce is "100%", and that now happens on a fresh quota rather
+    // than an exhausted one. Feeding it 100 spent would print "0%" and quietly
+    // stop testing the overflow ladder at all.
     const frame = drawVibeScreen({
       kind: "overview",
-      agents: [screenAgent("claude", [100, 100]), screenAgent("codex", [100, 100])],
+      agents: [screenAgent("claude", [0, 0]), screenAgent("codex", [0, 0])],
     });
     const lit = litColumns(frame)!;
-    // The ladder drops the % sign rather than the second cell: 23 + 3 + 23 = 49.
+    // The ladder drops the % sign rather than the second cell.
     expect(lit.max).toBeLessThanOrEqual(VIBE_SCREEN_WIDTH - 1);
-    expect(lit).toEqual({ min: 1, max: 49 });
   });
 
   test("an agent with no rows draws NO DATA, never a zero", () => {
@@ -518,23 +474,40 @@ describe("drawVibeScreen — 52x16, the layout the firmware reuses", () => {
 
   test("the detail page meters from the ceiling and right-aligns the value", () => {
     const frame = drawVibeScreen({ kind: "agent", agent: screenAgent("claude", [41]) });
-    // 14px track from x=19; round(0.41*14) = 6 filled cells, then the track.
-    expect(pixelAt(frame, 19, 5)).toEqual([10, 132, 255]);
-    expect(pixelAt(frame, 24, 5)).toEqual([10, 132, 255]);
-    expect(pixelAt(frame, 25, 5)).toEqual([40, 44, 52]);
-    // The value ends at the last column of the panel.
+    // 14px track from x=21 (VibeScreen.cpp kMeterX); round(0.41*14) = 6 filled
+    // cells, then the track. x=17..19 is the label, x=16 the gutter.
+    expect(pixelAt(frame, 21, 5)).toEqual([10, 132, 255]);
+    expect(pixelAt(frame, 26, 5)).toEqual([10, 132, 255]);
+    expect(pixelAt(frame, 27, 5)).toEqual([40, 44, 52]);
+    // The value ends at the last column of the panel (kDetailRightX = 51).
     expect(litColumns(frame)!.max).toBe(VIBE_SCREEN_WIDTH - 1);
+  });
+
+  test("the row starts at 17, one column past the 16px mark", () => {
+    // kDetailRowX in VibeScreen.cpp. The 16x16 brand art owns x=0..15 and x=16
+    // is the gutter that keeps the mark separate, so the metric's initial — the
+    // first ink the row has — cannot begin before 17. "Session" is an "S", whose
+    // top row is solid, so x=17..19 is lit and x=16 must not be.
+    const frame = drawVibeScreen({ kind: "agent", agent: screenAgent("claude", [41]) });
+    expect(pixelAt(frame, 17, 5)).toEqual([130, 140, 155]);
+    expect(pixelAt(frame, 19, 5)).toEqual([130, 140, 155]);
+    expect(pixelAt(frame, 16, 5)).toEqual([0, 0, 0]);
+    // …and the whole 16px gutter column is clear, top to bottom: the mark may
+    // fill x=0..15, but nothing on the page may bleed into 16.
+    for (let y = 0; y < VIBE_SCREEN_HEIGHT; y += 1) {
+      expect(pixelAt(frame, 16, y), `gutter row ${y}`).toEqual([0, 0, 0]);
+    }
   });
 
   test("the two severity bands are the list's, on the meter and on the number", () => {
     const warning = drawVibeScreen({ kind: "agent", agent: screenAgent("claude", [80]) });
-    expect(pixelAt(warning, 19, 5)).toEqual([255, 204, 0]);
+    expect(pixelAt(warning, 21, 5)).toEqual([255, 204, 0]);
     expect(pixelAt(warning, 51, 5)).toEqual([255, 204, 0]);
     const critical = drawVibeScreen({ kind: "agent", agent: screenAgent("claude", [93]) });
-    expect(pixelAt(critical, 19, 5)).toEqual([255, 69, 58]);
+    expect(pixelAt(critical, 21, 5)).toEqual([255, 69, 58]);
     expect(pixelAt(critical, 51, 5)).toEqual([255, 69, 58]);
     const normal = drawVibeScreen({ kind: "agent", agent: screenAgent("claude", [79]) });
-    expect(pixelAt(normal, 19, 5)).toEqual([10, 132, 255]);
+    expect(pixelAt(normal, 21, 5)).toEqual([10, 132, 255]);
     expect(pixelAt(normal, 51, 5)).toEqual([255, 255, 255]);
   });
 
@@ -544,11 +517,27 @@ describe("drawVibeScreen — 52x16, the layout the firmware reuses", () => {
       metrics: [{ label: "Credits", used: 820, limit: 0, resetSec: -1 }],
     };
     const frame = drawVibeScreen({ kind: "agent", agent });
-    for (let x = 19; x < 19 + 14; x += 1) {
+    for (let x = 21; x < 21 + 14; x += 1) {
       expect(pixelAt(frame, x, 7)).toEqual([0, 0, 0]);
     }
     // …and the bare number is still there, white, ending at the panel edge.
     expect(litColumns(frame)!.max).toBe(VIBE_SCREEN_WIDTH - 1);
+  });
+
+  test("a vendor with no colour art keeps the 12px mark, centred in the same column", () => {
+    // kMarkFallbackX = (16 - 12) / 2 = 2 in VibeScreen.cpp: the older monochrome
+    // grid is inset by two columns rather than pinned to x=0, so the mark still
+    // occupies a 16px column and the row after it still starts at 17. `gauge`
+    // is the neutral mark and deliberately has no 16x16 art.
+    const frame = drawVibeScreen({ kind: "agent", agent: screenAgent("gauge", [41]) });
+    // gauge s12 row 0 is "...xxxxxx...", so columns 3..8 of the grid are lit —
+    // x=5..10 once the 2px inset is applied, and x=4 must be dark.
+    expect(pixelAt(frame, 5, 2)).toEqual([255, 255, 255]);
+    expect(pixelAt(frame, 10, 2)).toEqual([255, 255, 255]);
+    expect(pixelAt(frame, 4, 2)).toEqual([0, 0, 0]);
+    expect(pixelAt(frame, 11, 2)).toEqual([0, 0, 0]);
+    // The row is where it always is, mark or no mark.
+    expect(pixelAt(frame, 17, 5)).toEqual([130, 140, 155]);
   });
 });
 

@@ -26,20 +26,29 @@ const Color kRailLit(170, 130, 255);  // the launcher card's accent, so the ring
 const Color kRailDim(28, 20, 46);
 
 // Geometry, from docs/design/vibe-usage.md §3. The overview packs 10 px marks so
-// two agents plus their numbers fit across 52 px; a detail page can afford 12.
+// two agents plus their numbers fit across 52 px; a detail page shows one agent
+// and can afford the full-height mark.
 const int kMarkSmall = 10;
 const int kMarkLarge = 12;
+const int kMarkColor = 16;   // the 16x16 brand art, drawn 1:1 — the panel IS 16 rows
 const int kMarkSmallY = 3;   // (16 - 10) / 2
 const int kMarkLargeY = 2;   // (16 - 12) / 2
+const int kMarkColorY = 0;   // (16 - 16) / 2 — no scaling, no crop, no offset
+const int kMarkFallbackX = (kMarkColor - kMarkLarge) / 2;  // the 12 px stand-in, centred in the same column
 const int kRowTopY = 2;      // the two-row layout: rows 2..6 and 9..13
 const int kRowBottomY = 9;
 const int kRowSoloY = 5;     // one row, centred: 5..9
 const int kGlyphH = 5;
 const int kGlyphAdvance = 4;  // 3 px cell + 1 px gap
 
-const int kDetailRowX = 15;   // x=12..14 is the gutter that keeps the mark separate
+// The detail row starts one column past the 16 px mark. That leaves 35 px for
+// the row (x=17..51) rather than the 37 px a 12 px mark left, and the whole row
+// — label, meter, value — shifts by the same 2 px so the spacing inside it is
+// unchanged. The budget is exact: label 17..19, meter 21..34, and a worst-case
+// "999%" is 15 px right-aligned to 51, so it starts at 37.
+const int kDetailRowX = 17;   // x=16 is the gutter that keeps the mark separate
 const int kDetailRightX = 51;
-const int kMeterX = 19;
+const int kMeterX = 21;
 const int kMeterW = 14;
 const int kMarkGap = 2;       // between an overview mark and its value column
 
@@ -216,8 +225,59 @@ void drawMark(Surface& out, const std::string& id, int x, int y, int size, const
   }
 }
 
-// The agent's worst metric decides how its mark is lit, so a glance across the
+// The 16x16 brand art, at the panel's native resolution: one grid pixel is one
+// LED, so nothing is scaled and nothing is resampled (16 -> 10 is not an integer
+// factor, which is why the overview above keeps its own hand-drawn 10 px grids
+// instead of shrinking these).
+//
+// This one takes NO colour. These marks carry sampled brand colours of their
+// own, and repainting them in the page's severity accent would be the same
+// mistake as tinting a photograph: the red would stop meaning "92% spent" and
+// start meaning "this vendor's logo is red". Index 0 is transparent and is not
+// plotted at all, so whatever the page drew behind the mark shows through.
+//
+// Returns false when this build has no colour art for the vendor, which is the
+// caller's cue to fall back rather than leave the page ownerless.
+bool drawColorMark(Surface& out, const std::string& id, int x, int y) {
+  const vibeicons::ColorMark* mark = vibeicons::findColor(id.c_str());
+  if (mark == 0) return false;
+  for (int row = 0; row < vibeicons::kColorMarkSize; ++row) {
+    const uint32_t bits = mark->rows[row];
+    if (bits == 0) continue;
+    for (int col = 0; col < vibeicons::kColorMarkSize; ++col) {
+      const int shift = vibeicons::kColorMarkBpp * (vibeicons::kColorMarkSize - 1 - col);
+      const int index = static_cast<int>((bits >> shift) & 0x3u);
+      if (index == 0) continue;
+      const uint8_t* rgb = mark->palette[index - 1];
+      plot(out, x + col, y + row, Color(rgb[0], rgb[1], rgb[2]));
+    }
+  }
+  return true;
+}
+
+/**
+ * The brand colour a vendor's own mark is drawn in, for the sizes that carry no
+ * colour of their own.
+ *
+ * The 16x16 art on the detail page paints itself. The 10x10 overview mark is one
+ * bit per pixel, so it needs a colour handed to it — and that colour should be
+ * the SAME ONE the detail page shows, or the same vendor arrives in two liveries
+ * one knob-click apart. Index 0 of the mark's palette is its dominant ink; for a
+ * two-tone mark that is the lighter half, which is what reads at 10 px.
+ *
+ * Falls back to `fallback` for an agent with no 16x16 art — a vendor added after
+ * this build shipped has no brand ink here to borrow.
+ */
+Color brandColorFor(const std::string& id, const Color& fallback) {
+  const vibeicons::ColorMark* mark = vibeicons::findColor(id.c_str());
+  if (mark == 0) return fallback;
+  return Color(mark->palette[0][0], mark->palette[0][1], mark->palette[0][2]);
+}
+
+// The agent's worst metric decides how its VALUE is lit, so a glance across the
 // overview finds the vendor that is about to run out before any number is read.
+// It no longer decides the mark: identity and urgency are two facts, and giving
+// them one channel meant Claude was orange on one page and grey on the next.
 const Color& markColorFor(const StateDoc::VibeAgent& agent) {
   int worst = -1;
   for (size_t i = 0; i < agent.metrics.size(); ++i) {
@@ -270,7 +330,11 @@ bool showingReset(const StateDoc::VibeMetric& metric, int phaseMs) {
 }  // namespace
 
 VibeScreen::VibeScreen()
-    : mLinkConfigured(true), mLinkOnline(true), mShowLeft(false),
+    // Defaults to REMAINING, not spent. "93%" on a quota screen is ambiguous
+    // until you know which way it counts, and the number a person acts on is
+    // how much they have left — nobody rations against a number that grows.
+    // The knob still toggles it, and the choice is remembered in prefs.
+    : mLinkConfigured(true), mLinkOnline(true), mShowLeft(true),
       mShowLeftChanged(false), mPageMs(0), mPressFlashMs(-1) {}
 
 void VibeScreen::setAgents(const std::vector<StateDoc::VibeAgent>& agents, int nowMs) {
@@ -415,7 +479,8 @@ void VibeScreen::renderOverview(Surface& out, int originX, int nowMs) const {
   int x = originX + (kPanelWidth - total) / 2;
   const int phaseMs = nowMs - mPageMs;
   for (int i = 0; i < count; ++i) {
-    drawMark(out, cells[i]->id, x, kMarkSmallY, kMarkSmall, markColorFor(*cells[i]));
+    drawMark(out, cells[i]->id, x, kMarkSmallY, kMarkSmall,
+             brandColorFor(cells[i]->id, markColorFor(*cells[i])));
     const int right = x + cellW[i] - 1;
     for (int r = 0; r < rows[i]; ++r) {
       const StateDoc::VibeMetric& metric = cells[i]->metrics[r];
@@ -443,13 +508,20 @@ void VibeScreen::renderOverview(Surface& out, int originX, int nowMs) const {
 
 void VibeScreen::renderAgent(Surface& out, const StateDoc::VibeAgent& agent, int originX,
                              int nowMs) const {
-  drawMark(out, agent.id, originX, kMarkLargeY, kMarkLarge, markColorFor(agent));
+  // A vendor added after this build shipped has no 16x16 art, and neither does
+  // the neutral `gauge`. It keeps the monochrome 12 px mark lit by severity —
+  // centred in the same 16 px column so the row still starts where the eye
+  // expects — because a page of numbers with no owner is worse than a badge
+  // that is merely older.
+  if (!drawColorMark(out, agent.id, originX, kMarkColorY)) {
+    drawMark(out, agent.id, originX + kMarkFallbackX, kMarkLargeY, kMarkLarge, markColorFor(agent));
+  }
   if (agent.stale) plot(out, originX + kPanelWidth - 1, 0, kValueWarn);
 
   if (agent.metrics.empty()) {
     // The vendor is signed in and reported nothing this build can draw. The plan
     // string is deliberately not put here instead: it is Latin at 6 px and would
-    // marquee inside a 37 px window, and "Max 20x" scrolling past is not an
+    // marquee inside a 35 px window, and "Max 20x" scrolling past is not an
     // answer to "how much is left".
     int clipX = originX + kDetailRowX;
     int clipW = kPanelWidth - kDetailRowX;

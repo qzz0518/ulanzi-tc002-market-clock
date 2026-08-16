@@ -14,7 +14,6 @@ import {
   type VibeStatusResponse,
 } from "@/lib/vibe";
 import { VibeDisplay } from "@/components/vibe/vibe-display";
-import { VibeKeys } from "@/components/vibe/vibe-keys";
 import { VibePreview } from "@/components/vibe/vibe-preview";
 import { VibeProviderList } from "@/components/vibe/vibe-provider-list";
 
@@ -170,9 +169,8 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
               <strong>本机还没有可读的代理登录</strong>
               <p>
                 VIBE 不需要额外装什么，它读的是各家代理的 CLI 已经留在这台电脑上的登录：
-                登录 Claude Code、Codex CLI 等任一支持的代理后回到这里刷新即可显示。
-                OpenRouter 与 Z.ai 没有本地登录可借，需要在下方填 API 密钥。
-                在此之前时钟会显示 OFFLINE 提示帧，不会编造数字。
+                登录 Claude Code、Codex CLI、OpenCode、Grok CLI 中任意一个后，
+                回到这里刷新即可显示。在此之前时钟会显示 OFFLINE 提示帧，不会编造数字。
               </p>
               {status.error && <p className="vibe-setup__error">本次采集的失败原因：{status.error}</p>}
             </div>
@@ -180,8 +178,8 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
         )}
 
         <div className="vibe-body">
-          {/* Left column: everything about *who is plugged in* — the signed-in
-              agents, then the two vendors that need a pasted key. */}
+          {/* Left column: everything about *who is plugged in* — the agents whose
+              CLI login this machine already carries. */}
           <div className="vibe-main">
             <section className="vibe-list-section" aria-labelledby="vibe-providers-title">
               <div className="vibe-section__head">
@@ -199,10 +197,6 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
                 onToggleStar={(providerId, key) => void toggleStar(providerId, key)}
               />
             </section>
-
-            {/* A saved key only pays off after one real collection round, so the
-                re-read is the forced one — same path as the 刷新 button. */}
-            <VibeKeys catalog={status.catalog} keys={status.keys} onSaved={() => load(true)} />
           </div>
 
           <aside className="vibe-aside">

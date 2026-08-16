@@ -1,8 +1,8 @@
 /**
  * Reads generic passwords out of the macOS login keychain.
  *
- * Claude Code, Copilot and friends store their OAuth blobs there rather than in
- * a file. We shell out to `/usr/bin/security` instead of binding the Security
+ * Claude Code and friends store their OAuth blobs there rather than in a file.
+ * We shell out to `/usr/bin/security` instead of binding the Security
  * framework: a spawn is a few milliseconds, it needs no native module, and — the
  * reason that decides it — a read the user already authorised for their own CLI
  * does not raise a second prompt.

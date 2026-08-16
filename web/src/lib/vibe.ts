@@ -2,6 +2,7 @@ import { renderPixelText, type PixelTextBitmap } from "@/lib/pixel-font";
 import { PIXEL_FONT_5X7, renderPixelText5x7 } from "@/lib/pixel-font-5x7";
 import { VIBE_ICONS, type VibeIconGrid } from "@/lib/vibe-icon-grids";
 import { VIBE_ICON_SVG } from "@/lib/vibe-icon-svg";
+import { VIBE_PIXEL_LOGOS, type VibePixelLogo } from "@/lib/vibe-pixel-logos";
 
 // Mirrors src/vibe/usage-service.ts (VibeMetric / VibeProviderUsage /
 // VibeUsageSnapshot) and the GET /api/vibe/status envelope of design §5.
@@ -60,27 +61,9 @@ export interface VibeCatalogEntry {
   metricLabels: Record<string, string>;
 }
 
-/**
- * Mirrors src/vibe/vibe-key-store.ts: the two vendors nothing on this machine
- * logs into, so the user pastes a key the service keeps 0600 on disk. The wire
- * only ever carries where the key came from — never the key.
- */
-export const VIBE_KEY_PROVIDERS = ["openrouter", "zai"] as const;
-export type VibeKeyState = "stored" | "environment" | "unset";
-/** Mirrors VibeKeyStore's MAX_KEY_LENGTH so the field stops before the 400 does. */
-export const VIBE_MAX_KEY_LENGTH = 512;
-
-export const VIBE_KEY_STATE_LABEL: Record<VibeKeyState, string> = {
-  stored: "已保存",
-  environment: "来自环境变量",
-  unset: "未设置",
-};
-
 export interface VibeStatusResponse {
   catalog: VibeCatalogEntry[];
   starred: Record<string, string[]>;
-  /** Per key-based vendor; a vendor the server did not mention reads as unset. */
-  keys: Record<string, string>;
   snapshot: VibeUsageSnapshot | null;
   error: string | null;
 }
@@ -89,20 +72,10 @@ export interface VibeStarredResponse {
   starred: Record<string, string[]>;
 }
 
-export interface VibeKeysResponse {
-  keys: Record<string, string>;
-}
-
-/** An unknown or absent value is "unset" — never guess a key exists. */
-export function vibeKeyState(keys: Record<string, string>, providerId: string): VibeKeyState {
-  const value = keys[providerId];
-  return value === "stored" || value === "environment" ? value : "unset";
-}
-
 /**
  * How many agents this machine is actually signed into. It is the number the
  * status strip prints, so it comes from the snapshot and nowhere else: the
- * catalog lists ten vendors and a signed-out one simply is not in `providers`.
+ * catalog lists four vendors and a signed-out one simply is not in `providers`.
  */
 export function vibeSignedInCount(snapshot: VibeUsageSnapshot | null): number {
   return snapshot?.providers.length ?? 0;
@@ -378,10 +351,26 @@ const SCREEN_MUTED: VibeRgb = [150, 150, 150];
 // proven readable on hardware, which is why the firmware reuses it verbatim.
 const ICON_10 = 10;
 const ICON_TEXT_GAP = 2;
-const AGENT_ROW_X = 15;
-const METER_X = 19;
+// The per-agent page's numbers, read off VibeScreen.cpp rather than re-derived:
+// kDetailRowX, kMeterX, kMeterW, kDetailRightX. The row starts one column past
+// the 16 px mark (x=16 is the gutter), so it owns x=17..51 — two px narrower
+// than the 12 px-mark layout it replaced, with the spacing inside it unchanged.
+const AGENT_ROW_X = 17;
+const METER_X = 21;
 const METER_WIDTH = 14;
 const METER_HEIGHT = 5;
+// kMarkColor / kMarkColorY: the brand art is 16 rows on a 16-row panel, so it
+// is drawn 1:1 from the top-left corner — no scaling, no crop, no offset.
+const COLOR_MARK_SIZE = 16;
+const COLOR_MARK_Y = 0;
+// kMarkFallbackX / kMarkLargeY: the monochrome 12 px stand-in, centred in the
+// same 16 px column so a vendor without colour art still leaves the row at 17.
+const MARK_FALLBACK_X = (COLOR_MARK_SIZE - 12) / 2;
+const MARK_FALLBACK_Y = 2;
+
+// Widened from the source's own key union: `agent.id` is whatever the pull
+// document named, and a vendor added after this build shipped simply has no art.
+const COLOR_MARKS: Readonly<Record<string, VibePixelLogo>> = VIBE_PIXEL_LOGOS;
 
 function screenUtilization(metric: VibeScreenMetric): number | undefined {
   if (metric.limit <= 0) return undefined;
@@ -394,7 +383,18 @@ function screenUtilization(metric: VibeScreenMetric): number | undefined {
  * does no unit arithmetic and neither does this.
  */
 function screenValueText(metric: VibeScreenMetric): string {
-  return metric.limit > 0 ? `${metric.used}%` : `${metric.used}`;
+  // REMAINING, matching the firmware's default (VibeScreen's mShowLeft). The
+  // preview is presented as exactly what the clock shows, so a preview counting
+  // the other way is a preview that lies — and this one used to, silently,
+  // because it had no notion of the toggle at all.
+  //
+  // 100 - percent rather than (limit - used) / limit: the two halves must sum
+  // to 100 on screen, and the firmware makes the same choice for the same
+  // reason. A metric with no ceiling is a balance, which IS what is left, so
+  // there is nothing to invert.
+  if (metric.limit <= 0) return `${metric.used}`;
+  const left = Math.max(0, 100 - metric.used);
+  return `${left}%`;
 }
 
 function screenTextColor(utilization: number | undefined): VibeRgb {
@@ -492,6 +492,39 @@ function drawScreenIcon(
       else if (cell === "*") setScreenPixel(frame, x + column, y + row, dimmed);
     }
   });
+}
+
+/**
+ * The 16x16 brand art, 1:1 — VibeScreen.cpp's `drawColorMark`, cell for cell.
+ *
+ * It takes NO colour, on purpose: these marks carry colours sampled from the
+ * vendors' own brands, and repainting them in the page's severity accent would
+ * be the same mistake as tinting a photograph — the red would stop meaning
+ * "92% spent" and start meaning "this vendor's logo is red". A "." cell is the
+ * firmware's palette index 0: transparent, never plotted, so whatever the page
+ * drew behind the mark shows through.
+ *
+ * Returns false when there is no colour art for the vendor, which is the
+ * caller's cue to fall back rather than leave the page ownerless.
+ */
+function drawScreenColorMark(
+  frame: Uint8ClampedArray,
+  id: string,
+  x: number,
+  y: number,
+): boolean {
+  const logo = COLOR_MARKS[id];
+  if (logo === undefined) return false;
+  logo.rows.forEach((line, row) => {
+    for (let column = 0; column < line.length; column += 1) {
+      const cell = line[column]!;
+      if (cell === ".") continue;
+      const rgba = logo.palette[cell];
+      if (rgba === undefined) continue;
+      setScreenPixel(frame, x + column, y + row, [rgba[0], rgba[1], rgba[2]]);
+    }
+  });
+  return true;
 }
 
 /**
@@ -639,7 +672,7 @@ function drawOverviewPage(frame: Uint8ClampedArray, agents: readonly VibeScreenA
 }
 
 function drawAgentRow(frame: Uint8ClampedArray, metric: VibeScreenMetric, y: number): void {
-  // One character, because 37 px has to hold a label, a bar and a number. The
+  // One character, because 35 px has to hold a label, a bar and a number. The
   // document carries the vendor's own word ("Session", "Credits") and the panel
   // takes its initial — the label itself is the vendor's, so the letter is too.
   const label = (metric.label.trim()[0] ?? "").toUpperCase();
@@ -666,8 +699,14 @@ function drawAgentRow(frame: Uint8ClampedArray, metric: VibeScreenMetric, y: num
 
 function drawAgentPage(frame: Uint8ClampedArray, agent: VibeScreenAgent): void {
   markStale(frame, [agent]);
-  const icon = VIBE_ICONS[agent.id]?.s12;
-  if (icon) drawScreenIcon(frame, icon, 0, 2, SCREEN_WHITE);
+  // The colour art first, exactly as VibeScreen::renderAgent does it. A vendor
+  // with no 16x16 art keeps the monochrome 12 px mark — centred in the same
+  // column, because a page of numbers with no owner is worse than a badge that
+  // is merely older.
+  if (!drawScreenColorMark(frame, agent.id, 0, COLOR_MARK_Y)) {
+    const icon = VIBE_ICONS[agent.id]?.s12;
+    if (icon) drawScreenIcon(frame, icon, MARK_FALLBACK_X, MARK_FALLBACK_Y, SCREEN_WHITE);
+  }
 
   if (agent.metrics.length === 0) {
     const bitmap = smallText("NO DATA");

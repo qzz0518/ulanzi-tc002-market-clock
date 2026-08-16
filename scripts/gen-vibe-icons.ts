@@ -10,7 +10,7 @@
  * of the SVG sources — no rasterisation. The LED grids in `src/vibe/vibe-icons.ts`
  * used to be generated from these same files and are **not** any more: at 10–12 px
  * every one of these marks is thinner than a pixel and area-averaging dissolved
- * it (the OpenAI knot became a disc, the Cursor cube a blob). Those grids are
+ * it (the OpenAI knot became a disc, the xAI slash a smear). Those grids are
  * hand-drawn pixel art now and are edited directly; see that file's header.
  *
  * The firmware header is generated from `src/vibe/vibe-icons.ts` rather than
@@ -24,10 +24,17 @@
  *   bun run scripts/gen-vibe-icons.ts
  */
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PNG } from "pngjs";
 import { VIBE_ICONS } from "../src/vibe/vibe-icons.ts";
+import {
+  VIBE_PIXEL_LOGO_IDS,
+  VIBE_PIXEL_LOGOS,
+  type PixelLogoRgba,
+  type VibePixelLogo,
+} from "../src/vibe/vibe-pixel-logos.ts";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const ICON_DIR = join(REPO, "src/assets/vibe-icons");
@@ -49,6 +56,84 @@ module += `};\n`;
 
 writeFileSync(join(REPO, "web/src/lib/vibe-icon-svg.ts"), module);
 
+// --- reusable 16x16 PNG assets ---------------------------------------------
+
+const PIXEL_LOGO_SIZE = 16;
+const PIXEL_LOGO_DIR = join(ICON_DIR, "pixel");
+const PIXEL_LOGO_PREVIEW = join(REPO, "docs/images/vibe-pixel-logos-16x16.png");
+
+function setPngPixel(png: PNG, x: number, y: number, color: PixelLogoRgba): void {
+  const offset = (y * png.width + x) * 4;
+  png.data[offset] = color[0];
+  png.data[offset + 1] = color[1];
+  png.data[offset + 2] = color[2];
+  png.data[offset + 3] = color[3];
+}
+
+function renderPixelLogo(id: string, logo: VibePixelLogo): PNG {
+  if (logo.rows.length !== PIXEL_LOGO_SIZE) {
+    throw new Error(`${id}: expected ${PIXEL_LOGO_SIZE} rows, got ${logo.rows.length}`);
+  }
+
+  const png = new PNG({ width: PIXEL_LOGO_SIZE, height: PIXEL_LOGO_SIZE });
+  png.data.fill(0);
+  logo.rows.forEach((row, y) => {
+    if (row.length !== PIXEL_LOGO_SIZE) {
+      throw new Error(`${id}: row ${y} is ${row.length}px wide, expected ${PIXEL_LOGO_SIZE}`);
+    }
+    [...row].forEach((cell, x) => {
+      if (cell === ".") return;
+      const color = logo.palette[cell];
+      if (!color) throw new Error(`${id}: row ${y}, column ${x} uses unknown palette cell ${cell}`);
+      setPngPixel(png, x, y, color);
+    });
+  });
+  return png;
+}
+
+mkdirSync(PIXEL_LOGO_DIR, { recursive: true });
+const pixelLogos = VIBE_PIXEL_LOGO_IDS.map((id) => {
+  const png = renderPixelLogo(id, VIBE_PIXEL_LOGOS[id]);
+  writeFileSync(join(PIXEL_LOGO_DIR, `${id}.png`), PNG.sync.write(png));
+  return png;
+});
+
+// A dark 2x2 review sheet makes transparency, edge padding and the three-tone
+// curves visible without changing the deliverables themselves. Every logical
+// pixel is enlarged to a 16x16 square — still no interpolation.
+const previewScale = 16;
+const previewGap = 24;
+const previewPadding = 24;
+const previewTile = PIXEL_LOGO_SIZE * previewScale;
+const previewSize = previewPadding * 2 + previewTile * 2 + previewGap;
+const preview = new PNG({ width: previewSize, height: previewSize });
+const previewBackground: PixelLogoRgba = [12, 8, 21, 255];
+for (let y = 0; y < preview.height; y += 1) {
+  for (let x = 0; x < preview.width; x += 1) setPngPixel(preview, x, y, previewBackground);
+}
+pixelLogos.forEach((logo, index) => {
+  const tileX = previewPadding + (index % 2) * (previewTile + previewGap);
+  const tileY = previewPadding + Math.floor(index / 2) * (previewTile + previewGap);
+  for (let y = 0; y < PIXEL_LOGO_SIZE; y += 1) {
+    for (let x = 0; x < PIXEL_LOGO_SIZE; x += 1) {
+      const source = (y * PIXEL_LOGO_SIZE + x) * 4;
+      if (logo.data[source + 3] === 0) continue;
+      const color: PixelLogoRgba = [
+        logo.data[source]!,
+        logo.data[source + 1]!,
+        logo.data[source + 2]!,
+        logo.data[source + 3]!,
+      ];
+      for (let dy = 0; dy < previewScale; dy += 1) {
+        for (let dx = 0; dx < previewScale; dx += 1) {
+          setPngPixel(preview, tileX + x * previewScale + dx, tileY + y * previewScale + dy, color);
+        }
+      }
+    }
+  }
+});
+writeFileSync(PIXEL_LOGO_PREVIEW, PNG.sync.write(preview));
+
 // --- the firmware's copy of the same grids -----------------------------------
 // Rows are packed low-bit-last so `bit(size-1)` is the leftmost column, matching
 // the shared font headers' convention (`bit5 = leftmost` at 6 px wide).
@@ -63,17 +148,61 @@ function packRows(rows: readonly string[]): string[] {
   });
 }
 
+// The 16x16 colour marks. Transparent plus at most three opaque colours is two
+// bits per pixel, so a row is one uint32 (bits 31..30 = leftmost column, the
+// same leftmost-is-highest convention the monochrome rows use) and a mark is
+// 64 bytes of pixels beside 9 bytes of palette. Index 0 is transparent and is
+// never plotted; 1..3 index the palette in the order the source declares it.
+const COLOR_MARK_COLORS = 3;
+const COLOR_MARK_BPP = 2;
+
+interface PackedColorMark {
+  readonly palette: readonly PixelLogoRgba[];
+  readonly rows: readonly number[];
+}
+
+function packColorMark(id: string, logo: VibePixelLogo): PackedColorMark {
+  const keys = Object.keys(logo.palette);
+  if (keys.length > COLOR_MARK_COLORS) {
+    throw new Error(`${id}: ${keys.length} colours, but the firmware format carries ${COLOR_MARK_COLORS}`);
+  }
+  const palette = keys.map((key) => {
+    const color = logo.palette[key]!;
+    // The header has no alpha channel because the format has no use for one:
+    // a cell is either transparent (index 0) or fully opaque. A half-lit LED
+    // is a colour, not a coverage, so blending here would be a fiction.
+    if (color[3] !== 255) throw new Error(`${id}: palette cell ${key} is not opaque`);
+    return color;
+  });
+  const rows = logo.rows.map((row, y) => {
+    let bits = 0;
+    [...row].forEach((cell, x) => {
+      if (cell === ".") return;
+      const index = keys.indexOf(cell) + 1;
+      if (index === 0) throw new Error(`${id}: row ${y}, column ${x} uses unknown palette cell ${cell}`);
+      bits |= index << (COLOR_MARK_BPP * (PIXEL_LOGO_SIZE - 1 - x));
+    });
+    return bits >>> 0;  // index 3 in column 0 sets bit 31, which is negative as an int32
+  });
+  return { palette, rows };
+}
+
+const colorMarkIds = [...VIBE_PIXEL_LOGO_IDS].sort();
+const colorMarks = colorMarkIds.map((id) => packColorMark(id, VIBE_PIXEL_LOGOS[id]));
+
 const names = Object.keys(VIBE_ICONS).sort();
 let header = `#ifndef VISUAL_VIBEICONS_H_
 #define VISUAL_VIBEICONS_H_
 #include <stdint.h>
-// GENERATED by scripts/gen-vibe-icons.ts from src/vibe/vibe-icons.ts — do not
-// edit by hand. The same hand-drawn grids the LED channel renderer uses, so a
-// mark reads identically on the panel and in the console's preview;
-// test/vibe-icons-parity.test.ts holds the two sides together.
+// GENERATED by scripts/gen-vibe-icons.ts from src/vibe/vibe-icons.ts and
+// src/vibe/vibe-pixel-logos.ts — do not edit by hand. The same hand-drawn grids
+// the LED channel renderer uses, so a mark reads identically on the panel and
+// in the console's preview; test/vibe-icons-parity.test.ts holds the two sides
+// together.
 //
-// Each row uses the low \`size\` bits, bit(size-1) = leftmost column. \`s10\` feeds
-// the two-agent overview, \`s12\` the per-agent page.
+// Each \`Mark\` row uses the low \`size\` bits, bit(size-1) = leftmost column.
+// \`s10\` feeds the two-agent overview, \`s12\` is the monochrome fallback on a
+// per-agent page for a vendor with no colour mark below.
 namespace tcos {
 namespace vibeicons {
 
@@ -110,6 +239,52 @@ inline const Mark* find(const char* id) {
   return 0;
 }
 
+// The 16x16 provider art from src/vibe/vibe-pixel-logos.ts, drawn 1:1 on the
+// per-agent page — the panel is exactly ${PIXEL_LOGO_SIZE} rows tall, so there is no scaling
+// and therefore no resampling, which is what that art's README forbids.
+//
+// Two bits per pixel: 0 = transparent (not plotted, the page shows through),
+// 1..3 index \`palette\`. \`rows[y]\` holds column 0 in bits 31..30, so the same
+// "leftmost is highest" rule as \`Mark\` above. ${COLOR_MARK_COLORS * 3} bytes of palette plus
+// ${PIXEL_LOGO_SIZE * 4} bytes of pixels per mark; unused palette slots are black and unreachable.
+struct ColorMark {
+  const char* id;
+  uint8_t palette[${COLOR_MARK_COLORS}][3];
+  uint32_t rows[${PIXEL_LOGO_SIZE}];
+};
+
+static const int kColorMarkSize = ${PIXEL_LOGO_SIZE};
+static const int kColorMarkBpp = ${COLOR_MARK_BPP};
+
+static const ColorMark kColorMarks[] = {
+`;
+colorMarkIds.forEach((id, index) => {
+  const mark = colorMarks[index]!;
+  const slots = [...mark.palette];
+  while (slots.length < COLOR_MARK_COLORS) slots.push([0, 0, 0, 255]);
+  header += `  {"${id}",
+`;
+  header += `   {${slots.map((c) => `{${c[0]},${c[1]},${c[2]}}`).join(",")}},
+`;
+  header += `   {${mark.rows.map((bits) => `0x${bits.toString(16).padStart(8, "0")}u`).join(",")}}},
+`;
+});
+header += `};
+
+static const int kColorMarkCount = ${colorMarkIds.length};
+
+/** The 16x16 colour mark for a provider id, or null when this build has none. */
+inline const ColorMark* findColor(const char* id) {
+  if (id == 0) return 0;
+  for (int i = 0; i < kColorMarkCount; ++i) {
+    const char* a = kColorMarks[i].id;
+    const char* b = id;
+    while (*a != 0 && *a == *b) { ++a; ++b; }
+    if (*a == 0 && *b == 0) return &kColorMarks[i];
+  }
+  return 0;
+}
+
 }  // namespace vibeicons
 }  // namespace tcos
 
@@ -119,5 +294,8 @@ writeFileSync(join(REPO, "device/tc002-os/app/src/visual/VibeIcons.h"), header);
 
 console.log(
   `gen-vibe-icons: ${files.length} marks → web/src/lib/vibe-icon-svg.ts, `
-  + `${names.length} grids → device/tc002-os/app/src/visual/VibeIcons.h`,
+  + `${names.length} grids + ${colorMarkIds.length} colour marks `
+  + `(${colorMarkIds.length * (PIXEL_LOGO_SIZE * 4 + COLOR_MARK_COLORS * 3)} bytes of pixels and palette) `
+  + `→ device/tc002-os/app/src/visual/VibeIcons.h, `
+  + `${pixelLogos.length} pixel PNGs → src/assets/vibe-icons/pixel/`,
 );

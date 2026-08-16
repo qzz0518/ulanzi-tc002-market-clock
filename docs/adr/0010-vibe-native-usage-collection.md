@@ -2,11 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-08-14
+- Amended: 2026-08-15 — the collected set was cut from ten vendors to four
+  (claude, codex, opencode, grok). The decision below is unchanged; only its
+  scope is. Numbers in this document that counted vendors have been updated.
 - Supersedes: the first cut of this ADR, which consumed OpenUsage's local HTTP API
 
 ## Context
 
-VIBE puts AI coding-agent quota (Claude Code, Codex, Cursor, …) on the panel and
+VIBE puts AI coding-agent quota (Claude Code, Codex, OpenCode, Grok) on the panel and
 in the console. The reference product is OpenUsage (MIT, robinebers/openusage), a
 macOS menu-bar app that supports ten vendors and exposes a read-only loopback API
 at `127.0.0.1:6736`.
@@ -39,22 +42,22 @@ The shape:
 - `parse.ts` / `http.ts` / `keychain.ts` — the shared floor: defensive field
   readers, a hard per-request timeout, the 401→refresh-once dance, and a
   `/usr/bin/security` wrapper (exit 44 = "nothing stored", which is a state).
-- `providers/<vendor>.ts` ×10, `providers/index.ts` as the registry.
+- `providers/<vendor>.ts` ×4, `providers/index.ts` as the registry.
 - `usage-service.ts` — probes every adapter, fetches the ones with a credential
   **in parallel**, folds the results into one snapshot.
 
 Consequences of collecting rather than consuming:
 
 - **Detection replaces configuration.** A vendor with no credential on this
-  machine is silently absent — not an error, not a setting. On this Mac that
-  turned three visible vendors into seven, because we probe all ten rather than
-  showing whichever ones another app had enabled.
+  machine is silently absent — not an error, not a setting. We probe all four
+  collected vendors rather than showing whichever ones another app had enabled.
 - **Failure is per vendor.** One dead endpoint costs that vendor's row; its last
   good values stand in for 15 minutes flagged `stale`, then it drops out. A 429
   parks that vendor until Retry-After passes and nothing else.
-- **Two vendors need a key.** OpenRouter and Z.ai have no local CLI to borrow a
-  login from, so the console takes an API key, stored `0600` in
-  `.runtime/vibe-keys.json` (never echoed back, never in `/api/vibe/status`).
+- **No vendor needs a key.** All four borrow a CLI login this machine already
+  carries. The key store (`.runtime/vibe-keys.json`, `0600`, never echoed back
+  and never in `/api/vibe/status`) stays wired for the next vendor that has no
+  local login, but its vendor list is empty and every key request is refused.
 - `OPENUSAGE_URL` is gone from the environment; there is no upstream to point at.
 
 Correctness was verified against the reference on this machine: for the vendors
@@ -64,7 +67,7 @@ five-hour session figure differing only by the minutes between the two calls.
 
 ## Consequences
 
-- **We now own vendor churn.** Ten private, undocumented endpoints will change,
+- **We now own vendor churn.** Four private, undocumented endpoints will change,
   and when one does its adapter breaks and that vendor shows no data. The blast
   radius is one file and one row; the alternative was a hard dependency on
   someone else shipping a fix. Adapters are written defensively (every field

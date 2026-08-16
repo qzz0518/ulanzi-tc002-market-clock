@@ -80,14 +80,14 @@ export class VibeUnavailableError extends Error {
 
 /** How long a vendor's last-good values may stand in after a failed refresh. */
 const PROVIDER_STALE_MS = 15 * 60_000;
-/** Per-vendor request ceiling. Ten of these run concurrently. */
+/** Per-vendor request ceiling. Four of these run concurrently. */
 const DEFAULT_TIMEOUT_MS = 8_000;
 
 /**
  * Ceiling on a whole vendor round, not just one request.
  *
- * Some adapters make several calls (a refresh, then usage, then a plan lookup;
- * Copilot walks the org list), so the per-request timeout alone lets a degraded
+ * Some adapters make several calls (a token refresh, then usage, then a plan
+ * lookup), so the per-request timeout alone lets a degraded
  * vendor hold the collection — and with it a channel render — for minutes. The
  * device expects a frame long before that, so the vendor is dropped instead.
  */

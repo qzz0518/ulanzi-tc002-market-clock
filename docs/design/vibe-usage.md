@@ -22,17 +22,17 @@
   JSON),调各家的用量接口,映射响应。不需要菜单栏应用,只需要知道每家把 token 放在哪、接口返回
   什么——这些从它的 Swift 源码里逐家读得出来(凭据位置与优先级、endpoint、header 集合、字段路径、
   plan 字符串映射、重置时间算法);
-- **检测取代配置**:本机没有某家凭据,它就静默不出现,既不是错误也不是设置项。本机实测由「三家
-  可见」变成七家——我们探十家,而不是显示另一个应用启用了哪几家;
+- **检测取代配置**:本机没有某家凭据,它就静默不出现,既不是错误也不是设置项。我们探全部四家,
+  而不是显示另一个应用启用了哪几家;
 - 「抄 OpenUsage」落在语义层:Provider 目录、指标键/标签、默认星标、缺数据即隐藏、staleness
   规则、meter 的 80%/90% 档位、菜单栏排版比例、设置交互,全部对齐。
 
-代价明摆着:十家私有、无文档的接口从此由我们自己维护。适配器逐字段收窄写(缺字段丢弃而非默认),
+代价明摆着:四家私有、无文档的接口从此由我们自己维护。适配器逐字段收窄写(缺字段丢弃而非默认),
 所以上游改形状时降级成「该家无数据」而不是错数字,炸的范围是一个文件、一行。
 
 前置条件:**没有前置条件**。装了哪家 CLI、登了哪家,就出现哪几家。一家都没登录(或全部拒绝)时
 **宁缺毋假**:LED 渲染 `AI USAGE / NO LOGIN` 提示帧(weather「未配置」模式),GUI 显示登录引导。
-OpenRouter 与 Z.ai 没有本地 CLI 登录可借,由用户在控制台粘一次 API key。
+四家都借各自 CLI 已经留在本机的登录,没有需要用户粘 key 的厂商。
 
 商标注:provider 图标是第三方品牌标识,指称性使用;不使用 OpenUsage 自身的名称/徽标做品牌
 (TRADEMARK.md 限制)。
@@ -41,31 +41,22 @@ OpenRouter 与 Z.ai 没有本地 CLI 登录可借,由用户在控制台粘一次
 
 ### 2.1 静态目录 `src/vibe/vibe-catalog.ts`
 
-10 个 Provider,顺序与 OpenUsage ProviderCatalog 一致(前三固定,其余按显示名字母序):
+4 个 Provider,顺序与 OpenUsage ProviderCatalog 一致(前两固定,其余按显示名字母序):
 
 | id | displayName | percent 指标(limits key → UI 标签) | 默认星标(≤2) |
 |---|---|---|---|
 | claude | Claude | session→Session, weekly→Weekly, sonnet→Sonnet, fable→Fable;另 extraUsage→Extra Usage(usd) | session, weekly |
 | codex | Codex | session→Session, weekly→Weekly, spark→Spark, sparkWeekly→Spark Weekly;另 credits/creditValue→Credits(balance), rateLimitResets→Rate Limit Resets(balance) | session, weekly |
-| cursor | Cursor | totalUsage→Total Usage, autoUsage→Auto Usage, apiUsage→API Usage;另 onDemand→Extra Usage(usd), requests→Requests(count), credits→Credits(balance) | autoUsage, apiUsage |
-| antigravity | Antigravity | geminiSession→Session, geminiWeekly→Weekly, nonGeminiSession→Claude, nonGeminiWeekly→Claude Weekly | geminiSession, geminiWeekly |
-| copilot | Copilot | premiumCredits→Credits;另 extraUsage(count), orgCredits, orgSpend, chat, completions | premiumCredits |
-| devin | Devin | daily→Daily, weekly→Weekly;另 extraUsageBalance→Extra Balance(balance) | daily, weekly |
 | grok | Grok | weekly→Weekly | weekly |
 | opencode | OpenCode | session→Session, weekly→Weekly, monthly→Monthly | session, weekly |
-| openrouter | OpenRouter | credits→Credits(usd);另 balance(balance), keyLimit(usd) | credits |
-| zai | Z.ai | session→Session, weekly→Weekly;另 webSearches(count) | session, weekly |
 
-默认星标即 OpenUsage `DefaultLayout.pinnedMetricIDs`(菜单栏默认);grok/devin/opencode 不在其默认
+默认星标即 OpenUsage `DefaultLayout.pinnedMetricIDs`(菜单栏默认);grok/opencode 不在其默认
 表中,按同精神取各自的主 percent 指标。目录还带单字符 LED 标签映射(详情页行首):
 
 ```
-session/geminiSession→"S"  weekly/geminiWeekly→"W"  monthly→"M"  daily→"D"
-sonnet→"N"  fable→"F"  spark→"K"  sparkWeekly→"X"  totalUsage→"T"  autoUsage→"A"
-apiUsage→"P"  premiumCredits/credits→"C"  nonGeminiSession→"C"  nonGeminiWeekly→"L"
-extraUsage/extraUsageBalance/onDemand→"E"  balance→"B"  keyLimit→"K"  requests→"R"
-rateLimitResets→"R"  creditValue→"V"  webSearches→"Q"  orgCredits→"O"  orgSpend→"G"
-chat→"H"  completions→"I"
+session→"S"  weekly→"W"  monthly→"M"  sonnet→"N"  fable→"F"
+spark→"K"  sparkWeekly→"X"  credits→"C"  creditValue→"V"
+extraUsage→"E"  rateLimitResets→"R"
 ```
 
 ### 2.2 适配器层 `src/vibe/providers/`
@@ -124,13 +115,11 @@ export interface VibeMetric {
   `errSecItemNotFound`,是「没存」这个状态而不是失败;其余非零(钥匙串锁着、访问被拒)才是真错误。
   非 macOS 上换成 `EmptyKeychain`,那几家自然检测不到。
 
-`providers/<厂商>.ts` ×10 + `providers/index.ts`(注册表,顺序与 `VIBE_CATALOG` 一致)。凭据来源
+`providers/<厂商>.ts` ×4 + `providers/index.ts`(注册表,顺序与 `VIBE_CATALOG` 一致)。凭据来源
 按厂商各异:`claude` 读钥匙串条目或 `~/.claude/.credentials.json`(`CLAUDE_CONFIG_DIR` 可改),
 `codex` 读 `~/.codex/auth.json` / `~/.config/codex/auth.json` 再退钥匙串,`grok` 读
-`~/.grok/auth.json`,`cursor` 读 `state.vscdb` + 钥匙串,`copilot` 读 `~/.config/github-copilot/*`
-或 `gh` 的 `hosts.yml`,`devin` 读 `credentials.toml` 或桌面端 globalStorage,`antigravity` 走钥匙串,
-`opencode` 认 `OPENCODE_DATA_DIR` / `XDG_DATA_HOME` / `~/.local/share/opencode`;`openrouter` /
-`zai` 走 `context.apiKey(id)`。
+`~/.grok/auth.json`,`opencode` 认 `OPENCODE_DATA_DIR` / `XDG_DATA_HOME` /
+`~/.local/share/opencode`。四家都借本机已有的 CLI 登录,没有走 `context.apiKey(id)` 的厂商。
 
 **刷新与写回的边界**:这些厂商每次换取 access token 都会**轮换 refresh token**,旧的立刻作废。
 我们刷了却不写回,等于把用户自己那支 CLI 手里的凭据变成废纸——下次他打开 Claude Code 会发现
@@ -149,7 +138,7 @@ export interface VibeMetric {
 
 ### 2.3 `src/vibe/usage-service.ts`
 
-整个数据层就这一个类:建一次 context,`detect()` 探十家,有凭据的**并发** `fetchUsage()`,折成一份
+整个数据层就这一个类:建一次 context,`detect()` 探四家,有凭据的**并发** `fetchUsage()`,折成一份
 快照。失败逐家隔离——一家接口挂了只损失它那一页,绝不损失整块屏。
 
 ```ts
@@ -175,7 +164,7 @@ export class VibeUnavailableError extends Error {}   // 一家都没登录 → �
 - `detect()` 返回 false → 该家**静默缺席**,同时删掉它的 last-good:登出之后不许昨天的数字还挂在屏上。
 - 429 → `cooldownUntil` 逐家记账(厂商没说就默认 5 分钟),冷却期间只吃缓存。被限流的 Claude 不拖住 Codex。
 - `providers.length === 0 && errors.length === 0` → 抛 `VibeUnavailableError`(真的一家都没登录)。
-- 默认超时 8s/家,十家并发;`options` 全是测试缝(adapters / fetcher / keychain / env / now /
+- 默认超时 8s/家,四家并发;`options` 全是测试缝(adapters / fetcher / keychain / env / now /
   apiKey / readTextFile / writeTextFile / listDirectory)。
 
 ### 2.4 控制器缓存(改 `src/workspace-controller.ts` + `src/content-registry.ts`)
@@ -206,15 +195,18 @@ LyricThemeStore 范式全套:randomUUID 临时文件 + rename、写操作链式�
 
 ### 2.6 `src/vibe/vibe-key-store.ts`(`.runtime/vibe-keys.json`)
 
-OpenRouter 与 Z.ai 本机没有任何东西替它们登录,只能由用户粘 key。所以这个文件是**凭据**:与
-`vibe.json` 不同,它**写 0600**,而且永不出进程——`GET /api/vibe/status` 只报「有没有」,不报 key。
+给「本机没有任何东西替它登录」的厂商用。**现在四家都有 CLI 登录可借,所以 key 制厂商列表是空的**,
+`set()` 对任何 id 都拒绝,`status()` 返回空表。留着这条路而不是删掉,是因为 `/api/vibe/key` 与状态
+信封里的 `keys` 是控制 API 的既定契约,而且下一家没有本地登录的厂商只需要在列表里加一行。
+
+真的存了 key 时这个文件是**凭据**:与 `vibe.json` 不同,它**写 0600**,而且永不出进程——
+`GET /api/vibe/status` 只报「有没有」,不报 key。
 
 ```json
-{ "version": 1, "keys": { "openrouter": "sk-or-…" } }
+{ "version": 1, "keys": {} }
 ```
 
-- `resolve(providerId)`:先取存的 key,没有再取各家自己的环境变量——`openrouter` 是
-  `OPENROUTER_API_KEY`,`zai` 是 `ZAI_API_KEY` / `Z_AI_API_KEY` / `ZHIPUAI_API_KEY`。**存的优先**,
+- `resolve(providerId)`:先取存的 key,没有再取该厂商自己的环境变量。**存的优先**,
   于是控制台里粘一把新 key 能盖掉服务启动时继承的那份 shell 导出。
 - `status()`:每家 `"stored" | "environment" | "unset"`,这是 GUI 唯一能知道的事。
 - `set(providerId, key)`:非 key 制厂商拒绝(`SettingsValidationError`),长度 ≤512,空串即清除。
@@ -227,7 +219,7 @@ OpenRouter 与 Z.ai 本机没有任何东西替它们登录,只能由用户粘 k
 
 图标数据在 `src/vibe/vibe-icons.ts`(10px/12px,"."/"*"/"x" 行编码)。绘制:"x" 用指定色全亮,
 "*" 用 55% 亮度(×140/255)。**这些 LED 点阵是手绘像素画,不是从 SVG 光栅化来的**:把矢量标识
-面积平均到 10–12px 会把它毁掉(OpenAI 的绳结变成实心圆,Cursor 的立方体变成一团),因为这个尺度
+面积平均到 10–12px 会把它毁掉(OpenAI 的绳结变成实心圆,xAI 的斜杠糊成一片),因为这个尺度
 下每一笔只有 1–2px 宽,平均覆盖率过不了任何合理阈值。手绘是拿保真度换「还认得出来」。
 `src/assets/vibe-icons/*.svg` 保留矢量原件,控制台**直接渲染真 SVG**
 (`scripts/gen-vibe-icons.ts` 只把它们内联进 `web/src/lib/vibe-icon-svg.ts`,不再光栅化)。
@@ -306,14 +298,14 @@ GET /api/vibe/status[?refresh=1]        # 免同源(只读)
     catalog: [{ id, displayName, order, percentKeys: [...], defaultStarred: [...],
                 metricLabels: { key: label } }],
     starred: { providerId: [keys] },              # 与默认合并后的完整表
-    keys: { openrouter: "stored"|"environment"|"unset", zai: ... },   # 只有状态,绝不含 key
+    keys: { <厂商>: "stored"|"environment"|"unset" },   # 只有状态,绝不含 key;四家都借 CLI 登录,故为空表
     snapshot: VibeUsageSnapshot | null,           # 一家都没登录时 null
     error: string | null                          # 采集失败的原因
   }
 ```
 
 `refresh=1` → `controller.getVibeUsage(true)`;默认走缓存(无缓存则采一次)。**一家都没登录不算
-HTTP 错误**(200 + `snapshot: null` + `error`),GUI 据此渲染登录/填 key 引导而不是弹错误 toast。
+HTTP 错误**(200 + `snapshot: null` + `error`),GUI 据此渲染登录引导而不是弹错误 toast。
 没有 `baseUrl`——没有上游可指。
 
 ```
@@ -324,8 +316,9 @@ body { providerId: "claude", starred: ["session","weekly"] }
 
 ```
 PUT /api/vibe/key                        # assertSameOrigin + readJson
-body { providerId: "openrouter", key: "sk-or-…" }   # key 传空串即清除
+body { providerId: "<key 制厂商>", key: "…" }   # key 传空串即清除
 → 200 { keys: {...状态表} }               # 只回状态,绝不回显 key;校验失败 400
+                                          # 目前没有 key 制厂商,任何 id 都是 400
 ```
 
 接线(service.ts):`VibeUsageService` 在数据客户端区构造,`apiKey` 接 `VibeKeyStore.resolve`;
@@ -355,11 +348,11 @@ body { providerId: "openrouter", key: "sk-or-…" }   # key 传空串即清除
 
 ### 6.1 `vibe-panel.tsx` 结构(zos-panel 骨架 + firmware-panel 分区惯例)
 
-`<main className="vibe-shell">` → `Surface variant="solid" outline` 单面板,五区:
+`<main className="vibe-shell">` → `Surface variant="solid" outline` 单面板,四区:
 
 1. **状态条**:`Chip` 报「已登录 N 家」(>0 brand 色 / 0 neutral)+ `fetchedAt` 相对时间 +
    「刷新」`Button`(`GET /api/vibe/status?refresh=1`)。一家都读不到时显示引导块:VIBE 不需要
-   额外装什么,登录任一支持的代理 CLI 后回来刷新即可;OpenRouter 与 Z.ai 请在下方填 API 密钥。
+   额外装什么,登录 Claude Code / Codex CLI / OpenCode / Grok CLI 任一家后回来刷新即可。
    有 `error` 时附一句「本次采集的失败原因:…」。
 2. **Provider 列表**(对齐 OpenUsage Customize):目录序,每行 = SVG 图标(`VIBE_ICON_SVG`,
    `dangerouslySetInnerHTML`,渲染前把 `fill` 属性统一改 `currentColor`,20px,`text-cladd-fg`)
@@ -369,15 +362,12 @@ body { providerId: "openrouter", key: "sk-or-…" }   # key 传空串即清除
    不必 cladd Progress)+ 数值/重置相对时间;末尾 spendLines 文本行(`Today: $127.42 · 141.8M
    tokens` 原样)。星标变更 → `PUT /api/vibe/starred` → 乐观更新 + 失败回滚 toast。快照龄
    >10 分钟:行区顶部「数据已过时(N 分钟前)」琥珀提示(OpenUsage "Outdated" 对齐)。
-3. **API 密钥**(`vibe-keys.tsx`):只有 OpenRouter 与 Z.ai 两行,各带 `Chip` 状态
-   (`stored` / `environment` / `unset`)+ 一个 `Input`。保存/清除走 `PUT /api/vibe/key`,成功后
-   立刻 `load(true)` 强制重采一次,让新 key 当场见效;草稿无论成败都清空,输入框不留 key。
-4. **LED 预览**:复用 `.device-stage`/`.clock-device`/`.clock-screen` 结构 + `POST
+3. **LED 预览**:复用 `.device-stage`/`.clock-device`/`.clock-screen` 结构 + `POST
    /api/channels/preview`(合成 ChannelConfig,`forceRefresh: false`,10s AbortController,
    `createLatestTaskRunner` 防竞态——均为 app.tsx 既有模式)。上方 `agentA`/`agentB` 两个 cladd
    select(duo 预览),另一组「详情预览」provider select;选择变化 320ms 防抖重渲。此处选择仅
    影响预览与布置默认值,不落盘。
-5. **频道布置**:读当前 workspace(`GET /api/workspace`),列出现存 vibe 频道 chips;provider
+4. **频道布置**:读当前 workspace(`GET /api/workspace`),列出现存 vibe 频道 chips;provider
    勾选组(`Checkbox`,默认 = 快照里有数据的 provider);「布置到时钟」/「移除 VIBE 频道」
    Buttons 按 §4 read-modify-write + `toast`;成功后提示「旋钮即可翻页」。
 
@@ -409,8 +399,8 @@ plan): { next, warnings }`、`stripVibeChannels(workspace)`。**duo/agent 内容
 
 ## 8. 文档(实施后,双语成对)
 
-- `docs/reference.md`/`.en.md`:VIBE 一节(凭据来源、十家清单、两家填 key 与其环境变量、逐家降级
-  状态);API 表 `/api/vibe/status`、`/api/vibe/starred`、`/api/vibe/key`;内容类型清单 +2。
+- `docs/reference.md`/`.en.md`:VIBE 一节(凭据来源、四家清单、逐家降级状态);
+  API 表 `/api/vibe/status`、`/api/vibe/starred`、`/api/vibe/key`;内容类型清单 +2。
   **环境变量表里不加任何 VIBE 项**——没有可配置的上游。
 - `README.md`/`README.en.md`:功能列表加 VIBE 一节(截图后补)。
 - `docs/adr/0010-vibe-native-usage-collection.md`:数据源决策(§1 浓缩)。
@@ -431,10 +421,10 @@ plan): { next, warnings }`、`stripVibeChannels(workspace)`。**duo/agent 内容
 ## 10. 验收清单
 
 1. `bun run typecheck` && `bun test` && `bun run build` 全绿。
-2. `curl /api/vibe/status` 出本机所有已登录代理的真数据(本机为七家);数值与 OpenUsage 菜单栏
+2. `curl /api/vibe/status` 出本机所有已登录代理的真数据(至多四家);数值与 OpenUsage 菜单栏
    逐项核对一致(仅滚动 5 小时窗因两次调用相差的分钟数不同);`bun run preview` 渲出 vibe 频道
    GIF(真实百分比)。
-3. 控制台 VIBE 页:列表/星标/填 key/预览/布置全链路可用;移动端底部导航 7 列不挤。
+3. 控制台 VIBE 页:列表/星标/预览/布置全链路可用;移动端底部导航 7 列不挤。
 4. 布置后旋钮翻页:`vibe` 双格 + 各代理详情页(官方固件按 App 切换,ZOS 进轮播环)。
 5. 退出任一代理的登录:该家从快照消失(15 分钟 last-good 过后),别家照常;全部退出后 LED 出
    `AI USAGE / NO LOGIN` 帧,GUI 出登录引导,服务无异常日志刷屏。
