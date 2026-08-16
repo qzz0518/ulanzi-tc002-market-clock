@@ -54,7 +54,16 @@ INCLUDES := -I$(APP)/src $(foreach d,$(EXTRA_INC),-I$(d)) -I$(SHARED) $(foreach 
 #                      built. Omitting it flips base::function to boost and every
 #                      symbol signature mismatches the device libraries.
 PLATFORM ?= __PLATFORM_Z21__
-CXXFLAGS := -c -fmessage-length=0 -pipe -Wformat -Werror=format-security \
+# -MMD -MP: let the compiler record which HEADERS each object read, and include
+# those records below. Without them make compares a .o only against its own .cpp,
+# so a change confined to a header rebuilds nothing — and every step still
+# reports success. That is not hypothetical: the VIBE marks live in a GENERATED
+# header (visual/VibeIcons.h), so redrawing an icon touches no .cpp at all. A
+# full build, link audit, image pack and over-the-air install all passed while
+# the object file linked in was five hours old and carried the previous art.
+# The hand-rolled $(LOGIC) rule below predates this and covers exactly one of
+# the ways it can happen; this covers the rest.
+CXXFLAGS := -c -MMD -MP -fmessage-length=0 -pipe -Wformat -Werror=format-security \
             -fstack-protector -fno-caller-saves -fexceptions -fPIC \
             -std=gnu++11 -O3 -DLOG_TAG='"zkgui"' -D$(PLATFORM) $(INCLUDES)
 
@@ -121,6 +130,10 @@ all: $(OUT)
 $(BUILD_DIR)/%.o: $(APP)/% $(LOGIC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $< -o $@
+
+# The header records written by -MMD, one per object. `-include` rather than
+# `include` so a clean tree (no .d files yet) is not an error.
+-include $(shell find $(BUILD_DIR) -name '*.d' 2>/dev/null)
 
 # Sources outside $(APP), found through vpath by basename.
 $(BUILD_DIR)/extra/%.o: %
