@@ -95,6 +95,7 @@ HostLink::HostLink()
       mMirrorDirty(false),
       mTelRestarts(0),
       mTelBattery(-1),
+      mTelBatteryMv(-1),
       mTelCharging(false),
       mTelFlashed(false),
       mTelSleepOn(false),
@@ -318,6 +319,7 @@ void HostLink::runWorker() {
       const std::string ip = mTelIp;
       const int restarts = mTelRestarts;
       const int battery = mTelBattery;
+      const int batteryMv = mTelBatteryMv;
       const bool charging = mTelCharging;
       const bool flashed = mTelFlashed;
       const bool sleepOn = mTelSleepOn;
@@ -337,6 +339,7 @@ void HostLink::runWorker() {
       report.freeKb = freeKb();
       report.supplicantRestarts = restarts;
       report.batteryPercent = battery;
+      report.batteryMillivolts = batteryMv;
       report.charging = charging;
       report.flashed = flashed;
       report.sleepOn = sleepOn;
@@ -514,8 +517,8 @@ std::string HostLink::reportBody(const Report& report) {
   const std::string wifi = jsonEscape(report.wifi);
   const std::string ip = jsonEscape(report.ip);
   // Sized from the escaped strings rather than fixed, so this cannot truncate.
-  // The literal skeleton is ~210 bytes and the fifteen numbers and booleans
-  // below cannot exceed ~130 together, which 512 clears with room to spare — and
+  // The literal skeleton is ~230 bytes and the sixteen numbers and booleans
+  // below cannot exceed ~145 together, which 512 clears with room to spare — and
   // the next field added does not have to re-derive that, because the only
   // unbounded parts are already measured.
   //
@@ -529,8 +532,12 @@ std::string HostLink::reportBody(const Report& report) {
              "{\"screen\":\"%s\",\"focus\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
              "\"uptimeMs\":%llu,\"freeKb\":%d,\"supplicantRestarts\":%d,"
              // -1 until the first successful MCU reading; the console shows
-             // nothing rather than a plausible-looking zero.
-             "\"batteryPercent\":%d,\"charging\":%s,"
+             // nothing rather than a plausible-looking zero. The millivolts are
+             // the quantity the shutdown protection actually runs on, and the
+             // percentage is display only — so the console has to be able to
+             // show both, or "is the percentage right?" has no answer short of
+             // opening the case (platform/BatteryPolicy.h).
+             "\"batteryPercent\":%d,\"batteryMillivolts\":%d,\"charging\":%s,"
              // Only the device knows this, and the console needs it to say
              // what a power cycle will bring back. Getting it wrong is the
              // dangerous direction: promising the official firmware to
@@ -552,7 +559,7 @@ std::string HostLink::reportBody(const Report& report) {
              "\"upgradeSeqInstalled\":%d}",
              screen.c_str(), focus.c_str(), wifi.c_str(), ip.c_str(),
              static_cast<unsigned long long>(report.uptimeMs), report.freeKb,
-             report.supplicantRestarts, report.batteryPercent,
+             report.supplicantRestarts, report.batteryPercent, report.batteryMillivolts,
              report.charging ? "true" : "false", report.flashed ? "true" : "false",
              StateDoc::kProtocol,
              report.sleepOn ? "true" : "false", report.sleepStartMin, report.sleepEndMin,
@@ -744,9 +751,10 @@ void HostLink::sendMusicAction(const char* action) {
 
 void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
                             const std::string& wifi, const std::string& ip,
-                            int supplicantRestarts, int batteryPercent, bool charging,
-                            bool flashed, bool sleepOn, int sleepStartMin, int sleepEndMin,
-                            int sleepIdleSec, bool sleepAsleep, bool sleepClockSynced) {
+                            int supplicantRestarts, int batteryPercent, int batteryMillivolts,
+                            bool charging, bool flashed, bool sleepOn, int sleepStartMin,
+                            int sleepEndMin, int sleepIdleSec, bool sleepAsleep,
+                            bool sleepClockSynced) {
   ::pthread_mutex_lock(&mLock);
   mTelScreen = screen;
   mTelFocus = focus;
@@ -754,6 +762,7 @@ void HostLink::setTelemetry(const std::string& screen, const std::string& focus,
   mTelIp = ip;
   mTelRestarts = supplicantRestarts;
   mTelBattery = batteryPercent;
+  mTelBatteryMv = batteryMillivolts;
   mTelCharging = charging;
   mTelFlashed = flashed;
   mTelSleepOn = sleepOn;

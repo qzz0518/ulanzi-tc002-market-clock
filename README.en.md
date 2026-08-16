@@ -101,10 +101,10 @@ this Mac and calls that vendor's usage endpoint, so nothing else has to be insta
 nothing signed in the panel says so rather than inventing a number
 (see [ADR 0010](docs/adr/0010-vibe-native-usage-collection.md)).
 
-The console's **VIBE** tab lists the ten agents and their metrics, stars at most two per agent
-(those are the ones that reach the panel), previews both 52×16 pages, and can jump the clock
-straight to the app. OpenRouter and Z.ai have no local CLI login to borrow, so they take a
-pasted API key there.
+The console's **VIBE** tab lists the four agents (Claude, Codex, OpenCode, Grok) and their
+metrics, stars at most two per agent (those are the ones that reach the panel), previews both
+52×16 pages, and can jump the clock straight to the app. All four borrow a CLI login this
+machine already carries, so no API key has to be typed anywhere.
 
 ## ZOS system firmware
 

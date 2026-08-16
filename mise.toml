@@ -79,6 +79,17 @@ if [ "$sleepowners" != "device/tc002-os/app/src/ui/SleepPolicy.cpp device/tc002-
   echo "$sleepowners" >&2
   exit 1
 fi
+# Same guard, for the rule that can POWER THE CLOCK OFF. platform/BatteryMonitor
+# talks to McuManager and therefore cannot be compiled by any host check — which
+# is exactly how its charging test stayed wrong for the whole life of the
+# firmware (it read the cell VOLTAGE as a charge flag, so a clock that had never
+# been plugged in reported 充电中 forever). The thresholds and the decision now
+# live in platform/BatteryPolicy.{h,cpp}, which the checks below link and drive.
+batteryowners=$(grep -rl 'kBatteryEmergencyMv' device/tc002-os/app/src | sort | xargs)
+if [ "$batteryowners" != "device/tc002-os/app/src/platform/BatteryPolicy.cpp device/tc002-os/app/src/platform/BatteryPolicy.h" ]; then
+  echo "FAIL the battery thresholds belong to platform/BatteryPolicy.{h,cpp} alone; found: $batteryowners" >&2
+  exit 1
+fi
 # 蓝牙配网 has TWO entry points — the 设置 → 配网 row and the console's
 # POST /api/os/ble — and they must be the same six statements. The checks below
 # can drive the wire and the arming gate, but not this: openProvisioning lives
@@ -120,6 +131,7 @@ clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/app/src/ui/*.cpp \
   device/tc002-os/app/src/visual/*.cpp \
   device/tc002-os/app/src/net/*.cpp \
+  device/tc002-os/app/src/platform/BatteryPolicy.cpp \
   device/tc002-os/app/src/platform/InstallMode.cpp \
   device/tc002-os/app/src/platform/ProvisionLog.cpp \
   device/tc002-arcade/app/src/games/*.cpp \

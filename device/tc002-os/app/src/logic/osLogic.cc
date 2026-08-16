@@ -425,7 +425,9 @@ void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
  * existed.
  */
 void restoreVibePrefs() {
-	sVibe.setShowLeft(tcos::prefs::getInt("vibe.showLeft", 0) != 0);
+	// 1, not 0: a clock that has never been told prefers 剩余 — see VibeScreen's
+	// constructor. A user who pressed the knob has a stored value and keeps it.
+	sVibe.setShowLeft(tcos::prefs::getInt("vibe.showLeft", 1) != 0);
 }
 
 /**
@@ -1322,6 +1324,12 @@ void rebuildSettings(int nowMs) {
 				snprintf(buf, sizeof(buf), "%d%% %ds", pct, left);   // 关机倒计时
 			} else if (tcos::BatteryMonitor::instance().charging()) {
 				snprintf(buf, sizeof(buf), "%d%% +", pct);            // 充电中
+			} else if (tcos::BatteryMonitor::instance().low()) {
+				// The warn threshold is a VOLTAGE, so this marker can light on a
+				// percentage that still looks comfortable — which is the point.
+				// It is the only place the device itself shows that the cell, not
+				// the gauge, is what the shutdown is watching.
+				snprintf(buf, sizeof(buf), "%d%% !", pct);            // 低电压
 			} else {
 				snprintf(buf, sizeof(buf), "%d%%", pct);
 			}
@@ -1813,6 +1821,10 @@ static bool onUI_Timer(int id) {
 			discovery.deviceIp = sNetIp;
 			discovery.baseUrl = hostLink().baseUrl();
 			discovery.lastPullMs = sLink.lastPullMonoMs;
+			// The signal that actually says the console is gone: a long poll
+			// holds open on a healthy device, so silence proves nothing and only
+			// a failed request does.
+			discovery.failures = sLink.consecutiveFailures;
 			discovery.nowMs = monoMs();
 			consoleDiscovery().noteLink(discovery);
 
@@ -2387,6 +2399,7 @@ static bool onUI_Timer(int id) {
 		                        tcos::netinfo::ipAddress(),
 		                        sWifiPolicy.supplicantRestarts() + sWifiPolicy.softApRestarts(),
 		                        tcos::BatteryMonitor::instance().percent(),
+		                        tcos::BatteryMonitor::instance().millivolts(),
 		                        tcos::BatteryMonitor::instance().charging(),
 		                        !tcos::install::isSideloaded(),
 		                        // 夜间休眠, as the DEVICE has it — which differs from

@@ -455,6 +455,11 @@
 .device-settings-trigger svg { width: 0.95rem; height: 0.95rem; }
 
 .device-settings-dialog {
+  /* 这一屏的左右内缩只有一个来源。行是 padding、说明块是 margin、页脚是 padding
+     ——三种盒模型算同一个数，任何一处照抄字面量都会在窄屏那条 @media 里掉队：
+     那里只重写了行，说明块与它管住的按钮就留在旧值上，于是同意栏和「安装到时钟」
+     和上面每一行错开。改成一个变量，窄屏只改这一个数，三者不可能再分家。 */
+  --device-settings-inset: 1.25rem;
   width: min(52rem, calc(100vw - 2rem)) !important;
   max-width: none !important;
   overflow: hidden;
@@ -465,7 +470,7 @@
 }
 .device-settings-dialog__content > :first-child,
 .device-settings-dialog__content > :nth-child(2) {
-  margin-inline: 1.25rem;
+  margin-inline: var(--device-settings-inset, 1.25rem);
 }
 .device-settings-dialog__content > :first-child { margin-top: 1.15rem; }
 .device-settings-dialog__content > :nth-child(2) {
@@ -507,7 +512,7 @@
 }
 /* 掉线时压在分节之上的那张卡。分节是整宽带边框的行，卡片按字段栏的 1.25rem
    内缩，读起来是「这一页现在的处境」，而不是又一节设置。 */
-.device-settings-banner { margin: 0.85rem 1.25rem; }
+.device-settings-banner { margin: 0.85rem var(--device-settings-inset, 1.25rem); }
 .device-settings-section {
   display: grid;
   grid-template-columns: 11rem minmax(0, 1fr);
@@ -517,7 +522,7 @@
   display: flex;
   align-items: flex-start;
   gap: 0.7rem;
-  padding: 1rem 1rem 1rem 1.25rem;
+  padding: 1rem 1rem 1rem var(--device-settings-inset, 1.25rem);
   border-right: 1px solid var(--border);
 }
 .device-settings-section__heading > span {
@@ -544,7 +549,7 @@
   min-height: 3.8rem;
   align-items: center;
   gap: 1rem;
-  padding: 0.58rem 1.25rem;
+  padding: 0.58rem var(--device-settings-inset, 1.25rem);
   border-bottom: 1px solid var(--border);
 }
 .device-setting-field:last-child { border-bottom: 0; }
@@ -581,7 +586,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: 0.55rem;
-  padding: 0.58rem 1.25rem;
+  padding: 0.58rem var(--device-settings-inset, 1.25rem);
 }
 .device-setting-control--slider {
   width: min(15rem, 52vw);
@@ -610,7 +615,7 @@
   width: 100%;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.9rem 1.25rem;
+  padding: 0.9rem var(--device-settings-inset, 1.25rem);
   border-top: 1px solid var(--border);
 }
 .device-settings-actions__spacer { flex: 1; }
@@ -630,7 +635,7 @@
 }
 .device-settings-state.is-error strong { color: var(--destructive); }
 .device-settings-timezone-options { max-height: min(22rem, 55vh); overflow-y: auto; }
-.device-settings-tabs { flex: none; margin: 0.9rem 1.25rem 0; }
+.device-settings-tabs { flex: none; margin: 0.9rem var(--device-settings-inset, 1.25rem) 0; }
 /* keepMounted 让未激活的面板留在 DOM 里、只带 hidden 属性。这里显式声明，
    别赌 UA 的 [hidden] 规则能压过 flex 容器里 .device-settings-form 的 flex:1。 */
 .device-settings-panel { display: contents; }
@@ -649,18 +654,79 @@
 /* ZOS 的音量/亮度就是系统面板那一对「下发」行本体（zos-send-row.tsx），不是照着
    重画的第二份。放进对话框只需要补齐这一栏的内缩与簇宽——行高、字号、压暗规则
    本来就和 .device-setting-field 同源。 */
-.device-settings-fields .zc-out__row { padding-inline: 1.25rem; }
+.device-settings-fields .zc-out__row { padding-inline: var(--device-settings-inset, 1.25rem); }
 .device-settings-fields .zc-out__control { width: min(15rem, 52vw); }
 .device-setting-control--host { width: min(23rem, 66vw); align-items: start; gap: 0.5rem; }
 .device-host-input { flex: 1; min-width: 0; }
 /* 一段贴在字段栏里的说明。地址表单先有了这条，ZOS 那两节也要说同样体量的话，
    所以名字改成不带「host」的那个，两处共用一份排版。 */
+/* margin，不是 padding：这一块没有自己的分隔线，靠外边距和上一行的 padding 对齐。
+   两种盒模型要算出同一个左缘，所以两边只能读同一个变量——固件那一节的同意栏与
+   「安装到时钟」就是这条规则管的，它们一旦和上面的行错开就读成了另一个容器。 */
 .device-host-note,
-.device-settings-note { margin: 0 1.25rem; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+.device-settings-note { margin: 0 var(--device-settings-inset, 1.25rem); color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
 /* 字段栏本身不带内边距，说明落在分节线上会显得挤——只有这条需要留白。 */
 .device-settings-note { padding-bottom: 0.85rem; }
 .device-host-note code { font-family: var(--mono); font-size: 0.68rem; }
-.device-host-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.35rem 1.25rem 0.2rem; }
+.device-host-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.35rem var(--device-settings-inset, 1.25rem) 0.2rem; }
+
+/* --- 固件那一节 -------------------------------------------------------------
+   常规设置的最后一节，也是这个对话框里唯一一个会重写闪存的入口。排版一律借
+   字段栏那一套：只读行就是 .device-setting-field，说明就是 .device-settings-note。
+   它以前在系统面板底下自成一块（.zc-update），搬过来时那份 CSS 一起搬走了——
+   同一段界面在两处各有一套样式，正是「风格混乱」的来源。 */
+.zos-fw__note {
+  display: flex;
+  align-items: start;
+  gap: 0.45rem;
+  text-wrap: pretty;
+}
+.zos-fw__note svg { flex: none; width: 0.85rem; height: 0.85rem; margin-top: 0.15rem; }
+.zos-fw__note strong { display: block; color: var(--foreground); font-size: 0.72rem; font-weight: 600; }
+.zos-fw__note--error { color: var(--destructive); }
+.zos-fw__note--error strong { color: var(--destructive); }
+.zos-fw__cmd {
+  padding: 0.05rem 0.28rem;
+  border-radius: 0.25rem;
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+}
+/* 说明 + 按钮的那种小块：说明自带 1.25rem 的内缩，按钮跟着对齐。 */
+.zos-fw__state { display: grid; justify-items: start; gap: 0.5rem; }
+/* 整包 MD5 要被人逐字比对，所以值走等宽并且允许在任意位置断行。 */
+.zos-fw__value { font-family: var(--mono); font-size: 0.7rem; }
+.zos-fw__upload { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+
+.zos-fw__watch-slot { padding-top: 0.85rem; }
+.zos-fw__watch { padding: 0.7rem 0.85rem; }
+.zos-fw__watch p { display: grid; gap: 0.15rem; margin: 0; }
+.zos-fw__watch strong { color: var(--foreground); font-size: 0.75rem; font-weight: 620; }
+.zos-fw__watch span { font-size: 0.66rem; line-height: 1.5; text-wrap: pretty; }
+.zos-fw__watch small { font-family: var(--mono); font-size: 0.58rem; }
+
+/* 同意栏与它管住的按钮是一个决定，所以贴在一起，与外面的段间距分开。 */
+.zos-fw__decision { display: grid; gap: 0.5rem; padding-top: 0.2rem; }
+.zos-fw__consent {
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  cursor: pointer;
+}
+.zos-fw__checkbox { margin-top: 0.04rem; }
+.zos-fw__consent > span { font-size: 0.66rem; line-height: 1.5; text-wrap: pretty; }
+.zos-fw__consent strong {
+  display: block;
+  margin-bottom: 0.1rem;
+  color: var(--foreground);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.zos-fw__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 .page-heading {
   display: flex;
@@ -1247,17 +1313,6 @@
 .vibe-preview__pager { display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
 .vibe-preview__count { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.6rem; font-variant-numeric: tabular-nums; }
 
-/* --- API 密钥（OpenRouter / Z.ai：没有本地 CLI 登录可借） ------------------ */
-
-/* 跟代理列表同在左列（.vibe-main）：说的是同一件事——「哪些代理接进来了」。 */
-.vibe-keys { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
-.vibe-key-list { display: grid; gap: 0.7rem; margin: 0; padding: 0; list-style: none; }
-.vibe-key__head { display: flex; align-items: center; gap: 0.45rem; padding-bottom: 0.3rem; }
-.vibe-key__name { font-size: 0.72rem; font-weight: 570; }
-.vibe-key__form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
-/* 输入框吃掉剩余宽度，两个按钮保持原尺寸；min-width 让它在窄列里能换行。 */
-.vibe-key__input { flex: 1 1 12rem; min-width: 0; }
-
 /* --- 上屏（VIBE 是 ZOS 根环上的 App，不再是频道） -------------------------- */
 
 .vibe-display { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
@@ -1553,10 +1608,11 @@
   /* 顶栏放不下两段文字了：固件名收成图标（aria-label 仍在），电量百分比留着
      ——「像手机一样」的那个数字正是这块要显示的东西。 */
   .firmware-chip__label { display: none; }
-  .device-setting-field { grid-template-columns: minmax(0, 1fr) auto; padding-inline: 0.9rem; }
-  .device-settings-fields .zc-out__row { padding-inline: 0.9rem; }
-  .device-settings-section__heading { padding-inline: 0.9rem; }
-  .device-settings-actions { padding-inline: 0.9rem; }
+  /* 窄屏收紧左右内缩：一个数，整屏跟着走。以前这里逐条重写行、页脚和分节标题，
+     而说明块（.device-settings-note）不在名单上——固件那一节的同意栏与安装按钮
+     因此停在 1.25rem，比它上面每一行都往里 5.6px，右缘同样对不齐。 */
+  .device-settings-dialog { --device-settings-inset: 0.9rem; }
+  .device-setting-field { grid-template-columns: minmax(0, 1fr) auto; }
   .device-settings-actions > button:first-child span { font-size: 0; }
   .device-access-popover { width: calc(100vw - 1.5rem) !important; }
 }

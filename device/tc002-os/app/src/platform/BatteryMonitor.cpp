@@ -10,7 +10,8 @@
 namespace tcos {
 
 BatteryMonitor::BatteryMonitor()
-    : mRunning(false), mStarted(false), mPercent(-1), mCharging(false), mCountdown(-1) {
+    : mRunning(false), mStarted(false), mPercent(-1), mMillivolts(-1), mCharging(false),
+      mLow(false), mCountdown(-1) {
   ::pthread_mutex_init(&mLock, 0);
 }
 
@@ -48,42 +49,54 @@ void BatteryMonitor::run() {
     McuManager::getInstance().setUsbState(-1);
     const int usb = McuManager::getInstance().queryUsbState();
 
-    const int level = battery.first;
-    // The MCU reports charge state twice — in the battery pair and as USB
-    // presence. Either one counts: a device on the charger is not in danger
-    // however low the cell reads, and disagreement between the two should fail
-    // towards "safe", never towards a shutdown that surprises the user.
-    const bool charging = battery.second > 0 || usb > 0;
+    BatteryReading reading;
+    reading.percent = battery.first;
+    // `.second` is the cell voltage in millivolts, NOT a charge flag — the
+    // whole rule lives in BatteryPolicy, which explains where that is from.
+    reading.millivolts = battery.second;
+    reading.usb = usb;
 
     ::pthread_mutex_lock(&mLock);
-    if (level >= 0) mPercent = level;
-    mCharging = charging;
-
-    if (charging || level < 0) {
-      // Plugged in, or we have no reading to act on. Either cancels a pending
-      // shutdown outright rather than pausing it.
-      if (mCountdown >= 0) LOGD("battery: shutdown cancelled (charging=%d)", charging ? 1 : 0);
-      mCountdown = -1;
-    } else if (level <= kShutdownPercent) {
-      if (mCountdown < 0) {
-        mCountdown = kCountdownSeconds;
-        LOGE_TRACE("battery: %d%%, shutting down in %ds", level, mCountdown);
-      }
-    } else if (level > kWarnPercent) {
-      mCountdown = -1;
+    const int wasCountdown = mCountdown;
+    const BatteryDecision decision = decideBattery(reading, wasCountdown);
+    if (reading.percent >= 0) mPercent = reading.percent;
+    if (reading.millivolts > 0) mMillivolts = reading.millivolts;
+    mCharging = decision.charging;
+    mLow = decision.low;
+    mCountdown = decision.countdown;
+    if (wasCountdown >= 0 && decision.countdown < 0) {
+      LOGD("battery: shutdown cancelled (charging=%d, %dmV)", decision.charging ? 1 : 0,
+           reading.millivolts);
+    } else if (wasCountdown < 0 && decision.countdown >= 0) {
+      LOGE_TRACE("battery: %dmV (%d%%), shutting down in %ds", reading.millivolts,
+                 reading.percent, decision.countdown);
     }
     const int countdown = mCountdown;
     ::pthread_mutex_unlock(&mLock);
 
     if (countdown >= 0) {
-      // Count down in one-second steps so the panel can show it, and re-check
-      // the charger every step: plugging in during the countdown must stop it.
+      // Count down in one-second steps so the panel can show it, and ASK THE
+      // MCU about the charger every step. Reading the cached mCharging here was
+      // the same class of mistake as the one this file was fixed for: nothing
+      // writes that field while this loop runs — the only writer is the poll at
+      // the top, which is exactly what the loop is standing in for — so the
+      // grace period could not be interrupted by the one act it exists to give
+      // the user time for. USB alone, not the battery pair: one blocking round
+      // trip rather than two, which keeps the step near its second. The query
+      // makes each step slightly LONGER than a second, which lengthens the
+      // grace rather than shortening it — the safe direction for a countdown
+      // that ends in a power cut.
       for (int left = countdown; left >= 0 && mRunning; --left) {
+        McuManager::getInstance().setUsbState(-1);
+        const bool plugged = McuManager::getInstance().queryUsbState() > 0;
         ::pthread_mutex_lock(&mLock);
-        mCountdown = left;
-        const bool stillDraining = !mCharging;
+        mCountdown = plugged ? -1 : left;
+        if (plugged) mCharging = true;
         ::pthread_mutex_unlock(&mLock);
-        if (!stillDraining) break;
+        if (plugged) {
+          LOGD("battery: shutdown cancelled, charger in with %ds left", left);
+          break;
+        }
         if (left == 0) {
           LOGE_TRACE("battery: powering off to protect the cell");
           // The MCU cuts power; this call does not return in any useful sense.
@@ -95,7 +108,7 @@ void BatteryMonitor::run() {
       continue;  // re-poll immediately rather than waiting out the full period
     }
 
-    for (int i = 0; i < kPollSeconds && mRunning; ++i) ::sleep(1);
+    for (int i = 0; i < kBatteryPollSeconds && mRunning; ++i) ::sleep(1);
   }
 }
 
@@ -106,9 +119,23 @@ int BatteryMonitor::percent() const {
   return value;
 }
 
+int BatteryMonitor::millivolts() const {
+  ::pthread_mutex_lock(&mLock);
+  const int value = mMillivolts;
+  ::pthread_mutex_unlock(&mLock);
+  return value;
+}
+
 bool BatteryMonitor::charging() const {
   ::pthread_mutex_lock(&mLock);
   const bool value = mCharging;
+  ::pthread_mutex_unlock(&mLock);
+  return value;
+}
+
+bool BatteryMonitor::low() const {
+  ::pthread_mutex_lock(&mLock);
+  const bool value = mLow;
   ::pthread_mutex_unlock(&mLock);
   return value;
 }

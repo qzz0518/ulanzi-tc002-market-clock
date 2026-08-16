@@ -10,14 +10,23 @@
  * /lib/libzkupgrade.so. So this script produces exactly the container that
  * updater accepts, and nothing else.
  *
+ * WHERE THE CONTAINER SPEC LIVES
+ * ------------------------------
+ * `./zkswe-image.ts` — the magic, the header arithmetic, the item descriptor,
+ * the ei block, pack and parse. It moved out when the console gained an upload
+ * route, because that route has to answer the same questions about a file
+ * somebody hands it, and two copies of a spec derived from a vendor
+ * disassembly is one copy too many. What stayed here is what only a packer
+ * does: build the res filesystem, and prove the spec against the stock image.
+ *
  * WHY IT IS SAFE TO BELIEVE THE LAYOUT
  * ------------------------------------
- * Every field below was read out of the ARM disassembly of the on-device
- * /lib/libzkupgrade.so (54,744 bytes — note the copy pulled via a text-mangling
- * path is 55,199 bytes and disassembles to garbage) AND is re-proved on every
- * run by `verifyStockRoundTrip()`: we re-derive all 572 header bytes of the
- * stock /mnt/storage/update.img from its payload alone and require a
- * byte-identical result. Nothing here is copied out of the file being
+ * Every field in that module was read out of the ARM disassembly of the
+ * on-device /lib/libzkupgrade.so (54,744 bytes — note the copy pulled via a
+ * text-mangling path is 55,199 bytes and disassembles to garbage) AND is
+ * re-proved on every run by `verifyStockRoundTrip()`: we re-derive all 572
+ * header bytes of the stock /mnt/storage/update.img from its payload alone and
+ * require a byte-identical result. Nothing here is copied out of the file being
  * reproduced, so the round trip is a real test of the spec rather than a
  * tautology. If it ever fails, the header is not understood and we emit nothing.
  *
@@ -41,280 +50,22 @@
  * to be built from the running firmware, and this is how.
  */
 
-import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { judgeBundle } from "./bundle-gate.ts";
+import {
+  IMAGE_ALIGNMENT,
+  ITEM_RESERVED,
+  PART_TYPE_RES,
+  RES_PARTITION_BYTES,
+  md5,
+  packContainer,
+  parseContainer,
+  type PackedItem,
+} from "./zkswe-image.ts";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
-
-// ---------------------------------------------------------------------------
-// Container spec
-// ---------------------------------------------------------------------------
-
-/**
- * Checked with memcmp(hdr, "ZKSWEV1.0", 9) at libzkupgrade 0x5540 — only the
- * first nine bytes are compared, but the stock image carries the full 16-byte
- * string and we reproduce it verbatim rather than inventing a shorter one.
- */
-const MAGIC = Buffer.from("ZKSWEV1.0-180127", "ascii");
-
-/** read(fd, hdr, 20) at 0x5518: magic[16] + hdrSize + itemCount + eiOffset + 1. */
-const HEADER_PREFIX_BYTES = 20;
-
-/** `add r5,r5,#28` at 0x56d0 walks the item array; the struct is 28 bytes. */
-const ITEM_BYTES = 28;
-
-/** read(fd, ei, 524) at 0x5568, and a short read is a hard reject (error 4). */
-const EI_BYTES = 524;
-
-/** memcpy(buf+hdrSize, ei, 520) at 0x55f8 — the trailing u32 is the CRC itself. */
-const EI_CRC_COVERED_BYTES = 520;
-
-/**
- * The updater relocates the image's first 16 bytes into the item descriptor and
- * uses the 16 bytes they vacate to carry the MD5. See `packContainer`.
- */
-const HEAD_BYTES = 16;
-
-/**
- * Partition type, indexed into a 9-entry `const char*` table at vaddr 0x1c950
- * (`ldrb r7,[r5,#20]; cmp r7,#8; bhi` at 0x5670, `ldr r8,[r3,r7,lsl #2]` at
- * 0x5930). Resolved entries, in order:
- *   0 uboot:BOOT:BOOT0  1 boot:KERNEL  2 system:rootfs  3 res
- *   4 config  5 recovery  6 MISC:boot_logo:LOGO  7 extres  8 extstatic
- * Index 3 is the string "res" — it is not a standalone literal in .rodata, the
- * linker merged it into the tail of "extres" (0xb4db + 3 = 0xb4de), which is why
- * a `strings` grep for it comes up empty. Cross-checked independently: the stock
- * payload's file set is byte-for-byte the live /res (221 files, 0 path deltas).
- */
-const PART_TYPE_RES = 3;
-
-/** /proc/mtd: mtd3 res is 0x800000. `cmp size,getSize(); bhi -> error` at 0x5b70. */
-const RES_PARTITION_BYTES = 0x800000;
-
-/**
- * Three bytes the updater never loads — the only reads of the item struct are
- * [r5,#4] (offset), [r5,#8] (size), the 16-byte head copy from r5+12, and the
- * type byte at r5+0. They sit inside the CRC, so they cannot be dropped, but
- * their meaning is unknown; we replay the stock bytes rather than guess.
- */
-const ITEM_RESERVED = Buffer.from([0x10, 0x60, 0x6c]);
-
-/**
- * hdr[19]. `grep 'sp, #67]'` over the whole library disassembly returns zero
- * hits: nothing in libzkupgrade ever reads this byte. Same reasoning as above —
- * CRC-covered, so replayed verbatim.
- */
-const HEADER_RESERVED_19 = 0x23;
-
-/** ei[4]. Not read by the flasher, but part of the accepted image. */
-const EI_VERSION = 0x02;
-
-/**
- * ei+5, u32 LE, *unaligned* (`ldr r3,[sp,#329]`). Compared against the model
- * record's +4 at 0x558c; a mismatch jumps straight to error 5. 0xAA550606 is
- * "Zkswe_SSD21X_SPINOR" in the model table at .data.rel.ro 0x1c9c0 — this is
- * what makes the image model-locked, and it is why a TC002 image must not be
- * pointed at another FlyThings board.
- */
-const EI_PLATFORM_ID = 0xaa550606;
-
-/**
- * ei+9. Read as u8 and, when zero, substituted with 0xF1 before the comparison
- * (`cmp r3,#0; moveq r3,#241` at 0x55a4). The stock image stores 0, so we do too.
- */
-const EI_FLASH_TYPE = 0x00;
-
-/**
- * ei[11..520) is 509 bytes of MSVC-`rand()` output from whatever packed the
- * stock image: state = state*214013 + 2531011, value = (state>>16)&0x7fff,
- * emitted value-then-advance as u32 LE with the 128th draw truncated to its low
- * byte. Seeded at 0x14e4a39e it reproduces all 127 whole words and the trailing
- * byte 0x8a exactly.
- *
- * That matters for two reasons. It proves the region is packer noise rather than
- * a slice table or per-chunk checksums — it cannot encode anything about the
- * payload, because it is a pure function of the seed. And it lets us *generate*
- * the bytes instead of copying them out of the stock file, which is what makes
- * the round-trip check below meaningful.
- *
- * We reuse the stock seed rather than picking a fresh one: the region only ever
- * enters the CRC, so any content would do, but an ei block byte-identical to one
- * the device has already accepted is the cheaper risk.
- */
-const EI_FILLER_SEED = 0x14e4a39e;
-const EI_FILLER_START = 11;
-
-/** mksquashfs pads to 4 KiB; the stock image's 0x2A4BFE rounds to 0x2A5000. */
-const IMAGE_ALIGNMENT = 4096;
-
-// ---------------------------------------------------------------------------
-// Primitives
-// ---------------------------------------------------------------------------
-
-const crcTable = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i += 1) {
-    let c = i;
-    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[i] = c >>> 0;
-  }
-  return table;
-})();
-
-/** Standard zlib/ISO-HDLC CRC-32; the routine at libzkupgrade 0x8fd8. */
-function crc32(bytes: Uint8Array): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < bytes.length; i += 1) c = crcTable[(c ^ bytes[i]!) & 0xff]! ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function md5(bytes: Uint8Array): Buffer {
-  return createHash("md5").update(bytes).digest();
-}
-
-/** See EI_FILLER_SEED. Writes ei[11..520) in place. */
-function writeEiFiller(ei: Buffer, seed: number): void {
-  let state = seed >>> 0;
-  for (let offset = EI_FILLER_START; offset < EI_CRC_COVERED_BYTES; offset += 4) {
-    const value = (state >>> 16) & 0x7fff;
-    state = (Math.imul(state, 214013) + 2531011) >>> 0;
-    const width = Math.min(4, EI_CRC_COVERED_BYTES - offset);
-    for (let b = 0; b < width; b += 1) ei[offset + b] = (value >>> (8 * b)) & 0xff;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Pack / parse
-// ---------------------------------------------------------------------------
-
-interface PackedItem {
-  type: number;
-  reserved: Buffer;
-  offset: number;
-  size: number;
-  head: Buffer;
-}
-
-/**
- * Build a single-slice container around one partition image.
- *
- * The one counter-intuitive part, and the one that bricks a device if you get it
- * wrong: **the image is not laid down contiguously at item.offset.** At 0x5bc0
- * the updater copies item[12..28] — 16 bytes stored inside the descriptor — to
- * the front of its write buffer, then `lseek(fd, item.offset + 16)` at 0x5bec
- * and streams the rest of the file after them. The 16 bytes physically sitting
- * at item.offset are never written to flash; they hold the MD5 that
- * zk_upgrade_check verifies. So the image's own first 16 bytes travel in the
- * header and the payload region begins at image[16:]. A builder that writes
- * image[0:] at item.offset produces a partition whose superblock head is 16
- * bytes of MD5 — mtd3 has no A/B pair and no recovery partition to fall back on.
- */
-function packContainer(image: Buffer, type: number): Buffer {
-  if (image.length % IMAGE_ALIGNMENT !== 0) {
-    throw new Error(`image must be ${IMAGE_ALIGNMENT}-byte aligned, got ${image.length}`);
-  }
-  if (image.length <= HEAD_BYTES) throw new Error("image is too small to carry a head");
-
-  const itemCount = 1;
-  // hdr[16] doubles as "bytes before ei" — it is both the length of the second
-  // read (`__read_chk(fd, buf, hdr[16], 1024)` at 0x55e0) and the lseek target
-  // that finds ei (`ldrb r1,[sp,#66]` at 0x554c). Both are u8, which caps a
-  // container at 8 items: 20 + 28*9 = 272 does not fit.
-  const headerSize = HEADER_PREFIX_BYTES + ITEM_BYTES * itemCount;
-  const eiOffset = headerSize;
-  const payloadOffset = eiOffset + EI_BYTES;
-
-  const out = Buffer.alloc(payloadOffset + image.length);
-  MAGIC.copy(out, 0);
-  out[16] = headerSize;
-  out[17] = itemCount;
-  out[18] = eiOffset;
-  out[19] = HEADER_RESERVED_19;
-
-  const item = out.subarray(HEADER_PREFIX_BYTES, HEADER_PREFIX_BYTES + ITEM_BYTES);
-  item[0] = type;
-  ITEM_RESERVED.copy(item, 1);
-  item.writeUInt32LE(payloadOffset, 4);
-  item.writeUInt32LE(image.length, 8);
-  image.copy(item, 12, 0, HEAD_BYTES);
-
-  const ei = out.subarray(eiOffset, eiOffset + EI_BYTES);
-  ei.writeUInt32LE(EI_BYTES, 0);
-  ei[4] = EI_VERSION;
-  ei.writeUInt32LE(EI_PLATFORM_ID, 5);
-  ei[9] = EI_FLASH_TYPE;
-  // ei[10] is a single zero byte between the flash type and the filler. It is
-  // outside the rand() run (the LCG fit starts at ei+11) and unread by the
-  // updater; alloc() already zeroed it, so this is a note rather than a write.
-  writeEiFiller(ei, EI_FILLER_SEED);
-
-  // The payload's first 16 bytes are the MD5 of the *reconstructed* image, i.e.
-  // of exactly what lands in flash. zk_upgrade_check reads them, then hashes
-  // item.head followed by the rest of the payload and memcmp's.
-  md5(image).copy(out, payloadOffset);
-  image.copy(out, payloadOffset + HEAD_BYTES, HEAD_BYTES);
-
-  // crc32 over hdr[16] bytes read from file offset 0, concatenated with the
-  // first 520 bytes of ei (0x55cc-0x5610). Because ei sits at exactly hdr[16],
-  // that is one contiguous run: out[0 .. eiOffset+520).
-  ei.writeUInt32LE(crc32(out.subarray(0, eiOffset + EI_CRC_COVERED_BYTES)), EI_CRC_COVERED_BYTES);
-  return out;
-}
-
-/**
- * Independent reader used to check our own output and to validate the stock
- * image before we trust its payload. Deliberately re-derives rather than
- * re-using packContainer's intermediates.
- */
-function parseContainer(bytes: Buffer): { items: PackedItem[]; images: Buffer[] } {
-  if (bytes.length < HEADER_PREFIX_BYTES) throw new Error("file is shorter than the header");
-  if (bytes.subarray(0, 9).compare(MAGIC.subarray(0, 9)) !== 0) throw new Error("bad ZKSWE magic");
-
-  const headerSize = bytes[16]!;
-  const itemCount = bytes[17]!;
-  const eiOffset = bytes[18]!;
-  if (headerSize !== HEADER_PREFIX_BYTES + ITEM_BYTES * itemCount) {
-    throw new Error(`hdr[16]=${headerSize} disagrees with ${itemCount} items`);
-  }
-  if (eiOffset !== headerSize) throw new Error(`ei offset ${eiOffset} != header size ${headerSize}`);
-
-  const ei = bytes.subarray(eiOffset, eiOffset + EI_BYTES);
-  if (ei.length !== EI_BYTES) throw new Error("truncated ei block");
-  if (ei.readUInt32LE(5) !== EI_PLATFORM_ID) {
-    throw new Error(`platform ${ei.readUInt32LE(5).toString(16)} is not Zkswe_SSD21X_SPINOR`);
-  }
-  const storedCrc = ei.readUInt32LE(EI_CRC_COVERED_BYTES);
-  const actualCrc = crc32(bytes.subarray(0, eiOffset + EI_CRC_COVERED_BYTES));
-  if (storedCrc !== actualCrc) {
-    throw new Error(`header crc32 ${actualCrc.toString(16)} != stored ${storedCrc.toString(16)}`);
-  }
-
-  const items: PackedItem[] = [];
-  const images: Buffer[] = [];
-  for (let i = 0; i < itemCount; i += 1) {
-    const base = HEADER_PREFIX_BYTES + ITEM_BYTES * i;
-    const item: PackedItem = {
-      type: bytes[base]!,
-      reserved: Buffer.from(bytes.subarray(base + 1, base + 4)),
-      offset: bytes.readUInt32LE(base + 4),
-      size: bytes.readUInt32LE(base + 8),
-      head: Buffer.from(bytes.subarray(base + 12, base + ITEM_BYTES)),
-    };
-    if (item.offset + item.size > bytes.length) throw new Error(`item ${i} runs past EOF`);
-    const payload = bytes.subarray(item.offset, item.offset + item.size);
-    const image = Buffer.concat([item.head, payload.subarray(HEAD_BYTES)]);
-    const digest = md5(image);
-    if (digest.compare(payload.subarray(0, HEAD_BYTES)) !== 0) {
-      throw new Error(`item ${i} md5 ${digest.toString("hex")} != stored`);
-    }
-    items.push(item);
-    images.push(image);
-  }
-  return { items, images };
-}
 
 // ---------------------------------------------------------------------------
 // The safety argument

@@ -437,9 +437,10 @@ class HostLink {
    */
   void setTelemetry(const std::string& screen, const std::string& focus,
                     const std::string& wifi, const std::string& ip,
-                    int supplicantRestarts, int batteryPercent, bool charging,
-                    bool flashed, bool sleepOn, int sleepStartMin, int sleepEndMin,
-                    int sleepIdleSec, bool sleepAsleep, bool sleepClockSynced);
+                    int supplicantRestarts, int batteryPercent, int batteryMillivolts,
+                    bool charging, bool flashed, bool sleepOn, int sleepStartMin,
+                    int sleepEndMin, int sleepIdleSec, bool sleepAsleep,
+                    bool sleepClockSynced);
 
   /** Everything POST /api/os/report carries, as one value. */
   struct Report {
@@ -451,6 +452,17 @@ class HostLink {
     int freeKb;
     int supplicantRestarts;
     int batteryPercent;
+    /**
+     * Cell voltage in millivolts, or -1 when this build has no reading yet.
+     *
+     * The percentage alone cannot answer 「is the percentage right?」, and that
+     * is not an idle question here: the MCU's second field was read as a charge
+     * flag for the whole life of this firmware, so the console said 充电中 on a
+     * clock that was never plugged in. This is the quantity the shutdown
+     * protection actually runs on (platform/BatteryPolicy.h), so it is the one
+     * an owner needs to see next to the number they are being asked to trust.
+     */
+    int batteryMillivolts;
     bool charging;
     bool flashed;
     bool sleepOn;
@@ -473,6 +485,7 @@ class HostLink {
 
     Report()
         : uptimeMs(0), freeKb(0), supplicantRestarts(0), batteryPercent(-1),
+          batteryMillivolts(-1),
           charging(false), flashed(false), sleepOn(false), sleepStartMin(0),
           sleepEndMin(0), sleepIdleSec(0), sleepAsleep(false),
           sleepClockSynced(false), upgradeSeqInstalled(0) {}
@@ -587,6 +600,7 @@ class HostLink {
   std::string mTelIp;
   int mTelRestarts;
   int mTelBattery;
+  int mTelBatteryMv;
   bool mTelCharging;
   bool mTelFlashed;
   bool mTelSleepOn;

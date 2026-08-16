@@ -45,7 +45,6 @@ import { BundledCryptoLogoCatalog } from "./market/logo-catalog.ts";
 import { NotifyManager } from "./notify.ts";
 import { WeatherClient } from "./weather/client.ts";
 import { VibeUsageService } from "./vibe/usage-service.ts";
-import { VibeKeyStore } from "./vibe/vibe-key-store.ts";
 import { VibeStore } from "./vibe/vibe-store.ts";
 
 function errorMessage(error: unknown): string {
@@ -94,14 +93,11 @@ restoreDeviceLyricTheme(await lyricThemeStore.load());
 // catalog defaults would push a panel the user never asked for.
 const vibeStore = new VibeStore(".runtime/vibe.json");
 await vibeStore.load();
-// Vendor API keys live in their own 0600 file: OpenRouter and Z.ai have no CLI
-// on this machine to borrow a login from, so the user pastes a key instead.
-const vibeKeyStore = new VibeKeyStore(".runtime/vibe-keys.json");
-await vibeKeyStore.load();
+// Vendor API keys live in their own 0600 file, for vendors with no CLI on this
+// machine to borrow a login from. All four agents VIBE collects have one, so the
 // Each adapter talks to its own vendor over the public internet, so these
 // requests take the normal route — CLOCK_HTTP_PROXY is for the device only.
 const vibeClient = new VibeUsageService({
-  apiKey: (providerId) => vibeKeyStore.resolve(providerId),
 });
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
 const instrumentStore = new InstrumentStore(".runtime/market-instruments");
@@ -584,7 +580,6 @@ const controlHandler = createControlHandler(controller, {
         // The console's 刷新 is the one caller allowed past the collection floor.
         const view = await controller.getVibeUsage(refresh, refresh);
         return {
-          keys: vibeKeyStore.status(),
           starred: view.starred,
           snapshot: view.snapshot,
           error: null,
@@ -593,7 +588,6 @@ const controlHandler = createControlHandler(controller, {
         // Signed into nothing yet is the normal first-run state, so the console
         // gets a 200 with the reason and renders its setup guide.
         return {
-          keys: vibeKeyStore.status(),
           starred: vibeStore.getStarred(),
           snapshot: null,
           error: errorMessage(error),
@@ -610,7 +604,6 @@ const controlHandler = createControlHandler(controller, {
       void publishOsVibe();
       return next;
     },
-    setKey: (providerId, key) => vibeKeyStore.set(providerId, key),
   },
 });
 const gameSockets = await createGameSocketHub({

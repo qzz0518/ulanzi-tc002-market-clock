@@ -64,8 +64,18 @@ class ConsoleDiscovery {
     std::string baseUrl;    // HostLink::baseUrl(), the address really polled
     uint64_t lastPullMs;    // monotonic ms of the last successful pull; 0 = never
     uint64_t nowMs;
+    /**
+     * HostLink::Snapshot::consecutiveFailures — polls that failed in a row.
+     *
+     * THIS, not elapsed time, is what says the console is gone. The pull is a
+     * LONG POLL: a healthy device deliberately holds a request open with
+     * nothing coming back, so "no successful pull for N seconds" is equally
+     * true of a clock that is perfectly fine and one that is talking to a dead
+     * address. Only a failed request distinguishes them.
+     */
+    int failures;
 
-    Link() : lastPullMs(0), nowMs(0) {}
+    Link() : lastPullMs(0), nowMs(0), failures(0) {}
   };
 
   // The console announces to this port. Compile-time, and deliberately not
@@ -78,7 +88,20 @@ class ConsoleDiscovery {
   // restart or a laptop lid closing for a moment is not "lost" — those recover
   // on their own and re-pointing the clock through them would be churn — and
   // short enough that a lease that moved is repaired before anyone notices.
-  static const uint64_t kLostMs = 60000;
+  /**
+   * Failed polls in a row before a hint may be acted on.
+   *
+   * Two, which the backoff (1 s, then doubling) reaches in about two to four
+   * seconds. It was sixty seconds of elapsed silence, and that was too
+   * cautious to be pleasant: the owner watched a working console sit
+   * unreachable for over a minute after a DHCP lease moved. The caution was
+   * also misplaced — the risk being guarded against is adopting a WRONG
+   * address, and that is held off by the /health probe and the same-/24 test,
+   * neither of which cares how long we waited. A hint that matches the address
+   * already in use is a no-op, so a console that merely restarted costs
+   * nothing however early we look.
+   */
+  static const int kLostFailures = 2;
   // The probe is one request to a LAN peer that has just proven it is up by
   // sending a packet. Long enough for a Bun handler that is busy rendering a
   // channel, short enough that a black hole does not park the thread.
@@ -122,7 +145,7 @@ class ConsoleDiscovery {
   /** Gate 1. `lastPullMs == 0` means no pull has ever succeeded, which after
    *  kLostMs of uptime is exactly the freshly flashed unit that has never been
    *  told where its console is. */
-  static bool lost(uint64_t nowMs, uint64_t lastPullMs);
+  static bool lost(int failures);
 
   /** The URL `hint` names, folded through the one normaliser this firmware has
    *  (ble::consoleUrl), so gate 3 compares like with like. */

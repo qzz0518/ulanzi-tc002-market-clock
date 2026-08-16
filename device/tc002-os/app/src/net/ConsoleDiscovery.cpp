@@ -100,12 +100,13 @@ bool ConsoleDiscovery::sameSlash24(const std::string& deviceIp, const std::strin
   return mine[0] == theirs[0] && mine[1] == theirs[1] && mine[2] == theirs[2];
 }
 
-bool ConsoleDiscovery::lost(uint64_t nowMs, uint64_t lastPullMs) {
-  // A clock that has not been running for kLostMs yet is not lost, it is
-  // booting; and a stamp from the future (which a monotonic clock cannot
-  // produce, but a caller confusing its epochs can) must not read as lost.
-  if (lastPullMs > nowMs) return false;
-  return (nowMs - lastPullMs) >= kLostMs;
+bool ConsoleDiscovery::lost(int failures) {
+  // Failed polls, not elapsed silence. The pull is a long poll: a healthy clock
+  // holds a request open for as long as nothing changes, so "no document for N
+  // seconds" describes a working device just as well as a dead address. Only a
+  // request that FAILED tells the two apart, and the backoff reaches two of
+  // them in about two to four seconds.
+  return failures >= kLostFailures;
 }
 
 std::string ConsoleDiscovery::hintHost(const Hint& hint) {
@@ -134,7 +135,7 @@ bool ConsoleDiscovery::consoleReply(int status, const std::string& body) {
 std::string ConsoleDiscovery::candidate(const Link& link, const Hint& hint) {
   // Gate 1. First, and it is the cheap one: a device that is talking to its
   // console has no business looking at a stranger's packet at all.
-  if (!lost(link.nowMs, link.lastPullMs)) return std::string();
+  if (!lost(link.failures)) return std::string();
   // Gate 2.
   if (!sameSlash24(link.deviceIp, hint.host)) return std::string();
   const std::string url = hintUrl(hint);
@@ -309,10 +310,13 @@ void ConsoleDiscovery::runListener() {
     ::pthread_mutex_lock(&mLock);
     const Link link = mLink;
     ::pthread_mutex_unlock(&mLock);
-    const bool listening = lost(link.nowMs, link.lastPullMs);
-
+    // REMEMBERING IS NOT ACTING. Every well-formed hint is parsed and kept,
+    // healthy or not, so that the moment the console does go missing the
+    // address is already in hand and the heal does not wait out a broadcast
+    // interval. Nothing is adopted here — the four gates still stand, and
+    // `lost` is checked where the decision is made, in pumpProbe/candidate.
     const ssize_t n = ::recvfrom(mSocket, buffer, sizeof(buffer), 0, 0, 0);
-    if (n > 0 && listening) onDatagram(buffer, static_cast<int>(n));
+    if (n > 0) onDatagram(buffer, static_cast<int>(n));
     // Outside the branch: a candidate armed on a previous pass still has to be
     // proven even if this pass timed out with nothing on the wire.
     pumpProbe();

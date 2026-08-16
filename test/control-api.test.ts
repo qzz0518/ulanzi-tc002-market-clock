@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1749,6 +1750,41 @@ describe("tc002-os night sleep", () => {
       asleep: false, clockSynced: false,
     });
   });
+
+  test("the cell voltage reaches the console, and older firmware simply omits it", async () => {
+    const { OsLinkHub } = await import("../src/os-link.ts");
+    const osLink = new OsLinkHub();
+    const handler = createControlHandler(fakeWorkspaceController(), { osLink });
+    const origin = "http://127.0.0.1:43820";
+    const post = (body: unknown) => handler(new Request(`${origin}/api/os/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+
+    expect((await post({
+      screen: "launcher", uptimeMs: 5, flashed: true,
+      batteryPercent: 54, batteryMillivolts: 3821, charging: false,
+    })).status).toBe(204);
+    expect(osLink.getTelemetry()?.batteryMillivolts).toBe(3821);
+    // 这才是关机保护真正读的量;百分比只是显示。
+    expect(osLink.getTelemetry()?.batteryPercent).toBe(54);
+
+    // -1 是真答案(「还没读到」),必须原样留着 —— 和「这台固件根本不会报」是
+    // 两件事,控制台对这两件事说的话不一样。
+    await post({ screen: "launcher", uptimeMs: 6, flashed: true, batteryMillivolts: -1 });
+    expect(osLink.getTelemetry()?.batteryMillivolts).toBe(-1);
+
+    await post({ screen: "launcher", uptimeMs: 7, flashed: true, batteryPercent: 54 });
+    expect(osLink.getTelemetry()?.batteryMillivolts).toBeUndefined();
+    // 字段乱了也不许把心跳整条打掉,更不许编一个看着像真的数字。
+    await post({ screen: "launcher", uptimeMs: 8, flashed: true, batteryMillivolts: "3821" });
+    expect(osLink.getTelemetry()?.batteryMillivolts).toBeUndefined();
+
+    const state = await handler(new Request(`${origin}/api/os/state`));
+    const body = await state.json() as { telemetry: { batteryMillivolts?: number } };
+    expect("batteryMillivolts" in body.telemetry).toBe(false);
+  });
 });
 
 // Self-update. The chain from the console to a rewritten mtd3 already exists —
@@ -1805,7 +1841,13 @@ describe("tc002-os firmware routes", () => {
     expect((await missing.json() as { error: string }).error).toContain("packed");
 
     const before = await handler(new Request("http://127.0.0.1/api/os/firmware/status"));
-    expect(await before.json()).toEqual({ packed: false, image: null, upgradeSeq: 0 });
+    expect(await before.json()).toEqual({
+      packed: false,
+      image: null,
+      source: null,
+      shadowedPacked: null,
+      upgradeSeq: 0,
+    });
 
     const image = zkswe(DIGEST);
     await Bun.write(osFirmwarePath, image);
@@ -1832,6 +1874,16 @@ describe("tc002-os firmware routes", () => {
     // just made. Fed straight into describeImageAge in web/src/lib/zos-link.ts.
     expect(body.image.builtAt).toBeGreaterThan(0);
     expect(body.image.builtAt).toBeLessThanOrEqual(Date.now());
+    // The packer's output is the source when nobody has uploaded anything, and
+    // it is named as such: 「这是我刚打的那一份」 and 「这是别人给我的文件」 are
+    // different claims and the console must be able to tell them apart.
+    const provenance = await (await handler(
+      new Request("http://127.0.0.1/api/os/firmware/status"),
+    )).json() as { source: { kind: string; fileName: string | null }; shadowedPacked: unknown };
+    expect(provenance.source.kind).toBe("packed");
+    expect(provenance.source.fileName).toBeNull();
+    // Nothing is being shadowed: the packed image IS the armed one.
+    expect(provenance.shadowedPacked).toBeNull();
   });
 
   // The route has no same-origin check — it is device-facing, and the device
@@ -1947,6 +1999,231 @@ describe("tc002-os firmware routes", () => {
     expect(osLink.serialize()).not.toContain("bleopen");
   });
 
+  // --- the owner's own image ------------------------------------------------
+  //
+  // Before this route existed, the only image the console could install was
+  // whatever `mise run os-image` last packed — a developer's button rather than
+  // a feature. Uploading turns it into one, and everything below exists to keep
+  // the two claims apart: "this file arrived intact" and "this is the build I
+  // meant". Only the owner can make the second one, and only by pressing 安装.
+
+  const ORIGIN = "http://127.0.0.1:43820";
+
+  /** A container that actually passes the validator, unlike `zkswe()` above. */
+  async function realImage(type = 3, mark = 0x5a): Promise<Buffer> {
+    const { packContainer } = await import("../device/tc002-os/release/zkswe-image.ts");
+    const image = Buffer.alloc(8192, mark);
+    image.writeUInt32LE(0x73717368, 0); // squashfs magic
+    image.writeUInt32LE(1_780_910_006, 8); // mkfs time
+    return packContainer(image, type);
+  }
+
+  function uploadRequest(bytes: Buffer, fileName = "zos-update.img"): Request {
+    const form = new FormData();
+    form.set("file", new File([new Uint8Array(bytes)], fileName));
+    return new Request(`${ORIGIN}/api/os/firmware`, {
+      method: "POST",
+      headers: { Origin: ORIGIN },
+      body: form,
+    });
+  }
+
+  test("an uploaded image is armed, described by its own bytes, and served to the device", async () => {
+    const { handler, osFirmwarePath } = await firmwareHandler();
+    const bytes = await realImage();
+
+    const uploaded = await handler(uploadRequest(bytes, "zos-2026.08.15.img"));
+    expect(uploaded.status).toBe(200);
+    const body = await uploaded.json() as {
+      packed: boolean;
+      image: {
+        bytes: number;
+        md5: string;
+        partitionType: number;
+        partitionLabel: string;
+        zosBuildId: string | null;
+      };
+      source: { kind: string; fileName: string; at: number };
+    };
+
+    // The answer is the same document the status route serves, so the console
+    // shows what ARRIVED rather than what it believes it sent.
+    expect(body.packed).toBe(true);
+    expect(body.image.bytes).toBe(bytes.byteLength);
+    expect(body.image.md5).toBe(createHash("md5").update(bytes).digest("hex"));
+    expect(body.image.partitionType).toBe(3);
+    expect(body.image.partitionLabel).toBe("res");
+    // Not recoverable through xz, and therefore null — which the console renders
+    // as 未知. An invented version here would be read as a real one.
+    expect(body.image.zosBuildId).toBeNull();
+    expect(body.source.kind).toBe("upload");
+    expect(body.source.fileName).toBe("zos-2026.08.15.img");
+
+    // The device gets the uploaded bytes, and gets them under the digest its own
+    // updater verifies rather than the one the console displays.
+    const served = await handler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(served.status).toBe(200);
+    expect(Buffer.from(await served.arrayBuffer()).equals(bytes)).toBe(true);
+
+    // And it did NOT land on the packer's path: that file is a different
+    // writer's, and this route must never be able to overwrite it.
+    expect(await Bun.file(osFirmwarePath).exists()).toBe(false);
+  });
+
+  // THE SEPARATION. Uploading is not installing: the second act erases mtd3, a
+  // partition with no A/B pair and no recovery slot, and it happens only when a
+  // human presses the button.
+  test("an upload does not arm an install by itself", async () => {
+    const { handler, osLink } = await firmwareHandler();
+
+    const uploaded = await handler(uploadRequest(await realImage()));
+    expect(uploaded.status).toBe(200);
+
+    // Nothing was asked of the device: no sequence, and nothing in the document
+    // the firmware polls. A clock that read an upgrade line here would fetch the
+    // image and rewrite its own flash because somebody picked a file.
+    expect(osLink.getUpgradeSeq()).toBe(0);
+    expect(osLink.serialize()).not.toContain("upgrade\t");
+
+    const state = await handler(new Request(`${ORIGIN}/api/os/state`));
+    expect((await state.json() as { upgradeSeq: number }).upgradeSeq).toBe(0);
+
+    // The install is still available — it just has to be asked for.
+    const asked = await handler(new Request(`${ORIGIN}/api/os/upgrade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: "{}",
+    }));
+    expect(asked.status).toBe(200);
+    expect(osLink.getUpgradeSeq()).toBeGreaterThan(0);
+  });
+
+  // The failure this whole storage scheme exists to prevent: `mise run os-image`
+  // runs on every build, and a naive upload-into-that-path would mean the next
+  // build silently becomes the image the owner "chose".
+  test("a later local pack cannot replace the uploaded image, and is reported as shadowed", async () => {
+    const { handler, osFirmwarePath } = await firmwareHandler();
+    const uploaded = await realImage(3, 0x11);
+    await handler(uploadRequest(uploaded, "mine.img"));
+
+    // Somebody packs locally afterwards.
+    const packed = zkswe(DIGEST);
+    await Bun.write(osFirmwarePath, packed);
+
+    const served = await handler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(Buffer.from(await served.arrayBuffer()).equals(uploaded)).toBe(true);
+
+    const status = await (await handler(
+      new Request("http://127.0.0.1/api/os/firmware/status"),
+    )).json() as {
+      source: { kind: string; fileName: string };
+      shadowedPacked: { bytes: number; builtAt: number } | null;
+    };
+    expect(status.source.kind).toBe("upload");
+    expect(status.source.fileName).toBe("mine.img");
+    // Not silently ignored — named, with its size, so the person who just ran
+    // the packer can see that their build is on disk and is not the one armed.
+    expect(status.shadowedPacked?.bytes).toBe(packed.byteLength);
+
+    // And the way back is in the console rather than only in a shell.
+    const removed = await handler(new Request(`${ORIGIN}/api/os/firmware`, {
+      method: "DELETE",
+      headers: { Origin: ORIGIN },
+    }));
+    expect(removed.status).toBe(200);
+    const after = await removed.json() as {
+      removed: boolean;
+      source: { kind: string };
+      shadowedPacked: unknown;
+    };
+    expect(after.removed).toBe(true);
+    expect(after.source.kind).toBe("packed");
+    expect(after.shadowedPacked).toBeNull();
+    const back = await handler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(Buffer.from(await back.arrayBuffer()).equals(packed)).toBe(true);
+  });
+
+  // The refusal that is not about a broken file. This container is perfect in
+  // every other way; the updater is a bitmask over partition type and would do
+  // exactly what it says. That is not a failed install, it is a brick.
+  test("an image aimed at a partition other than res is refused, and arms nothing", async () => {
+    const { handler } = await firmwareHandler();
+
+    const refused = await handler(uploadRequest(await realImage(1), "boot.img"));
+    expect(refused.status).toBe(400);
+    const body = await refused.json() as { error: string; reason: string };
+    expect(body.reason).toBe("partition");
+    expect(body.error).toContain("boot");
+    expect(body.error).toContain("res");
+
+    // Nothing armed, so nothing to install and nothing to serve.
+    const status = await (await handler(
+      new Request("http://127.0.0.1/api/os/firmware/status"),
+    )).json() as { packed: boolean };
+    expect(status.packed).toBe(false);
+    expect((await handler(new Request("http://127.0.0.1/api/os/firmware"))).status).toBe(404);
+  });
+
+  test("a damaged or oversized upload is refused, and the armed image is left alone", async () => {
+    const { handler } = await firmwareHandler();
+    const good = await realImage(3, 0x22);
+    await handler(uploadRequest(good, "good.img"));
+
+    // Not a container at all.
+    const notAnImage = await handler(uploadRequest(Buffer.alloc(9000, 0x99), "holiday.jpg"));
+    expect(notAnImage.status).toBe(400);
+    expect((await notAnImage.json() as { reason: string }).reason).toBe("magic");
+
+    // A container that arrived damaged: header intact, payload digest moved.
+    const damaged = Buffer.from(await realImage(3, 0x33));
+    damaged[damaged.length - 32] = damaged[damaged.length - 32]! ^ 0xff;
+    const corrupt = await handler(uploadRequest(damaged, "truncated.img"));
+    expect(corrupt.status).toBe(400);
+    expect((await corrupt.json() as { reason: string }).reason).toBe("digest");
+
+    // Too big for mtd3, refused on the declared length before the body is read.
+    const huge = await handler(new Request(`${ORIGIN}/api/os/firmware`, {
+      method: "POST",
+      headers: {
+        Origin: ORIGIN,
+        "Content-Type": "multipart/form-data; boundary=x",
+        "Content-Length": String(64 * 1024 * 1024),
+      },
+      body: "--x--",
+    }));
+    expect(huge.status).toBe(413);
+
+    // Three refusals, and the image armed before them is still the armed one:
+    // a rejected upload must not leave the clock with nothing to install.
+    const served = await handler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(Buffer.from(await served.arrayBuffer()).equals(good)).toBe(true);
+  });
+
+  // Same reasoning as the upgrade below: arming the image a clock will write to
+  // flash does not belong to another origin's page either.
+  test("a cross-origin upload or removal is refused and moves nothing", async () => {
+    const { handler } = await firmwareHandler();
+    const bytes = await realImage();
+
+    const form = new FormData();
+    form.set("file", new File([new Uint8Array(bytes)], "evil.img"));
+    const crossOrigin = await handler(new Request(`${ORIGIN}/api/os/firmware`, {
+      method: "POST",
+      headers: { Origin: "http://evil.example" },
+      body: form,
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect((await crossOrigin.json() as { error: string }).error).toContain("cross-origin");
+
+    await handler(uploadRequest(bytes));
+    const crossDelete = await handler(new Request(`${ORIGIN}/api/os/firmware`, {
+      method: "DELETE",
+      headers: { Origin: "http://evil.example" },
+    }));
+    expect(crossDelete.status).toBe(400);
+    expect((await handler(new Request("http://127.0.0.1/api/os/firmware"))).status).toBe(200);
+  });
+
   // Flashing a partition with no recovery slot behind it is the last thing that
   // should be reachable from another origin's page.
   test("a cross-origin upgrade is refused and moves nothing", async () => {
@@ -2020,7 +2297,7 @@ describe("vibe usage routes", () => {
         status: async (refresh: boolean) => {
           refreshCalls.push(refresh);
           return {
-            keys: { openrouter: "unset", zai: "unset" },
+            // Empty: all four agents borrow a CLI login, so no vendor takes a key.
             starred: store.getStarred(),
             snapshot: status.snapshot === undefined ? fakeSnapshot() : status.snapshot,
             error: status.error ?? null,
@@ -2040,16 +2317,15 @@ describe("vibe usage routes", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
 
-    // The GUI renders the catalog itself, so the route must ship all ten
+    // The GUI renders the catalog itself, so the route must ship all four
     // providers in the catalog's own order — not just the ones that answered
     // for (the snapshot here only carries claude).
-    expect(body.catalog).toHaveLength(10);
+    expect(body.catalog).toHaveLength(4);
     expect(body.catalog.map((entry: { id: string }) => entry.id)).toEqual([
-      "claude", "codex", "cursor", "antigravity", "copilot",
-      "devin", "grok", "opencode", "openrouter", "zai",
+      "claude", "codex", "grok", "opencode",
     ]);
     expect(body.catalog.map((entry: { order: number }) => entry.order))
-      .toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      .toEqual([1, 2, 3, 4]);
     expect(body.catalog[0]).toEqual({
       id: "claude",
       displayName: "Claude",
@@ -2067,12 +2343,16 @@ describe("vibe usage routes", () => {
 
     // A fresh store has pinned nothing, so every provider reports the catalog
     // default — the table is complete rather than empty.
-    expect(Object.keys(body.starred)).toHaveLength(10);
+    expect(Object.keys(body.starred)).toHaveLength(4);
     expect(body.starred.claude).toEqual(["session", "weekly"]);
-    expect(body.starred.copilot).toEqual(["premiumCredits"]);
+    expect(body.starred.grok).toEqual(["weekly"]);
     // baseUrl is gone with the third-party app; what the console needs now is
-    // which key-based vendors have a key, never the key itself.
-    expect(body.keys).toEqual({ openrouter: "unset", zai: "unset" });
+    // which key-based vendors have a key, never the key itself — and all four
+    // agents borrow a CLI login, so no vendor takes a key today.
+    // No `keys` envelope any more: the whole API-key feature existed for
+    // openrouter and z.ai alone, and both are gone. All four survivors borrow a
+    // CLI login, so there was nothing left for it to hold.
+    expect(body).not.toHaveProperty("keys");
     expect(body.error).toBeNull();
     expect(body.snapshot.providers[0].metrics[0].key).toBe("session");
 
@@ -2099,7 +2379,7 @@ describe("vibe usage routes", () => {
     expect(typeof body.error).toBe("string");
     expect(body.error).toContain("signed in");
     // The catalog and the stars still render with nothing signed in.
-    expect(body.catalog).toHaveLength(10);
+    expect(body.catalog).toHaveLength(4);
     expect(body.starred.claude).toEqual(["session", "weekly"]);
   });
 
@@ -2116,7 +2396,7 @@ describe("vibe usage routes", () => {
     const body = await response.json();
     expect(body.starred.claude).toEqual(["weekly", "sonnet"]);
     expect(body.starred.codex).toEqual(["session", "weekly"]);
-    expect(Object.keys(body.starred)).toHaveLength(10);
+    expect(Object.keys(body.starred)).toHaveLength(4);
 
     // Emptying a provider is a legal state, not a reset to the default: the
     // menu-bar strip is allowed to drop a provider entirely.

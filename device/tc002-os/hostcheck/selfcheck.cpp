@@ -40,6 +40,7 @@
 #include "net/WpaCtrl.h"
 #include "platform/DeviceWifi.h"
 #include "platform/DeviceControls.h"
+#include "platform/BatteryPolicy.h"
 #include "platform/InstallMode.h"
 #include "platform/Presenter.h"
 #include "platform/ProvisionLog.h"
@@ -2429,6 +2430,171 @@ tcos::SleepInputs sleepingInputs() {
   return in;
 }
 
+// The battery rule: what counts as charging, and what powers the clock off.
+//
+// This check exists because the rule it drives could not be executed anywhere
+// before it. BatteryMonitor talks to McuManager, McuManager pulls in the
+// FlyThings MCU headers, and nothing here can compile those — so from the day
+// the monitor was written until now, `charging` was a term nobody had ever
+// evaluated against a value. It was `battery.second > 0 || usb > 0`, and
+// `battery.second` is the cell voltage: a live battery reads ~3.8 V, so the
+// console said 充电中 on a clock that had never been plugged in, always.
+void checkBatteryPolicy() {
+  using tcos::BatteryDecision;
+  using tcos::BatteryReading;
+  using tcos::decideBattery;
+
+  // A reading built the way the MCU hands one over: percent, millivolts, usb.
+  struct Make {
+    static BatteryReading of(int percent, int millivolts, int usb) {
+      BatteryReading r;
+      r.percent = percent;
+      r.millivolts = millivolts;
+      r.usb = usb;
+      return r;
+    }
+  };
+
+  // --- charging is USB, and only USB ---------------------------------------
+  // The regression itself. Every one of these voltages is a perfectly ordinary
+  // cell reading, and the old rule called all of them "charging".
+  {
+    const int volts[5] = {4200, 3800, 3700, 3600, 3400};
+    for (int i = 0; i < 5; ++i) {
+      const BatteryDecision d = decideBattery(Make::of(54, volts[i], 0), -1);
+      char label[128];
+      std::snprintf(label, sizeof(label),
+                    "%d mV on a clock with no charger is NOT charging", volts[i]);
+      check(!d.charging, label);
+    }
+    check(!decideBattery(Make::of(54, 3800, -1), -1).charging,
+          "and a USB query that failed outright is not charging either");
+    check(decideBattery(Make::of(54, 4180, 1), -1).charging,
+          "USB present is what charging means");
+    check(decideBattery(Make::of(3, 3400, 1), -1).charging,
+          "including on a nearly flat cell — the charger is the whole answer");
+  }
+
+  // --- the warn threshold, either side of 3600 mV --------------------------
+  {
+    check(decideBattery(Make::of(40, 3599, 0), -1).low,
+          "3599 mV is low: one millivolt under the stock app's own 3600");
+    check(!decideBattery(Make::of(40, 3600, 0), -1).low,
+          "3600 mV exactly is not — the stock app recovers at >= 3600");
+    check(!decideBattery(Make::of(40, 3601, 0), -1).low, "and 3601 mV plainly is not");
+    check(!decideBattery(Make::of(40, 3400, 1), -1).low,
+          "and nothing is low while the charger is in");
+    // The point of reporting the voltage at all: the two can disagree, and when
+    // they do it is the voltage that decides.
+    check(decideBattery(Make::of(54, 3580, 0), -1).low,
+          "a comfortable-looking 54% is still low when the cell says 3580 mV");
+  }
+
+  // --- the shutdown threshold, either side of 3550 mV ----------------------
+  {
+    // 8% is the backstop warn line, so these readings AGREE that the cell is
+    // nearly out — which is what the countdown now requires. See the paired
+    // assertions below for why one number is not allowed to decide alone.
+    check(decideBattery(Make::of(6, 3549, 0), -1).countdown == 30,
+          "3549 mV with a percentage that agrees starts the 30 s countdown");
+    check(decideBattery(Make::of(6, 3550, 0), -1).countdown == -1,
+          "3550 mV exactly does not — the stock app clears at >= 3550");
+    check(decideBattery(Make::of(6, 3400, 0), -1).countdown == 30,
+          "and well under it starts one too");
+    check(decideBattery(Make::of(6, 3400, 0), 12).countdown == 12,
+          "a countdown already running is left alone, not restarted every poll");
+    check(decideBattery(Make::of(20, 3560, 0), 12).countdown == -1,
+          "a cell that came back above 3550 cancels outright rather than pausing");
+  }
+
+  // --- charging cancels a pending shutdown ---------------------------------
+  {
+    check(decideBattery(Make::of(2, 3400, 1), 7).countdown == -1,
+          "plugging in cancels a countdown that is already at 7 s");
+    check(decideBattery(Make::of(2, 3400, 1), 0).countdown == -1,
+          "even at zero — the last second is still a second to plug in");
+    check(!decideBattery(Make::of(2, 3400, 1), 7).low,
+          "and the warning goes with it");
+  }
+
+  // --- no reading triggers nothing -----------------------------------------
+  // -1 is what queyrBatteryPower returns when the request throws. It is not
+  // evidence of an empty cell, it is evidence of an MCU that did not answer,
+  // and powering the device off on it is the one outcome nobody can undo.
+  {
+    const BatteryDecision blind = decideBattery(Make::of(-1, -1, -1), -1);
+    check(!blind.charging && !blind.low && blind.countdown == -1,
+          "a failed reading charges nothing, warns nothing and shuts down nothing");
+    check(decideBattery(Make::of(-1, -1, -1), 9).countdown == -1,
+          "and it cancels a running countdown rather than acting on no data");
+    check(decideBattery(Make::of(-1, -1, 1), -1).charging,
+          "USB still answers on its own when the battery query failed");
+  }
+
+  // --- the backstop, for a voltage we did not get --------------------------
+  // Percentage and voltage arrive in the same three-byte answer, so a short or
+  // malformed frame can leave a sane percent next to a zero voltage. Dropping
+  // protection there would reopen the hole this monitor exists to close.
+  {
+    check(decideBattery(Make::of(2, 0, 0), -1).countdown == 30,
+          "2% with no voltage still starts a countdown");
+    check(decideBattery(Make::of(50, 0, 0), -1).countdown == -1,
+          "50% with no voltage does not");
+    check(decideBattery(Make::of(5, 0, 0), 11).countdown == 11,
+          "and the dead band between the backstop numbers holds what is running");
+    // BOTH NUMBERS MUST AGREE BEFORE THE POWER GOES OFF, and this is a fact
+    // about the hardware rather than a preference. Measured on the real clock:
+    // 3010 mV alongside 55%, both climbing on the charger. Those cannot both
+    // describe one cell — 55% of a single LiPo is about 3.8 V — and the stock
+    // firmware would have shut that device down long ago if 3010 were really
+    // the cell. Until a full charge and discharge has been watched on hardware,
+    // a power-off armed on the voltage alone turns the clock off on the first
+    // unplug with the battery half full.
+    //
+    // Shutting down late costs some cell life; shutting down wrongly turns off
+    // a device nobody asked to turn off. The asymmetry picks the rule.
+    check(decideBattery(Make::of(2, 4100, 0), -1).countdown == -1,
+          "2% on a cell reading 4100 mV shuts down NOTHING");
+    check(decideBattery(Make::of(99, 3400, 0), -1).countdown == -1,
+          "AND 99% ON A CELL READING 3400 mV SHUTS DOWN NOTHING EITHER — this is "
+          "the reading the real device produces, and it must not power off");
+    check(decideBattery(Make::of(55, 3010, 0), -1).countdown == -1,
+          "the exact pair measured on hardware powers nothing off");
+    // The warning is still voltage-alone: being told early costs nothing.
+    check(decideBattery(Make::of(99, 3400, 0), -1).low,
+          "but it still WARNS, because a warning that is early is just a warning");
+    // A cell that is genuinely flat reads low on both, which is the case this
+    // protection exists for and the one it still covers.
+    check(decideBattery(Make::of(4, 3400, 0), -1).countdown == 30,
+          "a cell both numbers call empty still shuts down");
+    // Voltage missing entirely: the percentage backstop stands alone, because
+    // there is nothing for it to disagree with.
+    check(decideBattery(Make::of(2, 0, 0), -1).countdown == 30,
+          "and with no voltage at all the percentage backstop still protects");
+  }
+
+  // --- and the number reaches the console ---------------------------------
+  // Without this the owner's question — "is the percentage right?" — has no
+  // answer short of opening the case.
+  {
+    tcos::HostLink::Report report;
+    report.batteryPercent = 54;
+    report.batteryMillivolts = 3821;
+    const std::string body = tcos::HostLink::reportBody(report);
+    check(body.find("\"batteryMillivolts\":3821") != std::string::npos,
+          "the report carries the cell voltage next to the percentage");
+    check(body.find("\"batteryPercent\":54") != std::string::npos &&
+              body.find("\"charging\":false") != std::string::npos,
+          "without disturbing the fields beside it");
+    check(!body.empty() && body[body.size() - 1] == '}',
+          "and the longer body is still a complete JSON object");
+    tcos::HostLink::Report fresh;
+    check(tcos::HostLink::reportBody(fresh).find("\"batteryMillivolts\":-1") !=
+              std::string::npos,
+          "a device with no reading yet sends -1, not a plausible-looking 0");
+  }
+}
+
 void checkSleepPolicy() {
   using tcos::SleepConfig;
   using tcos::SleepDecision;
@@ -3084,6 +3250,25 @@ const uint32_t kVibeNormal = 0xffffffu;
 const uint32_t kVibeWarn = 0xffcc00u;
 const uint32_t kVibeDanger = 0xff453au;
 const uint32_t kVibeMeter = 0x0a84ffu;
+const uint32_t kVibeSoft = 0x828c9bu;
+
+// The brand colours the 16x16 marks carry, sampled in src/vibe/vibe-pixel-logos.ts.
+// Written out as hex for the same reason the severity tiers are: the claim of
+// this page is that Claude's orange reaches the panel as Claude's orange, and a
+// check that accepted "something warm" would accept a mark tinted by the page.
+const uint32_t kClaudeInk = 0xe7753du;
+const uint32_t kNeutralFull = 0xf7f7f5u;
+// Codex's own ink: two blues on a diagonal gradient plus the white of the
+// `>`/`_` knocked out of it. Named separately from the neutral greys because
+// the point of the test below is that these are the MARK's colours.
+const uint32_t kCodexLight = 0x7c83f6u;
+const uint32_t kCodexDeep = 0x2d56e8u;
+const uint32_t kCodexGlyph = 0xffffffu;
+const uint32_t kNeutralMid = 0xaeb1aeu;
+const uint32_t kNeutralDim = 0x585c5au;
+
+// The mark column on a per-agent page: x=0..15, the full height of the panel.
+const int kMarkBoxX1 = 15;
 
 void checkVibeScreen() {
   using tcos::StateDoc;
@@ -3135,36 +3320,86 @@ void checkVibeScreen() {
     Surface detail(52, 16);
     vibe.render(detail, 400);  // past RingModel's 180 ms slide
     check(surfacesDiffer(overview, detail), "which is not the overview redrawn");
-    // The 12 px mark owns x=0..11 and the rows start at 15; the gutter between
-    // them is the only thing keeping a three-digit value off the vendor's badge.
-    check(rectIsDark(detail, 12, 0, 14, 15), "the detail page keeps its mark/row gutter clear");
-    check(rectHasColor(detail, 19, 2, 32, 6, kVibeMeter),
-          "a quota under 80% fills its meter in blue");
+
+    // --- the 16x16 brand mark, 1:1 --------------------------------------
+    //
+    // The panel is exactly 16 rows, so the mark is drawn at native resolution
+    // from (0,0) with no scaling. These two pixels are the proof: (3,3) is ink
+    // in the 16x16 grid and background in the 12 px one, and column 13 is past
+    // the right edge a 12 px mark drawn from x=0 could ever reach.
+    check(detail.getPixel(3, 3).toRGB888() == kClaudeInk,
+          "a detail page draws the 16x16 mark from (0,0), in the brand's own ink");
+    check(detail.getPixel(13, 6).toRGB888() == kClaudeInk,
+          "and it is a full 16 columns wide, not a 12 px mark in a 16 px box");
+    // Rows 0..2 and 13..15 of Claude's grid are empty, and nothing else on the
+    // page reaches into the mark's column — so the art is placed, not padded.
+    check(rectIsDark(detail, 0, 0, kMarkBoxX1, 2) && rectIsDark(detail, 0, 13, kMarkBoxX1, 15),
+          "the mark's own empty rows stay empty");
+
+    // The text moved to x=17 with the mark, so x=16 is the whole gutter now and
+    // nothing in the row may reach into the badge. On the old layout the label
+    // initial started at 15 and its top row alone would light this column.
+    check(rectIsDark(detail, 16, 0, 16, 15), "the detail page keeps its mark/row gutter clear");
+    check(!rectHasColor(detail, 0, 0, kMarkBoxX1, 15, kVibeMeter),
+          "and the meter never reaches the mark");
+    // The meter's left edge, pinned exactly: 21, not the 19 it sat at when the
+    // mark was 12 px. 11% of a quota lights two of its fourteen columns.
+    check(detail.getPixel(21, 2).toRGB888() == kVibeMeter && detail.getPixel(20, 2).toRGB888() == 0,
+          "a quota under 80% fills its meter in blue, from x=21");
+    check(rectHasColor(detail, 21, 2, 34, 6, kVibeMeter), "across the 14 px the bar still has");
+
+    // The page behind the mark shows through: a cell whose 2-bit index is 0 is
+    // never plotted, so the press-flash wash reaches it while the ink beside it
+    // is untouched. (4,5) is Claude's left eye, between two lit columns.
+    check(vibe.onInput(tcos::kInputPress, 500), "the press is consumed");
+    Surface flash(52, 16);
+    vibe.render(flash, 500);
+    const uint32_t washed = flash.getPixel(16, 0).toRGB888();
+    check(washed != 0, "the confirm flash washes the page's black");
+    check(flash.getPixel(4, 5).toRGB888() == washed &&
+              flash.getPixel(3, 5).toRGB888() == kClaudeInk &&
+              flash.getPixel(5, 5).toRGB888() == kClaudeInk,
+          "a transparent mark pixel is not plotted — the page behind it shows through");
+
+    // --- and the overview keeps the SIZE but takes the COLOUR ------------
+    // Two 16x16 marks plus their numbers do not fit across 52 px, and 16 -> 10
+    // is not an integer factor, so the overview still draws its own 10 px
+    // grids. What changed is what lights them: the vendor's own ink, not the
+    // severity ramp. Claude was orange on its detail page and grey on the
+    // overview — the same vendor in two liveries one knob-click apart, which
+    // is what the owner saw and objected to. Identity and urgency are two
+    // facts; the mark now carries the first and the VALUE still carries the
+    // second, so nothing was traded away to get it.
+    check(rectHasColor(overview, 0, 3, 51, 12, kClaudeInk),
+          "the overview mark is lit in the vendor's own ink");
+    check(!rectHasColor(overview, 0, 3, 51, 12, kVibeSoft),
+          "and no longer in the severity grey it used to borrow");
   }
 
-  // --- seven agents, and the ring around them ------------------------------
+  // --- every agent at once, and the ring around them -----------------------
+  // Four ids because the service collects four (src/vibe/vibe-catalog.ts), so
+  // five pages is the widest ring a real document can ever produce.
   {
-    static const char* kIds[7] = {"claude", "codex", "cursor", "copilot",
-                                  "grok",   "devin", "zai"};
-    std::vector<StateDoc::VibeAgent> seven;
-    for (int i = 0; i < 7; ++i) {
+    static const char* kIds[4] = {"claude", "codex", "grok", "opencode"};
+    std::vector<StateDoc::VibeAgent> all;
+    for (int i = 0; i < 4; ++i) {
       StateDoc::VibeAgent agent = vibeAgent(kIds[i], "Pro", false);
       agent.metrics.push_back(vibeMetric("Session", 10 + i * 7, 100, -1));
-      seven.push_back(agent);
+      all.push_back(agent);
     }
     VibeScreen vibe;
-    vibe.setAgents(seven, 0);
+    vibe.setAgents(all, 0);
     vibe.onEnter(0);
-    check(vibe.pageCount() == 8, "seven agents make eight pages");
+    check(vibe.pageCount() == 5, "four agents make five pages");
     vibe.onInput(tcos::kInputTurnCcw, 100);
-    check(vibe.page() == 7, "turning back off the overview wraps to the last agent");
-    for (int i = 0; i < 8; ++i) vibe.onInput(tcos::kInputTurnCw, 300 + i * 300);
-    check(vibe.page() == 7, "and a full lap of the ring comes back to the same page");
+    check(vibe.page() == 4, "turning back off the overview wraps to the last agent");
+    for (int i = 0; i < 5; ++i) vibe.onInput(tcos::kInputTurnCw, 300 + i * 300);
+    check(vibe.page() == 4, "and a full lap of the ring comes back to the same page");
 
     // Every page draws, and no page draws off the panel. Rendered onto a canvas
     // bigger than the panel because Surface::setPixel clips: a layout that ran
     // past x=51 would be invisible on a 52x16 one.
-    for (int p = 0; p < 8; ++p) {
+    for (int p = 0; p < 5; ++p) {
       Surface big(72, 24);
       const int at = 3000 + p * 400;
       vibe.onInput(tcos::kInputTurnCw, at);
@@ -3223,11 +3458,11 @@ void checkVibeScreen() {
       vibe.render(frame, 400);
       char what[96];
       std::snprintf(what, sizeof(what), "%d%% of a quota draws its own severity", kUsed[i]);
-      check(rectHasColor(frame, 33, 0, 51, 15, kWant[i]), what);
+      check(rectHasColor(frame, 35, 0, 51, 15, kWant[i]), what);
       for (int k = 0; k < 3; ++k) {
         if (kTiers[k] == kWant[i]) continue;
         std::snprintf(what, sizeof(what), "%d%% draws no other tier beside it", kUsed[i]);
-        check(!rectHasColor(frame, 33, 0, 51, 15, kTiers[k]), what);
+        check(!rectHasColor(frame, 35, 0, 51, 15, kTiers[k]), what);
       }
     }
   }
@@ -3242,30 +3477,35 @@ void checkVibeScreen() {
     vibe.setAgents(agents, 0);
     vibe.onEnter(0);
     vibe.onInput(tcos::kInputTurnCw, 0);
-    Surface used(52, 16);
     Surface left(52, 16);
-    vibe.render(used, 400);
-    check(!vibe.showLeft() && !vibe.takeShowLeftChanged(),
+    Surface used(52, 16);
+    vibe.render(left, 400);
+    // 剩余 is where a clock STARTS now: "93%" on a quota screen is ambiguous
+    // until you know which way it counts, and the number a person acts on is
+    // how much they have left. The press still toggles, and still asks to be
+    // persisted exactly once — that is what this block tests, and it is
+    // direction-agnostic.
+    check(vibe.showLeft() && !vibe.takeShowLeftChanged(),
           "nothing asks to be persisted before the first press");
     check(vibe.onInput(tcos::kInputPress, 500), "the press is consumed");
-    check(vibe.showLeft() && vibe.takeShowLeftChanged(), "and asks to be persisted once");
+    check(!vibe.showLeft() && vibe.takeShowLeftChanged(), "and asks to be persisted once");
     check(!vibe.takeShowLeftChanged(), "reading that flag clears it");
-    vibe.render(left, 900);  // past the 160 ms confirm flash
+    vibe.render(used, 900);  // past the 160 ms confirm flash
     check(surfacesDiffer(used, left), "已用 and 剩余 are different numbers");
     // The METER does not invert. The bar means "this much is spent" in both
     // states, so only the digits under it change — otherwise the toggle would
     // redraw the one thing the user was using to compare agents at a glance.
-    check(rectsEqual(used, left, 19, 5, 32, 9), "and the meter under them does not move");
+    check(rectsEqual(used, left, 21, 5, 34, 9), "and the meter under them does not move");
     // Nor does the severity: 92% spent is 8% left, and it is the same danger.
-    check(rectHasColor(used, 33, 0, 51, 15, kVibeDanger) &&
-              rectHasColor(left, 33, 0, 51, 15, kVibeDanger),
+    check(rectHasColor(used, 35, 0, 51, 15, kVibeDanger) &&
+              rectHasColor(left, 35, 0, 51, 15, kVibeDanger),
           "severity is read off what is spent, in both directions");
   }
 
   // --- a balance, which has no ceiling to be a fraction of ------------------
   {
     std::vector<StateDoc::VibeAgent> agents;
-    StateDoc::VibeAgent agent = vibeAgent("openrouter", "", false);
+    StateDoc::VibeAgent agent = vibeAgent("codex", "", false);
     agent.metrics.push_back(vibeMetric("Credits", 42, 0, -1));
     agents.push_back(agent);
     VibeScreen vibe;
@@ -3274,8 +3514,8 @@ void checkVibeScreen() {
     vibe.onInput(tcos::kInputTurnCw, 0);
     Surface frame(52, 16);
     vibe.render(frame, 400);
-    check(rectIsDark(frame, 19, 5, 32, 9), "a metric with no ceiling draws no meter");
-    check(rectHasColor(frame, 33, 5, 51, 9, kVibeNormal),
+    check(rectIsDark(frame, 21, 5, 34, 9), "a metric with no ceiling draws no meter");
+    check(rectHasColor(frame, 35, 5, 51, 9, kVibeNormal),
           "and its bare number is never a warning, because there is nothing to warn about");
   }
 
@@ -3341,14 +3581,42 @@ void checkVibeScreen() {
     check(litPixels(bigDetail) > 0 && rectIsDark(bigDetail, 52, 0, 71, 23) &&
               rectIsDark(bigDetail, 0, 16, 51, 23),
           "and so does a three-digit value beside a long label");
-    check(rectIsDark(bigDetail, 12, 0, 14, 15), "with the mark/row gutter still clear");
+    check(rectIsDark(bigDetail, 16, 0, 16, 15), "with the mark/row gutter still clear");
+  }
+
+  // --- a mark's colours are its own, not the page's ------------------------
+  //
+  // Codex at 95% spent: the value column is red and the meter is red, and the
+  // three inks of the mark are still the three inks of the mark. Tinting a
+  // brand mark with the severity accent would be the same mistake as tinting a
+  // photograph — the colour would stop meaning "nearly out".
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    StateDoc::VibeAgent agent = vibeAgent("codex", "Pro", false);
+    agent.metrics.push_back(vibeMetric("Session", 95, 100, -1));
+    agents.push_back(agent);
+    VibeScreen vibe;
+    vibe.setAgents(agents, 0);
+    vibe.onEnter(0);
+    vibe.onInput(tcos::kInputTurnCw, 0);
+    Surface frame(52, 16);
+    vibe.render(frame, 400);
+    check(rectHasColor(frame, 35, 0, 51, 15, kVibeDanger), "a 95% quota is red where it counts");
+    check(rectHasColor(frame, 0, 0, kMarkBoxX1, 15, kCodexLight) &&
+              rectHasColor(frame, 0, 0, kMarkBoxX1, 15, kCodexDeep) &&
+              rectHasColor(frame, 0, 0, kMarkBoxX1, 15, kCodexGlyph),
+          "and the mark keeps all three of its own tones");
+    check(!rectHasColor(frame, 0, 0, kMarkBoxX1, 15, kVibeDanger) &&
+              !rectHasColor(frame, 0, 0, kMarkBoxX1, 15, kVibeWarn) &&
+              !rectHasColor(frame, 0, 0, kMarkBoxX1, 15, kVibeSoft),
+          "a brand mark is never repainted in the page's accent");
   }
 
   // --- an agent this build has never heard of ------------------------------
   {
     std::vector<StateDoc::VibeAgent> agents;
     StateDoc::VibeAgent agent = vibeAgent("some-vendor-shipped-after-this-build", "Pro", false);
-    agent.metrics.push_back(vibeMetric("Session", 30, 100, -1));
+    agent.metrics.push_back(vibeMetric("Session", 95, 100, -1));
     agents.push_back(agent);
     VibeScreen vibe;
     vibe.setAgents(agents, 0);
@@ -3359,12 +3627,21 @@ void checkVibeScreen() {
     // The neutral gauge stands in. A page of numbers with no owner would be
     // worse than a generic badge.
     check(!rectIsDark(frame, 0, 2, 11, 13), "an unknown vendor still gets a mark");
+    // There is no 16x16 art for it, so the fallback is the 12 px grid lit by
+    // severity — centred in the same 16 px column the colour marks own, which
+    // is why the two rows above it and the two columns left of it stay dark.
+    check(rectHasColor(frame, 0, 2, kMarkBoxX1, 13, kVibeDanger),
+          "and with no colour art it falls back to the monochrome mark, lit by severity");
+    check(rectIsDark(frame, 0, 0, kMarkBoxX1, 1),
+          "the 12 px stand-in does not pretend to be 16 rows tall");
+    check(rectIsDark(frame, 0, 0, 1, 15), "it is centred in the mark column instead");
+    check(rectIsDark(frame, 16, 0, 16, 15), "and the row still starts past the gutter");
   }
 
   // --- an agent with nothing to report -------------------------------------
   {
     std::vector<StateDoc::VibeAgent> agents;
-    agents.push_back(vibeAgent("devin", "Team", false));
+    agents.push_back(vibeAgent("opencode", "Team", false));
     VibeScreen vibe;
     vibe.setAgents(agents, 0);
     vibe.onEnter(0);
@@ -3374,7 +3651,7 @@ void checkVibeScreen() {
     vibe.onInput(tcos::kInputTurnCw, 200);
     Surface detail(52, 16);
     vibe.render(detail, 500);
-    check(!rectIsDark(detail, 0, 2, 11, 13) && !rectIsDark(detail, 15, 2, 51, 13),
+    check(!rectIsDark(detail, 0, 2, kMarkBoxX1, 13) && !rectIsDark(detail, 17, 2, 51, 13),
           "and the agent's own page keeps its mark beside the words");
   }
 }
@@ -9288,17 +9565,21 @@ void checkConsoleDiscovery() {
   check(!ConsoleDiscovery::sameSlash24("192.168.8.240", "192.168.8.999"),
         "an octet out of range is not an address");
 
-  // --- gate 1, lost for 60 s ------------------------------------------------
-  check(!ConsoleDiscovery::lost(59999, 0),
-        "a device 59.999 s into its life is booting, not lost");
-  check(ConsoleDiscovery::lost(60000, 0),
-        "one that has never pulled in 60 s is lost");
-  check(!ConsoleDiscovery::lost(500000, 460001),
-        "a pull 59.999 s ago still counts as talking to the console");
-  check(ConsoleDiscovery::lost(500000, 440000),
-        "60 s of silence is lost");
-  check(!ConsoleDiscovery::lost(1000, 500000),
-        "a stamp from the future is not 'lost' - it is a caller confusing epochs");
+  // --- gate 1, failed polls rather than elapsed silence ---------------------
+  // This was 60 s of silence, and silence is the wrong signal: the pull is a
+  // LONG POLL, so a healthy clock deliberately goes minutes without a document
+  // whenever nothing changes. Only a request that failed separates "the console
+  // has nothing to say" from "the console is not there", and the backoff
+  // reaches two failures in about two to four seconds — down from the minute
+  // the owner actually sat watching a dead address.
+  check(!ConsoleDiscovery::lost(0),
+        "a clock whose polls are all succeeding is not lost");
+  check(!ConsoleDiscovery::lost(1),
+        "and one failure is a router hiccup, not a missing console");
+  check(ConsoleDiscovery::lost(2),
+        "two in a row is lost — about two to four seconds of backoff");
+  check(ConsoleDiscovery::lost(9),
+        "and it stays lost while they pile up");
 
   // --- gate 3, and the three folded together --------------------------------
   {
@@ -9311,11 +9592,15 @@ void checkConsoleDiscovery() {
     link.baseUrl = "http://192.168.8.108:43820";
     link.lastPullMs = 0;
     link.nowMs = 200000;
+    // Lost is a failure count now, not elapsed silence — a long poll makes
+    // silence useless as a signal.
+    link.failures = 3;
     check(ConsoleDiscovery::candidate(link, hint) == "http://192.168.8.114:43820",
           "a lost device on the same /24 takes a different address as a candidate");
 
     ConsoleDiscovery::Link talking = link;
     talking.lastPullMs = 199000;
+    talking.failures = 0;
     check(ConsoleDiscovery::candidate(talking, hint).empty(),
           "a device that is talking to its console ignores the hint entirely");
 
@@ -9407,6 +9692,7 @@ void checkConsoleDiscovery() {
       link.deviceIp = "127.0.0.2";  // same /24 as the loopback server
       link.baseUrl = "http://127.0.0.1:1";
       link.lastPullMs = 0;
+      link.failures = 3;
       link.nowMs = 200000;
       discovery.noteLink(link);
       discovery.onDatagram(beacon, (int)std::strlen(beacon));
@@ -9454,6 +9740,7 @@ void checkConsoleDiscovery() {
       link.baseUrl = "http://127.0.0.1:1";
       link.lastPullMs = 0;
       link.nowMs = 200000;
+      link.failures = 3;
       discovery.noteLink(link);
       discovery.onDatagram(beacon, (int)std::strlen(beacon));
 
@@ -9510,10 +9797,12 @@ void checkConsoleDiscovery() {
     link.adoptDocument(doc, 123456);
     check(link.snapshot().lastPullMonoMs == 123456,
           "a document that arrived stamps the moment it did");
-    check(!ConsoleDiscovery::lost(123456 + 59000, link.snapshot().lastPullMonoMs),
-          "which keeps the device deaf to beacons for a full minute after");
-    check(ConsoleDiscovery::lost(123456 + 60000, link.snapshot().lastPullMonoMs),
-          "and no longer");
+    // A successful document also clears the failure count, which is what the
+    // gate reads. The stamp stays for diagnostics; the decision is the counter.
+    check(link.snapshot().consecutiveFailures == 0,
+          "and clears the failures that would have made it adopt a hint");
+    check(!ConsoleDiscovery::lost(link.snapshot().consecutiveFailures),
+          "so a clock that just heard from its console ignores every beacon");
   }
 }
 
@@ -9583,6 +9872,8 @@ int main() {
   std::printf("  level overlay ok\n");
   checkConsoleSettings();
   std::printf("  console settings ok\n");
+  checkBatteryPolicy();
+  std::printf("  battery policy ok\n");
   checkSleepPolicy();
   std::printf("  sleep policy ok\n");
   checkSleepRows();

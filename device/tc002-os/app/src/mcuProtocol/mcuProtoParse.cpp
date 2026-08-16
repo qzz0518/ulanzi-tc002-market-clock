@@ -50,6 +50,8 @@ std::pair<int, int> McuParse::queyrBatteryPower() {
 	data.append( (char)checkSum );
 	try {
 		MyResponse response = request(data);
+		// data[1..2] is the cell voltage in millivolts, NOT a charge flag — see
+		// the corrected comment on McuManager::queryBatteryPower for the cost.
 		std::pair<int, int>BatteryState = {response.data[0], (response.data[1] << 8) | response.data[2]};
 		return BatteryState;
 	}catch(base::Exception& e) {

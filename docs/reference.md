@@ -104,19 +104,18 @@ VIBE 是 **ZOS 上的一个独立 App**，在旋钮主菜单里与「音乐」�
 读该家 CLI 自己已经留在这台 Mac 上的凭据，再直接调用该家的用量接口
 （[ADR 0010](adr/0010-vibe-native-usage-collection.md)）。
 
-支持十家：**Claude**（钥匙串条目或 `~/.claude/.credentials.json`）、**Codex**
-（`~/.codex/auth.json` 或 `~/.config/codex/auth.json`）、**Cursor**、**Antigravity**、
-**Copilot**、**Devin**、**Grok**（`~/.grok/auth.json`）、**OpenCode**、**OpenRouter**、
-**Z.ai**。前八家借各自 CLI 的登录；**OpenRouter 与 Z.ai 本机没有 CLI 登录可借**，需要在控制台
-粘一次 API key，存于 `.runtime/vibe-keys.json`（权限 `0600`），也认各家自己的环境变量——
-OpenRouter 是 `OPENROUTER_API_KEY`，Z.ai 是 `ZAI_API_KEY` / `Z_AI_API_KEY` / `ZHIPUAI_API_KEY`；
-控制台里存的 key 优先级更高，可以盖掉服务启动时继承的那份 shell 导出。
+支持四家：**Claude**（钥匙串条目或 `~/.claude/.credentials.json`）、**Codex**
+（`~/.codex/auth.json` 或 `~/.config/codex/auth.json`）、**Grok**（`~/.grok/auth.json`）、
+**OpenCode**（`OPENCODE_DATA_DIR` / `XDG_DATA_HOME` / `~/.local/share/opencode`）。四家都借各自
+CLI 已经留在本机的登录，**没有需要手填 API key 的厂商**。`PUT /api/vibe/key` 与
+`.runtime/vibe-keys.json`（权限 `0600`）仍在，是留给下一个没有本地登录的厂商的位置；当前
+key 制厂商列表为空，任何 id 都会被拒绝。
 
 读钥匙串就是一次 `security` 调用，沿用你自己给该 CLI 条目的既有授权，**不会多弹一次授权框**；
 非 macOS 上钥匙串读取直接空转，那几家自然检测不到。凭据只在进程内读出来签一次请求就丢弃，不写
-日志、不落盘——唯一持久化的是你自己粘进来的那两把 API key。
+日志、不落盘。
 
-控制台的 **VIBE** 标签页列出十家代理、每家最多 2 个星标指标（`PUT /api/vibe/starred`；上屏显示
+控制台的 **VIBE** 标签页列出四家代理、每家最多 2 个星标指标（`PUT /api/vibe/starred`；上屏显示
 的就是它们）、两页 LED 预览，以及一个「在时钟上打开」（走既有的 `PUT /api/os/display`
 `{focus:"vibe"}`）。指标目录、标签、默认星标与 80%/90% 两档告警颜色沿用 OpenUsage 的语义
 （它是这套采集的参考实现，运行时并不依赖它）。
@@ -737,7 +736,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/weather/geocode` | 按地名搜索定位候选（`?q=` 1–64 字符；Open-Meteo 免 key，服务端缓存 10 分钟） |
 | `GET` | `/api/vibe/status` | VIBE 用量快照，连同 provider 目录、星标表与 `keys`（每个需要 key 的代理是 `stored` / `environment` / `unset`，**绝不含 key 本身**）（只读，免同源）。`?refresh=1` 强制重新采集一次，默认走缓存。一家都没登录**不算 HTTP 错误**：仍返回 200，`snapshot` 为 `null` 并附 `error`，控制台据此显示登录/填 key 引导 |
 | `PUT` | `/api/vibe/starred` | 设置某个代理上屏显示哪些指标：`{providerId, starred}`，`starred` 去重后最多 2 项；应答是与目录默认合并后的完整星标表（同源 + JSON，校验失败 400） |
-| `PUT` | `/api/vibe/key` | 为 OpenRouter / Z.ai 存一把 API key：`{providerId, key}`，`key` 传空串即清除；应答只有 `keys` 那张状态表，**绝不回显 key**（同源 + JSON，校验失败 400） |
+| `PUT` | `/api/vibe/key` | 为 key 制厂商存一把 API key：`{providerId, key}`，`key` 传空串即清除；应答只有 `keys` 那张状态表，**绝不回显 key**（同源 + JSON，校验失败 400）。**当前四家代理都借 CLI 登录，key 制厂商列表为空，任何 `providerId` 都返回 400** |
 | `GET` | `/api/presets`、`/api/icons/:id.png` | 兼容旧客户端的市场预设与内置资产图标 |
 | `GET` / `PUT` | `/api/settings` | 兼容旧版单市场轮播设置 |
 | `POST` | `/api/preview` | 兼容旧版：直接返回渲染的 GIF/PNG 字节 |
@@ -765,13 +764,15 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` / `POST` | `/api/os/device-app/*` | ZOS 的同一套侧载生命周期（确认口令 `START_TC002_OS_SESSION`） |
 | `GET` | `/api/os/pull` | ZOS 长轮询状态文档（`?seq=`，最多挂起 8 秒；行式 `KEY\tVALUE` 纯文本，免同源） |
 | `GET` | `/api/os/frames` | ZOS 按 `?app=` 拉取一个频道渲染好的帧包（`TCF1` 原始 RGB 二进制，免同源） |
-| `GET` | `/api/os/firmware` | 设备自取要安装的固件镜像（`.runtime/tc002-os/update.img`，`mise run os-image` 打出来的 ZKSWE 容器；免同源）。带 `Content-Length` 与 `ETag` / `X-Build-Id`——**这个 id 是容器头里那份 MD5**，也就是更新器自己校验的那一份，不是 `ZOS_BUILD_ID`：git rev 编在 libzkgui.so 里，隔着一层 xz squashfs，为一个状态接口解压一兆不值当。没打包过就是 404。路径是组合根里写死的常量，请求里的任何东西都挪不动它 |
-| `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto, sleep?}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq）。`sleep` 形如 `{on, startMin, endMin, idleSec, asleep, clockSynced}`，**它在不在就是夜间息屏的能力探测**；块内数值越界按范围夹住而不是让整条心跳 400 |
+| `GET` | `/api/os/firmware` | 设备自取**当前选中**的那份镜像（免同源）。选中规则：`.runtime/tc002-os/uploaded/update.img`（上传的）优先，没有才轮到 `.runtime/tc002-os/update.img`（`mise run os-image` 打的）。两个路径分属两个写方，谁也盖不掉谁——上传落进打包路径的话，下一次 `os-image` 就会把主人选的镜像悄悄换掉。带 `Content-Length` 与 `ETag` / `X-Build-Id`——**这个 id 是容器头里那份 MD5**，也就是更新器自己校验的那一份，不是 `ZOS_BUILD_ID`：git rev 编在 libzkgui.so 里，隔着一层 xz squashfs，为一个状态接口解压一兆不值当。一份都没有就是 404。路径是组合根里写死的常量，请求里的任何东西都挪不动它 |
+| `POST` | `/api/os/firmware` | 主人上传一份镜像：`multipart/form-data`，字段 `file`，**同源检查**。正文上限 8 MiB + 768 字节（`res` 分区加容器头），超了在读正文之前就 413。存盘前逐项校验（`device/tc002-os/release/zkswe-image.ts`，与打包器同一份实现）：魔数、长度上下界、容器自洽（头部 CRC-32 与每项内嵌 MD5），以及**刷写目标必须是 type 3 `res`**。最后这条最要紧——瞄准别的分区的镜像不是一次失败的安装，是一块砖，设备的更新器就是照分区类型位掩码办事的。拒绝时正文是 `{error, reason}`，`reason` ∈ `magic` `too-short` `too-long` `malformed` `digest` `partition`，**并且什么都不写盘**：之前选中的镜像原封不动。通过则应答与 `GET /api/os/firmware/status` 同一份文档。**上传不等于安装**：这条路不碰任何升级序列 |
+| `DELETE` | `/api/os/firmware` | 删掉上传的那一份，让本地打包的重新当选（同源检查）。应答 `{removed, ...状态文档}`。没有它，上传就是一扇单向门——控制台再也回不到 `os-image` 的产物 |
+| `POST` | `/api/os/report` | ZOS 10 秒遥测：`{screen, focus, wifi, ip, uptimeMs, freeKb, supplicantRestarts, proto, batteryPercent, batteryMillivolts?, charging, sleep?}`（字符串截断 64 字符，免同源；只有 `proto` 变化时 bump seq）。`sleep` 形如 `{on, startMin, endMin, idleSec, asleep, clockSynced}`，**它在不在就是夜间息屏的能力探测**；块内数值越界按范围夹住而不是让整条心跳 400。`charging` 只看 USB 供电，与电压无关；`batteryMillivolts` 是电芯电压（3600 mV 报警、3550 mV 触发 30 秒关机倒计时），**固件的关机保护读的是它，`batteryPercent` 只用于显示**。两者都用 `-1` 表示「还没读到」；`batteryMillivolts` 在旧固件上**整个字段缺席**，缺席与 `-1` 含义不同，控制台据此决定是否显示电压 |
 | `POST` | `/api/os/mirror` | ZOS 回传面板实拍帧（正文即 2496 字节原始 RGB，免同源）；应答 `{wanted}` 告诉设备是否继续推 |
 | `GET` | `/api/os/mirror` | 控制台取最新一帧，**取本身就是订阅**：10 秒不取设备自动停流 |
 | `GET` | `/api/os/state` | 链路快照 `{seq, menu, display, telemetry, live, mirrorWanted, upgradeSeq, zosFlashed, requestedSettings, requestedSleep, pendingInputs, lyricTheme}`（遥测 15 秒内到达才算 live）。`upgradeSeq` 是至今要求过多少次安装，控制台靠它看出「请求还悬着」——设备装完就重启，这中间没有别的回执。`telemetry` 额外带 `ageMs` 与 `seq`：`seq` 是**收到过多少条上报**，单调不复位——`live` 只说明设备最近说过话，重新配网时它对旧网络也成立，要判断「设备回来了」必须比对配网前记下的 `seq` |
-| `GET` | `/api/os/firmware/status` | 控制台读镜像状态：`{packed, image, upgradeSeq}`，`image` 是 `{bytes, buildId, builtAt}` 或 `null`。`builtAt` 是镜像文件的 mtime，回答的是「这是不是我刚打的那一份」；`packed` 明写而不靠字段有无去猜——它旁边就是那颗改写闪存的按钮 |
-| `POST` | `/api/os/upgrade` | 要求设备安装已打包的镜像：正文 `{}`，应答 `{seq}`。**没打包过是 409**——序列照发的话，设备去取镜像只会拿到 404 然后停下，控制台却在那儿显示「正在安装」。设备对同一个序列每次开机只认一次；安装会重启设备，链路中途必然断，这是设计使然而不是故障 |
+| `GET` | `/api/os/firmware/status` | 控制台读镜像状态：`{packed, image, source, shadowedPacked, upgradeSeq}`。`image` 是 `{bytes, buildId, builtAt, md5, partitionType, partitionLabel, payloadBytes, zosBuildId, filesystemBuiltAt}` 或 `null`——`md5` 是**整包**的摘要（主人对着自己的文件跑一次 `md5` 就能核），`buildId` 是设备侧校验的那份内嵌 MD5，两者不是一个数。`zosBuildId` 只有在载荷里真的读得到那串 `<rev>-<stamp>` 时才有值，打包镜像里它压在 xz squashfs 底下，所以正常就是 `null`，控制台照直写「未知」——**不从大小、mtime 或摘要里凑一个像版本号的东西出来**。`filesystemBuiltAt` 是 squashfs 的 mkfs 时间，打包器把它钉在所打的 `.so` 的 mtime 上，是唯一一个扛得住 xz 的「这是哪一版」线索。`source` 是 `{kind:"upload"\|"packed", fileName, at}`：分不清「这是我刚打的」和「这是别人给我的文件」，正是照着昨天的构建装完还以为装了今天那一版的原因。`shadowedPacked` 是**存在但不会被安装**的那份本地打包镜像（有上传时才非空）。`builtAt` 是选中镜像的 mtime；`packed` 明写而不靠字段有无去猜——它旁边就是那颗改写闪存的按钮 |
+| `POST` | `/api/os/upgrade` | 要求设备安装当前选中的镜像：正文 `{}`，应答 `{seq}`。**一份都没有是 409**——序列照发的话，设备去取镜像只会拿到 404 然后停下，控制台却在那儿显示「正在安装」。设备对同一个序列每次开机只认一次；安装会重启设备，链路中途必然断，这是设计使然而不是故障 |
 | `POST` | `/api/os/ble` | 要求时钟打开蓝牙广播五分钟：正文 `{}`，应答 `{seq}`。等同于替用户远程按下设备上的 设置 → 配网——ZOS 只在**掉线时**、或按过那一行之后的五分钟里广播，所以一台正常在线的钟（恰恰是要换路由器的那一台）在浏览器的蓝牙列表里根本不存在。**没有前置条件**，不像 `/api/os/upgrade` 那样会 409：这里没有「没打包」这类东西可缺，而一台离线到读不到这条请求的钟，本来就已经在广播了。序列是秒级时间戳，设备**只认上升沿**，重复的 `bleopen` 不会在每轮长轮询里重开窗口 |
 | `PUT` | `/api/os/display` | 令 ZOS 跳到某个频道并锁定旋钮：`{focus, pinned}` |
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
@@ -790,12 +791,18 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/music/device/now`、`/api/music/device/audio` | 固件读取当前曲目歌词与下载音频。`/now` 按查询参数版本化：不带 `?v` 逐字节返回原格式 `DUR\t<ms>` + `<startMs>\t<text>`（已部署的解析器把非 `DUR` 的键当起点，新增记录类型会被渲染成乱码行），`?v=2` 返回 `V\t2`、`DUR`、`L\t<startMs>\t<sungEndMs>\t<text>`，以及紧跟其后可选的 `W\t<d0,w0,…>` 逐字表 |
 
 写接口仅接受 JSON 并执行同源检查（设备上报的 `report` / `heartbeat` 以及 ZOS 的
-`/api/os/pull`、`/api/os/frames`、`/api/os/firmware`、`/api/os/report`、`POST /api/os/mirror`
+`/api/os/pull`、`/api/os/frames`、`GET /api/os/firmware`、`/api/os/report`、`POST /api/os/mirror`
 除外，它们的调用方
-是时钟固件，不是浏览器，没有 Origin 可发；`POST /api/os/mirror` 的正文也不是 JSON 而是原始
+是时钟固件，不是浏览器，没有 Origin 可发；注意免同源的只有**取镜像那个 GET**，同一路径上的
+`POST` / `DELETE` 是写，同源检查照做；`POST /api/os/mirror` 的正文也不是 JSON 而是原始
 RGB——套一层 base64 JSON 信封要多花三分之一的字节，换不来固件用得上的任何东西）；请求体
 上限 256 KiB。工作区最多 24 个频道、每频道 48 项、
 每频道最多渲染 360 帧；App 名唯一且限 1–32 个 ASCII 字母、数字、下划线或连字符。
+
+`POST /api/os/firmware` 与 `/api/library/video/import` 是仅有的两个 `multipart/form-data` 写接口：
+正文是文件，套一层 base64 JSON 信封白花三分之一的字节。代价要说清楚——跨源的 `<form>` 能自己发出
+`multipart/form-data`，所以 JSON 接口顺带靠 `Content-Type` 挡住的那一层这里没有，同源检查是**唯一**
+的那道门。
 
 `/api/live/frames` 与 `/api/music/mirror` 例外使用 2 MiB 正文上限，并共用独立于频道 FIFO 的
 串行 live 写队列；live 请求限 1–400 个 52×16 RGB 帧，页面端负责只保留最新的待推帧。

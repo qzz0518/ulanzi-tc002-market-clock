@@ -52,8 +52,17 @@ export const BEACON_MAGIC = "ZOSCON1";
  */
 export const BEACON_PORT = 43_821;
 
-/** Every 10 s: a lost device is found within one interval of arriving. */
-export const BEACON_INTERVAL_MS = 10_000;
+/**
+ * Every 3 s.
+ *
+ * The interval used to be 10 s, on the reasoning that a lost device is found
+ * within one of them. It is not the dominant term any more — the firmware keeps
+ * the last hint it heard whether or not it is lost, so a clock that loses its
+ * console already has the address and does not wait for the next announcement.
+ * What this interval now bounds is the FIRST heal after a console appears, and
+ * three seconds of a 30-byte datagram is not a cost worth defending against.
+ */
+export const BEACON_INTERVAL_MS = 3_000;
 
 /**
  * One ASCII line: `ZOSCON1\t<host>\t<port>\n`.

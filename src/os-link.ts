@@ -301,8 +301,25 @@ export interface OsTelemetry {
   uptimeMs: number;
   freeKb: number;
   supplicantRestarts: number;
-  /** 0..100, or -1 before the device has a reading. */
+  /** 0..100, or -1 before the device has a reading. Display only — see below. */
   batteryPercent: number;
+  /**
+   * The cell voltage in millivolts, or -1 before the device has one.
+   *
+   * ABSENT on firmware from before this existed, and the distinction matters
+   * the same way `upgradeSeqInstalled`'s does: -1 means "this device has taken
+   * no reading yet", which is a fact, while undefined means "this build cannot
+   * tell me" and the console must show nothing at all rather than a dash that
+   * looks like a broken sensor.
+   *
+   * Why it is here at all: this is the quantity the firmware's shutdown
+   * protection actually runs on (device/tc002-os/app/src/platform/BatteryPolicy.h),
+   * and the percentage beside it is a display number. Without the voltage,
+   * "is the percentage right?" cannot be answered from the console — which is
+   * not academic, because the same three-byte MCU answer was misread as a
+   * charge flag for the whole life of the firmware.
+   */
+  batteryMillivolts?: number;
   charging: boolean;
   /**
    * Which revision of the state document this firmware understands. Absent or 0

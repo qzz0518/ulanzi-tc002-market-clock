@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
+import { BEACON_INTERVAL_MS,
   BEACON_MAGIC,
   BEACON_PORT,
   ConsoleBeacon,
@@ -298,5 +298,15 @@ describe("console discovery configuration", () => {
     expect(() => loadConfig({ ...base, CONSOLE_DISCOVERY_PORT: "80" })).toThrow(
       /CONSOLE_DISCOVERY_PORT/,
     );
+  });
+
+  test("announces often enough that a first heal is not a wait", () => {
+    // 3 s, down from 10. The interval stopped being the dominant term when the
+    // firmware started keeping the last hint it heard whether or not it was
+    // lost — a clock that loses its console already has the address. What this
+    // bounds now is only the FIRST heal after a console appears, and three
+    // seconds of a 30-byte datagram is not a cost worth defending.
+    expect(BEACON_INTERVAL_MS).toBe(3_000);
+    expect(BEACON_INTERVAL_MS).toBeLessThanOrEqual(3_000);
   });
 });

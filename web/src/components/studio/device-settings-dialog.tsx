@@ -3,6 +3,7 @@ import {
   Bluetooth,
   Check,
   Copy,
+  Cpu,
   RefreshCw,
   RotateCcw,
   Save,
@@ -41,13 +42,16 @@ import type { FirmwareMode } from "@/lib/firmware-mode";
 import type { BleSupport } from "@/lib/ble-provisioning";
 import {
   createZosLink,
+  type ZosFirmwareStatus,
   type ZosLink,
   type ZosReadoutRow,
   type ZosRequestedSettings,
   type ZosSleepReport,
   type ZosState,
+  type ZosUpgradeRequest,
 } from "@/lib/zos-link";
 import { ZosSendRows, type ZosSendSettingsPatch } from "@/components/zos/zos-send-row";
+import { ZosFirmwareUpdate } from "@/components/zos/zos-firmware-update";
 import {
   SLEEP_IDLE_OPTIONS,
   SLEEP_WINDOW_MINUTES,
@@ -405,6 +409,15 @@ export function DeviceHostPanel({
   );
 }
 
+/**
+ * 这个对话框的去处。
+ *
+ * 「固件」是第三个，不是「常规」里的第 N 节：它是这一屏唯一一个会重写闪存的操作，
+ * 和音量、时区这些随手可改、改错也只是难看一会儿的设置不是一类东西。只有 ZOS 有
+ * ZOS 可更新，所以它也只在那时候出现——一个按下去只会说「不适用」的标签页是家具。
+ */
+type SettingsTab = "general" | "device" | "firmware";
+
 export function DeviceSettingsDialog({
   open,
   onOpenChange,
@@ -424,7 +437,7 @@ export function DeviceSettingsDialog({
   const [accessError, setAccessError] = useState(false);
   const [accessCopied, setAccessCopied] = useState(false);
   const [accessPopoverOpen, setAccessPopoverOpen] = useState(false);
-  const [tab, setTab] = useState<"general" | "device">("general");
+  const [tab, setTab] = useState<SettingsTab>("general");
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
   const [infoError, setInfoError] = useState<string | null>(null);
@@ -436,6 +449,14 @@ export function DeviceSettingsDialog({
   const [zosState, setZosState] = useState<ZosState | null>(null);
   const [zosNow, setZosNow] = useState(() => Date.now());
   const [provisionOpen, setProvisionOpen] = useState(false);
+  // 固件那一节的四件事：服务当前选中的是哪一份镜像、有没有上传在途、同意勾了没、
+  // 这次会话要求过安装没有。同意不落盘——重开这个对话框就是没勾的状态。
+  const [firmware, setFirmware] = useState<ZosFirmwareStatus | null>(null);
+  const [firmwareError, setFirmwareError] = useState<string | null>(null);
+  const [firmwareBusy, setFirmwareBusy] = useState(false);
+  const [firmwareUploading, setFirmwareUploading] = useState(false);
+  const [upgradeConsent, setUpgradeConsent] = useState(false);
+  const [upgrade, setUpgrade] = useState<ZosUpgradeRequest | null>(null);
   const zosLinkRef = useRef<ZosLink | null>(null);
   // 不能渲染一个按下去必然失败的按钮，所以配网入口的有无和向导的第一屏由同一个
   // 判断决定。只在对话框打开时探，省掉常驻的适配器查询。
@@ -590,6 +611,12 @@ export function DeviceSettingsDialog({
       zosLinkRef.current = null;
       // 下次打开先显示「正在读取」，而不是上一次的读数——设备可能已经掉线了。
       setZosState(null);
+      // 镜像同理：这中间可能有人重新打了包或者传了新的一份。
+      setFirmware(null);
+      setFirmwareError(null);
+      // 同意只管一次安装，而且必须是当着这份镜像勾的。留着它，等于让下一次
+      // 打开对话框的人一进来就看见一颗解锁的、会擦掉 mtd3 的按钮。
+      setUpgradeConsent(false);
     };
   }, [open, zos]);
 
@@ -609,6 +636,13 @@ export function DeviceSettingsDialog({
   useEffect(() => {
     if (open && loadError && !hasDraftRef.current) setTab("device");
   }, [loadError, open]);
+
+  // 固件那一页只在 ZOS 上存在。一台钟可以在对话框开着的时候不再是 ZOS（装完官方
+  // 固件回来、或者有人侧载了别的），那时选中的标签页会没有对应的 Tab，cladd 会渲染
+  // 出一个哪一页都不亮的空壳——回到「常规」，那是任何一台钟都有的那一页。
+  useEffect(() => {
+    if (!zos && tab === "firmware") setTab("general");
+  }, [tab, zos]);
 
   useEffect(() => {
     if (open && accessPopoverOpen) void loadAccess();
@@ -683,6 +717,101 @@ export function DeviceSettingsDialog({
     }
   };
 
+  const zosFacts = zos && zosState !== null ? describeZosDeviceFacts(zosState, zosNow) : null;
+  // 拿到自己的第一份状态之前，就先用 App 那条轮询已经给出的判断（firmwareMode 只有
+  // 在设备正在上报时才是 zos）——总比在一台掉线的钟上先画一屏在线的样子好。
+  const zosLive = zosState !== null ? zosState.live === true : firmwareMode === "zos";
+
+  // 镜像不是设备状态：只有人去打包或上传，它才会变。所以读一次就够，其余交给
+  // 「重新读取」和每次写入后的回读——不再加第三条轮询。
+  const loadFirmware = useCallback(async () => {
+    const link = zosLinkRef.current;
+    if (!link) return;
+    setFirmwareBusy(true);
+    try {
+      setFirmware(await link.readFirmwareStatus());
+      setFirmwareError(null);
+    } catch (error) {
+      // 读失败就是读失败。留着上一次的镜像信息，等于让一个会重写闪存的按钮
+      // 站在过期的前提上。
+      setFirmware(null);
+      setFirmwareError(errorMessage(error));
+    } finally {
+      setFirmwareBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && zos) void loadFirmware();
+  }, [loadFirmware, open, zos]);
+
+  // 亲眼看见设备离开，才分得清「它重启了」和「什么都没发生」。错过这一刻，
+  // 之后再回到在线就不能算作一次重启了。
+  useEffect(() => {
+    if (zosLive) return;
+    setUpgrade((current) => (
+      current === null || current.sawOffline ? current : { ...current, sawOffline: true }
+    ));
+  }, [zosLive]);
+
+  // 上传只是把镜像交给服务，绝不触发安装：回来的是服务盘上真实的那一份，
+  // 照着渲染，人再决定装不装。
+  const uploadFirmware = async (file: File) => {
+    const link = zosLinkRef.current;
+    if (!link || firmwareUploading) return;
+    setFirmwareUploading(true);
+    try {
+      const next = await link.uploadFirmware(file);
+      setFirmware(next);
+      setFirmwareError(null);
+      // 换了镜像，之前那一勾就不作数了：同意的是「装那一份」。
+      setUpgradeConsent(false);
+      toast.success("镜像已上传", { description: "还没有开始安装；确认下面的信息后再点安装。" });
+    } catch (error) {
+      toast.error("镜像上传失败", { description: errorMessage(error) });
+    } finally {
+      setFirmwareUploading(false);
+    }
+  };
+
+  const removeFirmwareUpload = async () => {
+    const link = zosLinkRef.current;
+    if (!link || firmwareUploading) return;
+    setFirmwareUploading(true);
+    try {
+      setFirmware(await link.removeFirmwareUpload());
+      setFirmwareError(null);
+      setUpgradeConsent(false);
+      toast.success("已移除上传的镜像");
+    } catch (error) {
+      toast.error("移除失败", { description: errorMessage(error) });
+    } finally {
+      setFirmwareUploading(false);
+    }
+  };
+
+  const startUpgrade = async () => {
+    const link = zosLinkRef.current;
+    if (!link) return;
+    setFirmwareBusy(true);
+    try {
+      const seq = await link.requestUpgrade();
+      setUpgrade({ seq, at: Date.now(), sawOffline: false });
+      // 一次同意只管一次安装。设备回来以后要再装，就得再勾一次——不能因为
+      // 上一次答应过，就让写 flash 一直是解锁的。
+      setUpgradeConsent(false);
+      toast.success("已下发更新请求", {
+        description: "时钟会自己下载镜像、写入 flash 并重启，期间面板不响应。",
+      });
+      // 立刻回读一次：拉取文档里的那个序号，是这次请求真的上了线的唯一证据。
+      await link.refreshState();
+    } catch (error) {
+      toast.error("固件更新请求失败", { description: errorMessage(error) });
+    } finally {
+      setFirmwareBusy(false);
+    }
+  };
+
   const save = async () => {
     if (!draft || saving || surface !== "official") return;
     setSaving(true);
@@ -702,11 +831,6 @@ export function DeviceSettingsDialog({
       setSaving(false);
     }
   };
-
-  const zosFacts = zos && zosState !== null ? describeZosDeviceFacts(zosState, zosNow) : null;
-  // 拿到自己的第一份状态之前，就先用 App 那条轮询已经给出的判断（firmwareMode 只有
-  // 在设备正在上报时才是 zos）——总比在一台掉线的钟上先画一屏在线的样子好。
-  const zosLive = zosState !== null ? zosState.live === true : firmwareMode === "zos";
 
   // 开始配网 asks the clock first, and only then opens the wizard.
   //
@@ -852,7 +976,7 @@ export function DeviceSettingsDialog({
       buttons={(
         // The device tab saves through its own button, so the footer's write action
         // would be a no-op there — it offers a re-probe and a plain close instead.
-        // ZOS 两个标签页都一样：下发是即时的，没有草稿可保存，「重新读取」问的是
+        // ZOS 的三个标签页都一样：下发是即时的，没有草稿可保存，「重新读取」问的是
         // 同一份状态文档。
         <div className="device-settings-actions">
           <Button
@@ -864,7 +988,11 @@ export function DeviceSettingsDialog({
               ? zosState === null
               : tab === "general" ? loading || saving : infoLoading || savingHost}
             onClick={() => void (zos
-              ? zosLinkRef.current?.refreshState()
+              // 一页一颗「重新读取」：ZOS 这一页上要重读的是两样东西——设备状态，
+              // 和服务上选中的那份镜像。镜像那一节因此不再自带一颗常驻按钮。
+              // 一颗「重新读取」管住 ZOS 的每一页：要重读的就是两样东西——设备
+              // 状态，和服务上选中的那份镜像。固件那一页因此不自带常驻按钮。
+              ? Promise.all([zosLinkRef.current?.refreshState(), loadFirmware()])
               : tab === "general" ? loadSettings() : loadDeviceTab())}
           >
             <RefreshCw />重新读取
@@ -896,7 +1024,7 @@ export function DeviceSettingsDialog({
         </div>
       )}
     >
-      <Tabs value={tab} onValueChange={(value) => setTab(value as "general" | "device")}>
+      <Tabs value={tab} onValueChange={(value) => setTab(value as SettingsTab)}>
         <SurfaceCut
           className="segmented-track device-settings-tabs"
           color="neutral"
@@ -906,6 +1034,7 @@ export function DeviceSettingsDialog({
           <TabsList size="sm" rounded activeColor="brand" aria-label="设置分类">
             <Tab value="general"><SlidersHorizontal />常规</Tab>
             <Tab value="device"><Wifi />设备信息</Tab>
+            {zos && <Tab value="firmware"><Cpu />固件</Tab>}
           </TabsList>
         </SurfaceCut>
 
@@ -962,6 +1091,34 @@ export function DeviceSettingsDialog({
             />
           </div>
         </TabPanel>
+
+        {zos && (
+          <TabPanel value="firmware" className="device-settings-panel" keepMounted>
+            <ZosFirmwarePanel>
+              <ZosFirmwareUpdate
+                // 这一页自己判断适用不适用：一台在跑侧载固件的钟根本到不了这里
+                // （那是 sideload 面），但一台刷了 ZOS 却掉线的钟到得了——那时候能
+                // 传镜像、不能装，两句话分开说。
+                mode={firmwareMode}
+                zosFlashed={zosFlashed}
+                live={zosLive}
+                status={firmware}
+                statusError={firmwareError}
+                request={upgrade}
+                serverSeq={zosState?.upgradeSeq ?? null}
+                now={zosNow}
+                busy={firmwareBusy}
+                uploading={firmwareUploading}
+                consent={upgradeConsent}
+                onConsentChange={setUpgradeConsent}
+                onUpgrade={() => void startUpgrade()}
+                onRefreshStatus={() => void loadFirmware()}
+                onUpload={(file) => void uploadFirmware(file)}
+                onRemoveUpload={() => void removeFirmwareUpload()}
+              />
+            </ZosFirmwarePanel>
+          </TabPanel>
+        )}
       </Tabs>
     </Dialog>
 
@@ -1420,6 +1577,34 @@ export function ZosGeneralPanel({
       </section>
 
       <AboutSection index="04" />
+    </div>
+  );
+}
+
+/**
+ * 固件那一页的版式。
+ *
+ * 一个标签页里只有一节内容，仍然按分节排：左栏说这一节是什么、右栏是字段，和
+ * 「设备信息」那一页（01 设备状态、02 时钟地址）同一套栅格。另起一种版式只会让
+ * 这个对话框里出现第二种读法。标题叫「系统镜像」而不是「固件」——标签页已经这么
+ * 说过一遍了。
+ *
+ * 正文以 children 传进来，理由和它当初做成 prop 时一样：镜像信息、上传中、勾没勾
+ * 同意、请求发出去多久了，全都长在对话框上，因为 ZOS 链路是对话框持有的。
+ */
+export function ZosFirmwarePanel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="device-settings-form">
+      <section className="device-settings-section" aria-labelledby="zos-firmware-title">
+        <div className="device-settings-section__heading">
+          <span>01</span>
+          <div>
+            <h3 id="zos-firmware-title">系统镜像</h3>
+            <p>时钟闪存里的 ZOS 系统固件。上传和安装是两步。</p>
+          </div>
+        </div>
+        {children}
+      </section>
     </div>
   );
 }

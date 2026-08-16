@@ -257,9 +257,9 @@ describe("zos panel", () => {
     // 一次)。这里只留 markup 里看不见的那几条:组件的取舍,以及不该复活的旧写法。
     const html = markup(createElement(ZosPanel));
     // 分组小标题全 app 一个样,所以用 SectionTitle 而不是自己写一层眉题。
-    // 三块:设备菜单、下发到设备、固件更新。
+    // 两块:设备菜单、下发到设备。固件那一块搬去 常规设置 了。
     expect(html).toContain("cladd-section-title");
-    expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(3);
+    expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(2);
     // 音量与亮度都用 Slider:全 app 只有「常规设置」那一处在调这两个值,
     // 那边两条都是 Slider,这里跟着走。
     expect(html).toContain("cladd-slider");
@@ -308,13 +308,35 @@ describe("zos panel", () => {
   });
 });
 
-// --- 固件更新 ---------------------------------------------------------------
+// --- 固件 -------------------------------------------------------------------
+//
+// 这一节现在长在 常规设置 里（第 04 节），不在系统面板上：固件是设备属性，
+// 和亮度、息屏、网络同类。组件本身还是单独渲染来断言——cladd 的 Dialog 走
+// portal，服务端渲染出来是空串。
 
 const NOW = 1_700_000_000_000;
 
 const PACKED: ZosFirmwareUpdateProps["status"] = {
   packed: true,
-  image: { buildId: "zos-2026.08.14+3f2a1c", bytes: 8_912_896, builtAt: NOW - 2 * 3_600_000 },
+  image: {
+    buildId: "aa7ab843c11ec2713a023b4a20f52b14",
+    bytes: 8_912_896,
+    builtAt: NOW - 2 * 3_600_000,
+    md5: "08e9fc52338abd686ee822295a051327",
+    partitionType: 3,
+    partitionLabel: "res",
+    zosBuildId: null,
+    filesystemBuiltAt: NOW - 3 * 3_600_000,
+  },
+  source: { kind: "packed", fileName: null, at: NOW - 2 * 3_600_000 },
+  shadowedPacked: null,
+};
+
+const NOTHING: ZosFirmwareUpdateProps["status"] = {
+  packed: false,
+  image: null,
+  source: null,
+  shadowedPacked: null,
 };
 
 function updateMarkup(overrides: Partial<ZosFirmwareUpdateProps> = {}): string {
@@ -322,55 +344,131 @@ function updateMarkup(overrides: Partial<ZosFirmwareUpdateProps> = {}): string {
     mode: "zos",
     zosFlashed: true,
     live: true,
-    status: { packed: false, image: null },
+    status: NOTHING,
     statusError: null,
     request: null,
     serverSeq: null,
     now: NOW,
     busy: false,
+    uploading: false,
     consent: false,
     onConsentChange: () => {},
     onUpgrade: () => {},
     onRefreshStatus: () => {},
+    onUpload: () => {},
+    onRemoveUpload: () => {},
     ...overrides,
   }));
 }
 
 /** 装机按钮那一段 markup;整份里到处都有 disabled,得先把按钮切出来再判断。 */
 function installButton(html: string): string | undefined {
-  return html.split("<button").find((chunk) => chunk.includes("更新时钟固件"));
+  return html.split("<button").find((chunk) => chunk.includes("安装到时钟"));
+}
+
+/** 选文件那一颗，同理。 */
+function uploadButton(html: string): string | undefined {
+  return html.split("<button").find((chunk) => chunk.includes("选择镜像文件"));
 }
 
 describe("zos firmware update", () => {
-  test("no image packed: says how to make one, and offers no button that cannot work", () => {
-    const html = updateMarkup({ status: { packed: false, image: null } });
+  test("no image: names both ways to get one, and offers no button that cannot work", () => {
+    const html = updateMarkup({ status: NOTHING });
 
-    expect(html).toContain("固件更新");
-    expect(html).toContain("还没有打包镜像");
+    expect(html).toContain("还没有可安装的镜像");
+    // 上传是给这台钟的主人的；打包是给开发者的。两条路都说，别只说后者。
+    expect(html).toContain("上传一份 .img");
     expect(html).toContain("mise run os-image");
     // 按下去必然失败的入口比没有入口更糟。
     expect(installButton(html)).toBeUndefined();
     expect(html).not.toContain("我知道更新期间会发生什么");
-    // 打完包不该要求刷新整页。
+    // 但选文件永远可以按:没有镜像的时候，它正是要做的那件事。
+    expect(uploadButton(html)).toBeDefined();
+    expect(uploadButton(html)).not.toContain("disabled");
     expect(html).toContain("重新读取");
   });
 
-  test("an image on disk is described by its own facts, and only those", () => {
+  test("an image is described by its own facts: size, whole-file MD5, target partition", () => {
     const html = updateMarkup({ status: PACKED });
 
-    expect(html).toContain("镜像已就绪");
-    expect(html).toContain("zos-2026.08.14+3f2a1c");
     expect(html).toContain("8.5 MB");
+    // 人能自己核对的那个数——对文件跑一次 md5 就能比。
+    expect(html).toContain("08e9fc52338abd686ee822295a051327");
+    // 写哪个分区。服务只放 res 过，所以这一行是确认，而 res 正是最该被确认的。
+    expect(html).toContain("res（mtd3）");
+    // 版本读不出来就写「未知」，并且说清为什么。编一个像版本号的东西出来，
+    // 会被当成真的版本号。
+    expect(html).toContain("未知");
+    expect(html).toContain("隔着一层 xz 压缩读不出来");
     expect(html).toContain("2 小时前");
     expect(installButton(html)).toBeDefined();
+    // 一页一颗「重新读取」:有镜像时那颗在对话框脚上,这一节不再常驻一个同名按钮。
+    expect(html).not.toContain("重新读取");
 
-    // 服务没说的字段一律不占位:凭空的版本号会被当成真的。
-    const bare = updateMarkup({ status: { packed: true, image: { buildId: null, bytes: null, builtAt: null } } });
-    expect(bare).toContain("镜像已就绪");
-    expect(bare).not.toContain("版本");
+    // 服务真的给了版本号时，就照给的写，不再有「未知」那一套说辞。
+    const stamped = updateMarkup({
+      status: { ...PACKED, image: { ...PACKED.image!, zosBuildId: "3f2a1c9-202608141930" } },
+    });
+    expect(stamped).toContain("3f2a1c9-202608141930");
+    expect(stamped).not.toContain("隔着一层 xz 压缩读不出来");
+
+    // 服务没说的字段一律不占位。
+    const bare = updateMarkup({
+      status: {
+        packed: true,
+        image: {
+          buildId: null, bytes: null, builtAt: null, md5: null,
+          partitionType: null, partitionLabel: null, zosBuildId: null, filesystemBuiltAt: null,
+        },
+        source: null,
+        shadowedPacked: null,
+      },
+    });
     expect(bare).not.toContain("大小");
-    expect(bare).not.toContain("打包于");
+    expect(bare).not.toContain("整包 MD5");
+    expect(bare).not.toContain("写入分区");
     expect(installButton(bare)).toBeDefined();
+  });
+
+  // 装错版本那一晚就是这么来的:分不清「这是我刚打的」和「这是别人给我的」。
+  test("says where the armed image came from, and never lets a local pack hide behind an upload", () => {
+    const packed = updateMarkup({ status: PACKED });
+    expect(packed).toContain("本地打包");
+    expect(packed).toContain("mise run os-image");
+    // 本地打包的那一份就是要装的那一份,没有第二份可提。
+    expect(packed).not.toContain("移除上传");
+    expect(packed).not.toContain("没有被选中");
+
+    const uploaded = updateMarkup({
+      status: {
+        ...PACKED,
+        source: { kind: "upload", fileName: "zos-2026.08.15.img", at: NOW - 5 * 60_000 },
+        shadowedPacked: { bytes: 1_045_052, builtAt: NOW - 60_000 },
+      },
+    });
+    expect(uploaded).toContain("本次上传");
+    expect(uploaded).toContain("zos-2026.08.15.img");
+    expect(uploaded).toContain("5 分钟前");
+    // 仓库里那一份还在,而且不会被装——说出来,别让它悄悄躺着。
+    expect(uploaded).toContain("本地打包的镜像没有被选中");
+    expect(uploaded).toContain("1021 KB");
+    // 并且给得出回头路。
+    expect(uploaded).toContain("移除上传");
+  });
+
+  // 上传和安装是两步。这是整个设计的支点:上传成功和「这就是我要的那一版」
+  // 是两个说法,后者的结局是擦掉 mtd3。
+  test("uploading is offered without consent, and installing still is not", () => {
+    const html = updateMarkup({ status: PACKED, consent: false });
+    // 选文件不需要勾任何东西:它不动设备。
+    expect(uploadButton(html)).not.toContain("disabled");
+    expect(html).toContain("上传只是准备镜像，不会开始安装");
+    // 装机需要。
+    expect(installButton(html)).toContain("disabled");
+
+    // 上传在途时,装机按钮压住:两件事不能同时在飞。
+    const busy = updateMarkup({ status: PACKED, consent: true, uploading: true });
+    expect(installButton(busy)).toContain("disabled");
   });
 
   test("the status read can fail, and then it says so instead of showing an old image", () => {
@@ -457,27 +555,53 @@ describe("zos firmware update", () => {
     expect(installButton(offline)).toBeUndefined();
   });
 
-  test("the panel's first paint offers no install — nothing has reported yet", () => {
+  // 固件搬进了 常规设置。系统面板上不该再留一个入口:同一件事在两处各有一份
+  // 状态,就会有两个说法,而这一件事的结局是擦掉 mtd3。
+  test("the system panel offers no firmware entry at all — it lives in 常规设置 now", () => {
     const html = markup(createElement(ZosPanel));
-    expect(html).toContain("固件更新");
-    expect(html).toContain("当前不适用");
+    expect(html).not.toContain("固件更新");
+    expect(html).not.toContain("上传镜像");
     expect(installButton(html)).toBeUndefined();
+    expect(uploadButton(html)).toBeUndefined();
   });
 
   test("reads the image status field by field, and never invents one", () => {
+    const blank = { packed: false, image: null, source: null, shadowedPacked: null };
+    const image = (over: Record<string, unknown> = {}) => ({
+      buildId: null, bytes: null, builtAt: null, md5: null,
+      partitionType: null, partitionLabel: null, zosBuildId: null, filesystemBuiltAt: null,
+      ...over,
+    });
+
     // 认得出的两种写法都收,认不出的一律留白——这些数字紧挨着一个会重写闪存的按钮。
     expect(parseFirmwareStatus({ packed: true, image: { buildId: "b1", bytes: 1024, builtAt: 7 } }))
-      .toEqual({ packed: true, image: { buildId: "b1", bytes: 1024, builtAt: 7 } });
+      .toEqual({ ...blank, packed: true, image: image({ buildId: "b1", bytes: 1024, builtAt: 7 }) });
     expect(parseFirmwareStatus({ image: { buildId: "b1", size: 2048, builtAtMs: 9 } }))
-      .toEqual({ packed: true, image: { buildId: "b1", bytes: 2048, builtAt: 9 } });
+      .toEqual({ ...blank, packed: true, image: image({ buildId: "b1", bytes: 2048, builtAt: 9 }) });
     // 200 不等于「有镜像」。
-    expect(parseFirmwareStatus({})).toEqual({ packed: false, image: null });
-    expect(parseFirmwareStatus({ packed: false, image: { buildId: "b1" } }))
-      .toEqual({ packed: false, image: null });
-    expect(parseFirmwareStatus(null)).toEqual({ packed: false, image: null });
+    expect(parseFirmwareStatus({})).toEqual(blank);
+    expect(parseFirmwareStatus({ packed: false, image: { buildId: "b1" } })).toEqual(blank);
+    expect(parseFirmwareStatus(null)).toEqual(blank);
     // 类型不对的字段当成没给,而不是照着渲染。
     expect(parseFirmwareStatus({ packed: true, image: { buildId: 7, bytes: "big", builtAt: -1 } }))
-      .toEqual({ packed: true, image: { buildId: null, bytes: null, builtAt: null } });
+      .toEqual({ ...blank, packed: true, image: image() });
+
+    // 新字段同样是逐个读的:整包 MD5、写入分区、版本号。
+    expect(parseFirmwareStatus({
+      packed: true,
+      image: { md5: "abc", partitionType: 3, partitionLabel: "res", zosBuildId: "r-1", filesystemBuiltAt: 5 },
+      source: { kind: "upload", fileName: "a.img", at: 9 },
+      shadowedPacked: { bytes: 12, builtAt: 13 },
+    })).toEqual({
+      packed: true,
+      image: image({ md5: "abc", partitionType: 3, partitionLabel: "res", zosBuildId: "r-1", filesystemBuiltAt: 5 }),
+      source: { kind: "upload", fileName: "a.img", at: 9 },
+      shadowedPacked: { bytes: 12, builtAt: 13 },
+    });
+    // 认不出的来源就是「没有来源」,不是猜一个。猜错的方向恰好是最危险的那个:
+    // 把别人上传的镜像说成自己刚打的。
+    expect(parseFirmwareStatus({ packed: true, image: { bytes: 4 }, source: { kind: "elsewhere" } }).source)
+      .toBeNull();
 
     expect(parseUpgradeSeq({ seq: 4 })).toBe(4);
     expect(parseUpgradeSeq({ upgrade: { seq: 4 } })).toBe(4);
@@ -525,15 +649,20 @@ describe("zos firmware update", () => {
   });
 
   test("the console asks once, on the endpoints the service exposes", async () => {
-    const [linkSource, panelSource] = await Promise.all([
+    const [linkSource, dialogSource, panelSource] = await Promise.all([
       Bun.file(new URL("../web/src/lib/zos-link.ts", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/components/studio/device-settings-dialog.tsx", import.meta.url)).text(),
       Bun.file(new URL("../web/src/components/zos/zos-panel.tsx", import.meta.url)).text(),
     ]);
 
     expect(linkSource).toContain('"/api/os/firmware/status"');
+    expect(linkSource).toContain('"/api/os/firmware"');
     expect(linkSource).toContain('"/api/os/upgrade"');
-    // 装机是明确的人为动作,不是轮询:面板只在装载时读一次镜像信息,写只走点击。
-    expect(panelSource).toContain("link.requestUpgrade()");
-    expect(panelSource).not.toContain("setInterval(() => void loadFirmware");
+    // 装机是明确的人为动作,不是轮询:对话框只在打开时读一次镜像信息,写只走点击。
+    expect(dialogSource).toContain("link.requestUpgrade()");
+    expect(dialogSource).not.toContain("setInterval(() => void loadFirmware");
+    // 系统面板不再碰固件——它连读都不读了。
+    expect(panelSource).not.toContain("requestUpgrade");
+    expect(panelSource).not.toContain("readFirmwareStatus");
   });
 });

@@ -104,11 +104,17 @@ export function describeZosDeviceFacts(state: ZosState | null, now: number): Zos
   const fact = (key: string): ZosReadoutRow =>
     telemetry.find((row) => row.key === key) ?? { key, label: key, value: "离线" };
   const battery = vitals.battery;
+  // 电压跟在百分比后面，因为它才是固件关机保护真正读的量（3600 mV 报警、3550 mV
+  // 倒计时），百分比只用来显示。少了它，「这个百分比准不准」在控制台里没法回答
+  // ——而 MCU 那三个字节被当成充电标志读了整整一个固件生命周期，这问题并不假设。
+  // 老固件不报电压，那就只显示百分比，而不是补一个看着像坏了的占位符。
   const batteryRow: ZosReadoutRow = battery
     ? {
       key: "battery",
       label: "电量",
-      value: `${battery.label}${battery.charging ? " · 充电中" : ""}`,
+      value: `${battery.label}${battery.millivolts === null ? "" : ` · ${battery.millivolts} mV`}${
+        battery.charging ? " · 充电中" : ""
+      }`,
     }
     : live
       ? {

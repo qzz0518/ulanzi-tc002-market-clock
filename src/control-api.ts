@@ -20,6 +20,15 @@ import {
   type OsTelemetry,
 } from "./os-link.ts";
 import { encodeFrameBundle, rgbaToRgb } from "./os-frames.ts";
+import {
+  OsFirmwareStore,
+  sanitizeUploadName,
+  type ZksweVerdict,
+} from "./os-firmware-store.ts";
+import {
+  MAX_CONTAINER_BYTES,
+  RES_PARTITION_BYTES,
+} from "../device/tc002-os/release/zkswe-image.ts";
 import { renderAssetIconTile } from "./pixel-ui.ts";
 import type { ControlAccessInfo } from "./network-access.ts";
 import {
@@ -150,13 +159,11 @@ export interface ControlApiOptions {
     // reason so it can show its setup guide instead of an error toast.
     status: (refresh: boolean) => Promise<{
       /** Per key-based vendor: "stored" | "environment" | "unset". Never the key itself. */
-      keys: Record<string, string>;
       starred: Record<string, string[]>;
       snapshot: VibeUsageSnapshot | null;
       error: string | null;
     }>;
     setStarred: (providerId: string, starred: unknown) => Record<string, string[]>;
-    setKey: (providerId: string, key: string | null) => Promise<void>;
   };
 }
 
@@ -578,61 +585,104 @@ function decodeMirrorFrames(
 }
 
 /**
- * The ZKSWE container's first 20 bytes are magic[16] + hdrSize + itemCount +
- * eiOffset + 1; a 524-byte ei block sits at eiOffset, and the payload begins
- * right after it with the MD5 of what lands in flash. See
- * device/tc002-os/release/pack-image.ts, which is where those numbers are
- * derived and proved.
+ * One store per configured path, because the store memoizes an expensive read
+ * (an MD5 over up to 8 MiB) and the handler is rebuilt per test but the file on
+ * disk is not. The path is a constant from the composition root and never comes
+ * from a request — that is the whole containment argument for the device-facing
+ * GET below, which has no same-origin check.
  */
-const ZKSWE_MAGIC = "ZKSWEV1.0";
-const ZKSWE_EI_BYTES = 524;
-const ZKSWE_MD5_BYTES = 16;
+const osFirmwareStores = new Map<string, OsFirmwareStore>();
 
-interface OsFirmwareImage {
-  /** Carried back so the caller streams the file this was measured from. */
-  path: string;
-  bytes: number;
-  mtimeMs: number;
-  /** See readOsFirmwareImage — the updater's digest, not ZOS_BUILD_ID. */
-  buildId: string;
+function osFirmwareStore(path: string | undefined): OsFirmwareStore | null {
+  if (path === undefined) return null;
+  const existing = osFirmwareStores.get(path);
+  if (existing !== undefined) return existing;
+  const store = new OsFirmwareStore(path);
+  osFirmwareStores.set(path, store);
+  return store;
+}
+
+/** Multipart framing around one part: headers, boundaries, the trailing CRLFs. */
+const FIRMWARE_MULTIPART_SLACK_BYTES = 64 * 1024;
+
+/**
+ * Why an uploaded image was refused, in the language of the person who picked
+ * the file. The verdict's own `detail` is English and aimed at the packer's
+ * stderr; these sentences are aimed at someone deciding what to do next, so each
+ * one says what the file is rather than only that it failed.
+ */
+function firmwareRejectionCopy(verdict: Extract<ZksweVerdict, { ok: false }>): string {
+  switch (verdict.reason) {
+    case "magic":
+      return "这不是 ZKSWE 固件镜像：文件开头没有 ZKSWEV1.0 标记。";
+    case "too-short":
+      return "文件太小，装不下一个完整的容器头，多半是下载被截断了。";
+    case "too-long":
+      return `镜像超出 res 分区的 ${Math.floor(RES_PARTITION_BYTES / (1024 * 1024))} MiB 上限，时钟放不下。`;
+    case "digest":
+      return "镜像里的 MD5 与内容对不上，文件在传输或导出的过程中损坏了。请重新取一份再上传。";
+    case "malformed":
+      return `镜像头部读不通：${verdict.detail}`;
+    case "partition":
+      // The one refusal that is not about a broken file. A well-formed image
+      // aimed elsewhere installs perfectly and destroys the device, because the
+      // updater is a bitmask over partition type and does what it is told.
+      return `这个镜像写的是 ${verdict.partitionLabel ?? "别的"} 分区，不是 res。`
+        + "时钟的更新器会照着容器说的做——那不是一次失败的安装，是一块砖。已拒绝。";
+  }
 }
 
 /**
- * Stat the staged update.img and derive an identity for it, or null when the
- * packer has not run.
- *
- * THE ID IS THE UPDATER'S OWN MD5, NOT ZOS_BUILD_ID. The git rev the firmware
- * writes to /data/zos-build.id is a string compiled into libzkgui.so, and by
- * the time it reaches this file it is inside an xz-compressed squashfs — a
- * `strings` sweep over update.img does not find it, and decompressing a
- * megabyte per request to read twenty characters is not a status endpoint. The
- * container already carries a digest of exactly the filesystem that lands in
- * mtd3, 588 bytes in, and that digest is the number the device itself verifies
- * before it erases anything. It is cheap, it is derived from the file rather
- * than invented, and unlike size+mtime it survives the image being copied.
- *
- * A header that does not parse falls back to size+mtime rather than refusing to
- * serve: pack-image cannot emit such a file, and the gate on a corrupt image is
- * the device's own CRC and MD5 checks, not this.
+ * The document the console reads before it presses 安装, served identically by
+ * the status GET, the upload POST and the DELETE so all three agree by
+ * construction rather than by three careful hands.
  */
-async function readOsFirmwareImage(path: string | undefined): Promise<OsFirmwareImage | null> {
-  if (path === undefined) return null;
-  const file = Bun.file(path);
-  if (!(await file.exists())) return null;
-  const bytes = file.size;
-  const mtimeMs = file.lastModified;
-  // eiOffset is a u8, so the digest can never sit past byte 780.
-  const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
-  const md5At = (head[18] ?? 0) + ZKSWE_EI_BYTES;
-  const parsed = head.length >= md5At + ZKSWE_MD5_BYTES
-    && Buffer.from(head.subarray(0, ZKSWE_MAGIC.length)).toString("latin1") === ZKSWE_MAGIC;
+async function osFirmwareStatusBody(
+  store: OsFirmwareStore | null,
+  upgradeSeq: number,
+): Promise<Record<string, unknown>> {
+  const summary = store === null
+    ? { armed: null, facts: null, shadowed: null }
+    : await store.describe();
+  const armed = summary.armed;
   return {
-    path,
-    bytes,
-    mtimeMs,
-    buildId: parsed
-      ? Buffer.from(head.subarray(md5At, md5At + ZKSWE_MD5_BYTES)).toString("hex")
-      : `${bytes}-${mtimeMs}`,
+    // Stated rather than left to be inferred from the presence of the fields
+    // below. The console puts this next to a button that rewrites flash, and
+    // "the route answered 200" is not an answer to "is there anything to install".
+    packed: armed !== null,
+    image: armed === null ? null : {
+      bytes: armed.bytes,
+      // The in-band digest, i.e. the ETag the device gets. Kept for continuity;
+      // what the console shows a person is `md5`, of the whole file they picked.
+      buildId: armed.buildId,
+      // The file's mtime, which for the packer's output is when it was packed
+      // and for an upload is when it arrived. An absolute stamp rather than the
+      // `ageMs` the mirror and telemetry report: those answer "is this stream
+      // live", where a browser a few seconds out of step gives the wrong answer,
+      // and this one answers "is this the build I just made" — a question
+      // minutes wide, whose reader already clamps the skew (describeImageAge).
+      builtAt: armed.origin.at,
+      // Everything below is derived from the bytes on disk, and is absent
+      // rather than guessed when the container does not parse.
+      md5: summary.facts?.md5 ?? null,
+      partitionType: summary.facts?.partitionType ?? null,
+      partitionLabel: summary.facts?.partitionLabel ?? null,
+      payloadBytes: summary.facts?.payloadBytes ?? null,
+      // Null means "not recoverable", never "old" — see recoverZosBuildId. The
+      // console says 未知 rather than inventing a version.
+      zosBuildId: summary.facts?.zosBuildId ?? null,
+      filesystemBuiltAt: summary.facts?.filesystemBuiltAtMs ?? null,
+    },
+    // Where the armed image came from. Losing track of this is how someone
+    // installs yesterday's build believing it is today's.
+    source: armed === null ? null : {
+      kind: armed.origin.kind,
+      fileName: armed.origin.fileName,
+      at: armed.origin.at,
+    },
+    // A locally packed image that exists and will NOT be installed.
+    shadowedPacked: summary.shadowed,
+    upgradeSeq,
   };
 }
 
@@ -1895,7 +1945,6 @@ export function createControlHandler(
             metricLabels: entry.metricLabels,
           })),
           starred: status.starred,
-          keys: status.keys,
           snapshot: status.snapshot,
           error: status.error,
         });
@@ -1913,21 +1962,6 @@ export function createControlHandler(
         return jsonResponse({ starred: options.vibe.setStarred(input.providerId, input.starred) });
       }
 
-      if (request.method === "PUT" && url.pathname === "/api/vibe/key") {
-        if (!options.vibe) {
-          return jsonResponse({ error: "vibe usage is unavailable" }, 404);
-        }
-        assertSameOrigin(request);
-        const input = await readJson(request) as { providerId?: unknown; key?: unknown };
-        if (typeof input.providerId !== "string") {
-          throw new SettingsValidationError("providerId is required");
-        }
-        // An empty string clears the key; the response never echoes it back.
-        const key = typeof input.key === "string" ? input.key : null;
-        await options.vibe.setKey(input.providerId, key);
-        const status = await options.vibe.status(false);
-        return jsonResponse({ keys: status.keys });
-      }
 
       if (request.method === "GET" && url.pathname === "/api/device/settings/general") {
         if (!options.deviceGeneralSettings) {
@@ -2055,7 +2089,7 @@ export function createControlHandler(
       // it pulls its firmware the same way and `adb push` stops being a
       // prerequisite for flashing.
       if (request.method === "GET" && url.pathname === "/api/os/firmware") {
-        const image = await readOsFirmwareImage(options.osFirmwarePath);
+        const image = await osFirmwareStore(options.osFirmwarePath)?.armed() ?? null;
         if (image === null) {
           return jsonResponse({ error: "no firmware image has been packed" }, 404);
         }
@@ -2078,6 +2112,76 @@ export function createControlHandler(
             // C++ on a device with one core.
             "X-Build-Id": image.buildId,
           },
+        });
+      }
+
+      // The owner hands the console an image. Same path as the device-facing GET
+      // above, opposite direction — and a completely different trust story: this
+      // one is a write, so it takes the same-origin check every write takes.
+      //
+      // MULTIPART, NOT JSON. This is a ~1 MB file; base64 in a JSON envelope
+      // would cost a third more bytes to say the same thing, and the video
+      // import route already set the precedent for the one exception the
+      // JSON-only rule makes. Note what that costs: a cross-origin <form> CAN
+      // set multipart/form-data without a preflight, so the Content-Type rule
+      // that quietly guards the JSON routes does nothing here. The Origin check
+      // is load-bearing rather than belt-and-braces.
+      //
+      // UPLOADING IS NOT INSTALLING. Nothing below touches the upgrade
+      // sequence: arming an image and asking the clock to write mtd3 are two
+      // acts, because "the upload succeeded" and "this is the build I meant"
+      // are two different claims and only the owner can make the second one.
+      if (request.method === "POST" && url.pathname === "/api/os/firmware") {
+        const store = osFirmwareStore(options.osFirmwarePath);
+        if (store === null) return jsonResponse({ error: "firmware storage is unavailable" }, 404);
+        assertSameOrigin(request);
+        // The declared length is checked first so an oversized body is refused
+        // before it is read, and gets multipart slack; the file itself is then
+        // checked exactly against the partition's own ceiling.
+        const declaredBytes = Number(request.headers.get("Content-Length") ?? 0);
+        if (declaredBytes > MAX_CONTAINER_BYTES + FIRMWARE_MULTIPART_SLACK_BYTES) {
+          return jsonResponse({ error: firmwareRejectionCopy({ ok: false, reason: "too-long", detail: "" }) }, 413);
+        }
+        const contentType = (request.headers.get("Content-Type") ?? "").toLowerCase();
+        if (!contentType.startsWith("multipart/form-data")) {
+          throw new SettingsValidationError("Content-Type must be multipart/form-data");
+        }
+        const form = await request.formData();
+        const file = form.get("file");
+        if (!(file instanceof File)) {
+          throw new SettingsValidationError("缺少 file 字段（.img 固件镜像）");
+        }
+        if (file.size > MAX_CONTAINER_BYTES) {
+          return jsonResponse({ error: firmwareRejectionCopy({ ok: false, reason: "too-long", detail: "" }) }, 413);
+        }
+        const verdict = await store.storeUpload(
+          Buffer.from(await file.arrayBuffer()),
+          sanitizeUploadName(file.name),
+        );
+        if (!verdict.ok) {
+          // Refused means nothing was stored: the previous armed image, if any,
+          // is untouched. A half-accepted image is one an install could pick up.
+          return jsonResponse({ error: firmwareRejectionCopy(verdict), reason: verdict.reason }, 400);
+        }
+        // Answer with the same document the status route serves, so the console
+        // shows what ARRIVED rather than what it believes it sent.
+        return jsonResponse(
+          await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0),
+        );
+      }
+
+      // Drop the upload and let the locally packed image take over again.
+      // Without this, uploading once is a one-way door: the console would have
+      // no way back to `mise run os-image`'s output, and the only remedy would
+      // be a shell on the host.
+      if (request.method === "DELETE" && url.pathname === "/api/os/firmware") {
+        const store = osFirmwareStore(options.osFirmwarePath);
+        if (store === null) return jsonResponse({ error: "firmware storage is unavailable" }, 404);
+        assertSameOrigin(request);
+        const removed = await store.clearUpload();
+        return jsonResponse({
+          removed,
+          ...await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0),
         });
       }
 
@@ -2107,6 +2211,14 @@ export function createControlHandler(
           batteryPercent: typeof input.batteryPercent === "number"
             ? input.batteryPercent
             : -1,
+          // The cell voltage, which is what the firmware's shutdown protection
+          // runs on. ABSENT on any build from before it existed — undefined
+          // rather than -1, because -1 is a real answer ("no reading yet") and
+          // the console says different things about the two.
+          batteryMillivolts: typeof input.batteryMillivolts === "number"
+            && Number.isFinite(input.batteryMillivolts)
+            ? Math.floor(input.batteryMillivolts)
+            : undefined,
           charging: input.charging === true,
           flashed: input.flashed === true,
           // 夜间休眠, as the device has it. The PRESENCE of this block is the
@@ -2168,26 +2280,10 @@ export function createControlHandler(
       // gets, and nothing here is a change.
       if (request.method === "GET" && url.pathname === "/api/os/firmware/status") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
-        const image = await readOsFirmwareImage(options.osFirmwarePath);
-        return jsonResponse({
-          // Stated rather than left to be inferred from the presence of the
-          // fields below. The console puts this next to a button that rewrites
-          // flash, and "the route answered 200" is not an answer to "is there
-          // anything to install".
-          packed: image !== null,
-          image: image === null ? null : {
-            bytes: image.bytes,
-            buildId: image.buildId,
-            // The file's mtime, which for the packer's output is when it was
-            // packed. An absolute stamp rather than the `ageMs` the mirror and
-            // telemetry report: those answer "is this stream live", where a
-            // browser a few seconds out of step gives the wrong answer, and this
-            // one answers "is this the build I just made" — a question minutes
-            // wide, whose reader already clamps the skew (describeImageAge).
-            builtAt: image.mtimeMs,
-          },
-          upgradeSeq: options.osLink.getUpgradeSeq(),
-        });
+        return jsonResponse(await osFirmwareStatusBody(
+          osFirmwareStore(options.osFirmwarePath),
+          options.osLink.getUpgradeSeq(),
+        ));
       }
 
       // The trigger. Explicit and human-driven on purpose: the device's updater
@@ -2207,7 +2303,11 @@ export function createControlHandler(
         // the console sat there claiming an install was under way. Asking a
         // clock to install nothing is a guaranteed disappointment, so it is
         // refused where the answer is still legible.
-        if (await readOsFirmwareImage(options.osFirmwarePath) === null) {
+        // Written out rather than with an optional call: `store?.armed()` on an
+        // unconfigured store resolves to undefined, which is not null, and the
+        // install would be waved through with nothing to install.
+        const firmwareStore = osFirmwareStore(options.osFirmwarePath);
+        if (firmwareStore === null || await firmwareStore.armed() === null) {
           return jsonResponse({ error: "no firmware image has been packed" }, 409);
         }
         // The sequence is the receipt, exactly as /api/os/input's event is: the

@@ -3,6 +3,8 @@
 
 #include <pthread.h>
 
+#include "platform/BatteryPolicy.h"
+
 namespace tcos {
 
 /**
@@ -20,6 +22,12 @@ namespace tcos {
  * The MCU queries block for well over a second each (the arcade firmware
  * documents the same measurement), so this owns a thread and the UI only ever
  * reads a cached value. Nothing here may be called from the render tick.
+ *
+ * The RULE — which reading means low, empty, or charging — is not here. It is
+ * in platform/BatteryPolicy.{h,cpp}, because this file cannot be compiled by a
+ * host check (McuManager drags in the FlyThings MCU headers) and the rule was
+ * wrong for the whole life of the firmware as a direct result. This class is
+ * now only the thread, the cache, and the countdown's one-second steps.
  */
 class BatteryMonitor {
  public:
@@ -29,24 +37,22 @@ class BatteryMonitor {
   void start();
   void stop();
 
-  /** 0..100, or -1 before the first successful reading. */
+  /** 0..100, or -1 before the first successful reading. DISPLAY ONLY. */
   int percent() const;
-  /** True while the charger is supplying power. */
+  /**
+   * Cell voltage in millivolts, or -1 before the first reading that carried one.
+   *
+   * This is the quantity the protection actually runs on, and it is reported to
+   * the console for exactly that reason: 「is the percentage right?」 is not a
+   * question anyone can answer from a percentage.
+   */
+  int millivolts() const;
+  /** True while the charger is supplying power. USB presence, nothing else. */
   bool charging() const;
+  /** Below kBatteryWarnMv on its own cell. False while charging. */
+  bool low() const;
   /** Seconds until an automatic shutdown, or -1 when none is pending. */
   int shutdownInSeconds() const;
-
-  // Thresholds. The stock firmware works in millivolts and warns at 3550 mV;
-  // the MCU only reports a percentage to us, so these are OUR numbers rather
-  // than recovered constants, chosen to sit above where a protection circuit
-  // would cut in. Charging cancels both, because a device on the charger is
-  // not in danger however low it reads.
-  static const int kWarnPercent = 8;
-  static const int kShutdownPercent = 3;
-  /** Grace before the shutdown, so a user holding it can reach the charger. */
-  static const int kCountdownSeconds = 30;
-  /** Poll period. Every reading costs the MCU two blocking round trips. */
-  static const int kPollSeconds = 10;
 
  private:
   BatteryMonitor();
@@ -61,7 +67,9 @@ class BatteryMonitor {
   bool mRunning;
   bool mStarted;
   int mPercent;
+  int mMillivolts;
   bool mCharging;
+  bool mLow;
   int mCountdown;
 };
 

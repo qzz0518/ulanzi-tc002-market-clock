@@ -831,10 +831,27 @@ describe("zos battery and vitals", () => {
   });
 
   test("battery tone tracks the reading and charging passes through", () => {
-    expect(describeBattery(82, true)).toEqual({ label: "82%", charging: true, tone: "ok" });
+    expect(describeBattery(82, true)).toEqual({
+      label: "82%",
+      millivolts: null,
+      charging: true,
+      tone: "ok",
+    });
     expect(describeBattery(30)?.tone).toBe("low");
     expect(describeBattery(10)?.tone).toBe("critical");
     expect(describeBattery(120)?.label).toBe("100%");
+  });
+
+  test("the cell voltage rides along, and its absence costs the percentage nothing", () => {
+    expect(describeBattery(82, false, 3821)?.millivolts).toBe(3821);
+    // 老固件不报电压：百分比照常显示，电压那一段整个消失。
+    expect(describeBattery(82, false)?.millivolts).toBeNull();
+    expect(describeBattery(82, false, -1)?.millivolts).toBeNull();
+    expect(describeBattery(82, false, 0)?.millivolts).toBeNull();
+    expect(describeBattery(82, false, Number.NaN)?.millivolts).toBeNull();
+    // 电压不换算成第二个百分比——那是我们没有的电芯曲线，两个对不上的百分比
+    // 只会让人以为其中一个坏了。
+    expect(describeBattery(82, false, 3821)?.label).toBe("82%");
   });
 
   test("vitals exist only while the device is live", () => {

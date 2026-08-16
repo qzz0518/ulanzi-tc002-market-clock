@@ -325,102 +325,6 @@
   text-align: right;
 }
 
-/* --- 固件更新 -------------------------------------------------------------- */
-
-/* 横跨整块面板的最后一段：它更新的是整台设备，不属于左右任何一列。上边一条
-   发丝线把它与主体分开——这是页面上唯一一个会重写闪存的入口，读起来要像另一
-   件事，而不是菜单的续集。 */
-.zc-update {
-  display: grid;
-  gap: 0.55rem;
-  padding: 0.9rem 1.1rem 1.1rem;
-  border-top: 1px solid var(--border);
-}
-.zc-update > .cladd-section-title { padding: 0 0.5rem; }
-.zc-update__body { display: grid; gap: 0.7rem; padding-inline: 0.5rem; }
-.zc-update__image { display: grid; justify-items: start; gap: 0.5rem; }
-
-/* 说明行：与 .zc-note 同一种字号和图标尺寸，但不带那条上边线——这一段自己
-   已经被上面的分隔线圈起来了，再画一条就是两层框。 */
-.zc-update__note {
-  display: flex;
-  align-items: start;
-  gap: 0.45rem;
-  margin: 0;
-  font-size: 0.68rem;
-  line-height: 1.55;
-  text-wrap: pretty;
-}
-.zc-update__note svg { flex: none; width: 0.85rem; height: 0.85rem; margin-top: 0.15rem; }
-.zc-update__note strong { display: block; font-size: 0.72rem; font-weight: 600; }
-.zc-update__note--muted { color: var(--muted-foreground); }
-.zc-update__note--muted strong { color: var(--foreground); }
-.zc-update__note--error { color: var(--destructive); }
-.zc-update__cmd {
-  padding: 0.05rem 0.28rem;
-  border-radius: 0.25rem;
-  background: color-mix(in oklch, var(--foreground) 8%, transparent);
-  font-family: var(--mono);
-  font-size: 0.66rem;
-}
-
-.zc-update__ready {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0;
-  color: var(--primary);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-.zc-update__ready svg { width: 0.9rem; height: 0.9rem; }
-
-/* 镜像事实：一行两三格，值走等宽——版本号是要被人逐字比对的东西。 */
-.zc-update__facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem 1.4rem;
-  margin: 0;
-}
-.zc-update__facts div { display: grid; gap: 0.1rem; }
-.zc-update__facts dt { color: var(--muted-foreground); font-size: 0.58rem; }
-.zc-update__facts dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-family: var(--mono);
-  font-size: 0.7rem;
-}
-
-.zc-update__watch { border-radius: 0.55rem; }
-.zc-update__watch-content { padding: 0.7rem 0.85rem; }
-.zc-update__watch p { display: grid; gap: 0.15rem; margin: 0; }
-.zc-update__watch strong { font-size: 0.75rem; font-weight: 620; }
-.zc-update__watch span { color: var(--muted-foreground); font-size: 0.66rem; line-height: 1.5; text-wrap: pretty; }
-.zc-update__watch small { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; }
-
-/* 同意栏与它管住的按钮是一个决定，所以贴在一起，与外面的段间距分开。 */
-.zc-update__decision { display: grid; gap: 0.5rem; }
-.zc-update__consent {
-  display: grid;
-  grid-template-columns: 1.35rem minmax(0, 1fr);
-  align-items: start;
-  gap: 0.6rem;
-  padding: 0.75rem 0.85rem;
-  border: 1px solid var(--border);
-  border-radius: 0.55rem;
-  cursor: pointer;
-}
-.zc-update__checkbox { margin-top: 0.04rem; }
-.zc-update__consent > span { color: var(--muted-foreground); font-size: 0.66rem; line-height: 1.5; text-wrap: pretty; }
-.zc-update__consent strong {
-  display: block;
-  margin-bottom: 0.1rem;
-  color: var(--foreground);
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-.zc-update__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-
 /* --- 其它 ------------------------------------------------------------------ */
 
 .zc-note {
@@ -464,5 +368,4 @@
   }
   .zc-strip { padding-inline: 0.8rem; }
   .zc-body { padding-inline: 0.8rem; }
-  .zc-update { padding-inline: 0.8rem; }
 }

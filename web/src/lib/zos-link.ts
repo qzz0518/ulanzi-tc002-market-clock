@@ -52,6 +52,13 @@ export interface ZosTelemetry {
   supplicantRestarts: number;
   /** 0..100, or -1 before the device has a reading. Optional: older services omit it. */
   batteryPercent?: number;
+  /**
+   * Cell voltage in millivolts, or -1 before the device has one. Absent on
+   * firmware that predates it. This is the quantity the device's shutdown
+   * protection runs on, and the percentage is a display number — which is why
+   * the console shows both rather than deriving one from the other.
+   */
+  batteryMillivolts?: number;
   charging?: boolean;
   /** True when ZOS runs from flash rather than a sideload session. */
   flashed?: boolean;
@@ -510,6 +517,16 @@ export interface ZosReadoutRow {
 export interface ZosBatteryStatus {
   /** e.g. "82%"; the raw -1 sentinel never reaches here. */
   label: string;
+  /**
+   * Cell voltage in millivolts, or null when the device has not reported one.
+   *
+   * Deliberately NOT turned into a second percentage. A voltage-to-charge curve
+   * is chemistry we do not have for this cell, and two percentages that
+   * disagree by a few points would be read as one of them being broken. The
+   * millivolts are shown as millivolts — the honest unit, and the one the
+   * firmware's own thresholds are written in.
+   */
+  millivolts: number | null;
   charging: boolean;
   tone: "ok" | "low" | "critical";
 }
@@ -519,12 +536,24 @@ export interface ZosBatteryStatus {
  * field means an older service — both must render as nothing at all, never as
  * 0%: a wrong battery number reads as "grab the charger" or "all fine", and
  * either can be the opposite of the truth.
+ *
+ * The voltage follows the same rule for the same reason, and independently: a
+ * device can have a percentage while the millivolts are absent (firmware from
+ * before the field existed), and that must cost the percentage nothing.
  */
-export function describeBattery(percent?: number, charging?: boolean): ZosBatteryStatus | null {
+export function describeBattery(
+  percent?: number,
+  charging?: boolean,
+  millivolts?: number,
+): ZosBatteryStatus | null {
   if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0) return null;
   const clamped = Math.min(100, Math.round(percent));
+  const volts = typeof millivolts === "number" && Number.isFinite(millivolts) && millivolts > 0
+    ? Math.round(millivolts)
+    : null;
   return {
     label: `${clamped}%`,
+    millivolts: volts,
     charging: charging === true,
     tone: clamped <= 15 ? "critical" : clamped <= 40 ? "low" : "ok",
   };
@@ -546,7 +575,11 @@ export function describeVitals(state: ZosState | null): ZosVitals {
   const telemetry = state?.live === true ? state.telemetry : null;
   if (!telemetry) return { battery: null, wifi: null, uptime: null };
   return {
-    battery: describeBattery(telemetry.batteryPercent, telemetry.charging),
+    battery: describeBattery(
+      telemetry.batteryPercent,
+      telemetry.charging,
+      telemetry.batteryMillivolts,
+    ),
     wifi: telemetry.wifi || null,
     uptime: formatUptime(telemetry.uptimeMs),
   };
@@ -741,12 +774,41 @@ export function describeDriver(
 // version that ended up in flash is the device's to report, not ours to claim.
 
 export interface ZosFirmwareImage {
-  /** Build identity as the packer stamped it; null when the service did not say. */
+  /**
+   * The in-band digest the device's own updater verifies. Carried for
+   * completeness; what a person is shown is `md5`, of the whole file they
+   * picked, because that is the number they can compare against their own.
+   */
   buildId: string | null;
   /** Image size in bytes. */
   bytes: number | null;
-  /** When the image was packed, epoch ms on the service's clock. */
+  /** When the image was packed or uploaded, epoch ms on the service's clock. */
   builtAt: number | null;
+  /** MD5 of the whole container — `md5 update.img` on the owner's machine. */
+  md5: string | null;
+  /** 3 for `res`, and only 3 is installable. Null when the container did not parse. */
+  partitionType: number | null;
+  /** How the vendor updater names that partition. */
+  partitionLabel: string | null;
+  /**
+   * ZOS_BUILD_ID as recovered from the payload, or null.
+   *
+   * Null means "not recoverable", never "old" — in a packed image the string is
+   * inside an xz-compressed squashfs. The panel says 未知; it must never derive
+   * a version from a size, an mtime or a digest, because a plausible-looking
+   * version number is read as a real one.
+   */
+  zosBuildId: string | null;
+  /** squashfs mkfs time — the packer pins it to the build it packed. */
+  filesystemBuiltAt: number | null;
+}
+
+/** Where the armed image came from. */
+export interface ZosFirmwareSource {
+  kind: "upload" | "packed";
+  /** The name the file had on the owner's machine; null for a packed image. */
+  fileName: string | null;
+  at: number | null;
 }
 
 export interface ZosFirmwareStatus {
@@ -754,6 +816,14 @@ export interface ZosFirmwareStatus {
   packed: boolean;
   /** Only ever present when `packed`; every field inside is independently optional. */
   image: ZosFirmwareImage | null;
+  /** Null when the service is too old to say, which reads as "unknown", not "packed". */
+  source: ZosFirmwareSource | null;
+  /**
+   * A locally packed image that exists and will NOT be installed, because an
+   * upload is armed. Shown so that somebody who just ran `os-image` can see
+   * their build is on disk and is not the one that will be written.
+   */
+  shadowedPacked: { bytes: number | null; builtAt: number | null } | null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -780,8 +850,9 @@ function asPositive(value: unknown): number | null {
  * and no facts means nothing is packed.
  */
 export function parseFirmwareStatus(raw: unknown): ZosFirmwareStatus {
+  const empty: ZosFirmwareStatus = { packed: false, image: null, source: null, shadowedPacked: null };
   const root = asRecord(raw);
-  if (root === null) return { packed: false, image: null };
+  if (root === null) return empty;
   const body = asRecord(root.image) ?? root;
   const buildId = asText(body.buildId);
   const bytes = asPositive(body.bytes) ?? asPositive(body.size);
@@ -790,8 +861,108 @@ export function parseFirmwareStatus(raw: unknown): ZosFirmwareStatus {
     ? root.packed
     : typeof body.packed === "boolean" ? body.packed : null;
   const packed = flag ?? (buildId !== null || bytes !== null || builtAt !== null);
-  if (!packed) return { packed: false, image: null };
-  return { packed: true, image: { buildId, bytes, builtAt } };
+  if (!packed) return empty;
+
+  const rawSource = asRecord(root.source);
+  const kind = rawSource?.kind;
+  // Only the two words this console knows. An unrecognised one is no
+  // provenance at all rather than a guess: "packed" would be the wrong guess in
+  // exactly the case the owner most needs to see (an image somebody uploaded).
+  const source: ZosFirmwareSource | null = kind === "upload" || kind === "packed"
+    ? { kind, fileName: asText(rawSource?.fileName), at: asPositive(rawSource?.at) }
+    : null;
+
+  const rawShadow = asRecord(root.shadowedPacked);
+  return {
+    packed: true,
+    image: {
+      buildId,
+      bytes,
+      builtAt,
+      md5: asText(body.md5),
+      partitionType: asPositive(body.partitionType),
+      partitionLabel: asText(body.partitionLabel),
+      zosBuildId: asText(body.zosBuildId),
+      filesystemBuiltAt: asPositive(body.filesystemBuiltAt),
+    },
+    source,
+    shadowedPacked: rawShadow === null
+      ? null
+      : { bytes: asPositive(rawShadow.bytes), builtAt: asPositive(rawShadow.builtAt) },
+  };
+}
+
+/**
+ * The ceiling the service enforces, restated for the copy next to the picker.
+ *
+ * Duplicated rather than imported: the authority is `MAX_CONTAINER_BYTES` in
+ * device/tc002-os/release/zkswe-image.ts, but that module reaches for Buffer and
+ * node:crypto and has no business in a browser bundle. Same treatment the pixel
+ * glyphs get — two sides, one number, and a test that fails if they drift
+ * (test/zkswe-image.test.ts).
+ */
+export const ZOS_FIRMWARE_MAX_BYTES = 8 * 1024 * 1024 + 768;
+
+/**
+ * The facts a person reads before pressing 安装, in the order they answer
+ * "is this the image I meant".
+ *
+ * 版本 is always present, 未知 included, because it is the row whose absence
+ * would be read as "no version problem". Every other row is dropped when the
+ * service did not send it: a blank next to a button that rewrites flash is
+ * honest, an invented value is not.
+ */
+export function firmwareFactRows(image: ZosFirmwareImage | null, now: number): ZosReadoutRow[] {
+  if (image === null) return [];
+  const rows: ZosReadoutRow[] = [{
+    key: "version",
+    label: "版本",
+    value: image.zosBuildId ?? "未知",
+    note: image.zosBuildId === null
+      // Said once, plainly. The alternative — deriving something version-shaped
+      // from the digest or the mtime — is how a stale image gets installed with
+      // full confidence.
+      ? "版本号编在固件里，隔着一层 xz 压缩读不出来。这里不猜。"
+      : undefined,
+  }];
+  const size = formatImageBytes(image.bytes);
+  if (size !== null) rows.push({ key: "size", label: "大小", value: size });
+  if (image.md5 !== null) rows.push({ key: "md5", label: "整包 MD5", value: image.md5 });
+  if (image.partitionLabel !== null) {
+    rows.push({
+      key: "partition",
+      label: "写入分区",
+      value: image.partitionType === 3 ? `${image.partitionLabel}（mtd3）` : image.partitionLabel,
+      // The service refuses anything else, so this row is a confirmation rather
+      // than a warning — but it is the fact worth confirming: the partition has
+      // no A/B pair and nothing behind it.
+      note: image.partitionType === 3 ? undefined : "只有 res 分区可以安装。",
+    });
+  }
+  const built = describeImageAge(image.filesystemBuiltAt, now);
+  if (built !== null) rows.push({ key: "built", label: "系统构建于", value: built });
+  return rows;
+}
+
+/** Where the armed image came from, as one line. */
+export function describeFirmwareSource(
+  source: ZosFirmwareSource | null,
+  now: number,
+): { label: string; detail: string } {
+  if (source === null) {
+    return { label: "来源未知", detail: "服务没有说这份镜像是从哪来的。" };
+  }
+  const age = describeImageAge(source.at, now);
+  if (source.kind === "upload") {
+    return {
+      label: "本次上传",
+      detail: [source.fileName, age].filter((part) => part !== null).join(" · ") || "由你上传",
+    };
+  }
+  return {
+    label: "本地打包",
+    detail: ["mise run os-image", age].filter((part) => part !== null).join(" · "),
+  };
 }
 
 /** The install request the service acknowledged, or null when it did not say. */
@@ -991,8 +1162,20 @@ export interface ZosLink {
    * overwrite the other three — the exact bug the service layer already fixed
    * once and now guards with a test. */
   setSleep(patch: { enabled?: boolean; startMin?: number; endMin?: number; idleSec?: number }): Promise<ZosRequestedSleep>;
-  /** GET /api/os/firmware/status — what the service has packed for the device to fetch. */
+  /** GET /api/os/firmware/status — what the service has armed for the device to fetch. */
   readFirmwareStatus(): Promise<ZosFirmwareStatus>;
+  /**
+   * POST /api/os/firmware — hand the service an image file.
+   *
+   * Resolves with what ARRIVED, read back off the service's disk, rather than
+   * with anything derived from the file the browser sent. That difference is the
+   * point of the two-step flow: the console shows the owner what the service
+   * actually holds, and only then offers to install it. This never starts an
+   * install; `requestUpgrade` is the only thing that does.
+   */
+  uploadFirmware(file: File): Promise<ZosFirmwareStatus>;
+  /** DELETE /api/os/firmware — drop the upload, letting a locally packed image take over. */
+  removeFirmwareUpload(): Promise<ZosFirmwareStatus>;
   /**
    * POST /api/os/upgrade. Resolves with the install sequence now on the wire, or
    * null when the service did not name one — the request still stands either way,
@@ -1161,6 +1344,21 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
     },
     async readFirmwareStatus() {
       return parseFirmwareStatus(await readJson<unknown>("/api/os/firmware/status"));
+    },
+    async uploadFirmware(file) {
+      const form = new FormData();
+      form.append("file", file);
+      // No Content-Type header on purpose: the boundary is the browser's to
+      // pick, and setting the header by hand omits it and breaks the body.
+      return parseFirmwareStatus(await readJson<unknown>("/api/os/firmware", {
+        method: "POST",
+        body: form,
+      }));
+    },
+    async removeFirmwareUpload() {
+      return parseFirmwareStatus(await readJson<unknown>("/api/os/firmware", {
+        method: "DELETE",
+      }));
     },
     async requestUpgrade() {
       // An empty JSON body rather than no body at all: the write endpoints take

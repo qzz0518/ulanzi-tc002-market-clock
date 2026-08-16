@@ -44,8 +44,19 @@ public:
 
     void setBatteryState(const std::pair<int, int>& state);
     /**
-     * @brief 查询电池电量
-     * @return pair<电量百分�? 充电状�? (0-100, 0=未充�?1=充电�?
+     * @brief Battery percentage and CELL VOLTAGE.
+     *
+     * The vendor's own comment here said `.second` was a charge flag
+     * ("0-100, 0=not charging, 1=charging"). IT IS NOT. mcuProtoParse
+     * assembles it as `(data[1] << 8) | data[2]` and the stock app logs the
+     * same field as "V:%dmv" — it is the cell voltage in millivolts, and a
+     * live battery therefore always reads well above zero. Believing the
+     * comment is how ZOS came to report 充电中 on a clock that was never
+     * plugged in, for the whole life of the firmware. Charging is
+     * queryUsbState() and nothing else; the voltage is what the shutdown
+     * protection runs on (platform/BatteryPolicy.h).
+     *
+     * @return pair<percent 0..100, millivolts>, or {-1,-1} when the query failed
      */
     std::pair<int, int> queryBatteryPower();
 

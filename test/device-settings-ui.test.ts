@@ -152,4 +152,34 @@ describe("device settings UI", () => {
     // And it opens in exactly one place, so no branch can quietly skip it.
     expect(source.split("setProvisionOpen(true)").length - 1).toBe(1);
   });
+
+  // 上传和安装是两步。组件层已经证明过「上传按钮不需要勾同意、装机按钮需要」，
+  // 服务层也证明过「上传不动升级序列」；剩下这一段只有对话框自己知道：拿着文件
+  // 的那个 handler 有没有顺手把安装也点了。Dialog 走 portal、SSR 是空串，点不到，
+  // 所以和上面配网那条一样拿源码当接缝。
+  test("the upload handler never starts an install, and a new image voids the old consent", async () => {
+    const source = await Bun.file(
+      new URL("../web/src/components/studio/device-settings-dialog.tsx", import.meta.url),
+    ).text();
+
+    const start = source.indexOf("const uploadFirmware = async (file: File) => {");
+    expect(start).toBeGreaterThan(0);
+    const body = source.slice(start, source.indexOf("\n  };", start));
+
+    expect(body).toContain("link.uploadFirmware(file)");
+    // 这两个才是「开始安装」。上传路径上一个都不许出现。
+    expect(body).not.toContain("requestUpgrade");
+    expect(body).not.toContain("setUpgrade(");
+    // 换了镜像，之前那一勾就不作数了：同意的是「装那一份」。
+    expect(body).toContain("setUpgradeConsent(false)");
+
+    // 关掉对话框也把勾清掉——同意不落盘。留着它，下一个打开这一页的人一进来
+    // 就看见一颗解锁的、会擦掉 mtd3 的按钮。
+    const teardown = source.slice(
+      source.indexOf("const link = createZosLink({ mirror: false"),
+      source.indexOf("}, [open, zos]);"),
+    );
+    expect(teardown).toContain("setUpgradeConsent(false)");
+    expect(teardown).toContain("setFirmware(null)");
+  });
 });
