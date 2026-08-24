@@ -482,6 +482,63 @@ describe("claude adapter — rotated credentials go back to the CLI", () => {
     expect(harness.fileWrites).toHaveLength(0);
   });
 
+  // The bug this pins: Claude Code's access token lives about eight hours and
+  // sits in the keychain, which we may not rewrite. Every stretch where the
+  // user was not running the CLI therefore produced a request that could only
+  // 401, reported as「登录已过期」for a login that was perfectly intact — and
+  // then parked the vendor for thirty minutes on top.
+  test("a keychain login whose token already died is not spent on a doomed request", async () => {
+    const harness = makeContext({
+      keychain: {
+        [KEYCHAIN_SERVICE]: credentialBlob({ expiresAt: NOW - 60_000, refreshToken: "unusable" }),
+      },
+      responses: { [USAGE_URL]: [{ status: 401 }] },
+    });
+
+    const result = await claudeAdapter.fetchUsage(harness.context);
+    // No request at all — the expiry was knowable from the blob.
+    expect(harness.calls).toHaveLength(0);
+    expect(result.metrics).toEqual([]);
+    expect(result.note).toContain("访问令牌已过期");
+    // The plan is still known, so the row keeps its identity rather than
+    // dropping to「无数据」.
+    expect(result.plan).toBe("Max 20x");
+  });
+
+  test("a token with a minute left is still used — no five-minute margin here", async () => {
+    const harness = makeContext({
+      keychain: { [KEYCHAIN_SERVICE]: credentialBlob({ expiresAt: NOW + 60_000 }) },
+      responses: { [USAGE_URL]: [{ body: USAGE_BODY }] },
+    });
+    const result = await claudeAdapter.fetchUsage(harness.context);
+    expect(harness.calls).toHaveLength(1);
+    expect(result.metrics.length).toBeGreaterThan(0);
+  });
+
+  // A dead keychain copy beside a working file login must not become a note —
+  // the file login is the answer, and it still has to be tried.
+  test("an expired keychain login still falls through to a usable file login", async () => {
+    const harness = makeContext({
+      keychain: { [KEYCHAIN_SERVICE]: credentialBlob({ expiresAt: NOW - 60_000, accessToken: "dead" }) },
+      files: { [CREDENTIALS_PATH]: credentialBlob({ accessToken: "alive", refreshToken: undefined }) },
+      responses: { [USAGE_URL]: [{ body: USAGE_BODY }] },
+    });
+
+    const result = await claudeAdapter.fetchUsage(harness.context);
+    expect(result.metrics.length).toBeGreaterThan(0);
+    expect(harness.calls.map((call) => call.headers.Authorization)).toEqual(["Bearer alive"]);
+  });
+
+  // A vendor that actually said no is a different fact from a lapsed token, and
+  // only the first one deserves「登录已过期」and the thirty-minute cooldown.
+  test("a real rejection still throws, and now says which status it was", async () => {
+    const harness = makeContext({
+      keychain: { [KEYCHAIN_SERVICE]: credentialBlob({ expiresAt: NOW + 6 * 3_600_000 }) },
+      responses: { [USAGE_URL]: [{ status: 401 }] },
+    });
+    await expect(claudeAdapter.fetchUsage(harness.context)).rejects.toThrow(/HTTP 401/);
+  });
+
   test("a file login is rewritten, and the keychain is left alone", async () => {
     const harness = makeContext({
       files: { [CREDENTIALS_PATH]: EXPIRING },

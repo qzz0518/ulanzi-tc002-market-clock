@@ -64,6 +64,10 @@ const USER_AGENT = "claude-code/2.1.69";
 
 const MISSING_SCOPE_NOTE = "这份登录没有用量权限，运行 `claude` 重新登录即可恢复会话与每周额度。";
 const INFERENCE_ONLY_NOTE = "环境变量里只有推理用的 setup token，运行 `claude` 重新登录才能读到额度。";
+// Not an error: the login is fine, only the short-lived access token lapsed.
+// Claude Code renews it on its next run, and only Claude Code can — the token
+// lives in the keychain, which we are not allowed to rewrite.
+const TOKEN_STALE_NOTE = "访问令牌已过期，等下次运行 Claude Code 会自动续期；想立刻恢复就在终端跑一次 `claude`。";
 
 type CredentialSource = "keychain" | "file" | "environment";
 
@@ -240,6 +244,30 @@ function needsRefresh(oauth: ClaudeOAuth, nowMs: number): boolean {
   // rotate a working token for nothing.
   if (oauth.expiresAt === undefined) return false;
   return oauth.expiresAt - nowMs <= REFRESH_SLACK_MS;
+}
+
+/**
+ * Whether we may spend this candidate's refresh token.
+ *
+ * Only a file login qualifies: Anthropic retires the old refresh token the
+ * moment it issues a new one, and the keychain cannot be rewritten safely
+ * (keychain.ts), so refreshing a keychain login would sign the user out of
+ * Claude Code itself.
+ */
+function isRefreshable(candidate: Candidate): boolean {
+  return candidate.source === "file" && candidate.oauth.refreshToken !== undefined;
+}
+
+/**
+ * Already dead — no slack.
+ *
+ * `needsRefresh` deliberately fires five minutes early so a refresh lands
+ * before the token dies. A credential we cannot refresh gets no such margin:
+ * every remaining second of it still works, and there is nothing to prepare
+ * for.
+ */
+function hasExpired(oauth: ClaudeOAuth, nowMs: number): boolean {
+  return oauth.expiresAt !== undefined && oauth.expiresAt <= nowMs;
 }
 
 /**
@@ -456,8 +484,7 @@ async function fetchWithCandidate(
   // one, and the keychain cannot be rewritten safely (keychain.ts). So a
   // keychain login is used exactly as it stands — when it expires, the panel
   // says so and the next `claude` run repairs it.
-  const writable = candidate.source === "file";
-  const refresh = oauth.refreshToken === undefined || !writable
+  const refresh = !isRefreshable(candidate)
     ? undefined
     : async (): Promise<string> => {
       oauth = await refreshOAuth(context, endpoints, oauth);
@@ -531,13 +558,35 @@ export const claudeAdapter: VibeProviderAdapter = {
     // giving up on the first rejection would report "signed out" to a user who
     // is signed in; only an expired credential falls through to the next one.
     let expired: VibeCredentialsExpiredError | undefined;
+    let awaitingRefresh = false;
     for (const candidate of live) {
+      // An expired credential we are not allowed to refresh can only ever 401,
+      // and the blob already says so — the expiry is right there. Spending the
+      // request anyway is how this used to report「登录已过期」for a login that
+      // was perfectly good: Claude Code's access token lives about eight hours,
+      // so every stretch where the user is not running the CLI produced one.
+      // The token repairs itself the next time `claude` runs; until then this
+      // is a state to explain, not a failure to raise.
+      if (!isRefreshable(candidate) && hasExpired(candidate.oauth, context.now())) {
+        awaitingRefresh = true;
+        continue;
+      }
       try {
         return await fetchWithCandidate(context, endpoints, candidate);
       } catch (error) {
         if (!(error instanceof VibeCredentialsExpiredError)) throw error;
         expired = error;
       }
+    }
+    // Only when nothing was actually rejected: a real 401 outranks a token that
+    // is merely waiting to be renewed.
+    if (expired === undefined && awaitingRefresh) {
+      const plan = formatPlan(live[0]!.oauth);
+      return {
+        ...(plan === undefined ? {} : { plan }),
+        metrics: [],
+        note: TOKEN_STALE_NOTE,
+      };
     }
     throw expired ?? new VibeCredentialsExpiredError(PROVIDER_ID);
   },

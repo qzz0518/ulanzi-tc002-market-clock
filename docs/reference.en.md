@@ -173,6 +173,22 @@ the same cadence as the collector's own floor, so republishing costs no vendor r
   other vendor keeps refreshing.
 - A vendor answers 429 → it is parked until its Retry-After passes. The cooldown is per vendor,
   so a rate-limited Claude never stops Codex.
+- A vendor whose **access token lapsed and which we may not renew** → the doomed request is not
+  sent at all. The row carries a note instead (「访问令牌已过期，等下次运行 Claude Code 会自动
+  续期」), and this counts as **neither a failure nor a cooldown**. This one matters: on macOS the
+  Claude Code login lives in the keychain, and we only ever read the keychain (`security` silently
+  truncates writes past 128 bytes — see `providers/keychain.ts`), so only the CLI can renew that
+  access token. It lasts about eight hours, so **every stretch where you are not running the CLI**
+  hits the window. The blob already carries `expiresAt`, so expiry never needed a 401 to discover —
+  asking anyway is what used to report「登录已过期」for a perfectly good login and then park the
+  vendor for thirty minutes, so that by morning — CLI run, token long since renewed — the panel was
+  still repeating the stale reason.
+- A credential the vendor **actually rejected** (401/403) → that, and only that, is
+  `sign-in expired`: parked for thirty minutes, with the HTTP status carried in the message
+  (`sign-in rejected (HTTP 401)`). 401 and 403 mean different things, and flattening them into one
+  sentence sends debugging the wrong way from the first minute. Pressing 刷新 in the console clears
+  every per-vendor cooldown — that is what the button means, and someone who has just repaired a
+  login should not have to wait half an hour to find out.
 - **Nothing at all is signed in** (or everything refused) → the document carries `vibe\t0` and
   the ZOS panel draws a single centred CJK word, **saying which emptiness this is**: 未配置 when
   the device has no console address yet, 离线 when it has one and nothing arrived, 未登录 only

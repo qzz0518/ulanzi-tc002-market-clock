@@ -131,6 +131,19 @@ export class VibeUsageService {
     this.now = options.now ?? Date.now;
   }
 
+  /**
+   * Forgets every per-vendor cooldown.
+   *
+   * The console's 刷新 means "try again now". Without this a vendor parked for
+   * thirty minutes stayed parked even after the user had gone and repaired the
+   * very thing it was parked for — and the panel kept reporting the old reason,
+   * which reads as the repair having failed.
+   */
+  clearCooldowns(): void {
+    this.cooldownUntil.clear();
+    this.cooldownReason.clear();
+  }
+
   /** Which vendors have a credential on this machine — the first-run probe. */
   async detectProviders(): Promise<string[]> {
     const context = this.buildContext();
@@ -304,7 +317,9 @@ async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => Er
 }
 
 function describe(error: unknown): string {
-  if (error instanceof VibeCredentialsExpiredError) return "sign-in expired";
+  // Deliberately NOT flattened to a fixed "sign-in expired": the adapters put
+  // the HTTP status in the message, and that is the difference between a
+  // credential the vendor rejected and one this process never got to use.
   return error instanceof Error ? error.message : String(error);
 }
 

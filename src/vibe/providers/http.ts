@@ -115,9 +115,19 @@ export async function withTokenRefresh(input: {
 }): Promise<RawResponse> {
   const first = await input.attempt(input.token);
   if (!isAuthFailure(first)) return first;
-  if (input.refresh === undefined) throw new VibeCredentialsExpiredError(input.providerId);
+  // The status travels with the message: 401 and 403 mean different things
+  // (rejected credential vs refused permission) and "sign-in expired" alone
+  // sent one debugging session looking for an expiry that was not there.
+  if (input.refresh === undefined) {
+    throw new VibeCredentialsExpiredError(input.providerId, `sign-in rejected (HTTP ${first.status})`);
+  }
   const fresh = await input.refresh();
   const second = await input.attempt(fresh);
-  if (isAuthFailure(second)) throw new VibeCredentialsExpiredError(input.providerId);
+  if (isAuthFailure(second)) {
+    throw new VibeCredentialsExpiredError(
+      input.providerId,
+      `sign-in rejected after refresh (HTTP ${second.status})`,
+    );
+  }
   return second;
 }

@@ -754,6 +754,10 @@ export class WorkspaceController {
     if (cached && age < floor) {
       return { snapshot: cached, starred };
     }
+    // Pressing 刷新 means "try again now", including the vendors this service
+    // parked. Otherwise a user who just fixed a login watches the panel repeat
+    // the old reason for up to half an hour and concludes the fix did not work.
+    if (userRequested) this.vibeClient.clearCooldowns();
     // One collection round is shared by everyone who asks while it is running:
     // a channel push, a preview and an open console tab otherwise each start
     // their own, and ten vendors do not need three simultaneous conversations.

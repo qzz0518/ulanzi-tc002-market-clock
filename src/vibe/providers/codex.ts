@@ -48,6 +48,9 @@ const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REFRESH_URL = "https://auth.openai.com/oauth/token";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+// Not an error: the login is fine, only the short-lived access token lapsed,
+// and this copy of it is one we are not allowed to renew.
+const TOKEN_STALE_NOTE = "访问令牌已过期，等下次运行 Codex CLI 会自动续期；想立刻恢复就在终端跑一次 `codex`。";
 const KEYCHAIN_SERVICE = "Codex Auth";
 const USER_AGENT = "vibe-usage/1.0";
 /** Refresh five minutes ahead of the JWT's own expiry, as the CLI does. */
@@ -126,6 +129,33 @@ async function loadCandidates(context: VibeAdapterContext): Promise<Candidate[]>
   const keychainAuth = parseAuth(await context.keychain.read(KEYCHAIN_SERVICE).catch(() => null));
   if (keychainAuth) candidates.push({ source: "keychain", auth: keychainAuth });
   return candidates;
+}
+
+/**
+ * Whether we may spend this candidate's refresh token. Only a file-backed login
+ * can take its rotated token back (the keychain is read-only for us — see
+ * keychain.ts), and spending a rotation we cannot persist logs the user out of
+ * the Codex CLI.
+ */
+function isRefreshable(candidate: Candidate): boolean {
+  return candidate.source === "file"
+    && candidate.path !== undefined
+    && candidate.auth.refreshToken !== undefined;
+}
+
+/**
+ * Already dead — no slack, unlike `needsRefresh`.
+ *
+ * A credential we cannot refresh gets no five-minute margin: every remaining
+ * second of it still works, and there is nothing to prepare for. Only the JWT's
+ * own `exp` counts here; the `last_refresh` heuristic below says "probably
+ * stale", which is not the same as "certainly rejected".
+ */
+function hasExpired(auth: CodexAuth, nowMs: number): boolean {
+  const expSeconds = auth.accessToken === undefined
+    ? undefined
+    : asNumber(jwtPayload(auth.accessToken)?.exp);
+  return expSeconds !== undefined && expSeconds * 1000 <= nowMs;
 }
 
 function needsRefresh(auth: CodexAuth, nowMs: number): boolean {
@@ -398,11 +428,7 @@ async function fetchWithCandidate(
 ): Promise<VibeProviderResult> {
   let auth = candidate.auth;
   let activeToken = accessToken;
-  // Only a file-backed login can take its rotated token back (the keychain is
-  // read-only for us — see keychain.ts). Spending a rotation we cannot persist
-  // would log the user out of the Codex CLI, so we simply do not.
-  const writable = candidate.source === "file" && candidate.path !== undefined;
-  const refresh = auth.refreshToken === undefined || !writable
+  const refresh = !isRefreshable(candidate)
     ? undefined
     : async (): Promise<string> => {
       auth = await refreshAuth(context, auth);
@@ -516,13 +542,27 @@ export const codexAdapter: VibeProviderAdapter = {
     // `~/.config` and `~/.codex` can both hold a login; only an expired one
     // falls through to the next file, everything else is reported as it is.
     let expired: VibeCredentialsExpiredError | undefined;
+    let awaitingRefresh = false;
     for (const candidate of withToken) {
+      // An expired credential we may not refresh can only ever 401, and the
+      // JWT already says it is expired. Reporting「登录已过期」for it would be
+      // wrong twice: the login is intact, and the CLI renews the token itself
+      // on its next run. Same reasoning as claude.ts, which is where this bites
+      // in practice — on macOS that login lives in the keychain.
+      if (!isRefreshable(candidate) && hasExpired(candidate.auth, context.now())) {
+        awaitingRefresh = true;
+        continue;
+      }
       try {
         return await fetchWithCandidate(context, candidate, candidate.auth.accessToken!);
       } catch (error) {
         if (!(error instanceof VibeCredentialsExpiredError)) throw error;
         expired = error;
       }
+    }
+    // A real rejection outranks a token that is merely waiting to be renewed.
+    if (expired === undefined && awaitingRefresh) {
+      return { metrics: [], note: TOKEN_STALE_NOTE };
     }
     throw expired ?? new VibeCredentialsExpiredError(PROVIDER_ID);
   },

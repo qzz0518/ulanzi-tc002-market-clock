@@ -645,4 +645,36 @@ describe("codex adapter — rotated credentials go back to the CLI", () => {
     await codexAdapter.fetchUsage(harness.context);
     expect(harness.fileWrites).toHaveLength(0);
   });
+
+  // Same shape as claude.ts, where this actually bites: a keychain copy cannot
+  // be renewed by us, and its JWT already says it is dead, so spending a request
+  // on it only produces a 401 dressed up as「登录已过期」.
+  test("an expired keychain login becomes a note, not a doomed request", async () => {
+    const harness = makeContext({
+      keychain: { [KEYCHAIN_SERVICE]: EXPIRED },
+      responses: { [USAGE_URL]: [{ status: 401 }] },
+    });
+
+    const result = await codexAdapter.fetchUsage(harness.context);
+    expect(harness.calls).toHaveLength(0);
+    expect(result.metrics).toEqual([]);
+    expect(result.note).toContain("访问令牌已过期");
+  });
+
+  // The file copy can be refreshed, so it must still be tried rather than
+  // written off with the keychain's.
+  test("a refreshable file login is used even when the keychain copy is dead", async () => {
+    const harness = makeContext({
+      keychain: { [KEYCHAIN_SERVICE]: EXPIRED },
+      files: { [HOME_PATH]: EXPIRED },
+      responses: {
+        [REFRESH_URL]: [{ body: { access_token: jwt(Math.floor(NOW / 1000) + 3_600), refresh_token: "refresh-token-2" } }],
+        [USAGE_URL]: [{ body: USAGE_BODY }],
+      },
+    });
+
+    const result = await codexAdapter.fetchUsage(harness.context);
+    expect(result.metrics.length).toBeGreaterThan(0);
+    expect(harness.fileWrites).toHaveLength(1);
+  });
 });

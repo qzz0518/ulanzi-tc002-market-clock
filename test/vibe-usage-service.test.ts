@@ -182,3 +182,57 @@ describe("vibe usage service — degradation is per vendor", () => {
     expect(gone.errors).toHaveLength(1);
   });
 });
+
+describe("cooldowns and what clears them", () => {
+  function rejecting(id: string, calls: { n: number }): VibeProviderAdapter {
+    return {
+      id,
+      displayName: id,
+      detect: async () => true,
+      fetchUsage: async () => {
+        calls.n += 1;
+        throw new VibeCredentialsExpiredError(id, "sign-in rejected (HTTP 401)");
+      },
+    };
+  }
+
+  test("a rejected credential is parked, so the next round does not spend it again", async () => {
+    const calls = { n: 0 };
+    const service = new VibeUsageService({ adapters: [rejecting("claude", calls)], now: () => 1_000 });
+
+    const first = await service.fetchSnapshot();
+    expect(first.errors[0]!.message).toBe("sign-in rejected (HTTP 401)");
+    await service.fetchSnapshot();
+    expect(calls.n).toBe(1);
+  });
+
+  // The console's 刷新 means "try again now". Without this a user who had just
+  // repaired the login watched the panel repeat the old reason for half an hour
+  // and concluded the repair had failed.
+  test("clearCooldowns lets the very next round try again", async () => {
+    const calls = { n: 0 };
+    const service = new VibeUsageService({ adapters: [rejecting("claude", calls)], now: () => 1_000 });
+
+    await service.fetchSnapshot();
+    service.clearCooldowns();
+    await service.fetchSnapshot();
+    expect(calls.n).toBe(2);
+  });
+
+  // The status code is the difference between a credential the vendor rejected
+  // and one this process never got to use; flattening it cost a debugging
+  // session looking for an expiry that was not there.
+  test("the vendor's own message survives to the console", async () => {
+    const service = new VibeUsageService({
+      adapters: [{
+        id: "claude",
+        displayName: "claude",
+        detect: async () => true,
+        fetchUsage: async () => { throw new VibeCredentialsExpiredError("claude", "sign-in rejected (HTTP 403)"); },
+      }],
+      now: () => 1_000,
+    });
+    const snapshot = await service.fetchSnapshot();
+    expect(snapshot.errors[0]!.message).toContain("HTTP 403");
+  });
+});
