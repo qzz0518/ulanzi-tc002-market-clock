@@ -52,35 +52,57 @@ export const VIBE_PIXEL_LOGOS = {
     ],
   },
 
-  // The terminal-prompt mark: a rounded blue-violet blob with `>` and `_`
-  // knocked out of it. Two blues on a diagonal split rather than one flat fill —
-  // the source is a top-left-to-bottom-right gradient, and a single horizontal
-  // band read as two stacked colours instead of one lit shape. The white is the
-  // glyph, not a highlight, so it keeps the third palette slot.
+  // The terminal-prompt mark: the app icon's cloud — a fat, near-circular mass
+  // with six soft round lobes — carrying a white `>` and `_`.
+  //
+  // MEASURED, then exaggerated on purpose. Analysing the reference PNG showed
+  // the lobes are exactly six, 60° apart, with a peak at the top slightly left
+  // of centre (345° clockwise from top) and notches only 13.5% of the radius
+  // deep. At a 7.5 px radius that is ~1 px, so the reference's own 16x16
+  // downsample is a plain circle: the lobes average away. Every earlier version
+  // failed on one side of that fact — deep notches read as a gear, faithful
+  // ones read as a disc — so this one starts from that natural circle and cuts
+  // exactly four 1 px seams at the measured notch angles (15°/195° single-pixel
+  // nicks at row 1 and row 14; 75°/255° two-row bites on the flanks) and lets
+  // the top and bottom lobes bulge out 1 px so the diagonals read as lobes
+  // rather than chamfers. It is 180° rotationally symmetric, and every edge
+  // steps 1/2/3 like a hand-drawn pixel circle — no 1-2-1 wobble anywhere.
+  //
+  // The glyph follows the reference's geometry: `>` is a 2 px stroke, five rows
+  // tall, apex on the panel's centre row, sitting left of centre; `_` is a
+  // single row aligned with the chevron's lower tip, one column of gap between
+  // them; the pair is centred horizontally. Deep blue is a bottom band only —
+  // the owner asked for shape, not gradient, and the firmware self-check just
+  // needs all three inks somewhere on the tile.
+  //
+  // Chosen from a ten-candidate panel drawn by five independent designers and
+  // ranked by three judges (silhouette / craft / gestalt) — first on all three.
   codex: {
     displayName: "Codex",
     palette: {
+      // `a` stays first: the firmware's two-agent strip paints the 10x10 mono
+      // mark with palette[0], so reordering these repaints a different view.
       a: [124, 131, 246, 255],
       b: [45, 86, 232, 255],
       w: [255, 255, 255, 255],
     },
     rows: [
-      ".....aaaaaa.....",
-      "...aaaaaaaaaa...",
-      "..aaaaaaaaaaaa..",
+      "....aaaa........",
+      "...aaaaaa.aaa...",
+      "...aaaaaaaaaaa..",
+      "..aaaaaaaaaaaaa.",
       ".aaaaaaaaaaaaaa.",
-      ".aawwaaaaaaaaaa.",
-      "aaaaawwaaaaaaaab",
-      "aaaaaaawwaaabbbb",
-      "aaaaawwaabbbbbbb",
-      "aaawwabbbbbbbbbb",
-      "aaabbbbbbbbbbbbb",
-      ".bbbbbbbwwwwwbb.",
-      ".bbbbbbbbbbbbbb.",
-      "..bbbbbbbbbbbb..",
-      "...bbbbbbbbbb...",
-      ".....bbbbbb.....",
-      "................",
+      "aaaaaaaaaaaaaa..",
+      "aaawwaaaaaaaaa..",
+      "aaaawwaaaaaaaaa.",
+      ".aaaawwaaaaaaaaa",
+      "..aawwaaaaaaaaaa",
+      "..awwaaawwwwwaaa",
+      ".aaaaaaaaaaaaaa.",
+      ".aaaaaaaaaaaaa..",
+      "..bbbbbbbbbbb...",
+      "...bbb.bbbbbb...",
+      "........bbbb....",
     ],
   },
 

@@ -48,32 +48,48 @@ export const VIBE_ICONS: Record<string, VibeIconSizes> = {
       ".....xx.....",
     ],
   },
+  // A cloud, not a daisy: the real mark is a fat blob of unequal round lobes
+  // with a white ">_" floating in it. Two things force this drawing.
+  //
+  // The panel paints every lit pixel in ONE brand colour, so ink is the only
+  // thing that can carry the mark: the glyph has to *be* lit with an unlit gap
+  // around it. Carving it out of a solid body — what this used to do — reads as
+  // a scratch on a disc, not as a prompt.
+  //
+  // And a lobe needs area to read. A scallop 1 px wide is indistinguishable
+  // from a dead pixel at arm's length, so the lobes live on a 2-row cap at the
+  // top and bottom (where nothing else competes for space) and the flanks stay
+  // a plain 1-px wall. Three or four fat lumps of deliberately unequal width,
+  // with the top and bottom pattern offset by a column so the silhouette never
+  // resolves into something symmetric. The ">" sits high and left, the "_" low
+  // and right — that diagonal offset is the half of the glyph people recognise,
+  // so it survives even at s10 where the chevron is down to three pixels.
   codex: {
     s10: [
-      "..xxxxxx..",
+      ".xxx..xx..",
       ".xxxxxxxx.",
-      "xxxxxxxxxx",
-      "xx.xxxxxxx",
-      "xxx.xxxxxx",
-      "xxxx.xxxxx",
-      "xxx.xxxxxx",
-      "xx.xxxxxxx",
-      ".xxx....xx",
-      "..xxxxxx..",
+      "x........x",
+      "x.x......x",
+      "x..x.....x",
+      "x.x......x",
+      "x....xxx.x",
+      "x........x",
+      ".xxxxxxxx.",
+      "..xxx..xx.",
     ],
     s12: [
-      "....xxxx....",
-      "..xx....xx..",
-      ".x........x.",
-      "x....xx....x",
-      "x...x.x....x",
-      "x..x..x....x",
-      "x....x..x..x",
-      "x....x...x.x",
+      ".xxxx..xxx..",
+      ".xxxxxxxxxx.",
+      "x..........x",
+      "x..x.......x",
+      "x...x......x",
+      "x....x.....x",
+      "x...x......x",
+      "x..x.......x",
       "x.....xxx..x",
-      ".x........x.",
-      "..xx....xx..",
-      "....xxxx....",
+      "x..........x",
+      ".xxxxxxxxxx.",
+      "..xx..xxxx..",
     ],
   },
   grok: {
