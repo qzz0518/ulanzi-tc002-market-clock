@@ -214,13 +214,27 @@ describe("zos panel", () => {
     // 第二个。下一条用例守这个前提。
     expect(appSource).toMatch(/<div className="page-heading">/);
 
-    // 整数倍放大:尺寸给在画布上(边框往外包),五个断点都是整数 px。
-    // 反过来让边框盒去凑 52:16,扣掉边框剩下的内容宽就不再是 52 的整数倍。
+    // 整数倍放大:尺寸给在画布上(边框往外包),档位是整数 px。反过来让边框盒去凑
+    // 52:16,扣掉边框剩下的内容宽就不再是 52 的整数倍。
     expect(css).toMatch(/\.zc-screen__frame canvas\s*\{[^}]*width:\s*calc\(52 \* var\(--zc-pixel, 14px\)\);/s);
     expect(css).toMatch(/\.zc-screen__frame\s*\{[^}]*width:\s*fit-content;/s);
     expect(css).toMatch(/\.zc-device\s*\{[^}]*--zc-pixel:\s*14px;/s);
-    for (const step of [12, 10, 8, 6, 4]) {
-      expect(css).toContain(`{ .zc-device { --zc-pixel: ${step}px; } }`);
+    expect(css).toContain("{ .zc-device { --zc-pixel: 12px; } }");
+
+    // ……但只在双列里成立。单列时设备列就是整页,整数倍必然剩下 avail mod 52
+    // 的余量:412px 手机上实测 26px、430px 上 44px(12%)、768px 上 165px(24%),
+    // 右侧一条空带,被当成「预览没占满宽度」报回来过。窄屏改满宽,上限收在桌面
+    // 最大档,免得窄窗口里的镜像反而比桌面还大。
+    const singleColumn = css.slice(css.indexOf("@media (max-width: 60rem)"));
+    expect(singleColumn).toContain(
+      ".zc-device > * { max-width: min(100%, calc(52 * 14px + 2 * var(--zc-bezel))); }",
+    );
+    expect(singleColumn).toContain(".zc-screen__frame { width: 100%; }");
+    expect(singleColumn).toContain(".zc-screen__frame canvas { width: 100%; }");
+    // 60rem 以下的老档位必须删干净:留着只会是满宽规则下面的死代码,读的人会
+    // 以为窄屏还在走整数倍。
+    for (const step of [10, 8, 6, 4]) {
+      expect(css).not.toContain(`--zc-pixel: ${step}px`);
     }
 
     // LED 屏质感与游戏厅同源;盖层在网格之上,不会被网格纹理糊掉。

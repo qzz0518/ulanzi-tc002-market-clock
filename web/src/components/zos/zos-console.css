@@ -37,16 +37,13 @@
 /* 整数倍放大：一个 LED 像素恒等于 N × N 个屏幕像素，边缘不会出现半像素糊边。
    尺寸从画布本身给出、边框向外包住它——反过来让边框盒去凑 52:16，扣掉边框后
    剩下的内容宽就再也不是 52 的整数倍了（真机上量到过 14.66×）。
-   设备列整列按屏宽对齐，甲板和提示不会比屏幕更宽。 */
+   设备列整列按屏宽对齐，甲板和提示不会比屏幕更宽。
+   只在双列布局里成立：单列时这一列就是整页，整数倍必然留下余量，见下方响应式。 */
 .zc-device { --zc-pixel: 14px; --zc-bezel: 0.55rem; min-width: 0; }
 .zc-device > * { max-width: calc(52 * var(--zc-pixel) + 2 * var(--zc-bezel)); }
 /* 整数倍档位：每档都要满足 52 × N px ≤ 视口内容宽（视口 − 页边距 − 边框），
    否则 max-width 会把它压成小数倍。档位集中在这里，改一处就够。 */
 @media (max-width: 76rem) { .zc-device { --zc-pixel: 12px; } }
-@media (max-width: 52rem) { .zc-device { --zc-pixel: 10px; } }
-@media (max-width: 36rem) { .zc-device { --zc-pixel: 8px; } }
-@media (max-width: 30rem) { .zc-device { --zc-pixel: 6px; } }
-@media (max-width: 23rem) { .zc-device { --zc-pixel: 4px; } }
 
 /* --- LED 镜像 ------------------------------------------------------------- */
 
@@ -350,6 +347,14 @@
   .zc-shell { padding-top: 0.65rem; }
   .zc-body { grid-template-columns: minmax(0, 1fr); }
   .zc-strip__vitals { margin-left: 0; }
+  /* 单列下设备列就是整页宽度，整数倍缩放必然剩下 avail mod 52 的余量——最多
+     51px。412px 宽的手机上量到 47px，右侧一条 13% 的空带，看着像页面没画完。
+     手机和平板 DPR ≥ 2，光栅化落在设备像素上：放弃整数倍带来的列宽差不足一个
+     CSS 像素，pixelated 照样给硬边。所以窄屏用满宽换掉整数倍，整数倍留给双列。
+     上限收在桌面最大档（14px/LED），免得窄窗口里的镜像反而比桌面还大。 */
+  .zc-device > * { max-width: min(100%, calc(52 * 14px + 2 * var(--zc-bezel))); }
+  .zc-screen__frame { width: 100%; }
+  .zc-screen__frame canvas { width: 100%; }
 }
 @media (max-width: 36rem) {
   .zc-knob { width: 7rem; }
