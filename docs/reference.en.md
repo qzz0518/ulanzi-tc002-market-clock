@@ -36,6 +36,7 @@ port 43820.
 | `CLOCK_HTTP_PROXY` | unset | Optional loopback HTTP proxy (no credentials); **every** device request goes through it, live and notify included |
 | `CONSOLE_DISCOVERY` | `on` | LAN beacon: announces the console's address to the local subnet every 10 s so a ZOS device that lost it can find it again. `off`/`0`/`false` disables it; an unrecognised value throws rather than defaulting to on |
 | `CONSOLE_DISCOVERY_PORT` | `43821` | UDP port the beacon is sent to. **The firmware's listener is a compile-time constant**, so changing this makes the device deaf; the console's own port travels in the payload instead |
+| `VIBE_INGEST_TOKEN` | unset | Shared secret for usage pushed by the remote collector (`vibe-agent`). **Unset refuses every push**: `POST /v1/push` takes no same-origin check, so without a secret anything on the LAN could put invented quota on the panel |
 
 ## Control-panel behavior
 
@@ -145,6 +146,78 @@ Reading the Keychain is one `security` call against an item you already authoris
 CLI, so it **raises no new prompt**; on a non-macOS host the reader is inert and those vendors
 simply never detect. Credentials are read, used to sign one request, and discarded — never
 logged, never persisted.
+
+### Remote collection (service and logins on different machines)
+
+All of the above assumes **the service process can read those credentials**. In a Docker
+deployment, on a NAS, or on any host that is not the machine you code on, all four adapters
+truthfully find nothing — the panel is empty and no error is raised, because "no credential" is a
+state rather than a fault. Move the collection to the machine that has the logins instead:
+
+```bash
+# On a machine with this repo and Bun, just run it
+bun run agent -- --url http://<service>:43820/v1/push --token <token> --once   # verify first
+bun run agent -- --url http://<service>:43820/v1/push --token <token>          # then leave it running
+
+# No Bun over there: compile a single self-contained binary on any machine that has the repo
+bun run agent-build -- --target darwin-arm64   # or darwin-x64 / linux-x64 / linux-arm64 / windows-x64
+```
+
+`src/vibe-agent.ts` is a second entry point into the same collection code: the same four
+adapters, the same refresh discipline, the same per-vendor isolation — it just `POST`s the result
+to `/v1/push` instead of keeping it in process
+([ADR 0013](adr/0013-vibe-remote-usage-agent.md)). Arguments may also come from the environment:
+`VIBE_PUSH_URL` / `VIBE_INGEST_TOKEN` / `VIBE_MACHINE` / `VIBE_PUSH_INTERVAL`.
+
+The service needs `VIBE_INGEST_TOKEN` set, or **every push is refused** (503, with the variable
+named in the error).
+
+To avoid memorising any of it, the **远程采集** button on the console's VIBE tab walks the whole
+thing. It asks exactly two questions — **how this service was started** (Docker / autostart /
+shell) and **which machine holds the logins** (this one / another Mac / Linux / Windows) — then
+shows only the commands for that one path, token already generated and address already filled in.
+Autostart (launchd plist, systemd user unit, schtasks) and uninstall are folded away, the latter
+appearing only once a machine is actually pushing.
+
+Pushed rows fold into **the same snapshot**, and the console, the renderers, the star table and
+the ZOS document cannot tell a local row from a pushed one. The rules:
+
+- When both sources have the same vendor, **the local read wins** — a credential this process
+  just read itself outranks one relayed over the network.
+- A push **invalidates the controller's snapshot cache** and reaches the clock at once; otherwise
+  the new numbers would sit behind the 15-minute window.
+- **Failures travel with the round.** The collector pushes that round's `errors` too; without them
+  a vendor that failed over there simply vanished from the panel here with no reason attached —
+  local collection writes «sign-in rejected (HTTP 401)» and the remote path used to say nothing at
+  all, which is the harder of the two to debug and the one nobody is watching. A failing vendor has
+  no row to hang a machine badge on, so with several machines the name goes into the message; and a
+  remote failure is dropped when the local read of that same vendor succeeded — it explains nothing
+  the user is looking at.
+- Pushed data lives in memory, is flagged `stale` after 5 minutes and dropped after 15. A restart
+  shows an empty panel for one push interval rather than replaying a snapshot nobody can vouch for.
+- Several machines may push (up to 8). One vendor still gets one row, taken by **the most recent
+  push**, which names its machine in `note`.
+- The `ingest` field on `GET /api/vibe/status` tells the console whether this deployment can
+  receive at all, whether a token is set, and which machines are pushing. **The token itself is
+  never echoed back.**
+
+The console does not make you guess where the numbers came from: beside 「已接入 N 个代理」 the
+strip carries a **source** chip (`本机直采 4 家` / `远程推送 2 家（work-laptop）`, or both halves
+when the panel is mixed), and every pushed row wears a 「来自 <machine>」 badge. Local rows carry
+none — that is the default topology, and tagging all four would be noise. This comes from a
+`source` field on each row (`{kind:"local"|"remote", machine?}`), and a pusher **cannot claim to
+be local**: ingest never reads that field off the wire, it stamps `remote` on everything it stores.
+
+The empty state splits the same way. In a container (detected at boot from `/.dockerenv` or the
+`container` env var, surfaced as `ingest.containerized`) it says outright that the service reads
+the container's own credentials and cannot see yours. Otherwise it names both possibilities —
+never logged in here, or the service is not on the machine you code on — and offers the setup
+button.
+
+> The collector reads — and when the access token is about to expire, refreshes — each CLI's
+> login (`~/.claude/.credentials.json`, `~/.codex/auth.json`). Vendors retire the old refresh
+> token on every exchange, so **run this binary only on the machine those credentials belong
+> to**: pointed at someone else's home directory it will sign them out of their own CLI.
 
 The console's **VIBE** tab lists the four agents, at most two starred metrics per agent
 (`PUT /api/vibe/starred` — those are the ones that reach the panel), a preview of both pages,
@@ -944,6 +1017,8 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` | `/api/market/icons/:iconRef.png` | 16×16 pixel icon of a runtime asset (immutable cache) |
 | `GET` | `/api/vibe/status` | The VIBE usage snapshot plus the provider catalog, the starred table, and `keys` (per key-based vendor: `stored` / `environment` / `unset` — **never the key itself**) (read-only, cross-origin). `?refresh=1` forces a re-collection; otherwise the cache answers. Nothing being signed in is **not an HTTP error**: still 200, with `snapshot: null` and an `error`, which is what the console renders its sign-in / paste-a-key pointer from |
 | `PUT` | `/api/vibe/starred` | Choose which metrics an agent shows on the panel: `{providerId, starred}`, at most 2 after de-duplication; the reply is the full starred table merged with the catalog defaults (same-origin + JSON, 400 on validation failure) |
+| `POST` | `/v1/push` | Usage pushed by the remote collector. **No same-origin check** (the agent is not a browser and sends no Origin), so `Authorization: Bearer $VIBE_INGEST_TOKEN` is the whole of its authentication. With `VIBE_INGEST_TOKEN` unset every push is 503 with the variable named in the error; a wrong token is 401; a malformed envelope is 400 saying what is wrong. The envelope is `{schema:"vibe.usage.v1", machine, sent_at, snapshots, errors}` (`errors` optional, absent from older agents), shaped like openusage's hub `/v1/push` ([ADR 0013](adr/0013-vibe-remote-usage-agent.md)) |
+| `DELETE` | `/api/vibe/ingest/machine?machine=…` | Forget one machine's pushed rows (the console's 「移除」 button, same-origin). Replies `{forgotten, machines}`; `forgotten:false` means it was not known. This forgets only — an agent still running over there reappears on its next push |
 | `PUT` | `/api/vibe/key` | Store an API key for a key-based vendor: `{providerId, key}`, an empty string clears it; the reply is only the `keys` state table and **never echoes the key back** (same-origin + JSON, 400 on validation failure). **All four agents borrow a CLI login today, so the key-vendor list is empty and every `providerId` gets a 400** |
 | `GET` | `/api/presets`, `/api/icons/:id.png` | Legacy market presets and built-in asset icons |
 | `GET` / `PUT` | `/api/settings` | Legacy single-carousel settings |

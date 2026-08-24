@@ -127,6 +127,15 @@ export function VibeProviderList({
                   上次数据
                 </Chip>
               )}
+              {/* Only remote rows are labelled. Local is the default topology
+                  and tagging all four «本机» would be noise on every line; a
+                  pushed row, on the other hand, is a fact the reader cannot
+                  otherwise tell — the numbers look identical either way. */}
+              {usage?.source?.kind === "remote" && (
+                <Chip size="sm" color="neutral" variant="transparent" className="vibe-provider__origin">
+                  {usage.source.machine ? `来自 ${usage.source.machine}` : "远程推送"}
+                </Chip>
+              )}
               {usage && <span className="vibe-provider__count">{usage.metrics.length} 项指标</span>}
               {usage && <ChevronDown className={cn("vibe-provider__chevron", open && "is-open")} aria-hidden="true" />}
             </button>

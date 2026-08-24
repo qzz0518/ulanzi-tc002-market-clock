@@ -22,6 +22,8 @@ bun run build                     # vite lib build → dist/assets, then Bun.bui
 CLOCK_HOST=<ip> bun start         # build + run dist/service.js, console at http://127.0.0.1:43820/
 bun run preview                   # render every saved channel to .runtime/previews/ (no device needed)
 bun run status                    # query a running service
+bun run agent -- --help           # VIBE usage collector, for when the service is not on the machine holding the CLI logins
+bun run agent-build -- --all      # compile that collector to dist/agent/ for every platform
 mise run arcade-hostcheck         # compile+run the arcade game-engine self-checks on the host (clang++)
 ```
 
@@ -108,6 +110,7 @@ path, kept only so `/api/settings` and `/api/preview` stay compatible. New work 
 
 - `docs/reference.md` — env vars, data sources, full local API table, webhook payloads.
 - `docs/adr/` — 0001 content registry, 0002 native music player boundary, 0003 live frame channel,
-  0004 arcade firmware, 0005 runtime clock host.
+  0004 arcade firmware, 0005 runtime clock host, 0010 VIBE collects usage itself,
+  0013 that collector can also run out of process and push in.
 - `docs/design/` — pixel playground and arcade firmware designs; `docs/research/` — real-device
   probes and the no-IDE FlyThings build path.

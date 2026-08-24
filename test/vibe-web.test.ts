@@ -21,6 +21,7 @@ import {
   vibeScreenPages,
   vibeSeverity,
   vibeSignedInCount,
+  vibeSourceSummary,
   type VibeCatalogEntry,
   type VibeMetric,
   type VibeScreenAgent,
@@ -294,6 +295,108 @@ describe("signed-in count", () => {
     expect(vibeSignedInCount({ ...SNAPSHOT, providers: [] })).toBe(0);
     // No snapshot at all is "未接入", not a crash and not a guess.
     expect(vibeSignedInCount(null)).toBe(0);
+  });
+});
+
+describe("provider rows name their origin", () => {
+  const render = (source?: { kind: "local" | "remote"; machine?: string }) =>
+    renderToStaticMarkup(createElement(
+      CladdProvider,
+      null,
+      createElement(VibeProviderList, {
+        catalog: CATALOG,
+        snapshot: {
+          ...SNAPSHOT,
+          providers: [{ ...SNAPSHOT.providers[0]!, ...(source ? { source } : {}) }],
+        },
+        starred: {},
+        expandedId: null,
+        nowMs: Date.parse("2026-08-14T12:00:00Z"),
+        busyProviderId: null,
+        onToggleExpanded: () => {},
+        onToggleStar: () => {},
+      }),
+    ));
+
+  test("a pushed row says which machine it came from", () => {
+    const html = render({ kind: "remote", machine: "work-laptop" });
+    expect(html).toContain("vibe-provider__origin");
+    expect(html).toContain("来自 work-laptop");
+  });
+
+  // Local is the default topology; tagging all four «本机» would be noise on
+  // every line, and the strip already states the split.
+  test("a local row carries no badge at all", () => {
+    expect(render({ kind: "local" })).not.toContain("vibe-provider__origin");
+    expect(render()).not.toContain("vibe-provider__origin");
+  });
+
+  test("a pushed row with no machine name still says it is remote", () => {
+    expect(render({ kind: "remote" })).toContain("远程推送");
+  });
+});
+
+// The console must be able to answer «do I need to set up remote collection?»
+// without the reader opening anything, so the strip states the split.
+describe("source summary", () => {
+  function usage(id: string, source?: { kind: "local" | "remote"; machine?: string }) {
+    return { ...SNAPSHOT.providers[0]!, id, ...(source ? { source } : {}) };
+  }
+
+  test("all local reads read as 直采", () => {
+    const summary = vibeSourceSummary({
+      ...SNAPSHOT,
+      providers: [usage("claude", { kind: "local" }), usage("codex", { kind: "local" })],
+    });
+    expect(summary).toMatchObject({ local: 2, remote: 0, machines: [] });
+    expect(summary.label).toBe("本机直采 2 家");
+  });
+
+  test("all pushed rows name the machine they came from", () => {
+    const summary = vibeSourceSummary({
+      ...SNAPSHOT,
+      providers: [
+        usage("claude", { kind: "remote", machine: "work-laptop" }),
+        usage("codex", { kind: "remote", machine: "work-laptop" }),
+      ],
+    });
+    expect(summary).toMatchObject({ local: 0, remote: 2, machines: ["work-laptop"] });
+    expect(summary.label).toBe("远程推送 2 家（work-laptop）");
+  });
+
+  test("a mixed panel says both halves", () => {
+    const summary = vibeSourceSummary({
+      ...SNAPSHOT,
+      providers: [
+        usage("claude", { kind: "local" }),
+        usage("codex", { kind: "remote", machine: "desktop" }),
+      ],
+    });
+    expect(summary.label).toBe("本机直采 1 家 · 远程 1 家（desktop）");
+  });
+
+  // Past two the names would wrap the strip and say less than the count does.
+  test("more than two machines are counted rather than listed", () => {
+    const summary = vibeSourceSummary({
+      ...SNAPSHOT,
+      providers: [
+        usage("claude", { kind: "remote", machine: "a" }),
+        usage("codex", { kind: "remote", machine: "b" }),
+        usage("grok", { kind: "remote", machine: "c" }),
+      ],
+    });
+    expect(summary.machines).toEqual(["a", "b", "c"]);
+    expect(summary.label).toBe("远程推送 3 家");
+  });
+
+  // A service too old to have the ingest route could only have read locally.
+  test("a row with no source counts as local", () => {
+    expect(vibeSourceSummary(SNAPSHOT)).toMatchObject({ local: 1, remote: 0 });
+  });
+
+  test("no snapshot says nothing at all rather than 0 家", () => {
+    expect(vibeSourceSummary(null).label).toBe("");
+    expect(vibeSourceSummary({ ...SNAPSHOT, providers: [] }).label).toBe("");
   });
 });
 

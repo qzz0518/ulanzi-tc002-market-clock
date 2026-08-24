@@ -34,6 +34,20 @@ import { EmptyKeychain, SecurityKeychain } from "./providers/keychain.ts";
 
 export type { VibeMetric, VibeSpendLine } from "./providers/types.ts";
 
+/**
+ * Where a row came from.
+ *
+ * Two topologies are supported and they look identical on the panel, which is
+ * the point — but "identical" left the console unable to answer the first
+ * question anyone asks: do I need to set up remote collection or not? So every
+ * row carries its origin, and the console states it (ADR 0013).
+ */
+export interface VibeUsageSource {
+  kind: "local" | "remote";
+  /** Remote only: which machine pushed it. */
+  machine?: string;
+}
+
 export interface VibeProviderUsage {
   id: string;
   displayName: string;
@@ -47,6 +61,8 @@ export interface VibeProviderUsage {
   /** Catalog primary-metric order first; anything else keeps adapter order behind it. */
   metrics: VibeMetric[];
   spendLines: VibeSpendLine[];
+  /** Absent only on a snapshot built before sources existed. */
+  source?: VibeUsageSource;
 }
 
 export interface VibeUsageSnapshot {
@@ -96,6 +112,13 @@ const ADAPTER_DEADLINE_MS = 20_000;
 /** How long a rejected credential is left alone before we try it again. */
 const EXPIRED_COOLDOWN_MS = 30 * 60_000;
 
+/** The half of VibeIngestStore this service consumes; keeps the import one-way. */
+export interface VibeIngestSource {
+  collect(): VibeProviderUsage[];
+  /** Why the vendors a machine did not send are missing. */
+  collectErrors(): { providerId: string; message: string }[];
+}
+
 export interface VibeUsageServiceOptions {
   adapters?: readonly VibeProviderAdapter[];
   fetcher?: FetchLike;
@@ -110,6 +133,15 @@ export interface VibeUsageServiceOptions {
   readTextFile?: (path: string) => Promise<string | null>;
   writeTextFile?: (path: string, content: string) => Promise<void>;
   listDirectory?: (path: string) => Promise<string[]>;
+  /**
+   * Snapshots pushed by an out-of-process collector (`src/vibe-agent.ts`).
+   *
+   * A second *source*, not a second service: folding it in here is what lets a
+   * containerised deployment — where every adapter correctly finds no
+   * credential — light up the same panel, with the console, the renderers and
+   * the star table none the wiser about where a row came from.
+   */
+  ingest?: VibeIngestSource;
 }
 
 interface CachedProvider {
@@ -170,7 +202,21 @@ export class VibeUsageService {
     ));
 
     const byId = new Map<string, VibeProviderUsage>();
+    // Pushed rows go in first so a local read of the same vendor overwrites
+    // them: a credential this process just read itself outranks one relayed
+    // over the network, and "local wins" is a rule a user can predict without
+    // knowing which clock ran first.
+    for (const usage of this.options.ingest?.collect() ?? []) byId.set(usage.id, usage);
     for (const usage of collected) if (usage) byId.set(usage.id, usage);
+
+    // A vendor that failed on the pushing machine has no row here to explain
+    // itself with, so its reason travels separately and is folded in — unless
+    // a local read of the same vendor succeeded, in which case the remote
+    // failure is not what the user is looking at.
+    for (const error of this.options.ingest?.collectErrors() ?? []) {
+      if (byId.get(error.providerId)?.source?.kind === "local") continue;
+      errors.push(error);
+    }
 
     // Catalog order, so the console list and the knob pages never disagree.
     const providers = VIBE_CATALOG
@@ -230,6 +276,7 @@ export class VibeUsageService {
         note: result.note,
         metrics: orderMetrics(adapter.id, result.metrics),
         spendLines: result.spendLines ?? [],
+        source: { kind: "local" },
       };
       this.lastGood.set(adapter.id, { usage, atMs: nowMs });
       this.cooldownUntil.delete(adapter.id);

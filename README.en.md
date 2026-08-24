@@ -108,6 +108,20 @@ metrics, stars at most two per agent (those are the ones that reach the panel), 
 52×16 pages, and can jump the clock straight to the app. All four borrow a CLI login this
 machine already carries, so no API key has to be typed anywhere.
 
+**When the service is not on the machine holding those logins** — a Docker deployment, a NAS,
+another host — all four adapters truthfully find nothing and the panel is empty. That is not a
+fault; it is the credentials being out of reach. Run the collector on **the machine that has the
+logins** instead: `bun run agent -- --url http://<service>/v1/push --token <token>`, or
+`bun run agent-build` to compile a single self-contained binary to carry over (macOS / Linux /
+Windows). Set `VIBE_INGEST_TOKEN` on the service to start accepting pushes; pushed rows fold into
+the same snapshot as locally collected ones, and the console, the renderers and the panel cannot
+tell them apart. When both sources have the same vendor, the local read wins (see
+[ADR 0013](docs/adr/0013-vibe-remote-usage-agent.md)).
+
+The **远程采集** button on the console's VIBE tab holds a per-OS walkthrough with every command
+pre-filled with your own address and token. Note that the collector reads — and when necessary
+refreshes — each CLI's login, so **run it only on the machine those credentials belong to**.
+
 ## ZOS system firmware
 
 The first two firmwares are things you sideload for a while; **ZOS** (`device/tc002-os/`)

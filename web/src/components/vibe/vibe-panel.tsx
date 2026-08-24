@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Chip, Surface } from "@cladd-ui/react";
-import { Gauge, Info, RefreshCw, TriangleAlert } from "lucide-react";
+import { Gauge, Info, RefreshCw, Satellite, TriangleAlert } from "lucide-react";
 import { jsonApi } from "@/lib/api";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import { useAppToast } from "@/lib/use-app-toast";
@@ -9,6 +9,7 @@ import {
   formatVibeRelativeTime,
   toggleVibeStar,
   vibeSignedInCount,
+  vibeSourceSummary,
   VIBE_MAX_STARRED,
   type VibeStarredResponse,
   type VibeStatusResponse,
@@ -16,6 +17,7 @@ import {
 import { VibeDisplay } from "@/components/vibe/vibe-display";
 import { VibePreview } from "@/components/vibe/vibe-preview";
 import { VibeProviderList } from "@/components/vibe/vibe-provider-list";
+import { VibeRemoteDialog } from "@/components/vibe/vibe-remote-dialog";
 
 // Relative times ("3 分钟前", the >10 min Outdated notice) are the only thing on
 // this page that changes without an event, so it keeps a slow clock of its own.
@@ -34,6 +36,7 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
   const [refreshing, setRefreshing] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [starBusyId, setStarBusyId] = useState<string | null>(null);
+  const [remoteOpen, setRemoteOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   // `load` is created once, so it reads the live status through a ref rather
   // than the closure it was born with.
@@ -129,6 +132,10 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
   // each vendor's own CLI already left here.
   const signedIn = vibeSignedInCount(status.snapshot);
   const collectedAt = formatVibeRelativeTime(status.snapshot?.generatedAt, now);
+  // Where those rows came from. `signedIn` already counts both, so this splits
+  // the same number rather than adding to it — the strip has to answer «do I
+  // need remote collection?» without the reader opening anything.
+  const sources = vibeSourceSummary(status.snapshot);
 
   return (
     <main className="vibe-shell">
@@ -145,17 +152,25 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
             <Chip size="md" color={signedIn > 0 ? "brand" : "neutral"} variant="transparent">
               {signedIn > 0 ? `已接入 ${signedIn} 个代理` : "未接入"}
             </Chip>
+            {sources.label !== "" && (
+              <Chip size="md" color="neutral" variant="transparent">{sources.label}</Chip>
+            )}
             {signedIn > 0 && collectedAt && <span className="vibe-strip__age">采集于 {collectedAt}</span>}
           </div>
-          <Button
-            type="button"
-            color="neutral"
-            disabled={refreshing}
-            className="vibe-strip__refresh"
-            onClick={() => void load(true)}
-          >
-            <RefreshCw aria-hidden="true" />刷新
-          </Button>
+          <div className="vibe-strip__actions">
+            <Button type="button" color="neutral" onClick={() => setRemoteOpen(true)}>
+              <Satellite aria-hidden="true" />远程采集
+            </Button>
+            <Button
+              type="button"
+              color="neutral"
+              disabled={refreshing}
+              className="vibe-strip__refresh"
+              onClick={() => void load(true)}
+            >
+              <RefreshCw aria-hidden="true" />刷新
+            </Button>
+          </div>
         </div>
 
         {signedIn === 0 && (
@@ -166,12 +181,33 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
           <div className={cn("vibe-setup", status.error && "is-error")} role="status">
             {status.error ? <TriangleAlert aria-hidden="true" /> : <Info aria-hidden="true" />}
             <div>
-              <strong>本机还没有可读的代理登录</strong>
-              <p>
-                VIBE 不需要额外装什么，它读的是各家代理的 CLI 已经留在这台电脑上的登录：
-                登录 Claude Code、Codex CLI、OpenCode、Grok CLI 中任意一个后，
-                回到这里刷新即可显示。在此之前时钟会显示 OFFLINE 提示帧，不会编造数字。
-              </p>
+              <strong>这个服务读不到任何代理登录</strong>
+              {/* Two situations produce the same empty panel and they need
+                  opposite actions, so the container check decides which one to
+                  lead with rather than making the reader guess. */}
+              {status.ingest?.containerized
+                ? (
+                  <p>
+                    它跑在容器里，读的是容器内部的凭据，<strong>看不到你电脑上的登录</strong> ——
+                    这不是故障。在装了 Claude Code / Codex 的那台机器上跑一个采集器把额度推过来即可。
+                  </p>
+                )
+                : (
+                  <p>
+                    两种可能：① 这台机器上还没登录过 Claude Code、Codex CLI、OpenCode、Grok CLI
+                    中的任何一个 —— 登录后回来刷新即可；② 这个服务不在你日常写代码的那台机器上，
+                    它读的是自己所在机器的凭据 —— 那就在有登录的那台机器上跑个采集器推过来。
+                  </p>
+                )}
+              <p>在此之前时钟会显示 OFFLINE 提示帧，不会编造数字。</p>
+              <Button
+                type="button"
+                color="neutral"
+                className="vibe-setup__action"
+                onClick={() => setRemoteOpen(true)}
+              >
+                <Satellite aria-hidden="true" />配置远程采集
+              </Button>
               {status.error && <p className="vibe-setup__error">本次采集的失败原因：{status.error}</p>}
             </div>
           </div>
@@ -216,6 +252,20 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
           </aside>
         </div>
       </Surface>
+
+      <VibeRemoteDialog
+        open={remoteOpen}
+        onOpenChange={(open) => {
+          setRemoteOpen(open);
+          // Closing is the moment the reader has just finished a step, so this
+          // is where a first successful push shows up without them hunting for
+          // the refresh button.
+          if (!open) void load(false);
+        }}
+        ingest={status.ingest ?? null}
+        nowMs={now}
+        onChanged={() => void load(false)}
+      />
     </main>
   );
 }

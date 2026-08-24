@@ -82,6 +82,8 @@ import {
 } from "./market/instruments.ts";
 import { GeocodeClient, parseGeocodeQuery, type GeocodePlace } from "./weather/geocode.ts";
 import type { VibeUsageSnapshot } from "./vibe/usage-service.ts";
+import { VibeIngestError, type VibeIngestMachine } from "./vibe/ingest-store.ts";
+import { VIBE_INGEST_PATH } from "./vibe/ingest-schema.ts";
 import { VIBE_CATALOG } from "./vibe/vibe-catalog.ts";
 
 const CLOCK_FRAME_FILE = Bun.file(new URL("./assets/tc002-frame.png", import.meta.url));
@@ -164,6 +166,32 @@ export interface ControlApiOptions {
       error: string | null;
     }>;
     setStarred: (providerId: string, starred: unknown) => Record<string, string[]>;
+  };
+  /**
+   * Receives usage pushed by `src/vibe-agent.ts` running on the machine the
+   * agent CLIs are logged into. Absent when the deployment collects locally.
+   */
+  vibeIngest?: {
+    /**
+     * The shared secret. Ingest is REFUSED when this is unset — the route binds
+     * on 0.0.0.0 like everything else, and an unauthenticated writer could put
+     * invented quota on the panel, which is the one thing VIBE promises never
+     * to do. There is deliberately no "allow anonymous" escape hatch.
+     */
+    token?: string;
+    accept: (body: unknown) => void;
+    machines: () => VibeIngestMachine[];
+    /**
+     * True when this process is inside a container.
+     *
+     * Not a diagnostic — it decides which of two opposite instructions the
+     * empty panel gives. In a container "nothing signed in" always means the
+     * logins are out of reach, so the console can say so outright instead of
+     * offering the reader a guess between that and "you never logged in".
+     */
+    containerized: boolean;
+    /** Console-driven: drop one machine's rows now. False when it was unknown. */
+    forget: (machine: string) => boolean;
   };
 }
 
@@ -1947,7 +1975,61 @@ export function createControlHandler(
           starred: status.starred,
           snapshot: status.snapshot,
           error: status.error,
+          // The console's 「远程采集」 guide needs to say whether this
+          // deployment can receive a push at all, and which machines already
+          // do. The token itself is never echoed — only whether one is set.
+          ingest: {
+            available: options.vibeIngest !== undefined,
+            enabled: Boolean(options.vibeIngest?.token),
+            path: VIBE_INGEST_PATH,
+            containerized: options.vibeIngest?.containerized ?? false,
+            machines: options.vibeIngest?.machines() ?? [],
+          },
         });
+      }
+
+      // Pushed by src/vibe-agent.ts from the machine whose CLIs hold the
+      // credentials. Like the firmware-called routes it carries no same-origin
+      // check — the agent is not a browser and sends no Origin — so the Bearer
+      // token is the whole of its authentication.
+      if (request.method === "POST" && url.pathname === VIBE_INGEST_PATH) {
+        if (!options.vibeIngest) {
+          return jsonResponse({ error: "usage ingest is unavailable" }, 404);
+        }
+        const expected = options.vibeIngest.token;
+        if (!expected) {
+          return jsonResponse(
+            { error: "usage ingest is disabled: set VIBE_INGEST_TOKEN on the service" },
+            503,
+          );
+        }
+        const bearer = request.headers.get("Authorization")?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+        if (!tokensMatch(expected, bearer)) {
+          return jsonResponse({ error: "usage ingest token is invalid" }, 401);
+        }
+        try {
+          options.vibeIngest.accept(await readJson(request));
+        } catch (error) {
+          if (error instanceof VibeIngestError) {
+            return jsonResponse({ error: error.message }, 400);
+          }
+          throw error;
+        }
+        return jsonResponse({ ok: true });
+      }
+
+      // The console's 卸载 button. Same-origin, unlike the push above — this one
+      // is driven by a browser. It forgets; it cannot uninstall anything on the
+      // other machine, so an agent still running reappears on its next push.
+      if (request.method === "DELETE" && url.pathname === "/api/vibe/ingest/machine") {
+        if (!options.vibeIngest) {
+          return jsonResponse({ error: "usage ingest is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        const machine = url.searchParams.get("machine") ?? "";
+        if (machine === "") throw new SettingsValidationError("machine is required");
+        const forgotten = options.vibeIngest.forget(machine);
+        return jsonResponse({ forgotten, machines: options.vibeIngest.machines() });
       }
 
       if (request.method === "PUT" && url.pathname === "/api/vibe/starred") {

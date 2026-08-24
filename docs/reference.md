@@ -33,6 +33,7 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 | `CLOCK_HTTP_PROXY` | 无 | 可选，设备请求走的回环 HTTP 代理（不带凭据）；**所有**设备请求都经过它，包括 live / notify |
 | `CONSOLE_DISCOVERY` | `on` | 局域网信标：每 10 秒向本网段广播控制台地址，供换了 IP 之后找不到控制台的 ZOS 设备重新找回。`off`/`0`/`false` 关闭；写不认识的值直接报错而不是当成开 |
 | `CONSOLE_DISCOVERY_PORT` | `43821` | 信标发往的 UDP 端口。**固件监听的端口是编译期常量**，改了这里设备就听不见了；控制台自己的端口在报文里传，不由这个值决定 |
+| `VIBE_INGEST_TOKEN` | 无 | 远程采集器（`vibe-agent`）推送用量的共享密钥。**不设就一律拒收**：`POST /v1/push` 不做同源检查，没有密钥等于放任局域网往面板上写编造的额度 |
 
 ## 控制台行为
 
@@ -120,6 +121,63 @@ key 制厂商列表为空，任何 id 都会被拒绝。
 读钥匙串就是一次 `security` 调用，沿用你自己给该 CLI 条目的既有授权，**不会多弹一次授权框**；
 非 macOS 上钥匙串读取直接空转，那几家自然检测不到。凭据只在进程内读出来签一次请求就丢弃，不写
 日志、不落盘。
+
+### 远程采集（服务与登录不在同一台机器上）
+
+上面这套的前提是**服务进程能读到那些凭据**。Docker 部署、跑在 NAS 或另一台主机上时，四个
+适配器会如实地一个都读不到 —— 面板是空的，而且不报错，因为「没凭据」本来就是一种状态而不是
+故障。这时把采集搬到有登录的那台机器上：
+
+```bash
+# 有本仓库和 Bun 的机器，直接跑
+bun run agent -- --url http://<服务地址>:43820/v1/push --token <令牌> --once   # 先验证
+bun run agent -- --url http://<服务地址>:43820/v1/push --token <令牌>          # 常驻
+
+# 没有 Bun：在任意一台有仓库的机器上编译单文件二进制带过去
+bun run agent-build -- --target darwin-arm64   # 或 darwin-x64 / linux-x64 / linux-arm64 / windows-x64
+```
+
+`src/vibe-agent.ts` 就是同一套采集代码的第二个入口：同样四个适配器、同样的刷新纪律、同样的
+按家隔离，只是把结果 `POST` 到 `/v1/push` 而不是留在进程里（[ADR 0013](adr/0013-vibe-remote-usage-agent.md)）。
+参数也可用环境变量给：`VIBE_PUSH_URL` / `VIBE_INGEST_TOKEN` / `VIBE_MACHINE` / `VIBE_PUSH_INTERVAL`。
+
+服务端要设 `VIBE_INGEST_TOKEN`，**否则一律拒收**（503，错误里点名这个变量）。
+
+不想记这些的话，控制台 VIBE 页的「远程采集」按钮就是这套流程的向导。它只问两件事——
+**这个服务是怎么起的**（Docker / 开机自启 / 命令行）、**装了代理的是哪台机器**（就是这台 /
+另一台 Mac / Linux / Windows）——然后只给这一条路对应的命令，令牌已经生成好、地址已经填好，
+复制即可。开机自启（launchd plist / systemd user unit / schtasks）和卸载都在折叠里，
+后者只在真的有机器在推时才出现。
+
+推来的数据折进**同一份快照**，控制台、渲染器、星标表和上屏文档都分不出一行是本机读的还是推来的。
+几条规矩：
+
+- 两边都有同一家时**以本机直采为准** —— 本进程刚亲自读出来的凭据比网络转述的可信。
+- 一次推送会**作废控制器的快照缓存**并立即上屏，否则新数字要等 15 分钟才到时钟。
+- **失败原因跟着一起推**。采集器把这一轮的 `errors` 一并发过来，否则远端某家挂了只会从面板上
+  凭空消失、不给理由——本机采集会写「sign-in rejected (HTTP 401)」，远程链路以前什么都不说，
+  而这恰恰是更难查、也更没人盯着的那一种。出错的那家没有行可挂机器徽章，所以多机时机器名写进
+  消息里；同一家若本机直采成功，远端的失败就不再上报——用户眼前那一行不是它解释的。
+- 推来的数据在内存里，超过 5 分钟标 `stale`、超过 15 分钟丢弃；服务重启后空一个推送间隔，
+  而不是重放一份没人能担保的旧快照。
+- 允许多台机器推（上限 8 台）。同一家仍然只有一行，由**最近推送的那台**占据，并在 `note` 里
+  写明来自哪台机器。
+- `GET /api/vibe/status` 的 `ingest` 字段告诉控制台能不能收、有没有设令牌、哪些机器在推；
+  **令牌本身从不回显**。
+
+控制台不让你猜数据是哪来的：状态条上除了「已接入 N 个代理」还有一枚**来源**标签
+（`本机直采 4 家` / `远程推送 2 家（work-laptop）` / 两者兼有时都写），每个推来的代理行上
+再挂一枚「来自 <机器名>」——本机直采的行不挂，那是默认拓扑，四行都标一遍只是噪音。
+这个信息来自快照里每行自带的 `source` 字段（`{kind:"local"|"remote", machine?}`），
+推送方**无法伪造成本机**：ingest 解析时不读这个字段，落库时统一盖上 `remote`。
+
+一家都读不到时的文案也分情况：服务在容器里（启动时检测 `/.dockerenv` 或 `container` 环境变量，
+即 `ingest.containerized`）就直接说「它读的是容器内部的凭据，看不到你电脑上的登录」；
+否则并列两种可能——还没登录过，或者服务不在你写代码的那台机器上——并给出「配置远程采集」按钮。
+
+> 采集器会读取、并在 access token 快过期时刷新各家 CLI 的登录（`~/.claude/.credentials.json`、
+> `~/.codex/auth.json`）。各厂商每次刷新都会作废旧的 refresh token，所以**这个二进制只能在这些
+> 凭据所属的那台机器上运行** —— 拿到别人的家目录上跑，会把对方挤出自己的 CLI 登录。
 
 控制台的 **VIBE** 标签页列出四家代理、每家最多 2 个星标指标（`PUT /api/vibe/starred`；上屏显示
 的就是它们）、两页 LED 预览，以及一个「在时钟上打开」（走既有的 `PUT /api/os/display`
@@ -762,6 +820,8 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/weather/geocode` | 按地名搜索定位候选（`?q=` 1–64 字符；Open-Meteo 免 key，服务端缓存 10 分钟） |
 | `GET` | `/api/vibe/status` | VIBE 用量快照，连同 provider 目录、星标表与 `keys`（每个需要 key 的代理是 `stored` / `environment` / `unset`，**绝不含 key 本身**）（只读，免同源）。`?refresh=1` 强制重新采集一次，默认走缓存。一家都没登录**不算 HTTP 错误**：仍返回 200，`snapshot` 为 `null` 并附 `error`，控制台据此显示登录/填 key 引导 |
 | `PUT` | `/api/vibe/starred` | 设置某个代理上屏显示哪些指标：`{providerId, starred}`，`starred` 去重后最多 2 项；应答是与目录默认合并后的完整星标表（同源 + JSON，校验失败 400） |
+| `POST` | `/v1/push` | 远程采集器上报用量。**免同源**（采集器不是浏览器，没有 Origin），因此鉴权全靠 `Authorization: Bearer $VIBE_INGEST_TOKEN`。未设 `VIBE_INGEST_TOKEN` 时一律 503 并在错误里点名该变量；令牌不符 401；envelope 不合法 400 并说明哪里不合法。信封是 `{schema:"vibe.usage.v1", machine, sent_at, snapshots, errors}`（`errors` 可选，老版采集器不带），与 openusage hub 的 `/v1/push` 同形（[ADR 0013](adr/0013-vibe-remote-usage-agent.md)） |
+| `DELETE` | `/api/vibe/ingest/machine?machine=…` | 忘掉某台机器推来的数据（控制台的「移除」按钮，同源）。应答 `{forgotten, machines}`；`forgotten:false` 表示本来就没有这台。这只是忘掉——采集器若仍在那台机器上跑，下次推送还会出现 |
 | `PUT` | `/api/vibe/key` | 为 key 制厂商存一把 API key：`{providerId, key}`，`key` 传空串即清除；应答只有 `keys` 那张状态表，**绝不回显 key**（同源 + JSON，校验失败 400）。**当前四家代理都借 CLI 登录，key 制厂商列表为空，任何 `providerId` 都返回 400** |
 | `GET` | `/api/presets`、`/api/icons/:id.png` | 兼容旧客户端的市场预设与内置资产图标 |
 | `GET` / `PUT` | `/api/settings` | 兼容旧版单市场轮播设置 |

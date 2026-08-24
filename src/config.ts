@@ -5,6 +5,12 @@ export interface AppConfig {
   clockHost: string;
   clockHttpProxy?: string;
   notifyToken?: string;
+  /**
+   * Shared secret for POST /v1/push. Unset means the route refuses every push:
+   * it takes no same-origin check (the agent is not a browser), so without a
+   * token anything on the LAN could put invented quota on the panel.
+   */
+  vibeIngestToken?: string;
   controlHost: "127.0.0.1" | "0.0.0.0";
   appName: string;
   requestTimeoutMs: number;
@@ -52,7 +58,7 @@ const DEFAULTS = {
   // Fixed rather than derived from healthPort — the device's listener is a
   // compile-time constant. See BEACON_PORT in console-beacon.ts.
   consoleDiscoveryPort: 43_821,
-} satisfies Omit<AppConfig, "clockHost" | "clockHttpProxy" | "notifyToken">;
+} satisfies Omit<AppConfig, "clockHost" | "clockHttpProxy" | "notifyToken" | "vibeIngestToken">;
 
 function validateControlHost(value: string): AppConfig["controlHost"] {
   if (value !== "127.0.0.1" && value !== "0.0.0.0") {
@@ -146,10 +152,12 @@ export function loadConfig(
   }
   const clockHttpProxy = validateClockHttpProxy(env.CLOCK_HTTP_PROXY);
   const notifyToken = env.NOTIFY_TOKEN?.trim();
+  const vibeIngestToken = env.VIBE_INGEST_TOKEN?.trim();
   return {
     clockHost: validateClockHost(clockHost),
     ...(clockHttpProxy ? { clockHttpProxy } : {}),
     ...(notifyToken ? { notifyToken } : {}),
+    ...(vibeIngestToken ? { vibeIngestToken } : {}),
     controlHost: validateControlHost(env.CONTROL_HOST ?? DEFAULTS.controlHost),
     appName: validateAppName(env.APP_NAME ?? DEFAULTS.appName),
     requestTimeoutMs: loadRequestTimeoutMs(env),

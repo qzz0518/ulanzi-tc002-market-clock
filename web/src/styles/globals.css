@@ -1327,7 +1327,118 @@
 .vibe-display { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
 .vibe-display__actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
 .vibe-note__icon { width: 0.75rem; height: 0.75rem; margin-right: 0.3rem; vertical-align: -0.1em; }
-.vibe-provider__stale { margin-left: 0.35rem; }
+.vibe-provider__stale, .vibe-provider__origin { margin-left: 0.35rem; }
+
+/* --- 远程采集（ADR 0013） ------------------------------------------------- */
+
+.vibe-strip__actions { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; }
+.vibe-setup__action { margin-top: 0.55rem; }
+
+/* Width belongs on the dialog root Surface, not on the inner content wrapper:
+   sized on the wrapper the panel keeps its default width and every long command
+   spills out past the edge. Same shape as .device-settings-dialog above. */
+.vibe-remote {
+  width: min(42rem, calc(100vw - 2rem)) !important;
+  max-width: none !important;
+  overflow: hidden;
+}
+.vibe-remote__content { min-width: 0; }
+.vibe-remote__title { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
+.vibe-remote__title span { display: block; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.vibe-remote__title strong { display: block; font-size: 0.9rem; font-weight: 640; letter-spacing: -0.01em; }
+
+.vibe-remote__body {
+  display: grid;
+  gap: 0.95rem;
+  /* Bounded so the guide scrolls inside the dialog instead of growing past the
+     viewport; without a max-height the overflow-y below never engages. */
+  max-height: min(70vh, 44rem);
+  overflow-y: auto;
+  padding-top: 0.2rem;
+}
+/* Grid items default to min-width:auto, which lets a long command widen the
+   track and defeat the per-block horizontal scroll. Needed at every level. */
+.vibe-remote__body > *,
+.vibe-remote__step,
+.vibe-remote__command,
+.vibe-remote__fold,
+.vibe-remote__code { min-width: 0; }
+.vibe-remote__body code { font-family: var(--mono); font-size: 0.92em; overflow-wrap: anywhere; }
+
+.vibe-remote__lede { margin: 0; color: var(--muted-foreground); font-size: 0.7rem; line-height: 1.65; text-wrap: pretty; }
+.vibe-remote__lede strong { color: var(--foreground); font-weight: 600; }
+
+.vibe-remote__machines { display: grid; gap: 0.4rem; padding: 0.6rem 0.75rem; }
+.vibe-remote__machine { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.vibe-remote__machine strong { font-family: var(--mono); font-size: 0.7rem; font-weight: 600; }
+.vibe-remote__machine-meta { flex: 1 1 auto; min-width: 0; color: var(--muted-foreground); font-size: 0.63rem; }
+.vibe-remote__dot { flex: none; width: 0.4rem; height: 0.4rem; border-radius: 999px; background: oklch(0.68 0.16 150); }
+.vibe-remote__dot.is-stale { background: oklch(0.72 0.16 80); }
+
+.vibe-remote__step { display: grid; gap: 0.5rem; }
+.vibe-remote__step-head { display: grid; gap: 0.4rem; }
+.vibe-remote__step-head h3 { margin: 0; font-size: 0.78rem; font-weight: 620; letter-spacing: -0.01em; }
+.vibe-remote__choices { flex-wrap: wrap; justify-content: flex-start; justify-self: start; }
+
+.vibe-remote__done { display: flex; align-items: center; gap: 0.35rem; margin: 0; color: var(--muted-foreground); font-size: 0.66rem; }
+.vibe-remote__done > svg { width: 0.8rem; height: 0.8rem; color: oklch(0.62 0.15 150); }
+
+.vibe-remote__field { display: grid; gap: 0.25rem; min-width: 0; }
+.vibe-remote__field > span { color: var(--muted-foreground); font-size: 0.63rem; }
+.vibe-remote__field-row { display: flex; gap: 0.4rem; min-width: 0; }
+.vibe-remote__field-row > :first-child { flex: 1 1 auto; min-width: 0; }
+
+.vibe-remote__command { display: grid; gap: 0.3rem; }
+.vibe-remote__command-label { font-size: 0.7rem; font-weight: 600; }
+.vibe-remote__command p { margin: 0; color: var(--muted-foreground); font-size: 0.66rem; line-height: 1.55; text-wrap: pretty; }
+.vibe-remote__note { font-size: 0.62rem !important; opacity: 0.85; }
+.vibe-remote__file code { color: var(--foreground); }
+
+.vibe-remote__code { position: relative; }
+.vibe-remote__code pre {
+  /* A 30-line launchd plist would otherwise fill the dialog and bury the steps
+     after it; bounded, it scrolls in place and the copy button stays put. */
+  max-height: 13rem;
+  overflow-y: auto;
+  margin: 0;
+  /* Top padding clears the pinned copy button, which sits over the first line. */
+  padding: 1.95rem 0.65rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in oklch, var(--muted) 62%, transparent);
+}
+.vibe-remote__code code { font-family: var(--mono); font-size: 0.62rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Pinned rather than in flow: the block scrolls horizontally and a button
+   inside it would slide out of reach on a long command. Opaque, because the
+   command scrolls underneath it. */
+.vibe-remote__copy { position: absolute; top: 0.3rem; right: 0.3rem; background: var(--background); }
+
+.vibe-remote__extras { display: grid; gap: 0.45rem; }
+.vibe-remote__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font-size: 0.66rem;
+  cursor: pointer;
+}
+.vibe-remote__toggle:hover { color: var(--foreground); }
+.vibe-remote__toggle > svg { width: 0.75rem; height: 0.75rem; }
+.vibe-remote__fold { display: grid; gap: 0.55rem; padding-left: 1.1rem; border-left: 2px solid var(--border); }
+.vibe-remote__fold > p { margin: 0; color: var(--muted-foreground); font-size: 0.66rem; line-height: 1.55; text-wrap: pretty; }
+
+.vibe-remote__warning { display: flex; gap: 0.65rem; padding: 0.65rem 0.75rem; }
+.vibe-remote__warning > svg { flex: none; width: 0.9rem; height: 0.9rem; margin-top: 0.1rem; color: oklch(0.62 0.15 75); }
+.vibe-remote__warning strong { font-size: 0.7rem; font-weight: 620; }
+.vibe-remote__warning p { margin: 0.2rem 0 0; color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.55; text-wrap: pretty; }
+
+.vibe-remote__advanced { display: grid; gap: 0.4rem; }
+.vibe-remote__advanced summary { color: var(--muted-foreground); font-size: 0.64rem; cursor: pointer; }
+.vibe-remote__advanced p { margin: 0; color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.55; }
 
 @media (hover: hover) and (pointer: fine) {
   .channel-delete, .playlist-remove { opacity: 0; }

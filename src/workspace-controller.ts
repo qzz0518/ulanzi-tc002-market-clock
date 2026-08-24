@@ -737,6 +737,19 @@ export class WorkspaceController {
    * the starred table is merged in here rather than at the consumer, so both
    * the console and the wire see the same 「哪两行上屏」answer.
    */
+  /**
+   * Drops the cached snapshot so the next read rebuilds it.
+   *
+   * Called when an out-of-process agent pushes usage (ADR 0013). Without it a
+   * push would sit behind VIBE_STALE_MS and the panel would show numbers up to
+   * fifteen minutes older than the ones we just accepted. Rebuilding costs a
+   * local collection round, which on a deployment that receives pushes is four
+   * credential probes that all miss — no vendor traffic at all.
+   */
+  invalidateVibeUsage(): void {
+    this.vibeCache = undefined;
+  }
+
   async getVibeUsage(forceRefresh: boolean, userRequested = false): Promise<VibeUsageView> {
     if (!this.vibeClient) throw new VibeUnavailableError("usage collection is not configured");
     const starred = this.vibeStarred?.() ?? defaultVibeStarred();

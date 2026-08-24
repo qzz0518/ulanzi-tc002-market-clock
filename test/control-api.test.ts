@@ -26,6 +26,8 @@ import { MarketSearchService } from "../src/market/search.ts";
 import { MarketCatalogService } from "../src/market/catalog-service.ts";
 import { BundledCryptoLogoCatalog } from "../src/market/logo-catalog.ts";
 import type { VibeUsageSnapshot } from "../src/vibe/usage-service.ts";
+import { VibeIngestStore } from "../src/vibe/ingest-store.ts";
+import { VIBE_INGEST_SCHEMA } from "../src/vibe/ingest-schema.ts";
 
 const directories: string[] = [];
 
@@ -2463,5 +2465,189 @@ describe("vibe usage routes", () => {
     }));
     expect(starred.status).toBe(404);
     expect((await starred.json()).error).toContain("vibe usage is unavailable");
+  });
+});
+
+describe("vibe usage ingest", () => {
+  const ORIGIN = "http://127.0.0.1:43820";
+  const T0 = Date.parse("2026-08-16T09:00:00.000Z");
+
+  function body(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      schema: VIBE_INGEST_SCHEMA,
+      machine: "work-laptop",
+      sent_at: "2026-08-16T09:00:00.000Z",
+      snapshots: [{
+        id: "claude",
+        displayName: "Claude",
+        fetchedAt: "2026-08-16T09:00:00.000Z",
+        stale: false,
+        metrics: [{ key: "session", label: "Session", kind: "consumption", unit: "percent", utilization: 0.42 }],
+      }],
+      ...overrides,
+    });
+  }
+
+  /** Enough of the vibe option for /api/vibe/status to answer; ingest is the subject here. */
+  function minimalVibeOption() {
+    return {
+      status: async () => ({ starred: {}, snapshot: null, error: null }),
+      setStarred: () => ({}),
+    };
+  }
+
+  // The real store behind the option, so the rejections under test are the ones
+  // production raises rather than a stub's own opinion.
+  function ingestOption(token?: string) {
+    const store = new VibeIngestStore(() => T0);
+    return {
+      store,
+      option: {
+        ...(token ? { token } : {}),
+        accept: (payload: unknown) => { store.accept(payload); },
+        machines: () => store.listMachines(),
+        containerized: false,
+        forget: (machine: string) => store.forget(machine),
+      },
+    };
+  }
+
+  function push(token: string | undefined, payload: string): Request {
+    return new Request(`${ORIGIN}/v1/push`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: payload,
+    });
+  }
+
+  test("accepts a push carrying the right token", async () => {
+    const { option, store } = ingestOption("secret");
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+
+    const response = await handler(push("secret", body()));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(store.collect().map((usage) => usage.id)).toEqual(["claude"]);
+  });
+
+  // The route takes no same-origin check — the agent is not a browser and sends
+  // no Origin — so the token is the whole of its authentication.
+  test("needs no Origin, which is the point", async () => {
+    const { option } = ingestOption("secret");
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+    expect((await handler(push("secret", body()))).status).toBe(200);
+  });
+
+  test("refuses every push while no token is configured", async () => {
+    const { option, store } = ingestOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+
+    const response = await handler(push(undefined, body()));
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("VIBE_INGEST_TOKEN");
+    expect(store.collect()).toEqual([]);
+
+    // Not even one that invents a token of its own.
+    expect((await handler(push("guess", body()))).status).toBe(503);
+  });
+
+  test("rejects a wrong or missing token", async () => {
+    const { option, store } = ingestOption("secret");
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+
+    expect((await handler(push("wrong", body()))).status).toBe(401);
+    expect((await handler(push(undefined, body()))).status).toBe(401);
+    expect(store.collect()).toEqual([]);
+  });
+
+  test("a malformed envelope is a 400 that says what is wrong", async () => {
+    const { option } = ingestOption("secret");
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+
+    const response = await handler(push("secret", body({ schema: "openusage.limits.v1" })));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("unsupported schema");
+
+    const badMachine = await handler(push("secret", body({ machine: "work/laptop" })));
+    expect(badMachine.status).toBe(400);
+    expect((await badMachine.json()).error).toContain("machine must be");
+  });
+
+  test("404s when the deployment wires no ingest at all", async () => {
+    const handler = createControlHandler(fakeWorkspaceController());
+    const response = await handler(push("secret", body()));
+    expect(response.status).toBe(404);
+    expect((await response.json()).error).toContain("usage ingest is unavailable");
+  });
+
+  test("status reports whether ingest is on, and which machines push", async () => {
+    const { option, store } = ingestOption("secret");
+    store.accept(JSON.parse(body()));
+    const vibe = minimalVibeOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe, vibeIngest: option });
+
+    const payload = await (await handler(new Request(`${ORIGIN}/api/vibe/status`))).json();
+    expect(payload.ingest.available).toBe(true);
+    expect(payload.ingest.enabled).toBe(true);
+    expect(payload.ingest.path).toBe("/v1/push");
+    expect(payload.ingest.machines[0].machine).toBe("work-laptop");
+    // Never the secret itself — the console only needs to know one is set.
+    expect(JSON.stringify(payload)).not.toContain("secret");
+  });
+
+  test("the console can forget a machine, and says whether it knew it", async () => {
+    const { option, store } = ingestOption("secret");
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+    await handler(push("secret", body()));
+
+    const response = await handler(new Request(
+      `${ORIGIN}/api/vibe/ingest/machine?machine=work-laptop`,
+      { method: "DELETE", headers: { Origin: ORIGIN } },
+    ));
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.forgotten).toBe(true);
+    expect(payload.machines).toEqual([]);
+    expect(store.collect()).toEqual([]);
+
+    // Idempotent: a second click on a row that is already gone is not an error.
+    const again = await handler(new Request(
+      `${ORIGIN}/api/vibe/ingest/machine?machine=work-laptop`,
+      { method: "DELETE", headers: { Origin: ORIGIN } },
+    ));
+    expect((await again.json()).forgotten).toBe(false);
+  });
+
+  // Unlike the push, this one IS browser-driven, so it takes the same-origin
+  // check every other console write takes.
+  test("forgetting rejects a cross-origin caller and a missing machine", async () => {
+    const { option } = ingestOption("secret");
+    const handler = createControlHandler(fakeWorkspaceController(), { vibeIngest: option });
+
+    const cross = await handler(new Request(
+      `${ORIGIN}/api/vibe/ingest/machine?machine=work-laptop`,
+      { method: "DELETE", headers: { Origin: "https://evil.example" } },
+    ));
+    expect(cross.status).toBe(400);
+    expect((await cross.json()).error).toContain("cross-origin");
+
+    const missing = await handler(new Request(`${ORIGIN}/api/vibe/ingest/machine`, {
+      method: "DELETE",
+      headers: { Origin: ORIGIN },
+    }));
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).error).toContain("machine is required");
+  });
+
+  test("status says ingest is available but off when no token is set", async () => {
+    const { option } = ingestOption();
+    const vibe = minimalVibeOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe, vibeIngest: option });
+
+    const payload = await (await handler(new Request(`${ORIGIN}/api/vibe/status`))).json();
+    expect(payload.ingest).toMatchObject({ available: true, enabled: false, machines: [] });
   });
 });

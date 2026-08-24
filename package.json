@@ -14,6 +14,8 @@
     "music-release": "bun run scripts/create-music-release.ts",
     "arcade-release": "bun run scripts/create-arcade-release.ts",
     "status": "bun run scripts/status.ts",
+    "agent": "bun run src/vibe-agent.ts",
+    "agent-build": "bun run scripts/build-agent.ts",
     "install-macos": "bash scripts/install.sh",
     "uninstall-macos": "bash scripts/uninstall.sh",
     "install-docker": "bash scripts/install-docker.sh",

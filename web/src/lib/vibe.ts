@@ -28,6 +28,12 @@ export interface VibeSpendLine {
   value: string;
 }
 
+/** Where a row came from — local read or pushed by an agent (ADR 0013). */
+export interface VibeUsageSource {
+  kind: "local" | "remote";
+  machine?: string;
+}
+
 export interface VibeProviderUsage {
   id: string;
   displayName: string;
@@ -38,6 +44,8 @@ export interface VibeProviderUsage {
   note?: string;
   metrics: VibeMetric[];
   spendLines: VibeSpendLine[];
+  /** Absent on a service older than the ingest route; treated as local. */
+  source?: VibeUsageSource;
 }
 
 export interface VibeProviderError {
@@ -61,11 +69,33 @@ export interface VibeCatalogEntry {
   metricLabels: Record<string, string>;
 }
 
+/** One machine that has pushed usage to this service (ADR 0013). */
+export interface VibeIngestMachine {
+  machine: string;
+  receivedAt: string;
+  sentAt: string;
+  providerIds: string[];
+  stale: boolean;
+}
+
+export interface VibeIngestStatus {
+  /** Whether this deployment can receive pushes at all. */
+  available: boolean;
+  /** Whether a token is set. Without one every push is refused. */
+  enabled: boolean;
+  path: string;
+  /** This service runs inside a container, so local credentials are out of reach. */
+  containerized: boolean;
+  machines: VibeIngestMachine[];
+}
+
 export interface VibeStatusResponse {
   catalog: VibeCatalogEntry[];
   starred: Record<string, string[]>;
   snapshot: VibeUsageSnapshot | null;
   error: string | null;
+  /** Absent on a service older than the ingest route; the dialog copes. */
+  ingest?: VibeIngestStatus;
 }
 
 export interface VibeStarredResponse {
@@ -79,6 +109,53 @@ export interface VibeStarredResponse {
  */
 export function vibeSignedInCount(snapshot: VibeUsageSnapshot | null): number {
   return snapshot?.providers.length ?? 0;
+}
+
+/**
+ * Where this panel's numbers come from, as one answerable sentence.
+ *
+ * The two topologies render identically on purpose, but that left the console
+ * unable to answer the question everybody actually has — «do I need to set up
+ * remote collection?» — so the strip states the split and the empty state says
+ * which of the two situations it is in.
+ *
+ * A row with no `source` is counted local: only a service too old to have the
+ * ingest route can produce one, and that service could only read locally.
+ */
+export interface VibeSourceSummary {
+  local: number;
+  remote: number;
+  /** Machines contributing at least one visible row, in row order. */
+  machines: string[];
+  /** «直采 4 家» / «远程 2 家（work-laptop）» / «直采 2 家 · 远程 1 家» */
+  label: string;
+}
+
+export function vibeSourceSummary(snapshot: VibeUsageSnapshot | null): VibeSourceSummary {
+  const providers = snapshot?.providers ?? [];
+  const machines: string[] = [];
+  let local = 0;
+  let remote = 0;
+  for (const provider of providers) {
+    if (provider.source?.kind === "remote") {
+      remote += 1;
+      const machine = provider.source.machine;
+      if (machine !== undefined && !machines.includes(machine)) machines.push(machine);
+    } else {
+      local += 1;
+    }
+  }
+  return { local, remote, machines, label: sourceLabel(local, remote, machines) };
+}
+
+function sourceLabel(local: number, remote: number, machines: string[]): string {
+  if (local === 0 && remote === 0) return "";
+  // Naming the machines is worth the width only while there are few of them;
+  // past two the strip would wrap and say less than the count already does.
+  const from = machines.length > 0 && machines.length <= 2 ? `（${machines.join("、")}）` : "";
+  if (remote === 0) return `本机直采 ${local} 家`;
+  if (local === 0) return `远程推送 ${remote} 家${from}`;
+  return `本机直采 ${local} 家 · 远程 ${remote} 家${from}`;
 }
 
 /**

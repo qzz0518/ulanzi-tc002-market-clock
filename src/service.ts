@@ -45,6 +45,7 @@ import { BundledCryptoLogoCatalog } from "./market/logo-catalog.ts";
 import { NotifyManager } from "./notify.ts";
 import { WeatherClient } from "./weather/client.ts";
 import { VibeUsageService } from "./vibe/usage-service.ts";
+import { VibeIngestStore } from "./vibe/ingest-store.ts";
 import { VibeStore } from "./vibe/vibe-store.ts";
 
 function errorMessage(error: unknown): string {
@@ -97,7 +98,20 @@ await vibeStore.load();
 // machine to borrow a login from. All four agents VIBE collects have one, so the
 // Each adapter talks to its own vendor over the public internet, so these
 // requests take the normal route — CLOCK_HTTP_PROXY is for the device only.
+//
+// The ingest store is always constructed, never conditional on the token: the
+// console has to be able to say「远程采集未启用，设置 VIBE_INGEST_TOKEN 即可」
+// and list the machines already pushing, and it cannot do either through a
+// route that answers 404 (ADR 0013).
+const vibeIngest = new VibeIngestStore();
+// Docker writes /.dockerenv into every container it starts; Podman and most
+// others leave the same marker or set container=. Checked once at boot because
+// it cannot change under a running process, and used only to pick the wording
+// of the console's empty state.
+const containerized = await Bun.file("/.dockerenv").exists()
+  || (process.env.container ?? "") !== "";
 const vibeClient = new VibeUsageService({
+  ingest: vibeIngest,
 });
 const pixelAssetStore = new PixelAssetStore(".runtime/pixel-assets");
 const instrumentStore = new InstrumentStore(".runtime/market-instruments");
@@ -603,6 +617,28 @@ const controlHandler = createControlHandler(controller, {
       // design and the wiring was the part that was missing.
       void publishOsVibe();
       return next;
+    },
+  },
+  vibeIngest: {
+    ...(config.vibeIngestToken ? { token: config.vibeIngestToken } : {}),
+    accept: (body) => {
+      vibeIngest.accept(body);
+      // A push is fresh numbers for the panel, so it reaches the clock now
+      // rather than up to VIBE_STALE_MS later. The cache must be dropped first
+      // — publishOsVibe reads with forceRefresh=false and would otherwise be
+      // served the very snapshot this push supersedes.
+      controller.invalidateVibeUsage();
+      void publishOsVibe();
+    },
+    machines: () => vibeIngest.listMachines(),
+    containerized,
+    forget: (machine) => {
+      const forgotten = vibeIngest.forget(machine);
+      if (forgotten) {
+        controller.invalidateVibeUsage();
+        void publishOsVibe();
+      }
+      return forgotten;
     },
   },
 });
