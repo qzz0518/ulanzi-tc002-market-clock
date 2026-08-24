@@ -18,7 +18,7 @@ multiple items in one channel are composed into an ordered carousel.
 | --- | --- |
 | Market | 10 built-in assets (BTC, gold, AAPL, …); search-and-add any crypto, stock / ETF, FX pair, or precious metal — no API keys |
 | Tools | Notice board (with a key-free webhook: one POST from curl / iOS Shortcuts / Home Assistant puts a message on the clock), interval timer column, pomodoro, countdown days |
-| Visual | Langton's ant, aquarium, fire, flip clock, flux clock, Matrix clock, maze, pixel pet, falling sand, starfield, Game of Life, fireworks, shop sign (your own text and backlight color), weather particles, bold weather clock, viewfinder clock (six palettes, three of them night-dim — type only, dark ground), sunrise/sunset color clock (weather visuals locate by place-name search — no raw coordinates) |
+| Visual | Langton's ant, aquarium, fire, flip clock, flux clock, Matrix clock, maze, pixel pet, falling sand, starfield, Game of Life, fireworks, Nyan Cat, shop sign (your own text and backlight color), weather particles, bold weather clock, viewfinder clock (six palettes, three of them night-dim — type only, dark ground), sunrise/sunset color clock (weather visuals locate by place-name search — no raw coordinates) |
 | Creative | 52×16 canvas (pen, pixel text, image pixelization — crop a region and it fills the whole panel, optional live streaming to the clock plus QR-code collaborative doodling); Library imports of Ulanzi community assets (PNG / GIF) or local videos (ffmpeg to 52×16 pixel animation) |
 
 The top-right settings dialog reads and writes the clock's brightness, volume, timezone, and

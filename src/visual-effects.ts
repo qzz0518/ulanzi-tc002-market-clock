@@ -15,6 +15,7 @@ import type { WeatherCondition } from "./weather/client.ts";
 // already at the size where one more 200-line face stops being readable.
 import { renderSign } from "./visual/sign.ts";
 import { renderBoldClock } from "./visual/boldclock.ts";
+import { renderNyan } from "./visual/nyan.ts";
 import { renderViewfinderClock } from "./visual/viewfinder.ts";
 
 export const VISUAL_EFFECT_IDS = [
@@ -28,6 +29,7 @@ export const VISUAL_EFFECT_IDS = [
   "life",
   "matrixclock",
   "maze",
+  "nyan",
   "pet",
   "sand",
   "sign",
@@ -1424,6 +1426,7 @@ export function renderVisualEffect(
   }
   if (effectId === "matrixclock") return renderMatrixClock(durationMs, nowMs, random, speed);
   if (effectId === "maze") return renderMaze(durationMs, random, speed);
+  if (effectId === "nyan") return renderNyan(durationMs, speed);
   if (effectId === "pet") return renderPet(durationMs, random, speed, options.petAction);
   if (effectId === "sand") return renderSand(durationMs, random, speed);
   if (effectId === "sign") return renderSign(durationMs, options.signText, options.signPalette);

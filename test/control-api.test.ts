@@ -876,7 +876,7 @@ describe("local control API", () => {
     const handler = createControlHandler(fakeWorkspaceController(previewCalls));
     const catalog = await handler(new Request("http://127.0.0.1:43820/api/catalog"));
     const catalogBody = await catalog.json();
-    expect(catalogBody.contents).toHaveLength(34);
+    expect(catalogBody.contents).toHaveLength(35);
     expect(catalogBody.categories.map((category: { id: string }) => category.id)).toEqual([
       "market", "tools", "visual", "creative",
     ]);
