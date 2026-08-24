@@ -1819,18 +1819,133 @@ describe("tc002-os firmware routes", () => {
     return bytes;
   }
 
+  /**
+   * A container that actually passes `inspectZkswe`.
+   *
+   * The hand-built fixture above is enough for the device-facing GET, which
+   * only reads an identity out of the header — but ARMING runs the full
+   * inspection: platform id, header CRC, per-item bounds and per-item MD5.
+   * Rather than hand-roll all of that (and re-hand-roll it whenever the format
+   * moves), this calls the real packer. If the container format changes, this
+   * fixture changes with it instead of quietly becoming invalid.
+   */
+  async function validZkswe(payloadBytes = 8192): Promise<Buffer> {
+    const { packContainer } = await import("../device/tc002-os/release/zkswe-image.ts");
+    // 3 = the res partition, which is the one a ZOS image and a stock restore
+    // point both target.
+    return packContainer(Buffer.alloc(payloadBytes, 0x72), 3);
+  }
+
   async function firmwareHandler() {
     const { OsLinkHub } = await import("../src/os-link.ts");
     const directory = await mkdtemp(join(tmpdir(), "ulanzi-os-firmware-"));
     directories.push(directory);
     const osFirmwarePath = join(directory, "update.img");
+    const osRestorePath = join(directory, "restore-live.img");
     const osLink = new OsLinkHub();
     return {
       osLink,
       osFirmwarePath,
+      osRestorePath,
       handler: createControlHandler(fakeWorkspaceController(), { osLink, osFirmwarePath }),
+      // A second handler that knows where the stock restore point lives.
+      restoreHandler: createControlHandler(
+        fakeWorkspaceController(),
+        { osLink, osFirmwarePath, osRestorePath },
+      ),
     };
   }
+
+  // The way back to Ulanzi's own firmware. It ARMS and stops, exactly like an
+  // upload — the install stays a separate, separately consented act, because
+  // this one ends with ZOS gone and this console's link to the device with it.
+  test("the restore point is armed through the same validation an upload takes", async () => {
+    const { restoreHandler, osRestorePath } = await firmwareHandler();
+    // Unlike the device-facing GET, arming runs the full ZKSWE inspection.
+    await Bun.write(osRestorePath, await validZkswe());
+
+    const status = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware/status"));
+    const before = await status.json() as { restore: Record<string, unknown> };
+    expect(before.restore.available).toBe(true);
+    expect(before.restore.bytes).toBeGreaterThan(0);
+
+    const armed = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1" },
+      body: "{}",
+    }));
+    expect(armed.status).toBe(200);
+    const body = await armed.json() as { packed: boolean; source: { kind: string; fileName: string } };
+    expect(body.packed).toBe(true);
+    // Armed as an upload, so the existing 移除上传 puts the ZOS build back —
+    // arming the stock image must not be a one-way door either.
+    expect(body.source.kind).toBe("upload");
+    // The name is what the console matches to know an install would be a
+    // restore rather than an update, so it has to survive the trip.
+    expect(body.source.fileName).toBe("restore-live.img");
+  });
+
+  // A restore point that rotted on disk has to fail HERE, loudly, and not at the
+  // moment the device has already erased mtd3.
+  test("a corrupt restore point is refused rather than armed", async () => {
+    const { restoreHandler, osRestorePath } = await firmwareHandler();
+    await Bun.write(osRestorePath, Buffer.alloc(4096, 0x41));
+
+    const response = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1" },
+      body: "{}",
+    }));
+    expect(response.status).toBe(400);
+
+    // And nothing was armed: the device must not be able to fetch it.
+    const served = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware"));
+    expect(served.status).toBe(404);
+  });
+
+  test("a missing restore point says it cannot be recreated, and arms nothing", async () => {
+    const { restoreHandler } = await firmwareHandler();
+
+    const status = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware/status"));
+    expect((await status.json() as { restore: { available: boolean } }).restore.available).toBe(false);
+
+    const response = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1" },
+      body: "{}",
+    }));
+    expect(response.status).toBe(409);
+    expect((await response.json() as { error: string }).error).toContain("无法再生成");
+  });
+
+  test("a deployment with no restore configured offers none, and 404s the route", async () => {
+    const { handler } = await firmwareHandler();
+
+    const status = await handler(new Request("http://127.0.0.1/api/os/firmware/status"));
+    expect((await status.json() as { restore: unknown }).restore).toBeNull();
+
+    const response = await handler(new Request("http://127.0.0.1/api/os/firmware/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1" },
+      body: "{}",
+    }));
+    expect(response.status).toBe(404);
+  });
+
+  // The path is not an input, so the Origin check is the whole of this route's
+  // containment — the same argument the multipart upload makes.
+  test("arming the restore point takes the same-origin check", async () => {
+    const { restoreHandler, osRestorePath } = await firmwareHandler();
+    await Bun.write(osRestorePath, await validZkswe());
+
+    const response = await restoreHandler(new Request("http://127.0.0.1/api/os/firmware/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+      body: "{}",
+    }));
+    expect(response.status).toBe(400);
+    expect((await response.json() as { error: string }).error).toContain("cross-origin");
+  });
 
   test("the staged image is served with an identity read out of its own header", async () => {
     const { handler, osFirmwarePath } = await firmwareHandler();
@@ -1848,6 +1963,9 @@ describe("tc002-os firmware routes", () => {
       image: null,
       source: null,
       shadowedPacked: null,
+      // This deployment named no restore point, which is a different fact from
+      // naming one that is missing — see the restore tests below.
+      restore: null,
       upgradeSeq: 0,
     });
 

@@ -455,6 +455,7 @@ export function DeviceSettingsDialog({
   const [firmwareError, setFirmwareError] = useState<string | null>(null);
   const [firmwareBusy, setFirmwareBusy] = useState(false);
   const [firmwareUploading, setFirmwareUploading] = useState(false);
+  const [firmwareRestoring, setFirmwareRestoring] = useState(false);
   const [upgradeConsent, setUpgradeConsent] = useState(false);
   const [upgrade, setUpgrade] = useState<ZosUpgradeRequest | null>(null);
   const zosLinkRef = useRef<ZosLink | null>(null);
@@ -771,6 +772,27 @@ export function DeviceSettingsDialog({
       toast.error("镜像上传失败", { description: errorMessage(error) });
     } finally {
       setFirmwareUploading(false);
+    }
+  };
+
+  // 放入待装位，同样不触发安装。它和上传是同一件事，只是镜像来自本机那份
+  // 官方固件还原点——那份是刷 ZOS 之前从设备取下的，丢了就再也回不去了。
+  const armRestoreFirmware = async () => {
+    const link = zosLinkRef.current;
+    if (!link || firmwareRestoring || firmwareUploading) return;
+    setFirmwareRestoring(true);
+    try {
+      setFirmware(await link.armRestoreFirmware());
+      setFirmwareError(null);
+      // 换了镜像，之前那一勾就不作数了——而且这一次同意的是完全相反的一件事。
+      setUpgradeConsent(false);
+      toast.success("官方固件已放入待装位", {
+        description: "还没有开始安装；确认下面那句话之后再点「还原官方固件」。",
+      });
+    } catch (error) {
+      toast.error("放入待装位失败", { description: errorMessage(error) });
+    } finally {
+      setFirmwareRestoring(false);
     }
   };
 
@@ -1115,6 +1137,8 @@ export function DeviceSettingsDialog({
                 onRefreshStatus={() => void loadFirmware()}
                 onUpload={(file) => void uploadFirmware(file)}
                 onRemoveUpload={() => void removeFirmwareUpload()}
+                restoring={firmwareRestoring}
+                onArmRestore={() => void armRestoreFirmware()}
               />
             </ZosFirmwarePanel>
           </TabPanel>

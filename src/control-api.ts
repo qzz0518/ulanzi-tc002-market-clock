@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { basename } from "node:path";
 import { ASSET_PRESETS, isAssetId, type AssetId } from "./assets.ts";
 import { getContentCatalog } from "./content-registry.ts";
 import type { DashboardController } from "./controller.ts";
@@ -125,6 +126,19 @@ export interface ControlApiOptions {
    * route's containment argument. Unset means no image is on offer.
    */
   osFirmwarePath?: string;
+  /**
+   * The way back to Ulanzi's own firmware: `mise run os-restore-image`'s output,
+   * packed from the device's LIVE `/res` before ZOS was flashed over it.
+   *
+   * A fixed string here for the same reason as the path above — no request may
+   * influence which file the console can arm. Unset means the console offers no
+   * restore, which is the correct answer on a machine that never took a copy.
+   *
+   * This file is IRREPLACEABLE. Ulanzi publishes no TC002 firmware download, the
+   * device has no recovery partition, and re-running the packer now would just
+   * pack the running ZOS. See device/tc002-os/README.md §恢复.
+   */
+  osRestorePath?: string;
   // Where the 主题设置 outlives the process. Omitted in tests, where module
   // memory is the whole of the story; `save` is deliberately fire-and-forget so
   // a full disk cannot fail a colour change (ADR 0007).
@@ -665,9 +679,26 @@ function firmwareRejectionCopy(verdict: Extract<ZksweVerdict, { ok: false }>): s
  * the status GET, the upload POST and the DELETE so all three agree by
  * construction rather than by three careful hands.
  */
+/**
+ * Describes the stock-firmware restore point without reading a megabyte.
+ *
+ * Existence and size only: this rides along on a status route the console polls,
+ * and the ZKSWE validation that actually matters happens at arm time, through
+ * the very same `storeUpload` an upload takes. A file that is present but
+ * corrupt is therefore reported as available here and refused there — which is
+ * the right order, because the refusal can say what is wrong with it.
+ */
+async function osRestoreStatus(path: string | undefined): Promise<Record<string, unknown> | null> {
+  if (path === undefined) return null;
+  const file = Bun.file(path);
+  if (!(await file.exists())) return { available: false, path };
+  return { available: true, path, bytes: file.size, builtAt: file.lastModified };
+}
+
 async function osFirmwareStatusBody(
   store: OsFirmwareStore | null,
   upgradeSeq: number,
+  restorePath?: string,
 ): Promise<Record<string, unknown>> {
   const summary = store === null
     ? { armed: null, facts: null, shadowed: null }
@@ -710,6 +741,8 @@ async function osFirmwareStatusBody(
     },
     // A locally packed image that exists and will NOT be installed.
     shadowedPacked: summary.shadowed,
+    // The way back to the stock firmware, if this machine kept one.
+    restore: await osRestoreStatus(restorePath),
     upgradeSeq,
   };
 }
@@ -2248,7 +2281,54 @@ export function createControlHandler(
         // Answer with the same document the status route serves, so the console
         // shows what ARRIVED rather than what it believes it sent.
         return jsonResponse(
-          await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0),
+          await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0, options.osRestorePath),
+        );
+      }
+
+      // Arms the stock-firmware restore point.
+      //
+      // ARMS ONLY — it deliberately does not install, exactly like the upload
+      // above and for the same reason: "this file is on the console" and "write
+      // this to flash" are two claims, and only the owner makes the second. So
+      // this route ends where the upload route ends, and the existing 安装
+      // button is what finishes the job.
+      //
+      // The bytes go through `storeUpload`, not around it: the restore image is
+      // a ZKSWE container like any other and gets the same CRC/MD5 inspection.
+      // A restore point that has rotted on disk must fail here, loudly, rather
+      // than at the moment the device has already erased mtd3.
+      //
+      // The path is not an input — it comes from the composition root — because
+      // this route arms whatever it names, and a caller-chosen path would let a
+      // cross-origin form nominate the bytes to flash.
+      if (request.method === "POST" && url.pathname === "/api/os/firmware/restore") {
+        const store = osFirmwareStore(options.osFirmwarePath);
+        if (store === null) return jsonResponse({ error: "firmware storage is unavailable" }, 404);
+        assertSameOrigin(request);
+        // JSON-only like every other write route; there are no fields, the
+        // point is the Content-Type a cross-origin form cannot set.
+        await readJson(request);
+        if (options.osRestorePath === undefined) {
+          return jsonResponse({ error: "没有配置官方固件还原点" }, 404);
+        }
+        const file = Bun.file(options.osRestorePath);
+        if (!(await file.exists())) {
+          return jsonResponse({
+            error: "找不到官方固件还原点：这台机器上没有 "
+              + `${options.osRestorePath}。它是刷入 ZOS 之前从设备现役 /res 打包的，无法再生成。`,
+          }, 409);
+        }
+        const verdict = await store.storeUpload(
+          Buffer.from(await file.arrayBuffer()),
+          basename(options.osRestorePath),
+        );
+        if (!verdict.ok) {
+          return jsonResponse({ error: firmwareRejectionCopy(verdict), reason: verdict.reason }, 400);
+        }
+        // Same document the status route serves, so the console shows what is
+        // actually armed rather than what it believes it asked for.
+        return jsonResponse(
+          await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0, options.osRestorePath),
         );
       }
 
@@ -2263,7 +2343,7 @@ export function createControlHandler(
         const removed = await store.clearUpload();
         return jsonResponse({
           removed,
-          ...await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0),
+          ...await osFirmwareStatusBody(store, options.osLink?.getUpgradeSeq() ?? 0, options.osRestorePath),
         });
       }
 
@@ -2365,6 +2445,7 @@ export function createControlHandler(
         return jsonResponse(await osFirmwareStatusBody(
           osFirmwareStore(options.osFirmwarePath),
           options.osLink.getUpgradeSeq(),
+          options.osRestorePath,
         ));
       }
 

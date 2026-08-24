@@ -16,8 +16,10 @@ import {
   describeMirror,
   describeUpgradeWatch,
   formatImageBytes,
+  isRestoreArmed,
   parseFirmwareStatus,
   parseUpgradeSeq,
+  type ZosFirmwareStatus,
 } from "../web/src/lib/zos-link.ts";
 
 function markup(node: Parameters<typeof renderToStaticMarkup>[0]): string {
@@ -344,6 +346,7 @@ const PACKED: ZosFirmwareUpdateProps["status"] = {
   },
   source: { kind: "packed", fileName: null, at: NOW - 2 * 3_600_000 },
   shadowedPacked: null,
+  restore: null,
 };
 
 const NOTHING: ZosFirmwareUpdateProps["status"] = {
@@ -351,6 +354,26 @@ const NOTHING: ZosFirmwareUpdateProps["status"] = {
   image: null,
   source: null,
   shadowedPacked: null,
+  restore: null,
+};
+
+/** 那份取不回来的官方固件,如同服务报出来的样子。 */
+const RESTORE: NonNullable<ZosFirmwareStatus["restore"]> = {
+  available: true,
+  path: "/srv/clock/.runtime/tc002-stock/restore-live.img",
+  bytes: 2_781_756,
+  builtAt: NOW - 30 * 24 * 3_600_000,
+};
+
+/**
+ * 还原点已经躺在待装位里:服务把它当成一次上传收下,所以 source 就是 upload,
+ * 文件名正是还原点路径的末段——控制台正是靠这两者对上才知道待装的是它。
+ */
+const ARMED: ZosFirmwareUpdateProps["status"] = {
+  ...PACKED,
+  image: { ...PACKED!.image!, bytes: RESTORE.bytes, partitionType: 3, partitionLabel: "res" },
+  source: { kind: "upload", fileName: "restore-live.img", at: NOW - 60_000 },
+  restore: RESTORE,
 };
 
 function updateMarkup(overrides: Partial<ZosFirmwareUpdateProps> = {}): string {
@@ -371,6 +394,8 @@ function updateMarkup(overrides: Partial<ZosFirmwareUpdateProps> = {}): string {
     onRefreshStatus: () => {},
     onUpload: () => {},
     onRemoveUpload: () => {},
+    onArmRestore: () => {},
+    restoring: false,
     ...overrides,
   }));
 }
@@ -383,6 +408,21 @@ function installButton(html: string): string | undefined {
 /** 选文件那一颗，同理。 */
 function uploadButton(html: string): string | undefined {
   return html.split("<button").find((chunk) => chunk.includes("选择镜像文件"));
+}
+
+/** 还原点那一行自己的按钮:「放入待装位」/「已放入待装位」。 */
+function restoreButton(html: string): string | undefined {
+  return html.split("<button").find((chunk) => chunk.includes("放入待装位"));
+}
+
+/**
+ * 装机那一颗在还原模式下改叫「还原官方固件」——和上面那一行的标签同名。
+ *
+ * 按 <button 切出来的段落是从一颗按钮到下一颗,所以那个 <label> 会落在**前一颗**
+ * 按钮的段里(实测:「移除上传」那一段就带着它)。闭合标签是唯一分得开的东西。
+ */
+function restoreInstallButton(html: string): string | undefined {
+  return html.split("<button").find((chunk) => chunk.includes("还原官方固件</span>"));
 }
 
 describe("zos firmware update", () => {
@@ -436,6 +476,7 @@ describe("zos firmware update", () => {
         },
         source: null,
         shadowedPacked: null,
+        restore: null,
       },
     });
     expect(bare).not.toContain("大小");
@@ -505,6 +546,82 @@ describe("zos firmware update", () => {
 
     const checked = updateMarkup({ status: PACKED, consent: true });
     expect(installButton(checked)).not.toContain("disabled");
+  });
+
+  // 还原点这一行和上传是同一件事——把镜像放进待装位,然后停手。值得单独一行的
+  // 原因只有一个:那份镜像补不回来。它是刷 ZOS 之前从这台设备现役分区取下的,
+  // Ulanzi 不提供下载,设备没有恢复分区,现在再跑一次打包器只会打出正在跑的 ZOS。
+  test("the restore row says which of its three states it is in, and invents no fourth", () => {
+    // 服务端太老、根本没这个字段 → 整行不出现。「这台机器没有还原点」是个断言,
+    // 而这样的服务从没被问到过——沉默好过替它回答。
+    const silent = updateMarkup({ status: PACKED });
+    expect(restoreButton(silent)).toBeUndefined();
+    expect(silent).not.toContain("放进待装位");
+
+    // 配了路径但文件不在 → 说清它补不回来,而不是给一条会悄悄打出错东西的命令。
+    const gone = updateMarkup({
+      status: { ...PACKED, restore: { ...RESTORE, available: false, bytes: null, builtAt: null } },
+    });
+    expect(gone).toContain("这台机器上没有还原点");
+    expect(gone).toContain("补不回来");
+    expect(gone).toContain("Ulanzi 不提供固件下载");
+    // 按下去必然失败的入口比没有入口更糟——这一节别处已经守着这条规矩了。
+    expect(restoreButton(gone)).toContain("disabled");
+    expect(gone).not.toContain("mise run os-restore-image");
+
+    // 有 → 说它是什么、多大,并且和上传那一行一样明说这一步不装。
+    const ready = updateMarkup({ status: { ...PACKED, restore: RESTORE } });
+    expect(ready).toContain("刷 ZOS 之前从这台设备取下的 Ulanzi 官方固件");
+    expect(ready).toContain("2.7 MB");
+    expect(ready).toContain("不会开始安装");
+    expect(restoreButton(ready)).not.toContain("disabled");
+    expect(restoreButton(ready)).toContain("放入待装位");
+
+    // 已经在待装位里 → 按钮改口并停手,免得再发一次一模一样的装填。
+    const armed = updateMarkup({ status: ARMED });
+    expect(restoreButton(armed)).toContain("已放入待装位");
+    expect(restoreButton(armed)).toContain("disabled");
+
+    // 装填在途:和上传一样,它自己转,别人不许动。
+    const busy = updateMarkup({ status: { ...PACKED, restore: RESTORE }, restoring: true });
+    expect(restoreButton(busy)).toContain("disabled");
+    expect(installButton(busy)).toContain("disabled");
+  });
+
+  // 同一颗按钮,两种相反的结局。装 ZOS 是「时钟还是我们的」;装还原点是把时钟还给
+  // Ulanzi,连带这个控制台和设备之间的链路一起消失。旁边摆一句通用的同意语,就是
+  // 有一半的时候在让人同意另一件事——而这一半正是不可逆的那一半。
+  test("arming the restore point swaps the consent and the button, not just their colour", () => {
+    const armed = updateMarkup({ status: ARMED, consent: true });
+
+    expect(armed).toContain("我知道这会把 ZOS 从时钟上抹掉");
+    expect(armed).toContain("装完时钟回到出厂那套界面");
+    // 说到底会失去什么,要点名:这三样正是这台钟被刷成 ZOS 的理由。
+    expect(armed).toContain("VIBE、音乐、游戏和这个控制台的设备连接都会消失");
+    expect(armed).toContain("得重新刷一次 ZOS");
+    // 装 ZOS 那句必须消失,而不是被挤到下面还留着。
+    expect(armed).not.toContain("我知道更新期间会发生什么");
+    // 按钮同理:待装的是官方固件,就不该写着「安装到时钟」。
+    expect(installButton(armed)).toBeUndefined();
+    expect(restoreInstallButton(armed)).toBeDefined();
+    expect(restoreInstallButton(armed)).not.toContain("disabled");
+    // 勾选框和按钮一起转成橙色:这一节别处用 brand,橙色在这里只有一个意思。
+    expect(armed).toContain("orange");
+
+    // 反过来:待装的是一份 ZOS 上传,说的就必须是 ZOS 那一套。
+    const zos = updateMarkup({
+      status: { ...ARMED, source: { kind: "upload", fileName: "zos-2026.08.15.img", at: NOW - 60_000 } },
+      consent: true,
+    });
+    expect(zos).toContain("我知道更新期间会发生什么");
+    expect(zos).not.toContain("我知道这会把 ZOS 从时钟上抹掉");
+    expect(installButton(zos)).toBeDefined();
+    expect(restoreInstallButton(zos)).toBeUndefined();
+    // 还原点仍然在,只是没被装填——那一行照旧可按。
+    expect(restoreButton(zos)).not.toContain("disabled");
+
+    // 同意语换了,门禁没换:没勾就还是按不动。
+    expect(restoreInstallButton(updateMarkup({ status: ARMED, consent: false }))).toContain("disabled");
   });
 
   test("a request in flight is reported by what the console can see, and nothing more", () => {
@@ -580,7 +697,7 @@ describe("zos firmware update", () => {
   });
 
   test("reads the image status field by field, and never invents one", () => {
-    const blank = { packed: false, image: null, source: null, shadowedPacked: null };
+    const blank = { packed: false, image: null, source: null, shadowedPacked: null, restore: null };
     const image = (over: Record<string, unknown> = {}) => ({
       buildId: null, bytes: null, builtAt: null, md5: null,
       partitionType: null, partitionLabel: null, zosBuildId: null, filesystemBuiltAt: null,
@@ -611,7 +728,18 @@ describe("zos firmware update", () => {
       image: image({ md5: "abc", partitionType: 3, partitionLabel: "res", zosBuildId: "r-1", filesystemBuiltAt: 5 }),
       source: { kind: "upload", fileName: "a.img", at: 9 },
       shadowedPacked: { bytes: 12, builtAt: 13 },
+      restore: null,
     });
+
+    // 还原点是逐字段读的,而且**在「有没有装填镜像」之前**就读——两件事无关,
+    // 而「还什么都没装填」正是第一次来的人最可能看到的状态。
+    expect(parseFirmwareStatus({
+      restore: { available: true, path: "/x/restore-live.img", bytes: 2781756, builtAt: 42 },
+    }).restore).toEqual({ available: true, path: "/x/restore-live.img", bytes: 2781756, builtAt: 42 });
+    expect(parseFirmwareStatus({ packed: false, restore: { available: false, path: "/x/y.img" } }).restore)
+      .toEqual({ available: false, path: "/x/y.img", bytes: null, builtAt: null });
+    // 服务端太老、根本没这个字段 → null,读作「不知道」而不是「没有」。
+    expect(parseFirmwareStatus({ packed: false }).restore).toBeNull();
     // 认不出的来源就是「没有来源」,不是猜一个。猜错的方向恰好是最危险的那个:
     // 把别人上传的镜像说成自己刚打的。
     expect(parseFirmwareStatus({ packed: true, image: { bytes: 4 }, source: { kind: "elsewhere" } }).source)
@@ -621,6 +749,63 @@ describe("zos firmware update", () => {
     expect(parseUpgradeSeq({ upgrade: { seq: 4 } })).toBe(4);
     // 服务没给回执,请求仍然算发出去了——null,不是 0,更不是 NaN。
     expect(parseUpgradeSeq({ ok: true })).toBeNull();
+  });
+
+  /**
+   * 这条判断决定按钮旁边说哪一句话,而两句话描述的是相反的结局,所以它值得被逐个
+   * 情形钉住。
+   *
+   * 它比的是「服务记下的文件名」对上「服务报出的还原点路径的末段」——不是路径全等,
+   * 因为上传仓从来不记原来的目录;也不是网页这边写死一个名字,那样服务改了路径,
+   * 控制台会安静地说错话。
+   */
+  test("isRestoreArmed matches the recorded name against the reported path, and nothing else", () => {
+    const status = (over: Partial<ZosFirmwareStatus>): ZosFirmwareStatus => ({
+      packed: true,
+      image: null,
+      source: { kind: "upload", fileName: "restore-live.img", at: 1 },
+      shadowedPacked: null,
+      restore: { available: true, path: "/srv/.runtime/tc002-stock/restore-live.img", bytes: 1, builtAt: 1 },
+      ...over,
+    });
+
+    expect(isRestoreArmed(status({}))).toBe(true);
+    // 目录不参与比较:同名就算数,因为服务只报得出这两样。
+    expect(isRestoreArmed(status({
+      restore: { available: true, path: "restore-live.img", bytes: 1, builtAt: 1 },
+    }))).toBe(true);
+
+    // 待装的是别的东西 → 说 ZOS 那一套。
+    expect(isRestoreArmed(status({ source: { kind: "upload", fileName: "zos.img", at: 1 } }))).toBe(false);
+    // 本地打包出来的镜像永远不是还原点,它连文件名都没有。
+    expect(isRestoreArmed(status({ source: { kind: "packed", fileName: null, at: 1 } }))).toBe(false);
+    // 而且「不是上传」这一条要自己站得住:哪怕打包那一份真带上了同名的文件名,
+    // 它也不是还原点——只有服务把还原点收进上传仓的那一次才算数。
+    expect(isRestoreArmed(status({ source: { kind: "packed", fileName: "restore-live.img", at: 1 } })))
+      .toBe(false);
+    // 什么都没装填。
+    expect(isRestoreArmed(status({ source: null }))).toBe(false);
+    // 服务端太老,报不出还原点 → 不许猜。
+    expect(isRestoreArmed(status({ restore: null }))).toBe(false);
+    expect(isRestoreArmed(null)).toBe(false);
+    // 路径以斜杠收尾时末段是空字符串。两个空字符串相等,所以少了那道空串判断,
+    // 一份没有文件名的上传就会被说成还原点——这是这条规则唯一会自己骗自己的形状。
+    expect(isRestoreArmed(status({
+      source: { kind: "upload", fileName: "", at: 1 },
+      restore: { available: true, path: "/srv/tc002-stock/", bytes: 1, builtAt: 1 },
+    }))).toBe(false);
+    expect(isRestoreArmed(status({
+      restore: { available: true, path: "/srv/tc002-stock/", bytes: 1, builtAt: 1 },
+    }))).toBe(false);
+
+    // 这条规则会认错的唯一方向:主人自己上传一份**恰好也叫** restore-live.img 的
+    // 镜像。认错的方向是安全的那一边——它会把更吓人的那句话摆出来(「这会把 ZOS
+    // 抹掉」),而不是相反。反过来永远不会发生:装填还原点时,文件名是服务拿路径的
+    // 末段填的,所以真的还原点绝不会被说成一份普通的 ZOS 升级。
+    expect(isRestoreArmed(status({
+      source: { kind: "upload", fileName: "restore-live.img", at: 1 },
+      restore: { available: true, path: "/srv/x/restore-live.img", bytes: 1, builtAt: 1 },
+    }))).toBe(true);
   });
 
   test("image size and age are formatted, and skew never becomes a future build", () => {

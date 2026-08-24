@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { CircleAlert, HardDriveDownload, Info, RefreshCw, Trash2, Upload } from "lucide-react";
+import { CircleAlert, HardDriveDownload, Info, RefreshCw, RotateCcw, Trash2, Upload } from "lucide-react";
 import { Button, Checkbox, Surface } from "@cladd-ui/react";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import {
@@ -9,6 +9,7 @@ import {
   describeUpgradeWatch,
   firmwareFactRows,
   formatImageBytes,
+  isRestoreArmed,
   type ZosFirmwareStatus,
   type ZosUpgradeRequest,
 } from "@/lib/zos-link";
@@ -63,6 +64,11 @@ export interface ZosFirmwareUpdateProps {
   onRefreshStatus: () => void;
   onUpload: (file: File) => void;
   onRemoveUpload: () => void;
+  /** Arms the stock restore point. Like an upload, it installs nothing. */
+  onArmRestore: () => void;
+  /** The restore image is on its way into the slot. Its own flag rather than
+   * `uploading`: they disable different buttons and can never overlap. */
+  restoring: boolean;
 }
 
 export function ZosFirmwareUpdate({
@@ -82,6 +88,8 @@ export function ZosFirmwareUpdate({
   onRefreshStatus,
   onUpload,
   onRemoveUpload,
+  onArmRestore,
+  restoring,
 }: ZosFirmwareUpdateProps) {
   const { gate, note } = describeUpgradeGate(mode, zosFlashed);
   const watch = request === null
@@ -92,6 +100,9 @@ export function ZosFirmwareUpdate({
   // OFFLINE ZOS keeps it: preparing the image needs the service, not the device,
   // and the owner can upload now and install when the clock is back.
   const showsImage = gate !== "foreign";
+  // Which image is in the slot decides the wording of the consent and the
+  // button below — see the comment there.
+  const restoreArmed = isRestoreArmed(status);
 
   return (
     <div className="device-settings-fields">
@@ -148,37 +159,62 @@ export function ZosFirmwareUpdate({
             onRemoveUpload={onRemoveUpload}
           />
 
+          <RestoreRow
+            status={status}
+            restoring={restoring}
+            uploading={uploading}
+            busy={busy}
+            onArmRestore={onArmRestore}
+          />
+
           {gate === "ready" && status?.packed === true && (
             <div className="device-settings-note zos-fw__decision">
               {/* Consent and the button it gates are one decision, grouped like
                   the sideload panel's: say what will happen, then ask. */}
+              {/* The consent has to describe the image that is ACTUALLY armed.
+                  Installing a ZOS build and installing the stock restore point
+                  end in opposite places — one keeps the clock ours, the other
+                  hands it back to Ulanzi and takes this console's link with it —
+                  so a single generic sentence beside the button would be asking
+                  for agreement to the wrong thing half the time. */}
               <label className="zos-fw__consent">
                 <Checkbox
                   as="span"
                   className="zos-fw__checkbox"
                   input
                   size="md"
-                  color="brand"
+                  color={restoreArmed ? "orange" : "brand"}
                   checked={consent}
                   onChange={onConsentChange}
                 />
                 {/* One string per node: React SSR splits adjacent text children
                     with comment markers, which breaks copy asserts. */}
-                <span>
-                  <strong>我知道更新期间会发生什么</strong>
-                  时钟会下载镜像、写入 flash 并重启，期间面板会短暂无响应；断电会中断安装。
-                </span>
+                {restoreArmed
+                  ? (
+                    <span>
+                      <strong>我知道这会把 ZOS 从时钟上抹掉</strong>
+                      装的是 Ulanzi 官方固件：装完时钟回到出厂那套界面，VIBE、音乐、游戏和这个控制台的设备连接都会消失。想再用回来，得重新刷一次 ZOS。
+                    </span>
+                  )
+                  : (
+                    <span>
+                      <strong>我知道更新期间会发生什么</strong>
+                      时钟会下载镜像、写入 flash 并重启，期间面板会短暂无响应；断电会中断安装。
+                    </span>
+                  )}
               </label>
 
               <div className="zos-fw__actions">
                 <Button
                   type="button"
-                  color="brand"
+                  color={restoreArmed ? "orange" : "brand"}
                   loading={busy}
-                  disabled={!consent || busy || uploading || (watch !== null && watch.phase !== "returned")}
+                  disabled={!consent || busy || uploading || restoring || (watch !== null && watch.phase !== "returned")}
                   onClick={onUpgrade}
                 >
-                  <HardDriveDownload />安装到时钟
+                  {restoreArmed
+                    ? <><RotateCcw />还原官方固件</>
+                    : <><HardDriveDownload />安装到时钟</>}
                 </Button>
               </div>
             </div>
@@ -361,6 +397,70 @@ function UploadRow({
             <Trash2 />移除上传
           </Button>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The way back to Ulanzi's own firmware.
+ *
+ * Deliberately shaped like `UploadRow` and sitting right after it, because it
+ * is the same act: it puts an image in the slot and stops. What makes it worth
+ * its own row is that the image is irreplaceable — it was packed from this
+ * device's live `/res` before ZOS was flashed over it, Ulanzi publishes no
+ * download, the TC002 has no recovery partition, and re-running the packer now
+ * would only pack the running ZOS. So the copy leads with what it is, and the
+ * missing case explains that it cannot be recreated rather than offering a
+ * command that would quietly produce the wrong thing.
+ */
+function RestoreRow({
+  status,
+  restoring,
+  uploading,
+  busy,
+  onArmRestore,
+}: {
+  status: ZosFirmwareStatus | null;
+  restoring: boolean;
+  uploading: boolean;
+  busy: boolean;
+  onArmRestore: () => void;
+}) {
+  const restore = status?.restore ?? null;
+  // A service too old to report the field says nothing at all — better silence
+  // than a row claiming there is no way back when nobody asked the question.
+  if (restore === null) return null;
+  const armed = isRestoreArmed(status);
+
+  return (
+    <div className="device-setting-field">
+      <div className="device-setting-copy">
+        <label id="zos-firmware-restore-label">还原官方固件</label>
+        {restore.available
+          ? (
+            <p>
+              {`把刷 ZOS 之前从这台设备取下的 Ulanzi 官方固件放进待装位（${formatImageBytes(restore.bytes)}）。同样只是准备镜像，不会开始安装。`}
+            </p>
+          )
+          : (
+            <p>
+              这台机器上没有还原点，因此无法回到官方固件。它必须在刷入 ZOS
+              之前从设备现役分区取下，现在已经补不回来了——Ulanzi 不提供固件下载，设备也没有恢复分区。
+            </p>
+          )}
+      </div>
+      <div className="device-setting-control zos-fw__upload">
+        <Button
+          type="button"
+          color="neutral"
+          loading={restoring}
+          disabled={!restore.available || restoring || uploading || busy || armed}
+          onClick={onArmRestore}
+          aria-labelledby="zos-firmware-restore-label"
+        >
+          <RotateCcw />{armed ? "已放入待装位" : "放入待装位"}
+        </Button>
       </div>
     </div>
   );

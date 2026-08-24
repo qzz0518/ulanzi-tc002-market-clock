@@ -841,6 +841,22 @@ export interface ZosFirmwareStatus {
    * their build is on disk and is not the one that will be written.
    */
   shadowedPacked: { bytes: number | null; builtAt: number | null } | null;
+  /**
+   * The way back to Ulanzi's own firmware, if this machine kept a copy.
+   *
+   * Null on a service too old to say. `available: false` means the service
+   * knows where the restore point should be and it is not there — a different
+   * fact from "this deployment has no restore configured", and the console says
+   * different things about the two.
+   */
+  restore: ZosFirmwareRestore | null;
+}
+
+export interface ZosFirmwareRestore {
+  available: boolean;
+  path: string | null;
+  bytes: number | null;
+  builtAt: number | null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -866,9 +882,42 @@ function asPositive(value: unknown): number | null {
  * `packed` is likewise never inferred from "the route answered 200" — no flag
  * and no facts means nothing is packed.
  */
+/**
+ * Is the armed image the stock-firmware restore point rather than a ZOS build?
+ *
+ * Matched on the file name the service recorded against the restore path it
+ * reported, so the console never has to hardcode a name. This decides which
+ * consent sentence sits next to 安装到时钟 — and those two sentences describe
+ * opposite outcomes, so guessing wrong here is the expensive kind of wrong.
+ */
+export function isRestoreArmed(status: ZosFirmwareStatus | null): boolean {
+  const path = status?.restore?.path;
+  const fileName = status?.source?.fileName;
+  if (path === null || path === undefined || fileName === null || fileName === undefined) return false;
+  if (status?.source?.kind !== "upload") return false;
+  const base = path.split("/").pop();
+  return base !== undefined && base !== "" && base === fileName;
+}
+
 export function parseFirmwareStatus(raw: unknown): ZosFirmwareStatus {
-  const empty: ZosFirmwareStatus = { packed: false, image: null, source: null, shadowedPacked: null };
   const root = asRecord(raw);
+  // Parsed BEFORE the early return below: whether a restore point exists has
+  // nothing to do with whether an image is armed, and "nothing armed yet" is
+  // the state a first-time reader is most likely in.
+  const rawRestore = asRecord(root?.restore);
+  const restore: ZosFirmwareRestore | null = rawRestore === null ? null : {
+    available: rawRestore.available === true,
+    path: asText(rawRestore.path),
+    bytes: asPositive(rawRestore.bytes),
+    builtAt: asPositive(rawRestore.builtAt),
+  };
+  const empty: ZosFirmwareStatus = {
+    packed: false,
+    image: null,
+    source: null,
+    shadowedPacked: null,
+    restore,
+  };
   if (root === null) return empty;
   const body = asRecord(root.image) ?? root;
   const buildId = asText(body.buildId);
@@ -906,6 +955,7 @@ export function parseFirmwareStatus(raw: unknown): ZosFirmwareStatus {
     shadowedPacked: rawShadow === null
       ? null
       : { bytes: asPositive(rawShadow.bytes), builtAt: asPositive(rawShadow.builtAt) },
+    restore,
   };
 }
 
@@ -1194,6 +1244,14 @@ export interface ZosLink {
   /** DELETE /api/os/firmware — drop the upload, letting a locally packed image take over. */
   removeFirmwareUpload(): Promise<ZosFirmwareStatus>;
   /**
+   * POST /api/os/firmware/restore — arm the stock-firmware restore point.
+   *
+   * ARMS ONLY, exactly like `uploadFirmware`: it puts Ulanzi's own firmware in
+   * the slot the device would fetch and stops there. The install is still the
+   * separate, explicitly consented act it is for every other image.
+   */
+  armRestoreFirmware(): Promise<ZosFirmwareStatus>;
+  /**
    * POST /api/os/upgrade. Resolves with the install sequence now on the wire, or
    * null when the service did not name one — the request still stands either way,
    * so a missing receipt must not read as a failure.
@@ -1375,6 +1433,16 @@ export function createZosLink(options: ZosLinkOptions = {}): ZosLink {
     async removeFirmwareUpload() {
       return parseFirmwareStatus(await readJson<unknown>("/api/os/firmware", {
         method: "DELETE",
+      }));
+    },
+    async armRestoreFirmware() {
+      // An empty JSON body rather than none: the route takes no arguments —
+      // which file is the restore point is the service's business, and letting
+      // a caller name it would be letting a caller name the bytes to flash.
+      return parseFirmwareStatus(await readJson<unknown>("/api/os/firmware/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
       }));
     },
     async requestUpgrade() {

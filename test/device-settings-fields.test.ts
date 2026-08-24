@@ -264,6 +264,7 @@ describe("常规 tab, ZOS — two different tables, not one half-filled", () => 
           },
           source: { kind: "packed", fileName: null, at: 1_700_000_000_000 },
           shadowedPacked: null,
+          restore: null,
         },
         statusError: null,
         request: null,
@@ -277,6 +278,8 @@ describe("常规 tab, ZOS — two different tables, not one half-filled", () => 
         onRefreshStatus: noop,
         onUpload: noop,
         onRemoveUpload: noop,
+        onArmRestore: noop,
+        restoring: false,
       }),
     }));
 

@@ -540,6 +540,11 @@ const controlHandler = createControlHandler(controller, {
   // the same way; naming the path here rather than in the handler keeps it a
   // fixed string that no request can influence.
   osFirmwarePath: ".runtime/tc002-os/update.img",
+  // The way back to Ulanzi's own firmware, packed by `mise run os-restore-image`
+  // from the device's live /res BEFORE ZOS was flashed over it. Irreplaceable:
+  // Ulanzi publishes no TC002 download, there is no recovery partition, and
+  // running the packer now would only pack the running ZOS.
+  osRestorePath: ".runtime/tc002-stock/restore-live.img",
   lyricThemeStore,
   controlAccess,
   deviceGeneralSettings: {
