@@ -34,7 +34,8 @@ export const ZOS_MAX_POLL_MS = 10_000;
 export interface ZosMenuEntry {
   id: string;
   label: string;
-  kind: "channel" | "music" | "game" | "settings";
+  /** Mirrors `OsMenuEntry["kind"]` in src/os-link.ts — this is that wire format. */
+  kind: "channel" | "music" | "game" | "settings" | "vibe";
 }
 
 export interface ZosDisplay {
@@ -434,6 +435,11 @@ const KIND_SCREENS: Record<ZosMenuEntry["kind"], readonly string[]> = {
   music: ["music"],
   game: ["games", "game"],
   settings: ["settings"],
+  // 「VIBE」 was not in this table when the service started publishing it, and
+  // the omission is what made the lookup below throw. Not measured like the
+  // four above — taken from the firmware's own screenName block, which reports
+  // "vibe" for exactly the screen `focus: "vibe"` pushes (osLogic.cc).
+  vibe: ["vibe"],
 };
 
 /**
@@ -442,14 +448,25 @@ const KIND_SCREENS: Record<ZosMenuEntry["kind"], readonly string[]> = {
  * `telemetry.focus` is the *channel ring's* current app and keeps its value
  * while another screen is on top — pinned to 音乐, the device reported
  * `screen: "music"` with `focus: "btc"` throughout. So only a channel row may be
- * matched by focus, and it must also be the screen on top; the other three kinds
- * are matched by screen name alone, because no field ever names them in `focus`.
- * Matching every kind on `focus` (what the panel used to do) meant 音乐/游戏/设置
- * could never be confirmed, no matter what the device did.
+ * matched by focus, and it must also be the screen on top; every other kind is
+ * matched by screen name alone, because no field ever names them in `focus`.
+ * Matching every kind on `focus` (what the panel used to do) meant
+ * 音乐/游戏/VIBE/设置 could never be confirmed, no matter what the device did.
  */
 export function entryOnScreen(entry: ZosMenuEntry, telemetry: ZosTelemetry | null): boolean {
   if (!telemetry) return false;
-  if (!KIND_SCREENS[entry.kind].includes(telemetry.screen)) return false;
+  // Looked up through `string`, and an unknown kind is "cannot confirm" rather
+  // than a throw. The type says this cannot happen; the running console said
+  // otherwise. `menu` is a wire format from a service that ships separately from
+  // this bundle, and the service has been publishing `kind: "vibe"` ever since
+  // 「VIBE」 became a destination on the ring — so `KIND_SCREENS["vibe"]` was
+  // undefined and `.includes` threw a TypeError. Inside describeDriver, which
+  // runs during ZosPanel's render, with no error boundary anywhere in this app:
+  // pinning VIBE from its own tab blanked the entire studio, and it stayed blank
+  // across reloads because the pin lives on the service.
+  const screens = (KIND_SCREENS as Record<string, readonly string[] | undefined>)[entry.kind];
+  if (screens === undefined) return false;
+  if (!screens.includes(telemetry.screen)) return false;
   return entry.kind !== "channel" || telemetry.focus === entry.id;
 }
 

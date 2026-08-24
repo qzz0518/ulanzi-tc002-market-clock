@@ -267,7 +267,7 @@ describe("zos panel", () => {
   });
 
   test("the right column is built from the kit, not from divs dressed up as it", () => {
-    // 结构本身由 zos-menu.test.ts 真渲染出来看(四个触发器、单开、标记只出现
+    // 结构本身由 zos-menu.test.ts 真渲染出来看(五个目的地、单开、标记只出现
     // 一次)。这里只留 markup 里看不见的那几条:组件的取舍,以及不该复活的旧写法。
     const html = markup(createElement(ZosPanel));
     // 分组小标题全 app 一个样,所以用 SectionTitle 而不是自己写一层眉题。

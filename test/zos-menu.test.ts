@@ -9,7 +9,7 @@ import { ZOS_GAME_SHORTCUTS, type ZosMenuEntry, type ZosTelemetry } from "../web
 // The menu is rendered here, not grepped for. ZosPanel itself cannot be: it
 // gets its sections from a poll, and renderToStaticMarkup runs no effects, so
 // under SSR the panel is forever empty. Splitting the rendering out is what
-// makes the structure — four triggers, one open panel, one marker per fact —
+// makes the structure — five destinations, one open panel, one marker per fact —
 // something a test can actually look at.
 
 const MENU: ZosMenuEntry[] = [
@@ -17,6 +17,7 @@ const MENU: ZosMenuEntry[] = [
   { id: "weather", label: "大字天气钟", kind: "channel" },
   { id: "music", label: "音乐", kind: "music" },
   { id: "game", label: "游戏", kind: "game" },
+  { id: "vibe", label: "VIBE", kind: "vibe" },
   { id: "settings", label: "设置", kind: "settings" },
 ];
 
@@ -68,13 +69,15 @@ function count(html: string, needle: string): number {
 }
 
 describe("zos menu structure", () => {
-  test("the device's four destinations are four accordion triggers, one open at a time", () => {
+  test("the device's five destinations are five rows, one disclosure open at a time", () => {
     const html = render({ open: "carousel" });
 
     // 音乐 is a leaf — nothing lives under it, so it has no disclosure at all.
     expect(button(html, "音乐")).not.toContain("aria-expanded");
     expect(button(html, "游戏")).toContain('aria-expanded="false"');
     expect(button(html, "轮播")).toContain('aria-expanded="true"');
+    // 「VIBE」 too: 固件只认一个地址,下面那些页只有旋钮翻得到。
+    expect(button(html, "VIBE")).not.toContain("aria-expanded");
     // 设置 became a leaf when 蓝牙配网 moved into 常规设置: one row left, and a
     // disclosure around one row is a click that buys nothing.
     expect(button(html, "设置")).not.toContain("aria-expanded");
@@ -101,11 +104,11 @@ describe("zos menu structure", () => {
     // 七个引擎 + 那一环本身,全部挂在 游戏 下面,而不是和频道并排。
     for (const game of ZOS_GAME_SHORTCUTS) expect(games).toContain(game.label);
 
-    // 全部收起也是合法状态:用户关掉最后一个,菜单就只剩四个目的地。
+    // 全部收起也是合法状态:用户关掉最后一个,菜单就只剩五个目的地。
     const closed = render({ open: undefined });
     expect(closed).not.toContain('role="region"');
     expect(closed).not.toContain("比特币");
-    for (const label of ["音乐", "游戏", "轮播", "设置"]) expect(closed).toContain(label);
+    for (const label of ["音乐", "游戏", "轮播", "VIBE", "设置"]) expect(closed).toContain(label);
   });
 
   test("nothing to show yet says so, and offers no menu to click", () => {
@@ -180,6 +183,16 @@ describe("zos menu markers", () => {
     expect(count(html, "正在显示")).toBe(0);
   });
 
+  test("「VIBE」 wears its own marker: a leaf has no rows to defer to", () => {
+    const html = render({ open: "carousel" }, { telemetry: telemetry({ screen: "vibe" }) });
+    expect(button(html, "VIBE")).toContain("正在显示");
+    expect(count(html, "正在显示")).toBe(1);
+    // 和其它每一行一样是个开关,再点一次就是交还旋钮。
+    expect(button(html, "VIBE")).toContain('aria-pressed="false"');
+    // footer 说的是「按下去会把设备送到哪」,不是设备正在干什么。
+    expect(button(html, "VIBE")).toContain("把时钟切到 AI 代理的额度页");
+  });
+
   test("offline the menu still stands, and nothing on it claims to be showing", () => {
     const html = render(
       { open: "carousel" },
@@ -214,12 +227,13 @@ describe("zos menu accessibility", () => {
     expect(button(html, "比特币")).toContain("disabled");
     expect(button(html, "设置")).toContain("disabled");
     expect(button(html, "音乐")).toContain("disabled");
+    expect(button(html, "VIBE")).toContain("disabled");
   });
 
   test("菜单里再没有「打开这台浏览器里的向导」那种行", () => {
-    // 蓝牙配网 搬去了常规设置:它不是设备上的一个去处,混在四个目的地里就得为它
+    // 蓝牙配网 搬去了常规设置:它不是设备上的一个去处,混在五个目的地里就得为它
     // 破例(不是开关、不受 busy 管),而破例正是这份菜单一致性的裂口。
-    for (const open of ["carousel", "games", "settings", undefined]) {
+    for (const open of ["carousel", "games", "vibe", "settings", undefined]) {
       const html = render({ open });
       expect(html).not.toContain("蓝牙配网");
     }

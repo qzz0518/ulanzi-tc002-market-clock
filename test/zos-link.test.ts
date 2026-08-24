@@ -235,6 +235,24 @@ describe("which menu entry the device is actually showing", () => {
     expect(entryOnScreen(entry("music"), null)).toBe(false);
   });
 
+  test("「VIBE」 matches its own screen, like the other non-channel destinations", () => {
+    const vibe: ZosMenuEntry = { id: "vibe", label: "VIBE", kind: "vibe" };
+    expect(entryOnScreen(vibe, telemetry({ screen: "vibe" }))).toBe(true);
+    // focus 停在频道环上不动,和 音乐/游戏/设置 完全同一条规矩。
+    expect(entryOnScreen(vibe, telemetry({ focus: "vibe", screen: "launcher" }))).toBe(false);
+  });
+
+  test("a kind this bundle has never heard of cannot confirm, and must not throw", () => {
+    // 这不是假想:服务早就在发 kind: "vibe" 了,而这张表里没有它,于是
+    // KIND_SCREENS[kind].includes 抛 TypeError——抛在 describeDriver 里,而
+    // describeDriver 跑在 ZosPanel 的 render 里,这个应用又没有任何 error
+    // boundary。结果是在 VIBE 页点一下「在时钟上打开」,整个控制台白屏,而且
+    // 因为 pin 存在服务端,刷新还是白屏。服务和这份 bundle 是分开发布的,所以
+    // 「没见过的种类」永远可能出现:它应该是「确认不了」,不是崩。
+    const alien = { id: "x", label: "X", kind: "telegraph" } as unknown as ZosMenuEntry;
+    expect(entryOnScreen(alien, telemetry({ screen: "telegraph" }))).toBe(false);
+  });
+
 });
 
 describe("zos driver status", () => {
@@ -287,6 +305,23 @@ describe("zos driver status", () => {
     );
     expect(driver.detail).toContain("已锁定");
     expect(driver.detail).toContain("音乐");
+  });
+
+  test("pinning 「VIBE」 names it and confirms it, instead of taking the page down", () => {
+    // 这条就是那次白屏的回归测试:菜单里带着 vibe 这一项,固定它,再让遥测回来。
+    const menu: ZosMenuEntry[] = [...MENU, { id: "vibe", label: "VIBE", kind: "vibe" }];
+    const pending = describeDriver({ focus: "vibe", pinned: true }, menu, telemetry(), true);
+    expect(pending.detail).toContain("VIBE");
+    expect(pending.detail).toContain("等下一次心跳确认");
+
+    const locked = describeDriver(
+      { focus: "vibe", pinned: true },
+      menu,
+      telemetry({ focus: "btc", screen: "vibe" }),
+      true,
+    );
+    expect(locked.detail).toContain("已锁定");
+    expect(locked.detail).toContain("VIBE");
   });
 
   test("an id missing from the menu still names something", () => {

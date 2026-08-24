@@ -271,7 +271,7 @@
 
 /* --- 设备菜单 -------------------------------------------------------------- */
 
-/* 右列与设备根环同构：四个目的地，内容挂在下一层的手风琴里。 */
+/* 右列与设备根环同构：五个目的地，内容挂在下一层的手风琴里。 */
 .zc-menu { display: flex; flex-direction: column; min-width: 0; }
 .zc-menu > .cladd-section-title { padding: 0.15rem 0.5rem 0.1rem; }
 .zc-menu__title { padding-top: 0.7rem; }

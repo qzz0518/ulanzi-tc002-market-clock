@@ -17,6 +17,7 @@ const MENU: ZosMenuEntry[] = [
   { id: "weather", label: "大字天气钟", kind: "channel" },
   { id: "music", label: "音乐", kind: "music" },
   { id: "game", label: "游戏", kind: "game" },
+  { id: "vibe", label: "VIBE", kind: "vibe" },
   { id: "settings", label: "设置", kind: "settings" },
 ];
 
@@ -49,13 +50,15 @@ function byId(sections: ZosSection[], id: string): ZosSection {
 }
 
 describe("zos device sections", () => {
-  test("the flat pull document becomes the device's four-entry root ring", () => {
-    // osLogic.cc fixes exactly these four and says why: channels are content,
+  test("the flat pull document becomes the device's five-entry root ring", () => {
+    // osLogic.cc fixes exactly these five and says why: channels are content,
     // not destinations. Ten channels on one level is the wire format, not the
     // device — and the wire format is what the old console rendered.
     const sections = build();
     expect(sections.map((section) => section.id)).toEqual([...ZOS_SECTION_ORDER]);
-    expect(sections.map((section) => section.label)).toEqual(["音乐", "游戏", "轮播", "设置"]);
+    // 顺序跟着旋钮走:「VIBE」在 轮播 和 设置 之间,固件就是这么排的。
+    expect(sections.map((section) => section.label))
+      .toEqual(["音乐", "游戏", "轮播", "VIBE", "设置"]);
   });
 
   test("channels live one level down, under 轮播", () => {
@@ -82,6 +85,29 @@ describe("zos device sections", () => {
     expect(music.leaf).toBe(true);
     expect(music.focus).toBe("music");
     expect(music.rows).toEqual([]);
+  });
+
+  test("「VIBE」 is a leaf: the firmware knows one address for the whole app", () => {
+    // 它下面确实有一层(总览一页、每个代理各一页),但固件只认 focus: "vibe" 这
+    // 一个地址,翻页在旋钮上。菜单里每一行都得是控制台指得到的去处,所以指不到
+    // 的页面就不该是行——把四个代理列出来,只会得到四个一模一样的按钮。
+    const vibe = byId(build(), "vibe");
+    expect(vibe.leaf).toBe(true);
+    expect(vibe.focus).toBe("vibe");
+    expect(vibe.rows).toEqual([]);
+    // 「VIBE」是这一环上唯一一个名字本身说不清自己是什么的入口。
+    expect(vibe.footer).toBe("把时钟切到 AI 代理的额度页");
+  });
+
+  test("「VIBE」 is confirmed by its own screen, like 音乐 and 设置", () => {
+    const sections = build({ telemetry: telemetry({ screen: "vibe", focus: "btc" }) });
+    expect(byId(sections, "vibe").onScreen).toBe(true);
+    expect(byId(sections, "carousel").onScreen).toBe(false);
+    expect(byId(sections, "music").onScreen).toBe(false);
+
+    const pinned = byId(build({ display: { focus: "vibe", pinned: true } }), "vibe");
+    expect(pinned.pinned).toBe(true);
+    expect(sectionMarker(pinned, false)).toBe("pinned");
   });
 
   test("设置 is a leaf: the wizard that used to live under it moved to 常规设置", () => {
@@ -134,6 +160,7 @@ describe("zos device sections", () => {
       { screen: "music" },
       { screen: "games" },
       { screen: "game" },
+      { screen: "vibe" },
       { screen: "settings" },
     ]) {
       const sections = build({ telemetry: telemetry(telemetryOverride) });
@@ -174,7 +201,7 @@ describe("zos device sections", () => {
     expect(sections.every((section) => !section.onScreen)).toBe(true);
     expect(sections.every((section) => section.rows.every((row) => !row.onScreen))).toBe(true);
     // 但菜单结构还在:离线也能预约固定,固件上线后第一次拉取即生效。
-    expect(sections).toHaveLength(4);
+    expect(sections).toHaveLength(5);
   });
 
   test("a destination the service does not offer is dropped, not shown dead", () => {

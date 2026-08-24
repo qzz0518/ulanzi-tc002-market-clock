@@ -157,7 +157,7 @@ export function ZosPanel() {
   });
   const vitals = describeVitals(state);
   const driver = describeDriver(display, menu, state?.telemetry ?? null, live);
-  // The device's own root ring: four destinations, content one level down.
+  // The device's own root ring: five destinations, content one level down.
   const sections = describeSections({
     menu,
     display,

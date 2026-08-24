@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   ChevronRight,
   Gamepad2,
+  Gauge,
   LayoutGrid,
   Music2,
   Pin,
@@ -33,6 +34,10 @@ const SECTION_ICONS: Record<ZosSectionId, LucideIcon> = {
   music: Music2,
   games: Gamepad2,
   carousel: LayoutGrid,
+  // The same Gauge the top-level VIBE tab wears, deliberately: this row and
+  // that tab are two doors into one thing, and giving them different icons is
+  // how a reader learns they are not.
+  vibe: Gauge,
   settings: Settings2,
 };
 
@@ -58,7 +63,7 @@ export interface ZosMenuProps {
 /**
  * The device's own menu, rendered.
  *
- * Presentational on purpose: every derivation it needs — the four sections,
+ * Presentational on purpose: every derivation it needs — the five sections,
  * which of them is open, which row wears which marker — is decided in
  * `lib/zos-sections.ts`, so this file holds nothing a test would have to boot a
  * browser to reach, and the structure below can be rendered from a fixture.

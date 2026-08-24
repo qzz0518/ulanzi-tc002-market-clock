@@ -1,15 +1,20 @@
 // The device's root ring, rebuilt on the console side.
 //
-// osLogic.cc fixes four entries — 音乐 / 游戏 / 轮播 / 设置 — and says why:
+// osLogic.cc fixes five entries — 音乐 / 游戏 / 轮播 / VIBE / 设置 — and says why:
 // "The workspace's channels are content, not destinations — they live one level
 // down, under 轮播, the same way the seven games live under 游戏."
 //
 // The service's pull document is flat (every enabled channel, plus music / game
-// / settings) because that is the shape the firmware wants to consume. The
-// console used to render that flat list verbatim, which put ten channels and
-// three destinations on one level and left the reader to rebuild the hierarchy
+// / vibe / settings) because that is the shape the firmware wants to consume.
+// The console used to render that flat list verbatim, which put ten channels and
+// four destinations on one level and left the reader to rebuild the hierarchy
 // in their head. This module does that rebuild once, in one place, so the panel
 // can render the device's own two levels instead of the wire format.
+//
+// 轮播 is the one section with no wire kind behind it — it is synthesised here
+// from the channel entries. Every other section is `byKind(...)` and vanishes
+// when the service does not offer it, so a destination missing from this list
+// is a destination the console will not draw.
 
 import {
   ZOS_GAME_SHORTCUTS,
@@ -20,10 +25,24 @@ import {
   type ZosTelemetry,
 } from "./zos-link";
 
-export type ZosSectionId = "music" | "games" | "carousel" | "settings";
+export type ZosSectionId = "music" | "games" | "carousel" | "vibe" | "settings";
 
-/** The ring's own order, as the firmware pushes the four entries. */
-export const ZOS_SECTION_ORDER: readonly ZosSectionId[] = ["music", "games", "carousel", "settings"];
+/**
+ * The ring's own order, as the firmware pushes the five entries.
+ *
+ * 「VIBE」 sits between 轮播 and 设置 because that is where the knob puts it —
+ * osLogic.cc placed it there so the first three keep the position three
+ * releases of muscle memory gave them, and 设置 stays last. A console that
+ * listed the same five in a different order would be a second, disagreeing map
+ * of one device.
+ */
+export const ZOS_SECTION_ORDER: readonly ZosSectionId[] = [
+  "music",
+  "games",
+  "carousel",
+  "vibe",
+  "settings",
+];
 
 export interface ZosSectionRow {
   key: string;
@@ -57,8 +76,14 @@ export interface ZosSection {
   label: string;
   /**
    * A leaf pins from its own row; a container discloses its rows and pins from
-   * them. 音乐 is a leaf because the device has nothing under it — the other
-   * three all carry a level below.
+   * them.
+   *
+   * Three of the five are leaves, for two different reasons — 音乐 and 设置
+   * because the device has nothing under them, 「VIBE」 because the device has
+   * plenty under it and the console can address none of it (see the vibe branch
+   * in describeSections). Only 游戏 and 轮播 carry a level this menu can render.
+   * The test is never "does this destination have pages"; it is "can the console
+   * name any of them".
    */
   leaf: boolean;
   /** Set on a leaf; containers pin through their rows. */
@@ -80,7 +105,7 @@ export interface ZosSectionInput {
 }
 
 /**
- * The four destinations, each carrying whatever lives one level under it.
+ * The five destinations, each carrying whatever lives one level under it.
  *
  * Sections whose backing menu entry is missing are dropped rather than shown
  * dead: the menu comes from the service, and a service that does not offer
@@ -186,6 +211,32 @@ export function describeSections(input: ZosSectionInput): ZosSection[] {
         // here as well put the same sentence on screen twice.
         footer: `${rows.length} 个频道`,
         rows,
+      });
+      continue;
+    }
+
+    if (id === "vibe") {
+      const entry = byKind("vibe");
+      if (!entry) continue;
+      sections.push({
+        id,
+        label: entry.label,
+        // A leaf, and for a harder reason than 音乐's. 「VIBE」 genuinely has a
+        // level below it — an overview page, then one page per signed-in agent —
+        // but the firmware knows exactly ONE address for the whole app: `focus:
+        // "vibe"` pushes the screen and the knob does the rest (osLogic.cc).
+        // Every row in this menu is somewhere the console can send the device,
+        // so a page it cannot name is not a row: listing the agents here would
+        // put four buttons on screen that all do the same thing.
+        leaf: true,
+        focus: entry.id,
+        pinned: pinnedOn(entry.id),
+        onScreen: entryOnScreen(entry, telemetry),
+        // Says where the row sends the device, like 设置's does. 「VIBE」 is the
+        // one label on this ring that names nothing a reader already knows —
+        // 音乐, 游戏, 轮播 and 设置 all say what they are.
+        footer: "把时钟切到 AI 代理的额度页",
+        rows: [],
       });
       continue;
     }
