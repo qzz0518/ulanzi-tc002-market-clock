@@ -27,7 +27,9 @@ versions, and lets you repoint the clock when its IP moves — applied immediate
 restarts, no reinstall. Under ZOS the same dialog becomes what ZOS actually offers: volume,
 brightness and Bluetooth provisioning to set, and Wi-Fi, IP, battery, uptime, free memory and
 firmware residency to read — the stock-only fields are absent rather than blank. Phone
-browsers get a dedicated touch layout with add-to-home-screen support.
+browsers get a dedicated touch layout with add-to-home-screen support; browsers that can
+install the console say so with a card in its bottom-left corner (Safari and iOS get the
+manual steps instead), and browsers that cannot never bring it up.
 
 <p align="center">
   <img src="docs/images/tc002-mobile-content.png" width="390" alt="Ulanzi TC002 Pixel Studio mobile channel composition">

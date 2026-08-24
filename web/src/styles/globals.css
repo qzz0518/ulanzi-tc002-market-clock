@@ -1092,6 +1092,15 @@
 .toast-action { padding: 0; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: var(--foreground); font-weight: 600; cursor: pointer; }
 .cladd-toast { right: max(1rem, env(safe-area-inset-right)) !important; bottom: max(1rem, env(safe-area-inset-bottom)) !important; width: max-content; max-width: min(24rem, calc(100vw - 2rem)) !important; z-index: 60 !important; }
 
+/* 「装成应用」提示条：和 toast 一样浮在页面之上，所以规则放在一起看。toast 占了
+   右下角，这条就占左下角——两者可以同时出现，谁也别压住谁。 */
+.install-prompt { position: fixed; z-index: 55; bottom: max(1rem, env(safe-area-inset-bottom)); left: max(1rem, env(safe-area-inset-left)); display: flex; align-items: center; gap: 0.6rem; max-width: min(23rem, calc(100vw - 2rem)); padding: 0.55rem 0.6rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); }
+.install-prompt__icon { display: grid; width: 1.85rem; height: 1.85rem; flex: none; place-items: center; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-foreground); }
+.install-prompt__icon svg { width: 0.9rem; height: 0.9rem; }
+.install-prompt__copy { display: grid; min-width: 0; gap: 0.1rem; margin-right: 0.15rem; }
+.install-prompt__copy strong { font-size: 0.68rem; }
+.install-prompt__copy span { color: var(--muted-foreground); font-size: 0.58rem; line-height: 1.45; }
+
 @keyframes option-in {
   from { opacity: 0; transform: translateY(-0.25rem); }
   to { opacity: 1; transform: translateY(0); }
@@ -1410,6 +1419,8 @@
   }
   /* 底部主导航是全 App 的拇指落点，唯一保留大于尺度档的触控高度。 */
   .main-tabs button { min-width: 0; min-height: 2.75rem; justify-content: center; }
+  /* 手机上底部归主导航（0.65rem + 3.45rem），提示条整条压在它上面而不是盖住它。 */
+  .install-prompt { right: max(0.75rem, env(safe-area-inset-right)); bottom: calc(4.55rem + env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); max-width: none; }
   /* 六个主视图后每列只剩约 1/6 屏宽，横排放不下「素材库」这种三字标签。
      图标上、文字下，标签就永远是一行，触控高度也没变。 */
   .main-tab__content { flex-direction: column; gap: 0.16rem; padding-inline: 0.15rem; white-space: nowrap; }
@@ -1674,6 +1685,9 @@
   .device-settings-trigger { min-width: 2.75rem; }
   .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
   .main-tabs button { justify-content: center; }
+  /* 手机横屏这一档里，主导航上面那条已经归游戏控制台了，装应用的提示不值得再抢
+     一层——它是便利提示，下次竖屏打开还会在。 */
+  .install-prompt { display: none; }
   .studio-layout.is-canvas { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); }
   .studio-layout.is-game { display: block; }
   .game-shell { padding: 0.35rem 0 1rem; }

@@ -40,6 +40,12 @@ macOS 安装（`scripts/install.sh`）默认监听 `0.0.0.0`，方便同局域�
 画板会提示横屏使用。页面自带 Web App Manifest 与离线静态壳，可「添加到主屏幕」；完整
 PWA 安装需要可信 HTTPS，纯局域网 HTTP 下响应式控制台不受影响。
 
+真的能装的时候，左下角会出现一条安装提示：Chromium 系接住 `beforeinstallprompt`，「安装」
+按钮直接调起系统安装框；Safari 与 iOS 不发这个事件，提示改说手动步骤（菜单栏「文件」→
+「添加到程序坞」／底部「分享」→「添加到主屏幕」）。装不上的地方一律不提示——Firefox 没有
+安装这回事，局域网 HTTP 上的 Chrome 不满足安全上下文。关掉后 14 天内不再出现，装好之后
+（`appinstalled`）永久消失，已经在应用窗口里跑也不会再问。
+
 设置保存在 `.runtime/workspace.json`；旧版 `.runtime/settings.json` 首次启动时原子迁移为
 一个市场频道，原文件不覆盖。禁用、删除频道或修改 `appName` 时，服务向旧 Custom App 名
 发送空对象清理；设备离线导致清理失败只记录为降级状态，不回滚已保存的工作区。

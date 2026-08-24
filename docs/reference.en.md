@@ -45,6 +45,14 @@ landscape. The UI ships a Web App Manifest and an offline static shell for add-t
 use; full PWA installation requires a trusted HTTPS origin, while plain LAN HTTP keeps the
 responsive panel fully working.
 
+When installation is actually possible, an install card appears in the bottom-left corner:
+Chromium browsers hand over `beforeinstallprompt`, so its **安装** button opens the native
+install dialog; Safari and iOS never fire that event, so the card states the manual steps
+instead (menu bar **File → Add to Dock**, or the share sheet's **Add to Home Screen**). Where
+installation cannot work the card stays away — Firefox has no install flow, and Chrome on a
+plain LAN HTTP origin fails the secure-context requirement. Dismissing it hides it for 14
+days; `appinstalled` hides it for good, and a window already running standalone never asks.
+
 Configuration lives in `.runtime/workspace.json`; a legacy `.runtime/settings.json` is
 atomically migrated into one market channel on first launch without overwriting the original.
 Disabling, deleting, or renaming a channel posts an empty object to its former Custom App
