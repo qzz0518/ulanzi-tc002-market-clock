@@ -167,4 +167,55 @@ describe("webhook notifications", () => {
     now += 10_000;
     expect((await handler(notifyRequest({ message: "下一轮" }))).status).toBe(200);
   });
+
+  test("refuses instead of writing into ZOS, and a refusal costs no rate budget", async () => {
+    let now = 1_000;
+    let pushes = 0;
+    let clears = 0;
+    let suspended = true;
+    const handler = createControlHandler(controller, {
+      notifyNow: () => now,
+      notifyToken: "secret",
+      notify: {
+        push: async () => {
+          pushes += 1;
+          return { status: 200 };
+        },
+        clear: async () => {
+          clears += 1;
+          return { status: 200 };
+        },
+        suspended: () => suspended,
+      },
+    });
+
+    // The short message is the one that used to lie: under ZOS the provisioning
+    // page answers it with the config page and HTTP 200, so the caller saw
+    // {ok:true} for pixels that never reached a screen.
+    const refused = await handler(notifyRequest({ message: "构建失败" }, "secret"));
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({
+      error: "the clock is running ZOS, which has no notification receiver",
+    });
+    expect((await handler(new Request(
+      "http://clock.test:43820/api/notify?token=secret",
+      { method: "DELETE", headers: { Origin: "https://external.example" } },
+    ))).status).toBe(503);
+    expect(pushes).toBe(0);
+    expect(clears).toBe(0);
+
+    // Auth is still decided first: a refusal must not tell an unauthenticated
+    // caller what firmware the device is running.
+    expect((await handler(notifyRequest({ message: "构建失败" }))).status).toBe(401);
+
+    // Six refusals in the same 10s window, then a real one — the bucket was
+    // never touched, so the accepted push is not a 429.
+    for (let index = 0; index < 6; index += 1) {
+      expect((await handler(notifyRequest({ message: `重试 ${index}` }, "secret"))).status).toBe(503);
+    }
+    suspended = false;
+    const accepted = await handler(notifyRequest({ message: "构建失败" }, "secret"));
+    expect(accepted.status).toBe(200);
+    expect(pushes).toBe(1);
+  });
 });

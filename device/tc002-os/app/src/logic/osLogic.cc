@@ -1956,8 +1956,14 @@ static bool onUI_Timer(int id) {
 			// looked plausible, and moved nothing on the device — the same silent
 			// no-op the display endpoint was hardened against on the host side.
 			// The ids are the ones service.ts publishes in publishOsMenu.
+			// navigate() rather than push(): the console naming a destination is
+			// not the user walking down into one. Pinning 音乐 then a channel then
+			// 音乐 again used to leave two entries for 音乐 at two depths, so every
+			// round trip through the console cost the user another 「返回」 to get
+			// home. It no-ops when the destination is already on top, so the
+			// former `top() != &X` guards are now inside the call.
 			if (sLink.focus == "music") {
-				if (shell().top() != &sMusic) shell().push(&sMusic, nowMs);
+				shell().navigate(&sMusic, nowMs);
 			} else if (sLink.focus.compare(0, 5, "game:") == 0) {
 				// `game:tetris` — the console naming one engine rather than the ring.
 				// The ids are the engines' own id() strings, which is also what the
@@ -1970,27 +1976,26 @@ static bool onUI_Timer(int id) {
 				}
 				if (index >= 0) {
 					if (shell().top() != &sGameList && shell().top() != &sGameScreen) {
-						shell().push(&sGameList, nowMs);
+						shell().navigate(&sGameList, nowMs);
 					}
 					sGameList.selectById(ID_GAME_BASE + index, nowMs);
 					sGameScreen.setEngine(sEngines[index]);
-					if (shell().top() != &sGameScreen) shell().push(&sGameScreen, nowMs);
+					shell().navigate(&sGameScreen, nowMs);
 					sSfxGame = tcos::Sfx::gameFromId(sEngines[index]->id());
 					tcos::Sfx::instance().playGame(sSfxGame, tcos::Sfx::kGameStart);
 				}
 			} else if (sLink.focus == "game") {
-				if (shell().top() != &sGameList) shell().push(&sGameList, nowMs);
+				shell().navigate(&sGameList, nowMs);
 			} else if (sLink.focus == "vibe") {
 				// The console's 「在时钟上打开」 button. The id is the one
 				// publishOsMenu emits for the 「VIBE」 entry.
 				sVibeFedSeq = -1;
-				if (shell().top() != &sVibe) shell().push(&sVibe, nowMs);
+				shell().navigate(&sVibe, nowMs);
 			} else if (sLink.focus == "settings") {
 				rebuildSettings(nowMs);
-				if (shell().top() != &sSettings) shell().push(&sSettings, nowMs);
-			} else if (sChannelRing.selectApp(sLink.focus, nowMs) &&
-			           shell().top() != &sChannelRing) {
-				shell().push(&sChannelRing, nowMs);
+				shell().navigate(&sSettings, nowMs);
+			} else if (sChannelRing.selectApp(sLink.focus, nowMs)) {
+				shell().navigate(&sChannelRing, nowMs);
 			}
 		} else if (!sLink.pinned) {
 			sPinnedFocus.clear();

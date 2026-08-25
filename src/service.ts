@@ -15,6 +15,7 @@ import {
   resetDeviceMusicSelection,
   restoreDeviceLyricTheme,
 } from "./control-api.ts";
+import { AppCleanupStore } from "./app-cleanup-store.ts";
 import { LyricThemeStore } from "./lyric-theme-store.ts";
 import { OsSleepRequestStore } from "./os-sleep-request-store.ts";
 import { MusicSessionStore, NeteaseLyricsFallback, NeteaseMusicService } from "./netease-music.ts";
@@ -88,6 +89,12 @@ const workspaceStore = new WorkspaceStore(
 // /data copy in the same poll (ADR 0007).
 const lyricThemeStore = new LyricThemeStore(".runtime/lyric-theme.json");
 restoreDeviceLyricTheme(await lyricThemeStore.load());
+// Apps the last run still owed the device a DELETE for. Loaded here so the
+// controller starts with them and retryCleanup drains them on the first
+// pushDue; on this machine the DELETE that failed was usually failing because
+// the clock was asleep, which is also when a restart is most likely.
+const appCleanupStore = new AppCleanupStore(".runtime/app-cleanup.json", log);
+const pendingAppCleanup = await appCleanupStore.load();
 // Which usage metrics each AI agent pins on the LED. Loaded before the handler
 // like the theme store above, for a plainer reason: the controller reads this
 // table on the very first channel render, and a render that started on the
@@ -189,6 +196,8 @@ const controller = new WorkspaceController({
   // has said so the answer does not change until somebody reflashes, at which
   // point the service is restarted anyway.
   devicePushSuspended: () => osLink.zosFlashed(),
+  appCleanupStore,
+  pendingAppCleanup,
   pixelAssetStore,
   instrumentStore,
   marketIconStore,
@@ -553,7 +562,16 @@ const controlHandler = createControlHandler(controller, {
   },
   deviceInfo: {
     read: async () => {
-      const info = await readClockDeviceInfo(config);
+      let info;
+      try {
+        info = await readClockDeviceInfo(config);
+      } catch (error) {
+        // A live probe that failed is the freshest reachability fact anyone
+        // has; dropping it on the floor is what let /health keep claiming a
+        // clock that had been off for hours.
+        controller.setDeviceUnreachable();
+        throw error;
+      }
       // Keep /health's versions in step with the last successful probe; the boot
       // probe below is the only other writer and it never runs again. The narrow
       // shape is deliberate — serial and MAC must not enter the health snapshot.
@@ -590,7 +608,14 @@ const controlHandler = createControlHandler(controller, {
     push: (appName, payload) => queueLiveWrite(() => pushClockPayloadNamed(config, appName, payload, fetch)),
     clear: (appName) => queueLiveWrite(() => deleteClockApp(config, appName, fetch)),
   },
-  notify,
+  notify: {
+    push: (input) => notify.push(input),
+    clear: () => notify.clear(),
+    // Same sticky, device-reported fact the channel path gates on at
+    // `devicePushSuspended` above. Without it every webhook gets `{ok:true}`
+    // for pixels that never reached a screen.
+    suspended: () => osLink.zosFlashed(),
+  },
   notifyToken: config.notifyToken,
   marketCatalog,
   vibe: {

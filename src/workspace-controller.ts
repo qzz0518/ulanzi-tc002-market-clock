@@ -143,6 +143,15 @@ export interface WorkspaceControllerOptions {
    */
   devicePushSuspended?: () => boolean;
   /**
+   * Where the list of apps still owed a DELETE survives a restart.
+   *
+   * Optional because every test and the legacy path build this controller
+   * without one, and an in-memory list is exactly the behaviour they had.
+   */
+  appCleanupStore?: { save(pending: Record<string, string>): Promise<void> };
+  /** What that store held at boot, so the retry loop resumes rather than restarts. */
+  pendingAppCleanup?: Record<string, string>;
+  /**
    * Where the boot-time workspace migration announces itself.
    *
    * Unlike OsSleepRequestStore's onWarn this defaults to writing the line rather
@@ -347,6 +356,7 @@ export class WorkspaceController {
   }>();
   private readonly previewInFlight = new Map<string, Promise<RenderedChannel>>();
   private cleanupErrors: Record<string, string> = {};
+  private readonly appCleanupStore: WorkspaceControllerOptions["appCleanupStore"];
   private deviceReachable = false;
   private deviceVersions?: { mcu?: string; app?: string };
   private activePushCount = 0;
@@ -370,6 +380,10 @@ export class WorkspaceController {
     this.vibeClient = options.vibeClient;
     this.vibeStarred = options.vibeStarred;
     this.devicePushSuspended = options.devicePushSuspended ?? (() => false);
+    this.appCleanupStore = options.appCleanupStore;
+    // Seeded, not merged: nothing else has run yet, so whatever the last run
+    // wrote down IS the pending list.
+    if (options.pendingAppCleanup) this.cleanupErrors = { ...options.pendingAppCleanup };
     this.onLog = options.onLog ?? ((event, details) => {
       console.log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     });
@@ -419,6 +433,7 @@ export class WorkspaceController {
         this.cleanupErrors[appName] = errorMessage(error);
       }
     }
+    this.persistCleanup();
   }
 
   private validateKnownContent(
@@ -555,6 +570,7 @@ export class WorkspaceController {
         this.cleanupErrors[appName] = errorMessage(error);
       }
     }
+    this.persistCleanup();
     return this.getWorkspace();
   }
 
@@ -568,6 +584,17 @@ export class WorkspaceController {
   setDeviceInfo(info: { mcuVersion?: string; appVersion?: string }): void {
     this.deviceReachable = true;
     this.deviceVersions = { mcu: info.mcuVersion, app: info.appVersion };
+  }
+
+  /**
+   * The other half of `setDeviceInfo`. A probe that failed is the freshest fact
+   * anyone has about the clock, and without somewhere to put it the flag could
+   * only ever go one way. The versions are deliberately kept: they describe the
+   * firmware that was there, and blanking them would turn a clock that is
+   * merely asleep into one we know nothing about.
+   */
+  setDeviceUnreachable(): void {
+    this.deviceReachable = false;
   }
 
   getEffectiveRefreshIntervalMs(channel: ChannelConfig): number {
@@ -991,12 +1018,23 @@ export class WorkspaceController {
             Math.ceil(rendered.animationDurationMs / 1_000) + 30,
           ),
         );
-        await this.queueDeviceWrite(() =>
-          this.pushPayload(
-            channel.appName,
-            buildImagePayload(rendered.image, rendered.mimeType, durationSeconds),
-          )
-        );
+        try {
+          await this.queueDeviceWrite(() =>
+            this.pushPayload(
+              channel.appName,
+              buildImagePayload(rendered.image, rendered.mimeType, durationSeconds),
+            )
+          );
+        } catch (error) {
+          // The write is the only step in this method that talks to the device,
+          // so it is the only one that can report it gone — a renderer throwing
+          // says nothing about the clock. Until this existed the flag was a
+          // latch: set true by the first success and by the boot probe, with no
+          // path back, so a clock unplugged an hour ago still read as reachable
+          // on /health and the console showed the workspace healthy.
+          this.deviceReachable = false;
+          throw error;
+        }
       }
       runtime.animationDurationMs = rendered.animationDurationMs;
       runtime.contentErrors = rendered.contentErrors;
@@ -1057,6 +1095,7 @@ export class WorkspaceController {
     // official firmware, and retrying would only feed the captive portal.
     if (this.devicePushSuspended()) {
       this.cleanupErrors = {};
+      this.persistCleanup();
       return;
     }
     const retainedApps = new Set(
@@ -1074,6 +1113,18 @@ export class WorkspaceController {
         this.cleanupErrors[appName] = errorMessage(error);
       }
     }
+    this.persistCleanup();
+  }
+
+  /**
+   * Writes the pending-delete list down after every change to it.
+   *
+   * Deliberately not awaited: the callers are on the push path, and a DELETE
+   * retry must not wait on a disk write whose only job is to survive a restart.
+   * The store swallows and logs its own failures for the same reason.
+   */
+  private persistCleanup(): void {
+    void this.appCleanupStore?.save({ ...this.cleanupErrors });
   }
 
   async pushNow(reason: "scheduled" | "manual" = "manual"): Promise<WorkspaceRuntimeSnapshot> {

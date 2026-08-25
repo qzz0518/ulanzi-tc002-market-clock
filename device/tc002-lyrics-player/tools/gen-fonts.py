@@ -47,7 +47,13 @@ from PIL import Image, ImageDraw, ImageFont
 SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = SCRIPT_DIR.parent            # device/tc002-lyrics-player
 REPO_ROOT = APP_DIR.parent.parent      # repo root ("Ulanzi Clock")
-VISUAL_DIR = APP_DIR / "app" / "src" / "visual"
+# device/shared-visual, not this firmware's own visual/. The tables outgrew the
+# lyrics player: ZOS includes them through visual/Glyphs.cpp and the web preview
+# mirrors them through web/src/lib/pixel-glyph-data.ts, and test/pixel-glyphs.ts
+# asserts the two are identical bit for bit. Writing them back into
+# device/tc002-lyrics-player/app/src/visual/ would regenerate a copy nothing
+# includes any more, leave every real consumer untouched, and report success.
+VISUAL_DIR = REPO_ROOT / "device" / "shared-visual"
 CJK_HEADER = VISUAL_DIR / "CjkFont.h"
 LATIN_HEADER = VISUAL_DIR / "LatinFont.h"
 

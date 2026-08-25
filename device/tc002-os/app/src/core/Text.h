@@ -13,7 +13,21 @@ namespace text {
 // the layout loop forever.
 uint32_t utf8Next(const char*& p);
 
-// Number of codepoints, not bytes.
+/**
+ * Folds fullwidth punctuation onto the ASCII form the glyph table has.
+ *
+ * The table was generated from song lyrics, which do not use 「，」 — the
+ * character a Chinese IME emits by default — so it was drawing a hole. Every
+ * width and every draw goes through this, and it is exported so a caller that
+ * needs to know what will actually be rendered can ask.
+ *
+ * One-to-one, so a substitution never reflows the cells around it. The mapping
+ * mirrors PUNCTUATION_FALLBACK in web/src/lib/pixel-text-block.ts; the two are
+ * asserted identical by test/pixel-punctuation-fallback.test.ts.
+ */
+uint32_t foldPunctuation(uint32_t cp);
+
+// Number of codepoints, not bytes. Folding is one-to-one, so this is unaffected.
 int countCells(const char* utf8);
 
 // Total advance width in pixels: 6 per ASCII cell, 12 per anything else.

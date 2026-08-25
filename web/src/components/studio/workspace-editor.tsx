@@ -228,13 +228,14 @@ function NoticeWebhookHint({ firmwareMode }: { firmwareMode: FirmwareMode }) {
               contentClassName="px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
             >
               <strong className="text-cladd-fg">时钟正在运行 ZOS，这条 Webhook 暂时不会上屏。</strong>
-              它写的是官方固件的 Custom App 接收端，ZOS 上没有这个接口，服务会返回
-              「clock returned HTTP 503」。恢复官方固件后即刻恢复。
+              它写的是官方固件的 Custom App 接收端，ZOS 上没有这个接口，服务因此直接
+              拒绝，返回 HTTP 503。恢复官方固件后即刻恢复。
             </Surface>
           )}
           <p className="m-0">
             与频道里的通知板内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的
-            地址 POST 一条消息即可立刻上屏，显示 holdSeconds 秒后自动消失，支持中文。
+            地址 POST 一条消息，时钟即刻收到，显示 holdSeconds 秒后自动消失，支持中文。
+            它写进名为 notify 的 Custom App——什么时候轮到它上屏，仍由设备的自动翻页决定。
           </p>
           <code
             className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs"

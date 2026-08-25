@@ -18,7 +18,50 @@ int continuationBytes(unsigned char lead) {
   return -1;  // a stray continuation byte or an invalid lead
 }
 
+// The shared table carries hanzi, kana and 。！？、…～「」 but not the rest of the
+// fullwidth punctuation, because it was generated from song lyrics and lyrics do
+// not use 「，」 — which a Chinese IME emits by default, so 「你好，世界」 drew a
+// hole. Each entry maps to an ASCII form the table does have.
+//
+// Substituting rather than adding 12px glyphs is the better answer on a 52 px
+// row, and the reasoning is the host's: half-width punctuation is 6 px against
+// fullwidth's 12 px, so a comma stops eating a quarter of the four-character
+// budget. 《》〈〉【】 have no honest ASCII equivalent and are deliberately
+// absent — they still fall through and leave a gap.
+//
+// THIS TABLE IS A COPY, and copies drift. The original is PUNCTUATION_FALLBACK
+// in web/src/lib/pixel-text-block.ts; test/pixel-punctuation-fallback.test.ts
+// parses this file and asserts the two are identical, for the same reason
+// test/pixel-glyphs.test.ts does it for the glyph tables — the device and the
+// preview have to draw the same pixels.
+struct PunctuationFold { uint32_t from; uint32_t to; };
+const PunctuationFold kPunctuationFolds[] = {
+  {0xFF0C, ','},
+  {0xFF1A, ':'},
+  {0xFF1B, ';'},
+  {0x201C, '"'},
+  {0x201D, '"'},
+  {0x2018, '\''},
+  {0x2019, '\''},
+  {0xFF08, '('},
+  {0xFF09, ')'},
+  {0x00B7, '.'},
+  {0x2014, '-'},
+};
+
 }  // namespace
+
+uint32_t foldPunctuation(uint32_t cp) {
+  // Linear over eleven entries, all above U+00B7: the early reject means every
+  // hanzi and every ASCII character costs one comparison, and punctuation is
+  // rare enough that the rest is noise even at one call per cell per frame.
+  if (cp < 0x00B7) return cp;
+  const int count = sizeof(kPunctuationFolds) / sizeof(kPunctuationFolds[0]);
+  for (int i = 0; i < count; ++i) {
+    if (kPunctuationFolds[i].from == cp) return kPunctuationFolds[i].to;
+  }
+  return cp;
+}
 
 uint32_t utf8Next(const char*& p) {
   const unsigned char lead = static_cast<unsigned char>(*p);
@@ -71,7 +114,7 @@ int measure(const char* utf8) {
   int width = 0;
   const char* p = utf8;
   while (*p) {
-    width += glyphs::cellWidth(utf8Next(p));
+    width += glyphs::cellWidth(foldPunctuation(utf8Next(p)));
   }
   return width;
 }
@@ -83,7 +126,7 @@ int prefixBytesThatFit(const char* utf8, int maxPx) {
   const char* lastFit = utf8;
   while (*p) {
     const char* cellStart = p;
-    const int w = glyphs::cellWidth(utf8Next(p));
+    const int w = glyphs::cellWidth(foldPunctuation(utf8Next(p)));
     if (width + w > maxPx) return static_cast<int>(lastFit - utf8);
     width += w;
     lastFit = p;
@@ -103,7 +146,7 @@ void draw(Surface& out, const char* utf8, int x, int y, const Color& color,
   int penX = x;
   const char* p = utf8;
   while (*p) {
-    const uint32_t cp = utf8Next(p);
+    const uint32_t cp = foldPunctuation(utf8Next(p));
     const glyphs::Bitmap bitmap = glyphs::lookup(cp);
     const int advance = bitmap.width;
 

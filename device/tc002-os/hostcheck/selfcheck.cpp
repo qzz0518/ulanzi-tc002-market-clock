@@ -571,6 +571,22 @@ void checkBootScreen() {
 void checkGlyphs() {
   using namespace tcos;
   check(glyphs::cjkCount() == 5195, "the CJK table still holds 5195 glyphs");
+
+  // The table was generated from song lyrics, so it has 。！？、 but not 「，」 —
+  // the character a Chinese IME emits by default. text::foldPunctuation is what
+  // stops that drawing a hole, and folding to half-width is narrower than a
+  // fullwidth glyph would have been: 6 px instead of 12 on a 52 px row.
+  check(glyphs::lookup(0xFF0C).rows == 0, "the table really has no fullwidth comma");
+  check(text::foldPunctuation(0xFF0C) == ',', "「，」 folds to an ASCII comma");
+  check(text::foldPunctuation(0xFF1A) == ':' && text::foldPunctuation(0x2014) == '-',
+        "the rest of the fullwidth punctuation folds too");
+  check(text::foldPunctuation(0x4E2D) == 0x4E2D, "a hanzi is never folded");
+  check(text::foldPunctuation('A') == 'A', "ASCII is never folded");
+  check(text::foldPunctuation(0x300A) == 0x300A,
+        "《 has no honest ASCII equivalent and is deliberately left alone");
+  // 你好，世界 = four full-width cells plus one folded comma.
+  check(text::measure("\xE4\xBD\xA0\xE5\xA5\xBD\xEF\xBC\x8C\xE4\xB8\x96\xE7\x95\x8C") == 4 * 12 + 6,
+        "the folded comma costs 6 px, not 12 and not 0");
   check(glyphs::latinCount() == 0x7E - 0x20 + 1, "the Latin table covers ASCII 0x20..0x7E");
   check(glyphs::cellWidth('A') == 6, "ASCII is half-width");
   check(glyphs::cellWidth(0x4E2D) == 12, "CJK is full-width");
@@ -831,6 +847,38 @@ void checkShell() {
 
   shell.onInput(kInputTurnCw, 4000);
   check(shell.depth() == 1, "a turn never pops");
+
+  // navigate(): the console naming a destination is not the user walking into
+  // one. This is the shape of the bug it fixes — pin A, pin B, pin A again used
+  // to leave two entries for A at two depths, so the walk home got one level
+  // longer every round trip through the console.
+  SolidScreen a(Color(255, 255, 0));
+  SolidScreen b(Color(0, 255, 255));
+  shell.navigate(&a, 5000);
+  check(shell.depth() == 2 && shell.top() == &a, "navigate opens what is not open");
+  shell.navigate(&a, 5100);
+  check(shell.depth() == 2, "navigate to the top screen is a no-op");
+  shell.navigate(&b, 5200);
+  check(shell.depth() == 3 && shell.top() == &b, "navigate stacks a new destination");
+  const int entersBefore = a.mEnters;
+  shell.navigate(&a, 5300);
+  check(shell.depth() == 3 - 1 && shell.top() == &a, "navigate returns to the open copy");
+  check(a.mEnters == entersBefore + 1, "the revealed screen is re-entered");
+  check(b.mExits == 1, "the level walked back past still gets onExit");
+  shell.navigate(&b, 5400);
+  shell.navigate(&a, 5500);
+  check(shell.depth() == 2, "round trips through the console do not grow the stack");
+
+  // The depth cap is a backstop for callers that push without checking, not a
+  // budget: three levels is the deepest legitimate path. Refused rather than
+  // dropping the oldest, because the bottom of the stack is the way home.
+  // Sized once so the vector never reallocates: the Shell holds these pointers.
+  std::vector<SolidScreen> filler(Shell::kMaxDepth, SolidScreen(Color(8, 8, 8)));
+  for (int i = 0; i < Shell::kMaxDepth; ++i) shell.push(&filler[i], 6000 + i);
+  check(shell.depth() == Shell::kMaxDepth, "push stops at the depth cap");
+  Screen* const capped = shell.top();
+  shell.push(&filler[0], 7000);
+  check(shell.top() == capped, "a push past the cap changes nothing");
 }
 
 // Every beat of every entry motion, pinned at chosen instants.

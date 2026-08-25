@@ -98,7 +98,7 @@ export function WorkspaceActions({
       : !channelEnabled
         ? "频道未启用 · 不在时钟菜单里"
         : pinnedHere
-          ? "已固定在时钟上 · 旋钮暂时不切台"
+          ? "已固定在时钟上 · 旋钮随时可切走"
           : "ZOS 主动拉取 · 保存后已通知时钟更新"
     : !lastPushAt
       ? "尚未推送到设备"
@@ -141,10 +141,15 @@ export function WorkspaceActions({
             disabled={Boolean(disabled) || !channelEnabled || pinBusy}
             aria-busy={pinBusy}
             aria-pressed={pinnedHere}
+            // 「固定」 is a one-shot jump, not a lock: osLogic's focus router
+            // acts on the EDGE of a focus change and nothing in the input path
+            // ever reads `pinned`, so the knob works the whole time. Cancelling
+            // does not move the panel — it re-arms, so the same channel can be
+            // sent again.
             title={pinnedHere
               ? "交还旋钮，时钟恢复自己切台"
               : channelEnabled
-                ? "把时钟切到这个频道并锁住旋钮"
+                ? "把时钟切到这个频道；旋钮全程仍可用"
                 : "频道未启用，不会出现在时钟菜单里"}
             onClick={() => pin(channelAppName)}
           >

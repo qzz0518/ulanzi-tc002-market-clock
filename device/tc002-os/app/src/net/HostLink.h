@@ -36,7 +36,11 @@ class HostLink {
   struct Snapshot {
     bool online;          // a pull has succeeded recently
     int seq;
-    bool pinned;          // the console is driving; the ring is locked
+    // The console has named a destination. NOT a lock: osLogic acts on the
+    // EDGE of a focus change (logic/osLogic.cc), and nothing in the input path
+    // reads this, so the knob keeps working. false re-arms, so the same focus
+    // can be sent again.
+    bool pinned;
     bool mirrorWanted;
     std::string focus;
     std::vector<StateDoc::Item> items;

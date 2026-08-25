@@ -62,6 +62,15 @@ class Shell {
   // pretending this is a general-purpose map.
   static const int kMaxEntryStyles = 8;
 
+  // The deepest the stack may get. The deepest legitimate path is three levels
+  // (启动器 > 游戏列表 > 游戏), so this is a backstop, not a budget: reaching it
+  // means a caller pushed without checking, and the cost of that bug is paid by
+  // the user in long-presses to get home. Screens are singletons and navigate()
+  // refuses to stack a second copy of one, so the reachable depth is already
+  // bounded by the number of distinct destinations; this bounds it for the
+  // callers that push directly.
+  static const int kMaxDepth = 8;
+
   Shell(int width, int height);
 
   // Shell does not own screens; the caller keeps them alive for the app's life.
@@ -70,6 +79,22 @@ class Shell {
   void reset(Screen* root, int nowMs);
   void push(Screen* screen, int nowMs);
   void pop(int nowMs);
+
+  /**
+   * Go to `screen` the way a remote caller means it — a destination, not a
+   * descent. Already on top: nothing happens. Already open further down: pop
+   * back to it. Otherwise push.
+   *
+   * This is the primitive for navigation the user did not initiate (the
+   * console pinning a channel, an entry being opened by id). Plain push() is
+   * still right for the knob, where every level the user walked down is a level
+   * they expect 「返回」 to walk back up.
+   *
+   * Without it, pinning A then B then A again left two entries for A at two
+   * depths — the same pixels twice, and a walk home that got longer every time
+   * the console was touched.
+   */
+  void navigate(Screen* screen, int nowMs);
 
   /**
    * Declares how `screen` arrives. Survives reset(), because it describes the

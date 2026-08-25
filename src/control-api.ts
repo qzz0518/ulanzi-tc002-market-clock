@@ -164,6 +164,21 @@ export interface ControlApiOptions {
   notify?: {
     push: (input: NotifyMessage) => Promise<{ status: number }>;
     clear: () => Promise<{ status: number }>;
+    /**
+     * True once ZOS has replaced the official app. Same fact and same reason as
+     * `devicePushSuspended` on the channel path: `POST /api/custom` is gone and
+     * the provisioning page answers every unknown path with the config page and
+     * HTTP 200, so the write "succeeds" into a 404 wearing a 200. The channel
+     * path already skips the device write; notify never did, and its failure is
+     * worse — a caller that gets `{ok:true}` has no second signal to check.
+     *
+     * The size split makes it dangerous rather than merely wrong: the portal
+     * caps a request at 8 KiB, so a short "构建失败" (412 B) is swallowed as a
+     * fake success while a long message that needs a scrolling GIF (~21 KB) is
+     * rejected outright and surfaces as 503. Short is exactly what CI and Home
+     * Assistant send.
+     */
+    suspended?: () => boolean;
   };
   notifyToken?: string;
   notifyNow?: () => number;
@@ -1588,6 +1603,15 @@ export function createControlHandler(
         }
         if (!notifyAuthorized(request, url, options.notifyToken)) {
           return jsonResponse({ error: "notification token is invalid" }, 401);
+        }
+        // Refused rather than attempted: see `suspended` on the notify option.
+        // Checked after auth so an unauthenticated caller cannot use the status
+        // code to learn what firmware is on the device, and before the rate
+        // limiter so a refusal never consumes somebody's budget.
+        if (options.notify.suspended?.()) {
+          return jsonResponse({
+            error: "the clock is running ZOS, which has no notification receiver",
+          }, 503);
         }
         if (request.method === "DELETE") {
           await options.notify.clear();

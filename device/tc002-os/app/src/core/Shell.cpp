@@ -111,6 +111,10 @@ void Shell::beginTransition(transition::Style style, Motion motion, int nowMs) {
 
 void Shell::push(Screen* screen, int nowMs) {
   if (screen == 0) return;
+  // Refused rather than dropping the oldest level: the bottom of the stack is
+  // the launcher, and a device that silently loses its way home is worse than
+  // one that ignores a push nothing legitimate should have made.
+  if (depth() >= kMaxDepth) return;
   const transition::Style style = styleFor(screen);
   beginTransition(style, kDescend, nowMs);
   Screen* leaving = top();
@@ -135,6 +139,25 @@ void Shell::pop(int nowMs) {
   if (!mStackStyles.empty()) mStackStyles.pop_back();
   Screen* revealed = top();
   if (revealed != 0) revealed->onEnter(nowMs);
+}
+
+void Shell::navigate(Screen* screen, int nowMs) {
+  if (screen == 0 || top() == screen) return;
+  // Screens are singletons, so a second entry for one is two names for the same
+  // pixels — and every level the user has to walk back past is one the console
+  // added without asking. Coming back up to the open copy keeps the stack a
+  // description of where you can go, not a log of what the console has done.
+  //
+  // Popping level by level rather than truncating the vector is what keeps this
+  // from being the arcade PageManager's navigateTo (see Shell.h): each level
+  // still gets its onExit, the one it was entered with still plays its motion,
+  // and the arrival is a transition rather than a hard cut.
+  for (int i = 0; i < depth(); ++i) {
+    if (mStack[i] != screen) continue;
+    while (depth() > i + 1) pop(nowMs);
+    return;
+  }
+  push(screen, nowMs);
 }
 
 void Shell::onInput(Input input, int nowMs) {

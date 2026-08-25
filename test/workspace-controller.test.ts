@@ -155,6 +155,53 @@ describe("multi-channel workspace controller", () => {
     expect(controller.getWorkspace().channels[0]?.appName).toBe("market_new");
   });
 
+  test("carries a failed delete across a restart instead of forgetting it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ulanzi-cleanup-restart-"));
+    directories.push(directory);
+    const workspacePath = join(directory, "workspace.json");
+    // Stands in for AppCleanupStore: the controller only ever calls save().
+    let saved: Record<string, string> = {};
+    const appCleanupStore = { save: async (pending: Record<string, string>) => { saved = pending; } };
+
+    // The clock is asleep, so the DELETE fails. Before this was written down,
+    // the retry list lived only in memory.
+    const first = new WorkspaceController({
+      config: loadConfig({ CLOCK_HOST: "tc002.test" }),
+      workspace: fixtureWorkspace(),
+      workspaceStore: new WorkspaceStore(workspacePath),
+      marketClient: {} as never,
+      pushPayload: async () => ({ status: 200 }),
+      deleteApp: async () => { throw new Error("clock request timed out after 4000ms"); },
+      appCleanupStore,
+      now: () => NOW,
+    });
+    const next = fixtureWorkspace();
+    next.channels[1]!.enabled = false;
+    await first.saveWorkspace(next);
+    expect(first.getState().cleanupErrors).toEqual({ fire: "clock request timed out after 4000ms" });
+    expect(saved).toEqual({ fire: "clock request timed out after 4000ms" });
+
+    // A restart in that window used to drop the list: the workspace no longer
+    // mentions the channel, so nothing else remembers the app is on the device.
+    const deleted: string[] = [];
+    const second = new WorkspaceController({
+      config: loadConfig({ CLOCK_HOST: "tc002.test" }),
+      workspace: next,
+      workspaceStore: new WorkspaceStore(workspacePath),
+      marketClient: {} as never,
+      pushPayload: async () => ({ status: 200 }),
+      deleteApp: async (appName) => { deleted.push(appName); return { status: 200 }; },
+      appCleanupStore,
+      pendingAppCleanup: saved,
+      now: () => NOW,
+    });
+    expect(second.getState().cleanupErrors).toEqual({ fire: "clock request timed out after 4000ms" });
+    await second.pushDue();
+    expect(deleted).toEqual(["fire"]);
+    expect(second.getState().cleanupErrors).toEqual({});
+    expect(saved).toEqual({});
+  });
+
   test("rejects unknown renderers and malformed canvases before persistence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "ulanzi-invalid-"));
     directories.push(directory);

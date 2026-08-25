@@ -108,6 +108,25 @@ if [ "$entries" != "2" ]; then
   echo "FAIL both 配网 entry points (设置 row, console request) must call openProvisioning(); found $entries" >&2
   exit 1
 fi
+# Same guard, for the rule that decides HOW FAR THE USER IS FROM HOME. The
+# console pinning a destination is remote navigation, not the user walking down
+# into one, so it must go through Shell::navigate() — which returns to an open
+# copy instead of stacking a second entry for the same singleton. A bare push()
+# here is invisible until somebody pins A, then B, then A again and finds the
+# panel three long-presses from the launcher. Shell's own half is asserted by
+# the checks below; this half is in the file none of them compile.
+router=$(awk '/sPinnedFocus = sLink\\.focus;/{inb=1} inb{print} /\\} else if \\(!sLink\\.pinned\\) \\{/{if(inb) exit}' "$oslogic")
+if printf '%s' "$router" | grep -q 'shell()\\.push('; then
+  echo "FAIL the pinned-focus router must navigate(), not push(); a bare push stacks a duplicate" >&2
+  exit 1
+fi
+# Seven call sites over six destinations: 游戏列表 is reached both by `game` and
+# as the first of the two levels `game:<id>` opens.
+routes=$(printf '%s' "$router" | grep -c 'shell()\\.navigate(' || true)
+if [ "$routes" != "7" ]; then
+  echo "FAIL the pinned-focus router should route every destination through navigate(); expected 7 sites, found $routes" >&2
+  exit 1
+fi
 # Same guard, for the rule that decides whether a BLE join needs the pairing
 # code. `host`, `host:port` and `http://host:port` all name one console, and
 # BleProvisionSession::hostIsTakeover folds an over-the-air host through
@@ -121,6 +140,16 @@ if [ "$hosturl" != "device/tc002-os/app/src/net/BleProtocol.cpp" ]; then
   echo "FAIL the console-URL normaliser belongs to net/BleProtocol.cpp alone; found: $hosturl" >&2
   exit 1
 fi
+# EVERY codepoint the firmware can put on the panel must have a glyph, including
+# the ones in files no host check compiles. A missing codepoint does not fall
+# back to a box or a space - glyphs::lookup returns rows==0 and the renderer
+# draws nothing - so the symptom is a character that is simply absent from a
+# label, which on a 52 px row reads as a layout bug rather than a font one.
+# The in-binary coverage check only walks the eight 夜间息屏 strings, so it could
+# not have caught what this was written for: the fullwidth comma was missing from
+# the table for the life of the firmware, because the character set was generated
+# from song lyrics and lyrics do not use it.
+python3 device/tc002-os/hostcheck/glyph-coverage.py || exit 1
 # The seven game engines are compiled in unchanged from the arcade tree, so its
 # src is on the include path AFTER this firmware's own: utils/Surface.h resolves
 # to the bridge here, visual/PixelFont.h falls through to the arcade's.

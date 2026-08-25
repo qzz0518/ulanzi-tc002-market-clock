@@ -915,6 +915,14 @@ curl --request DELETE 'http://你的服务地址:43820/api/notify' \
   --header "Authorization: Bearer $NOTIFY_TOKEN"
 ```
 
+**ZOS 在位时这条路整体拒绝。** 它写的是官方固件的 `POST /api/custom`，而 ZOS 顶替官方 app
+之后 :80 长期由配网页占着，对任何未知路径都回配置页加 HTTP 200——短通知因此会「成功」而不
+上屏，返回 `{ok:true}`；只有长到需要滚动 GIF 的消息（超过配网页 8 KiB 的请求上限）才会显式
+失败。**短句正是 CI 和 Home Assistant 最常发的那种**。所以设备一旦上报过 `flashed`，
+`/api/notify` 直接返回 503 并说明原因，而不是尝试写入。这与频道推送 `devicePushSuspended`
+是同一个事实、同一个理由（见上文「ZOS 在位时，推送这一步会停」）。拒绝发生在鉴权之后、限流
+之前：前者让未鉴权的调用方无法用状态码探出设备跑的是什么固件，后者让一次拒绝不消耗配额。
+
 通知字段：`message` 必填（1–96 字符）；`color` 默认 `#00ff66`；`background` 默认
 `#000000`；`fontScale` 可选 `1`（5px ASCII）或 `2`（12px CJK，默认）；`speed` 为
 4–40 px/s；`holdSeconds` 为 5–300 秒，默认 45 秒。超宽消息循环滚动，最多生成 120 帧；
