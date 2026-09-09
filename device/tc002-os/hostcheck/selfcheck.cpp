@@ -31,6 +31,7 @@
 #include "net/ConsoleDiscovery.h"
 #include "net/FirmwareUpdate.h"
 #include "net/FrameBundle.h"
+#include "net/DeviceAudio.h"
 #include "net/HostLink.h"
 #include "net/HttpClient.h"
 #include "net/HttpServer.h"
@@ -9856,6 +9857,190 @@ void checkConsoleDiscovery() {
 
 }  // namespace
 
+// The clock as the NetEase player: the protocol it reads and the decisions it
+// returns, without a socket or a decoder — see net/DeviceAudio.h for why the
+// decisions are a Plan rather than sink calls.
+void checkDeviceAudio() {
+  using tcos::DeviceAudioLink;
+  using tcos::DeviceMusicState;
+  typedef DeviceAudioLink::Plan Plan;
+
+  // Verbatim GET /api/music/device/state from src/control-api.ts, with the
+  // web-only tail the device must ignore.
+  static const char* kBody =
+      "SEQ\t7\nSRC\tnetease\nRMT\t0\nTID\t1974443814\nPLAY\t1\nMODE\tspotlight\n"
+      "SKIN\tsignal\nACCENT\t-\nSEEK\t-1\nRPOS\t-1\nRDUR\t-1\nRPLAY\t0\nRVOL\t-1\n"
+      "HBAGE\t-1\nFWPOLL\t-1\nDTRACK\t-\nDPLAY\t0\nDPLAYING\t0\n";
+  DeviceMusicState state;
+  check(DeviceAudioLink::parseState(kBody, &state), "the live document parses");
+  check(state.seq == 7 && !state.remote && state.trackId == "1974443814" && state.play &&
+            state.seekMs == -1,
+        "and every field the device acts on comes through");
+  check(DeviceAudioLink::field(kBody, "SKIN") == "signal", "a field is found by key");
+  check(DeviceAudioLink::field(kBody, "SK").empty(), "a key prefix is not a key");
+  check(DeviceAudioLink::field(kBody, "NOPE").empty(), "an absent field is empty");
+  check(DeviceAudioLink::field("TID\t42\r\n", "TID") == "42", "a CR is not part of the value");
+  check(!DeviceAudioLink::parseState("<html>", &state), "a body with no SEQ is not a document");
+  DeviceMusicState dash;
+  check(DeviceAudioLink::parseState("SEQ\t1\nTID\t-\nSEEK\t-1\n", &dash) && dash.trackId.empty(),
+        "TID - is nothing selected");
+  DeviceMusicState remote;
+  check(DeviceAudioLink::parseState("SEQ\t2\nRMT\t1\nTID\tabc\nPLAY\t1\n", &remote) &&
+            remote.remote && remote.trackId == "abc",
+        "RMT 1 is the remote source");
+
+  check(DeviceAudioLink::heartbeatBody("1974443814", 12345, true) ==
+            "{\"trackId\":\"1974443814\",\"playheadMs\":12345,\"playing\":true}",
+        "the heartbeat is the exact body the service parses");
+  check(DeviceAudioLink::heartbeatBody("a\"b", -5, false) ==
+            "{\"trackId\":\"a\\\"b\",\"playheadMs\":0,\"playing\":false}",
+        "a quote in an id is escaped and a negative playhead clamped");
+  check(DeviceAudioLink::playingReportBody(true) == "{\"playing\":true}" &&
+            DeviceAudioLink::playingReportBody(false) == "{\"playing\":false}",
+        "the report is the one field the control patch understands");
+
+  // --- transitions ----------------------------------------------------------
+  DeviceAudioLink link;
+  check(!link.wantsHeartbeat() && !link.hasTrack() && !link.playing(),
+        "idle: no track, nothing to say");
+
+  DeviceMusicState s1;
+  s1.seq = 7;
+  s1.trackId = "A";
+  s1.play = true;
+  Plan p = link.applyState(s1, 1000);
+  check(p.fetch && p.trackId == "A" && !p.play && !p.stop && p.seekMs < 0 && p.setPlaying < 0,
+        "first document: fetch the track and nothing else");
+  check(!link.wantsHeartbeat(), "no heartbeat while the bytes are still arriving");
+  p = link.applyState(s1, 1500);
+  check(p.empty(), "the same document again mid-fetch does nothing");
+
+  p = link.noteTrackLoaded("A", true, 2000);
+  check(p.play && p.setPlaying < 0 && !p.fetch && !p.stop, "loaded: play, and the console said playing");
+  check(link.hasTrack() && link.wantsHeartbeat() && link.playing(), "a heartbeat is honest now");
+  check(link.playheadMs(2000) == 0 && link.playheadMs(5000) == 3000, "the clock runs from the load");
+  p = link.applyState(s1, 6000);
+  check(p.empty(), "the same sequence while playing does nothing");
+
+  DeviceMusicState s2 = s1;
+  s2.seq = 8;
+  s2.play = false;
+  p = link.applyState(s2, 7000);
+  check(p.setPlaying == 0 && !p.fetch && p.seekMs < 0, "a console pause");
+  check(!link.playing() && link.playheadMs(9000) == 5000, "freezes the clock where it was");
+  p = link.applyState(s2, 7500);
+  check(p.empty(), "and is not applied twice");
+
+  DeviceMusicState s3 = s2;
+  s3.seq = 9;
+  s3.seekMs = 30000;
+  p = link.applyState(s3, 8000);
+  check(p.seekMs == 30000 && p.setPlaying < 0, "a console seek while paused");
+  check(link.playheadMs(9000) == 30000, "re-anchors the clock");
+
+  DeviceMusicState s4 = s3;
+  s4.seq = 10;
+  s4.play = true;
+  p = link.applyState(s4, 10000);
+  check(p.setPlaying == 1 && p.seekMs < 0, "a resume, and the seek is not repeated");
+  check(link.playheadMs(11000) == 31000, "the clock runs on from the seek");
+
+  // A press on the clock answers locally and queues a report; the service's
+  // echo of that report must not toggle it back.
+  link.togglePlay(12000);
+  check(!link.playing() && link.playheadMs(13000) == 32000, "a press pauses at once");
+  DeviceMusicState echo = s4;
+  echo.seq = 11;
+  echo.play = false;
+  p = link.applyState(echo, 13000);
+  check(p.empty(), "the echo of our own pause is a no-op");
+  link.togglePlay(14000);
+  check(link.playing() && link.playheadMs(15000) == 33000, "a second press resumes where it stopped");
+
+  DeviceMusicState s6 = echo;
+  s6.seq = 12;
+  s6.trackId = "B";
+  s6.play = true;
+  s6.seekMs = 30000;  // the previous track's, still in the document
+  p = link.applyState(s6, 16000);
+  check(p.fetch && p.trackId == "B" && p.seekMs < 0 && !p.play,
+        "a new track: fetch it; the old seek is not carried over");
+  check(!link.wantsHeartbeat() && !link.hasTrack(), "silent while B downloads");
+
+  DeviceMusicState s7 = s6;
+  s7.seq = 13;
+  s7.trackId = "C";
+  p = link.applyState(s7, 17000);
+  check(p.fetch && p.trackId == "C", "the selection moves on before B arrived");
+  p = link.noteTrackLoaded("B", true, 18000);
+  check(p.fetch && p.trackId == "C" && !p.play, "a stale download is not played; C is fetched instead");
+
+  p = link.noteTrackLoaded("C", false, 19000);
+  check(p.empty() && !link.hasTrack() && !link.wantsHeartbeat(), "a failed fetch leaves no track");
+  p = link.applyState(s7, 20000);
+  check(p.empty(), "and no retry before the gate");
+  p = link.applyState(s7, 19000 + DeviceAudioLink::kRetryMs);
+  check(p.fetch && p.trackId == "C", "one retry once the gate opens");
+  p = link.noteTrackLoaded("C", true, 30000);
+  check(p.play && link.playing(), "the retry lands");
+
+  DeviceMusicState s8 = s7;
+  s8.seq = 14;
+  s8.trackId = "D";
+  p = link.applyState(s8, 31000);
+  check(p.fetch, "D is fetched");
+  DeviceMusicState s9 = s8;
+  s9.seq = 15;
+  s9.play = false;
+  p = link.applyState(s9, 32000);
+  check(p.empty(), "a pause during the download is tracked, not acted on");
+  p = link.noteTrackLoaded("D", true, 33000);
+  check(p.play && p.setPlaying == 0, "loaded into a pause: start the decoder, then hold it");
+  check(!link.playing() && link.wantsHeartbeat() && link.playheadMs(40000) == 0,
+        "the heartbeat says paused at 0");
+
+  DeviceMusicState r = s9;
+  r.seq = 16;
+  r.remote = true;
+  p = link.applyState(r, 34000);
+  check(p.stop && !p.fetch && !p.play, "a remote source drops the track");
+  check(!link.wantsHeartbeat() && !link.hasTrack(), "and the link goes quiet");
+  p = link.applyState(r, 35000);
+  check(p.empty(), "quietly");
+  DeviceMusicState back = r;
+  back.seq = 17;
+  back.remote = false;
+  p = link.applyState(back, 36000);
+  check(p.fetch && p.trackId == "D", "the source coming back is a fresh fetch");
+
+  // Nothing selected, after something was.
+  DeviceAudioLink link2;
+  link2.applyState(s1, 0);
+  link2.noteTrackLoaded("A", true, 0);
+  DeviceMusicState none;
+  none.seq = 2;
+  p = link2.applyState(none, 100);
+  check(p.stop && !link2.hasTrack(), "nothing selected: stop and drop");
+  p = link2.applyState(none, 200);
+  check(p.empty(), "once");
+
+  // End of file: the decoder's thread reports it; the clock freezes and the
+  // heartbeat keeps saying so until the console picks the next track.
+  DeviceAudioLink link3;
+  link3.applyState(s1, 0);
+  link3.noteTrackLoaded("A", true, 0);
+  link3.noteCompleted(4000);
+  check(!link3.playing() && link3.playheadMs(9000) == 4000 && link3.wantsHeartbeat(),
+        "end of file freezes the clock; the console decides what is next");
+
+  DeviceAudioLink link4;
+  link4.togglePlay(5);
+  check(!link4.playing() && !link4.hasTrack(), "a press with no track is inert");
+
+  check(std::string(DeviceAudioLink::trackPath()) == "/tmp/track.mp3",
+        "the file is where the sideloaded player put it, so the cleanup lists stay true");
+}
+
 int main() {
   std::printf("tc002-os host self-check\n");
   checkEase();
@@ -9904,6 +10089,8 @@ int main() {
   std::printf("  music theme ok\n");
   checkMusicPath();
   std::printf("  music path ok\n");
+  checkDeviceAudio();
+  std::printf("  device audio ok\n");
   checkVibeScreen();
   std::printf("  vibe screen ok\n");
   checkVibePath();

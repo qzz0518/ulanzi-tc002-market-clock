@@ -1632,7 +1632,13 @@ export function createControlHandler(
         // lib — one "KEY\tVALUE" line each. Both device and web UI poll this;
         // the web tags itself with ?viewer=web so a bare poll marks the firmware
         // as alive (it polls from boot, long before the first heartbeat).
-        if (url.searchParams.get("viewer") !== "web") sDeviceLive.firmwarePollAt = Date.now();
+        // ZOS tags its polls too, for the opposite reason: FWPOLL is what makes
+        // the console lock every other view behind "a sideload holds the
+        // device", and under ZOS the channels and the mirror keep working. ZOS
+        // announces itself as the player through the heartbeat alone, and only
+        // while it actually has a track (net/DeviceAudio.h).
+        const viewer = url.searchParams.get("viewer");
+        if (viewer !== "web" && viewer !== "zos") sDeviceLive.firmwarePollAt = Date.now();
         // In remote mode the authority on "what is playing" is the Connect
         // player, not the device: fold its reading into the state both readers
         // already poll, so neither needs a second request.

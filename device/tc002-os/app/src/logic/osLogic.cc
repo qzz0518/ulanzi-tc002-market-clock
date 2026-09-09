@@ -15,6 +15,7 @@
 #include "net/BleProvisionSession.h"
 #include "net/ConsoleDiscovery.h"
 #include "net/FirmwareUpdate.h"
+#include "net/DeviceAudio.h"
 #include "net/HostLink.h"
 #include "net/PortalService.h"
 #include "net/WifiPolicy.h"
@@ -30,6 +31,7 @@
 #include "platform/Prefs.h"
 #include "platform/ProvisionLog.h"
 #include "platform/Sfx.h"
+#include "platform/TrackPlayer.h"
 #include "platform/Presenter.h"
 #include "core/Shell.h"
 #include "core/Surface.h"
@@ -153,6 +155,35 @@ tcos::HostLink& hostLink() {
 	return instance;
 }
 
+// The clock as the NetEase player (net/DeviceAudio). Same discipline as the
+// link: it owns a thread, so it is created on first use, not at load.
+tcos::DeviceAudioLink& audioLink() {
+	static tcos::DeviceAudioLink instance;
+	return instance;
+}
+
+// 设置 → 音乐播放. Off by default, and a DEVICE setting rather than a console
+// one: when this path fails, the browser is the only other speaker, and the
+// device's own heartbeat is what silences it — the fault is observed at the
+// clock, so the switch is at the clock. See DeviceAudioLink for the rest.
+bool sAudioWanted = false;
+
+void onTrackCompleted(void*) {
+	audioLink().noteCompleted(monoMs());
+}
+
+// Brings the audio link into line with the switch and the console address.
+// Called wherever either changes: boot, the 设置 row, and a console adoption.
+// stop() is cheap when nothing runs; start() is a no-op while running, so a
+// changed address needs the stop first — which is also what drops the file.
+void applyAudioSwitch() {
+	audioLink().stop();
+	if (!sAudioWanted || hostLink().baseUrl().empty()) return;
+	tcos::TrackPlayer::instance().onCompletion(&onTrackCompleted, 0);
+	audioLink().setSink(&tcos::TrackPlayer::instance());
+	audioLink().start(hostLink().baseUrl());
+}
+
 // The console beacon listener, for the day the console's DHCP lease moves and
 // the address above stops answering. Same function-local-static discipline as
 // the link, and for the same reason: it owns a thread.
@@ -246,6 +277,7 @@ enum {
 	ACTION_PROVISION = 1,
 	ACTION_SLEEP_WINDOW = 2,
 	ACTION_SLEEP_IDLE = 3,
+	ACTION_MUSIC_AUDIO = 4,
 };
 
 // The host's channel list, as the second-level ring currently reflects it.
@@ -751,6 +783,8 @@ void adoptConsoleHost(const std::string& host) {
 	hostLink().stop();
 	const std::string url = readHostAddress();
 	hostLink().start(url.empty() ? normalizeHostAddress(host) : url);
+	// The player follows the link: it downloads from the same address.
+	applyAudioSwitch();
 }
 
 void updateChannelRing(const std::vector<tcos::StateDoc::Item>& items, int nowMs) {
@@ -1173,6 +1207,17 @@ void rebuildSettings(int nowMs) {
 	row.value = buf;
 	rows.push_back(row);
 
+	// 音乐播放: who plays NetEase audio — the console's browser, or this clock
+	// through its own speaker. A cycle row like the two sleep rows below. The
+	// value names the PLAYER rather than saying 开/关, because "on" would beg
+	// the question of what is on; 控制台 / 时钟 answers it in the same glance.
+	row.label = "\xE9\x9F\xB3\xE4\xB9\x90\xE6\x92\xAD\xE6\x94\xBE";          // 音乐播放
+	row.value = sAudioWanted ? "\xE6\x97\xB6\xE9\x92\x9F"                       // 时钟
+	                         : "\xE6\x8E\xA7\xE5\x88\xB6\xE5\x8F\xB0";         // 控制台
+	row.id = ACTION_MUSIC_AUDIO;
+	rows.push_back(row);
+	row.id = ACTION_NONE;
+
 	// 夜间息屏 / 息屏等待, right after 亮度: they are the other two rows that change
 	// what the panel EMITS, and near the front of a 17-row ring so a user who
 	// went looking for them finds them without a lap.
@@ -1447,6 +1492,11 @@ static void onUI_init() {
 	// Started here rather than in onUI_show: onUI_show runs on every return to
 	// this activity, and the link's threads must be created exactly once.
 	hostLink().start(readHostAddress());
+	// The player is restored beside the link and after it, because it needs the
+	// link's address; nothing starts when the switch is off, which is the
+	// default on every unit that has never touched the row.
+	sAudioWanted = tcos::prefs::getInt("music.audio", 0) != 0;
+	applyAudioSwitch();
 	// Started unconditionally, INCLUDING on a unit that has no address at all:
 	// with no console adopted the link can never come up, so such a device is
 	// "lost" from its sixtieth second and the first console that both shouts on
@@ -2236,7 +2286,12 @@ static bool onUI_Timer(int id) {
 		                     sLink.lyricCells.cells, sLink.lyricCells.count);
 		switch (sMusic.takeAction()) {
 		case tcos::MusicScreen::kToggle:
-			hostLink().sendMusicAction(sLink.playing ? "pause" : "play");
+			// When this clock is the player, the press is answered here and
+			// reported as a state, not sent as a command for the console to
+			// carry out: the console is a silent remote in that mode, and the
+			// only thing it could do with "pause" is ask us.
+			if (audioLink().hasTrack()) audioLink().togglePlay(monoMs());
+			else hostLink().sendMusicAction(sLink.playing ? "pause" : "play");
 			break;
 		case tcos::MusicScreen::kNext:
 			hostLink().sendMusicAction("next");
@@ -2276,6 +2331,13 @@ static bool onUI_Timer(int id) {
 			// The body is shared with the console's POST /api/os/ble; see
 			// openProvisioning for why the two entry points may not drift.
 			openProvisioning(nowMs);
+		} else if (settingsPick == ACTION_MUSIC_AUDIO) {
+			sAudioWanted = !sAudioWanted;
+			// Staged like every other pref; DeviceControls::flushIfDue commits.
+			tcos::prefs::setInt("music.audio", sAudioWanted ? 1 : 0);
+			applyAudioSwitch();
+			rebuildSettings(nowMs);
+			sSettings.revealValue(nowMs);
 		} else if (settingsPick == ACTION_SLEEP_WINDOW || settingsPick == ACTION_SLEEP_IDLE) {
 			// The cycle itself is in ui/SleepPolicy.cpp; this is only the wiring.
 			sSleepConfig = settingsPick == ACTION_SLEEP_WINDOW

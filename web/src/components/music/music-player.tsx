@@ -1011,7 +1011,7 @@ export function MusicPlayer({
         : selected
           ? "已载入"
           : deviceOnline
-            ? "音乐固件就绪 · 选一首歌"
+            ? "时钟就绪 · 选一首歌"
             : "等待选歌";
   // Every line of the song, whichever layout is up: `lyricTapeRows` narrows this
   // to a window when the stage is stacked, and a slice of these elements costs
@@ -1684,7 +1684,7 @@ export function MusicPlayer({
                     outline
                     tightFocusRing
                     aria-disabled="true"
-                    title="设备正在运行音乐固件，直接原生播放"
+                    title="时钟自己在放：侧载的音乐固件，或把「音乐播放」切到「时钟」的 ZOS"
                   >
                     <HardDrive aria-hidden="true" />设备直连
                   </Button>

@@ -90,7 +90,7 @@ describe("game shell", () => {
     // Tooltip 文案（弹层内容不进 SSR，只能查源码）。
     expect(headerSource).toContain('"音乐固件运行中，结束侧载后可用"');
     expect(appSource).toContain('view === "game"');
-    expect(appSource).toContain("const firmwareOnline = musicFirmwareOnline;");
+    expect(appSource).toContain('const firmwareOnline = musicFirmwareOnline && firmwareMode !== "zos";');
     expect(appSource).toContain("firmwareOnline={firmwareOnline}");
     expect(appSource).not.toContain("arcadeOnline");
     expect(appSource).toContain('className="game-orientation-gate"');

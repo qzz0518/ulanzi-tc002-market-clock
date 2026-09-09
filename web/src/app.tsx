@@ -772,14 +772,16 @@ export function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // 侧载的音乐固件直连中就是「固件直连」：官方固件的推送与设置通道都不存在，
-  // 内容/画板/素材库视图一律锁定。（游戏固件已退役，同样七款游戏在 ZOS 里原生跑。）
-  const firmwareOnline = musicFirmwareOnline;
-
   // 时钟究竟在跑哪套固件：ZOS 的实时上报 > 侧载固件的心跳 > 官方固件（推导规则
   // 见 lib/firmware-mode.ts）。整份控制台只有这一处判定。
   const firmwareStatus = describeFirmware({ osState, musicFirmwareOnline });
   const firmwareMode = firmwareStatus.mode;
+
+  // 侧载的音乐固件直连中就是「固件直连」：官方固件的推送与设置通道都不存在，
+  // 内容/画板/素材库视图一律锁定。（游戏固件已退役，同样七款游戏在 ZOS 里原生跑。）
+  // ZOS 自己放歌时发的是同一种心跳（设置 → 音乐播放 → 时钟），但那不是侧载：频道拉取
+  // 与镜像照常，锁定就是错的，所以 ZOS 在线时这个判断不成立。
+  const firmwareOnline = musicFirmwareOnline && firmwareMode !== "zos";
 
   // ZOS 的音乐页是一块由控制台喂的歌词显示器：网页就是网易云的播放器，除了它没人
   // 知道音箱里出来的是什么。所以「该不该上报」是整页的判断，不是音乐页的——音乐页

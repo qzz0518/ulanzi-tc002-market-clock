@@ -394,10 +394,17 @@ Details of the two display paths:
   control messages but cannot replace it).
 
 **The sideloaded player is transitional** ([ADR 0014](adr/0014-two-tiers-official-and-zos.md)):
-ZOS already has the music page, and device-side audio is being folded into it behind a
-device-side switch (off by default), over the same `/api/music/device/*` protocol; once the
-speaker is verified on hardware, the sideloaded player goes together with its profile, panel
-and firmware mode. Until then it receives no changes.
+ZOS already has the music page, and device-side audio is in it too (设置 → 音乐播放 → 时钟,
+default 控制台), over the same `/api/music/device/*` protocol; once the speaker is verified on
+hardware, the sideloaded player goes together with its profile, panel and firmware mode.
+Until then it receives no changes.
+
+Playing on ZOS differs from the sideloaded player in one place: its `/state` polls carry
+`?viewer=zos`, which the service does **not** record as `FWPOLL` — that field is how the console
+decides "a sideload holds the device, lock every other view", and under ZOS the channels and the
+mirror keep working. ZOS announces itself as the player through the heartbeat alone, sent only
+while a track is really loaded and the source is not Spotify Connect; flip the switch off and the
+heartbeats stop, and ten seconds later the browser is the player again.
 
 Sideloading is always non-persistent: the firmware only ever runs from the device tmpfs, and
 hitting **Restore official firmware** — or any power cycle — brings the stock firmware back
@@ -1049,7 +1056,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `GET` / `POST` | `/api/music/device-app/*` | Validate the firmware bundle, probe the device, sideload / restore (tmpfs session) |
 | `POST` / `DELETE` | `/api/music/mirror` | Push lyric frames (≤400) to a stock-firmware Custom App (device mirror) |
 | `POST` | `/api/music/device/select`, `/api/music/device/control` | Web-side track selection and control patches |
-| `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll |
+| `GET` | `/api/music/device/state`, `/api/music/device/current` | Plain-text control state polled by the firmware; legacy current-track poll. A poll without `viewer` counts as `FWPOLL` (a sideload firmware is alive); `?viewer=web` and `?viewer=zos` do not |
 | `POST` | `/api/music/device/report`, `/api/music/device/heartbeat` | Firmware key-action reports and playhead heartbeats |
 | `GET` | `/api/music/device/now`, `/api/music/device/audio` | Firmware-side lyric fetch and audio download. `/now` is versioned by query parameter: no `?v` returns the original `DUR\t<ms>` + `<startMs>\t<text>` bytes verbatim (a deployed parser treats any non-`DUR` key as a start time, so a new record type would render as garbage), `?v=2` returns `V\t2`, `DUR`, `L\t<startMs>\t<sungEndMs>\t<text>` and an optional `W\t<d0,w0,…>` table for the line above it |
 | `GET` / `POST` | `/api/os/device-app/*` | The same sideload lifecycle for ZOS (confirmation phrase `START_TC002_OS_SESSION`) |
@@ -1070,7 +1077,7 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `POST` | `/api/os/input` | Press one of the device's own controls on the user's behalf: `{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`; the reply `{event:{seq,action}}` is the receipt. Only the last 8 stay in the document — a press the device missed by more than a moment is one the user has already given up on, and replaying it late is worse than dropping it |
 | `PUT` | `/api/os/settings` | Ask the device to adopt a volume/brightness: `{volume?:0..6, brightness?:1..10}`; 400 when both are absent. Carries `setseq` and is applied **only on a rising sequence**, or the console's old value in every document would override the knob the user just turned. Only the field named in the request is stamped: the other one stays in the document with its own `setvolseq` / `setbriseq` unmoved, so the panel raises a bar only for the level the user actually touched |
 | `PUT` | `/api/os/sleep` | Ask the device to adopt a night-sleep configuration: `{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`; 400 when all four are absent, and 400 out of range. Replies `{requested:{enabled,startMin,endMin,idleSec,seq}}`, where a field the console has never written is **`null`** rather than a default — only written fields go on the wire, so a timeout-only PUT cannot also move the window. `startMin == endMin` means **the whole day** rather than a zero-length window and must be accepted. **Every write bumps the sequence, and the sequence is persisted to `.runtime/os-sleep-request.json`** — the device's own 设置 rows are a second writer, only a rising sequence can overrule the knob, and a counter that restarted at 0 with the service would have its next change refused. A rising sequence also counts as the user operating the clock, so `{enabled:false}` does not merely stop it sleeping again, it **lights the panel now**: the remote escape hatch for a clock that went dark with nobody in the room |
-| `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — the browser *is* the player and nothing else can see it — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
+| `PUT` | `/api/os/now-playing` | The browser reports what it is playing: `{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}` (`lyricEndMs` is when the line stopped being *sung*, `lyricUntilMs` when the next one starts; `lyricWords` is `[{startMs,endMs,text}]`, at most 64 entries of ≤16 chars and ≤200 chars total, dropped rather than rejected when malformed); a `null` body (or a missing `playing`) clears it. NetEase is device-audio — by default the browser *is* the player and nothing else can see it (with ZOS's 音乐播放 set to 时钟 the browser follows the playhead in the device's heartbeat and reports the same fields) — while Spotify is polled service-side off Connect. The two writers arbitrate by "last writer owns it, silence never evicts sound, 15 s of quiet releases the field" |
 
 Writes accept JSON only and require same-origin requests (except the firmware-facing
 `report` / `heartbeat` endpoints and ZOS's `/api/os/pull`, `/api/os/frames`, `GET /api/os/firmware`,

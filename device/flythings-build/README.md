@@ -39,6 +39,12 @@ docker run --rm --platform linux/amd64 -v "$PWD/..":/work -w /work/flythings-bui
 # → libzkgui.so  (ELF 32-bit ARM, NEEDED libeasyui/libzkhardware/liblog)
 ```
 
+If `make` stops with "No rule to make target '../../<something>.cpp'", the object
+directory's `.d` dependency records still name a path from before a tree move
+(the toolchain moved from under the music player to `device/` in ADR 0014, and
+`APP` with it). They are a cache: `rm -rf build-os` (or the app's `BUILD_DIR`)
+and build again.
+
 Build a different app by overriding `APP`:
 
 ```sh

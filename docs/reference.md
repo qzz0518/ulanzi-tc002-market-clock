@@ -322,9 +322,14 @@ FFT。这三种来源都显示模拟律动，并在主题面板标明——否�
   只能传控制消息，替代不了它）。
 
 **侧载播放器是过渡方案**（[ADR 0014](adr/0014-two-tiers-official-and-zos.md)）：ZOS 已有
-音乐页，设备端出声正以设备侧开关（默认关）并入 ZOS，走的是同一套 `/api/music/device/*`
-协议；扬声器在真机验证通过后，侧载播放器连同它的 profile、面板与固件模式一起删除。在那
-之前它冻结不再改动。
+音乐页，设备端出声也已并入 ZOS（设置 → 音乐播放 → 时钟，默认「控制台」），走的是同一套
+`/api/music/device/*` 协议；扬声器在真机验证通过后，侧载播放器连同它的 profile、面板与
+固件模式一起删除。在那之前它冻结不再改动。
+
+ZOS 放歌时与侧载播放器只有一处不同：它轮询 `/state` 带 `?viewer=zos`，服务端**不**把它记成
+`FWPOLL`——那个字段是控制台判定「侧载固件占着设备、锁掉其他视图」的依据，而 ZOS 下频道与
+镜像照常。ZOS 只靠心跳宣告自己是播放器，且只在真的载入了曲目、音源不是 Spotify Connect 时
+才发；开关关掉，心跳停，十秒后浏览器重新接管。
 
 侧载始终是非持久化的：固件只推进设备内存盘临时运行，点「恢复官方固件」或断电重启即回到
 原样，flash 从不被写入。侧载前需三重确认：固件包逐文件 SHA-256 与发布清单一致、官方
@@ -851,7 +856,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `POST` | `/api/os/input` | 替用户按一次设备的键：`{action}` ∈ `cw` `ccw` `press` `hold` `left` `right`；应答 `{event:{seq,action}}` 就是回执。文档里只留最近 8 条尾巴——设备漏掉超过一瞬的按键，用户早就放弃了，晚点补按比丢掉更糟 |
 | `PUT` | `/api/os/settings` | 请求设备采用某个音量/亮度：`{volume?:0..6, brightness?:1..10}`，两个都缺则 400。带 `setseq`，**只在序列上升时**应用，否则文档里的旧值每轮都会盖掉旋钮刚拧出来的值。只写请求里点名的那一项：另一项也会随 `setvolseq` / `setbriseq` 一起留在文档里，但序列不动，面板因此只为用户真正动过的那一项亮 bar |
 | `PUT` | `/api/os/sleep` | 请求设备采用一套夜间息屏：`{enabled?:boolean, startMin?:0..1439, endMin?:0..1439, idleSec?:30..7200}`，四个都缺则 400，越界也是 400。应答 `{requested:{enabled,startMin,endMin,idleSec,seq}}`，**没写过的字段是 `null`** 而不是默认值——只发出去写过的那几行，一次只改超时的 PUT 不会顺手改掉窗口。`startMin == endMin` 是**全天**而不是零长度窗口，必须接受。**每次写入都推进序列，序列落盘在 `.runtime/os-sleep-request.json`**——设备的 设置 页是第二个写方，只有上升的序列能盖过旋钮；计数器要是跟着服务重启归零，下一次改动就会被设备拒收。序列上升同时也被设备算作一次「用户操作」，所以 `{enabled:false}` 不只是停止再次息屏，而是**当场点亮面板**：这是黑屏时不在时钟旁边的人唯一的远程逃生口 |
-| `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}`（`lyricEndMs` 是这一句**唱完**的时刻，`lyricUntilMs` 是下一句接手的时刻；`lyricWords` 形如 `[{startMs,endMs,text}]`，最多 64 条、每条 ≤16 字符、合计 ≤200 字符，格式不对就整表丢弃而不是让上报失败），正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器就是这个浏览器，只有它知道音箱里出来的是什么；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
+| `PUT` | `/api/os/now-playing` | 浏览器上报自己正在放什么：`{track, artist, playing, positionMs, durationMs, lyric, lyricStartMs?, lyricEndMs?, lyricUntilMs?, lyricWords?}`（`lyricEndMs` 是这一句**唱完**的时刻，`lyricUntilMs` 是下一句接手的时刻；`lyricWords` 形如 `[{startMs,endMs,text}]`，最多 64 条、每条 ≤16 字符、合计 ≤200 字符，格式不对就整表丢弃而不是让上报失败），正文为 `null` 或缺 `playing` 即清空。网易云是 device-audio，播放器默认就是这个浏览器，只有它知道音箱里出来的是什么（ZOS 把「音乐播放」切到「时钟」后，浏览器跟着设备心跳里的播放头上报，内容不变）；Spotify 由服务端轮询 Connect 上报。两个写方按「谁最后写谁拥有，静音不夺声音，15 秒不说话才让位」仲裁 |
 | `POST` / `DELETE` | `/api/music/mirror` | 把歌词帧（≤400）推到官方固件 Custom App（设备同屏） |
 | `POST` / `DELETE` | `/api/live/frames` | 同源页面把实时帧推到隔离的 `live_<app>` Custom App，或立即清除 |
 | `GET` | `/api/game/socket` | WebSocket 升级：`?room=<4位码>&role=host\|pad`，双人手柄与涂鸦墙的纯中继通道 |
@@ -859,7 +864,7 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/pad`、`/draw` | 自包含伴生页：手机游戏手柄触控条、涂鸦墙访客画布（扫码落地页，内联零依赖） |
 | `POST` / `DELETE` | `/api/notify` | 外部 Webhook 推送或立即清除一条通知（可用 `NOTIFY_TOKEN` 鉴权） |
 | `POST` | `/api/music/device/select`、`/api/music/device/control` | 网页下发选歌与控制补丁（播放/主题/配色/主色/seek） |
-| `GET` | `/api/music/device/state`、`/api/music/device/current` | 音乐固件轮询的纯文本控制状态；兼容的轻量当前曲目查询 |
+| `GET` | `/api/music/device/state`、`/api/music/device/current` | 音乐固件轮询的纯文本控制状态；兼容的轻量当前曲目查询。不带 `viewer` 的轮询记为 `FWPOLL`（侧载固件在线），`?viewer=web` 与 `?viewer=zos` 不记 |
 | `POST` | `/api/music/device/report`、`/api/music/device/heartbeat` | 固件上报按键动作与播放头心跳 |
 | `GET` | `/api/music/device/now`、`/api/music/device/audio` | 固件读取当前曲目歌词与下载音频。`/now` 按查询参数版本化：不带 `?v` 逐字节返回原格式 `DUR\t<ms>` + `<startMs>\t<text>`（已部署的解析器把非 `DUR` 的键当起点，新增记录类型会被渲染成乱码行），`?v=2` 返回 `V\t2`、`DUR`、`L\t<startMs>\t<sungEndMs>\t<text>`，以及紧跟其后可选的 `W\t<d0,w0,…>` 逐字表 |
 

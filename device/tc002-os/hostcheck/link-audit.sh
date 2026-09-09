@@ -114,31 +114,30 @@ fi
 # 36 MB box, and an unstripped .so has OOM-rebooted this device before.
 size_bytes="$(wc -c < "$SO" | tr -d ' ')"
 echo "  size: $size_bytes bytes"
-# The original 600 KB was a design target, not a hardware limit: the arcade
-# firmware runs on this unit at 1,766,760 bytes and the lyrics player at
-# 1,840,452. Sound costs ~438 KB (base::AudioPlayer pulls the resampler, the
-# mixer and the MI_AO glue) and is worth it. What this cap has to catch is a
-# MISTAKE, and the mistakes are large: accidentally linking the full ffmpeg
-# decode path, measured at roughly 1.9 MB, and shipping the .so unstripped.
+# THE MP3 DECODE PATH IS NOW DELIBERATE. Until ADR 0014 this cap sat at
+# 1,400,000 and existed to catch exactly one accident: linking the ffmpeg
+# decode path, which the sideloaded music player needed and this firmware did
+# not. Now this firmware plays NetEase itself (net/DeviceAudio) through
+# base::MediaPlayer, and the archives it pulls in are the feature, not the
+# mistake. Measured: 1,353,484 bytes before, 2,299,288 after — 945,804 bytes
+# for the demuxer, the decoder and their tables.
 #
-# NOT A ROUND MiB, and that is the point. This used to be 1258291 (1.2 MiB),
-# picked as a round number when the binary was 1,255,160 bytes — apparently
-# 3,131 bytes of headroom. It was not: ld pads the read-only segment so the
-# writable one keeps its page congruence, so THE FILE SIZE ONLY EVER MOVES IN
-# 4,096 BYTE STEPS. Measured on the baseline by padding it with known amounts of
-# .rodata: +200 bytes -> 1,255,160; +500 -> 1,259,256; +3,000 -> 1,259,256;
-# +4,524 -> 1,263,352. The very next attainable size above the baseline was
-# already 965 bytes over the old cap, so the real budget was the ~200-500 bytes
-# that fit in the existing padding, and any feature at all failed the audit —
-# which is what happened to the word-level lyric timing (ADR 0008): 3,096 bytes
-# of compiled code spread evenly over four files, with no single item to remove.
+# What the cap still has to catch: shipping the .so unstripped (~6.7 MB before
+# ffmpeg, more now), and a second decode path arriving by accident — the video
+# side of the same archives (swscale, avfilter) would be another megabyte and
+# nothing here needs a pixel from ffmpeg. 2,600,000 is ~300 KB (73 of the
+# 4,096-byte steps the file size actually moves in — see the git history of this
+# line for why that granularity matters) above the current binary, so ordinary
+# features can be paid for, and comfortably below where either failure lands.
 #
-# 1,400,000 restores what the number was for. It is 136 KB — 33 of those 4 KB
-# steps — above the current binary, so a real change can be paid for; it is
-# 366 KB below the smaller of the two firmwares this device already runs; and it
-# is 500 KB below a measured ffmpeg link, which is the failure being guarded.
-if [ "$size_bytes" -gt 1400000 ]; then
-  echo "  FAIL over the 1,400,000 byte budget for tc002-os" >&2
+# What it can no longer promise is the tmpfs argument the old number carried:
+# the largest .so this unit has been SEEN to sideload is the music player's
+# 1,840,452 bytes, and this firmware is now 25% past that. Flashed to `res`
+# (device/tc002-os/README.md 「固化到 flash」) it is mmapped from squashfs and
+# the stock app it replaces is 7,464,044 bytes, so flash is not the concern;
+# a /tmp sideload of this build is the one configuration nobody has run yet.
+if [ "$size_bytes" -gt 2600000 ]; then
+  echo "  FAIL over the 2,600,000 byte budget for tc002-os" >&2
   fail=1
 fi
 

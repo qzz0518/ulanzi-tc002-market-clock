@@ -157,7 +157,10 @@ its own.
   one card each, with a per-game 12×12 animated icon and per-game synthesised sound
   (square / triangle / noise sweeps — no .wav files, nothing to decode).
 - **Music** shows what the console is playing (title, artist, current lyric line, playhead);
-  the knob is previous/next and a press toggles play.
+  the knob is previous/next and a press toggles play. NetEase audio comes out of the console's
+  computer by default; set 设置 → 音乐播放 to 时钟 on the clock and it downloads and plays the
+  track through its own speaker (Spotify still plays on the Connect device). **Not yet verified
+  on hardware**, hence off by default.
 - **Settings** lists network, IP, console address, volume, brightness, MAC, the setup-page
   address, and uptime.
 

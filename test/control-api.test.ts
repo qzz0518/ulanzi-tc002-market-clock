@@ -419,6 +419,30 @@ describe("local control API", () => {
     expect((await noLikes.json()).error).toContain("还没有喜欢的歌曲");
   });
 
+  test("a ZOS poll of the device state is not a sideload firmware poll", async () => {
+    // FWPOLL is what the console reads as "a sideload firmware holds the device"
+    // and locks every other view on. ZOS polls the same document to play NetEase
+    // itself, but nothing is locked under ZOS, so its polls carry viewer=zos and
+    // leave FWPOLL alone; only its heartbeat says it is the player.
+    resetDeviceMusicSelection("netease");
+    const handler = createControlHandler(fakeWorkspaceController());
+    const read = async (query: string) => {
+      const response = await handler(new Request(`http://127.0.0.1:43820/api/music/device/state${query}`));
+      const fields = Object.fromEntries(
+        (await response.text()).split("\n").filter(Boolean).map((line) => line.split("\t") as [string, string]),
+      );
+      return Number(fields.FWPOLL);
+    };
+    const before = await read("?viewer=web");
+    expect(await read("?viewer=zos")).toBe(before);
+    expect(await read("?viewer=web")).toBe(before);
+    // A bare poll — the sideloaded player — does mark it.
+    await read("");
+    const marked = await read("?viewer=web");
+    expect(marked).toBeGreaterThanOrEqual(0);
+    expect(marked).toBeLessThan(2_000);
+  });
+
   test("publishes the Connect player's position to the device and relays transport commands", async () => {
     const commands: string[] = [];
     let snapshot = {
