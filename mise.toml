@@ -147,11 +147,13 @@ python3 device/tc002-os/hostcheck/glyph-coverage.py || exit 1
 # engine's physics frame by frame. It is a separate binary with its own main();
 # it links the same core/Surface.cpp the UI check does, through the
 # utils/Surface.h bridge the engines include.
+# `|| exit 1` because this is the first of two compiles in one script and a
+# failure here would otherwise be hidden behind the second one's success.
 clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/hostcheck/games-selfcheck.cpp \
   device/tc002-os/app/src/games/*.cpp \
   device/tc002-os/app/src/core/Surface.cpp \
-  -o .runtime/os-games-selfcheck && .runtime/os-games-selfcheck
+  -o .runtime/os-games-selfcheck && .runtime/os-games-selfcheck || exit 1
 clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/hostcheck/selfcheck.cpp \
   device/tc002-os/app/src/core/*.cpp \
