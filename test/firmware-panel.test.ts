@@ -38,7 +38,7 @@ function fakeController(overrides: Partial<FirmwarePanelController> = {}): Firmw
 const readyApp = {
   artifact: {
     state: "ready",
-    appId: "tc002-arcade",
+    appId: "tc002-lyrics-player",
     bundleId: "c".repeat(64),
     message: "固件包完整性校验通过（逐文件 SHA-256），可以侧载到时钟",
   },
@@ -48,27 +48,26 @@ const readyApp = {
   restore: { title: "回到 Ulanzi 官方固件", steps: ["点「恢复官方固件」，官方界面立即恢复"] },
 } as MusicDeviceAppStatus;
 
-describe("shared firmware panel", () => {
+describe("music firmware panel", () => {
   test("statusLabel walks session > probe > artifact > idle", () => {
     expect(firmwareStatusLabel(null, null, "音乐固件")).toBe("侧载固件");
-    expect(firmwareStatusLabel(readyApp, null, "游戏固件")).toBe("固件包已就绪");
+    expect(firmwareStatusLabel(readyApp, null, "音乐固件")).toBe("固件包已就绪");
     const probe = { adb: "ready", connected: true, message: "ok" } as MusicDeviceProbe;
-    expect(firmwareStatusLabel(readyApp, probe, "游戏固件")).toBe("TC002 已连接");
+    expect(firmwareStatusLabel(readyApp, probe, "音乐固件")).toBe("TC002 已连接");
     const active = { ...readyApp, session: { active: true } } as MusicDeviceAppStatus;
-    expect(firmwareStatusLabel(active, probe, "游戏固件")).toBe("游戏固件运行中");
     expect(firmwareStatusLabel(active, probe, "音乐固件")).toBe("音乐固件运行中");
   });
 
   test("renders the guarded three-step flow with the firmware-specific copy", () => {
     // Dialog 走 portal（SSR 为空），直接渲染抽屉主体。
     const html = renderToStaticMarkup(createElement(FirmwarePanelBody, {
-      controller: fakeController({ firmwareLabel: "游戏固件", deviceApp: readyApp }),
-      heading: "侧载游戏固件",
-      description: "把游戏固件推进时钟内存临时运行。",
-      headingId: "arcade-firmware-dialog-deploy-title",
+      controller: fakeController({ firmwareLabel: "音乐固件", deviceApp: readyApp }),
+      heading: "侧载音乐固件",
+      description: "把音乐固件推进时钟内存临时运行。",
+      headingId: "music-firmware-dialog-deploy-title",
     }));
 
-    expect(html).toContain("侧载游戏固件");
+    expect(html).toContain("侧载音乐固件");
     expect(html).toContain("校验固件包");
     expect(html).toContain("检测 TC002");
     expect(html).toContain("我知道如何回到官方固件");
@@ -87,36 +86,37 @@ describe("shared firmware panel", () => {
     expect(html).toMatch(/data-disabled="true"[\s\S]{0,1200}?侧载固件<\/span><\/button>/);
   });
 
-  test("shows session-active state with the stop action and extra live facts", () => {
+  test("shows session-active state with the stop action and the host page's extras", () => {
     const active = { ...readyApp, session: { active: true, version: "0.1.0" } } as MusicDeviceAppStatus;
     const html = renderToStaticMarkup(createElement(
       FirmwarePanelBody,
       {
         controller: fakeController({
-          firmwareLabel: "游戏固件",
+          firmwareLabel: "音乐固件",
           deviceApp: active,
           sessionActive: true,
           deviceProbe: {
             adb: "ready",
             connected: true,
             model: "Ulanzi TC002",
-            message: "设备在线，游戏固件正在运行",
+            message: "设备在线，音乐固件正在运行",
           } as MusicDeviceProbe,
         }),
-        heading: "侧载游戏固件",
+        heading: "侧载音乐固件",
         description: "描述",
-        headingId: "arcade-firmware-dialog-deploy-title",
+        headingId: "music-firmware-dialog-deploy-title",
       },
+      // 宿主页塞进来的额外内容（音乐页放的是 ZOS 中断提示）跟在探测事实后面。
       createElement("dl", { className: "fw-device-facts" },
         createElement("div", null,
-          createElement("dt", null, "当前游戏"),
-          createElement("dd", null, "breakout"))),
+          createElement("dt", null, "正在播放"),
+          createElement("dd", null, "像素歌词"))),
     ));
 
-    expect(html).toContain("游戏固件运行中；点「恢复官方固件」或断电重启即可回到官方固件");
+    expect(html).toContain("音乐固件运行中；点「恢复官方固件」或断电重启即可回到官方固件");
     expect(html).toContain("恢复官方固件");
-    expect(html).toContain("当前游戏");
-    expect(html).toContain("breakout");
+    expect(html).toContain("正在播放");
+    expect(html).toContain("像素歌词");
     expect(html).toContain("Ulanzi TC002");
   });
 
@@ -147,17 +147,19 @@ describe("shared firmware panel", () => {
     expect(html).not.toContain("自动回到官方固件");
   });
 
-  test("both host pages mount the shared panel instead of a private drawer", async () => {
-    const [playerSource, shellSource] = await Promise.all([
+  test("the music page is the panel's one host; the game shell no longer mounts it", async () => {
+    const [playerSource, shellSource, css] = await Promise.all([
       Bun.file(new URL("../web/src/components/music/music-player.tsx", import.meta.url)).text(),
       Bun.file(new URL("../web/src/components/game/game-shell.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../web/src/styles/music-player.css", import.meta.url)).text(),
     ]);
     expect(playerSource).toContain("<FirmwarePanel");
     expect(playerSource).toContain('apiPrefix: "/api/music"');
-    expect(shellSource).toContain("<FirmwarePanel");
-    expect(shellSource).toContain('apiPrefix: "/api/arcade"');
-    // 各自的抽屉主题：音乐纸面浅色，游戏街机暗色。
     expect(playerSource).toContain('dialogClassName="music-firmware-dialog"');
-    expect(shellSource).toContain('dialogClassName="arcade-firmware-dialog"');
+    // 游戏固件退役了（ADR 0014）：游戏页没有抽屉，也不碰 /api/arcade；那套
+    // 抽屉皮肤随之从样式表里消失，别留一份没人挂的 .arcade-firmware-dialog。
+    expect(shellSource).not.toContain("FirmwarePanel");
+    expect(shellSource).not.toContain("/api/arcade");
+    expect(css).not.toContain("arcade-firmware-dialog");
   });
 });

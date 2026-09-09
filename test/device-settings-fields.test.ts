@@ -85,13 +85,11 @@ function facts(input: ZosState | null): Map<string, { value: string; note?: stri
 }
 
 describe("which surface 常规设置 renders, per firmware", () => {
-  test("a live report picks the surface; the two sideloads share one", () => {
+  test("a live report picks the surface; the music sideload gets its own", () => {
     expect(deviceSettingsSurface("official")).toBe("official");
     expect(deviceSettingsSurface("zos")).toBe("zos");
-    // 音乐/游戏 are the same situation for this dialog: something else holds the
-    // device and the official endpoints answer nothing.
+    // Something else holds the device and the official endpoints answer nothing.
     expect(deviceSettingsSurface("music")).toBe("sideload");
-    expect(deviceSettingsSurface("arcade")).toBe("sideload");
   });
 
   test("a flashed ZOS that fell off the Wi-Fi is still ZOS, not 官方固件", () => {
@@ -101,7 +99,6 @@ describe("which surface 常规设置 renders, per firmware", () => {
     expect(deviceSettingsSurface("official", true)).toBe("zos");
     // 侧载优先：闪存里是 ZOS，但此刻占着设备的是侧载固件。
     expect(deviceSettingsSurface("music", true)).toBe("sideload");
-    expect(deviceSettingsSurface("arcade", true)).toBe("sideload");
     // 没刷过就还是官方固件那条路，一个字都不改。
     expect(deviceSettingsSurface("official", false)).toBe("official");
   });

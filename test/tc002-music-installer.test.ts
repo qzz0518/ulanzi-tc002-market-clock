@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import {
-  ARCADE_SESSION_CONFIRMATION,
-  ARCADE_SIDELOAD_PROFILE,
   computeBundleId,
   MUSIC_SESSION_CONFIRMATION,
   MUSIC_SIDELOAD_PROFILE,
   MusicInstallerError,
   MusicPlayerBundleStore,
+  OS_SESSION_CONFIRMATION,
+  OS_SIDELOAD_PROFILE,
   Tc002MusicInstaller,
   Tc002SideloadInstaller,
   type ProcessRunner,
@@ -94,10 +94,11 @@ const PROFILES: Array<{
     identity: '{ [ "$(cat /tmp/tc002-sideload.id 2>/dev/null)" = "tc002-lyrics-player" ] || [ ! -f /tmp/tc002-sideload.id ]; }',
   },
   {
-    profile: ARCADE_SIDELOAD_PROFILE,
-    remoteDir: "/tmp/tc002-arcade",
-    extraCleanup: "",
-    identity: '[ "$(cat /tmp/tc002-sideload.id 2>/dev/null)" = "tc002-arcade" ]',
+    profile: OS_SIDELOAD_PROFILE,
+    remoteDir: "/tmp/tc002-os",
+    // ZOS downloads the current track to the same path the music player does.
+    extraCleanup: "/tmp/track.mp3 ",
+    identity: '[ "$(cat /tmp/tc002-sideload.id 2>/dev/null)" = "tc002-os" ]',
   },
 ];
 
@@ -131,8 +132,9 @@ describe("TC002 sideload session (both profiles)", () => {
       ]);
       expect(calls.slice(-7).map((call) => call.at(-1))).toEqual([
         `[ -f ${remoteDir}/session.pid ] && kill "$(cat ${remoteDir}/session.pid)" 2>/dev/null; setprop ctl.stop zkswe`,
-        // Start clears EVERY bundle dir and the session id: switching between
-        // the three apps must never push on top of a full tmpfs. /tmp is 16 MB
+        // Start clears EVERY bundle dir (the retired arcade's included: a device
+        // not power-cycled since then still holds it) and the session id:
+        // switching apps must never push on top of a full tmpfs. /tmp is 16 MB
         // and the bundles are ~0.4-1.8 MB each, so a stale one is not academic.
         `rm -rf /tmp/tc002-music /tmp/tc002-arcade /tmp/tc002-os /tmp/ui; rm -f ${extraCleanup}/tmp/EasyUI.cfg /tmp/libzkgui.so /tmp/tc002-sideload.id`,
         `mkdir -p ${remoteDir}`,
@@ -210,9 +212,9 @@ describe("TC002 sideload session (both profiles)", () => {
         verifyClock: async () => ({}),
         settleDelayMs: 0,
       });
-      const wrong = profile.appId === "tc002-arcade"
+      const wrong = profile.appId === OS_SIDELOAD_PROFILE.appId
         ? MUSIC_SESSION_CONFIRMATION
-        : ARCADE_SESSION_CONFIRMATION;
+        : OS_SESSION_CONFIRMATION;
       await expect(installer.startSession({
         confirmation: wrong,
         expectedBundleId: fixture.bundleId,
@@ -221,17 +223,17 @@ describe("TC002 sideload session (both profiles)", () => {
     });
   }
 
-  test("the arcade store refuses a music manifest (appId mismatch)", async () => {
+  test("the ZOS store refuses a music manifest (appId mismatch)", async () => {
     const fixture = await releaseFixture("tc002-lyrics-player");
-    const store = new MusicPlayerBundleStore(fixture.directory, ARCADE_SIDELOAD_PROFILE);
+    const store = new MusicPlayerBundleStore(fixture.directory, OS_SIDELOAD_PROFILE);
     const inspected = await store.inspect();
     expect(inspected.state).toBe("invalid");
-    expect(inspected.appId).toBe("tc002-arcade");
+    expect(inspected.appId).toBe("tc002-os");
   });
 
   test("a session with a foreign identity is not recognized as our own", async () => {
-    // The device runs the arcade (id file says tc002-arcade); the music
-    // installer's alive check must come back empty, flipping its session off.
+    // The device runs ZOS (id file says tc002-os); the music installer's
+    // alive check must come back empty, flipping its session off.
     const fixture = await releaseFixture("tc002-lyrics-player");
     const calls: string[][] = [];
     const installer = new Tc002SideloadInstaller({
@@ -303,14 +305,14 @@ describe("TC002 music sideload session", () => {
     expect(status.restore.steps.join("\n")).toContain("USB-C");
   });
 
-  test("the arcade profile's missing-bundle message points at its own packaging doc", async () => {
+  test("the ZOS profile's missing-bundle message points at its own packaging doc", async () => {
     const directory = await mkdtemp(join(tmpdir(), "tc002-empty-bundle-"));
     directories.push(directory);
-    const store = new MusicPlayerBundleStore(directory, ARCADE_SIDELOAD_PROFILE);
+    const store = new MusicPlayerBundleStore(directory, OS_SIDELOAD_PROFILE);
     const inspected = await store.inspect();
     expect(inspected.state).toBe("missing");
-    expect(inspected.appId).toBe("tc002-arcade");
-    expect(inspected.message).toContain("device/tc002-arcade/README.md");
+    expect(inspected.appId).toBe("tc002-os");
+    expect(inspected.message).toContain("device/tc002-os/README.md");
   });
 
   test("rejects a stale confirmation before running any ADB command", async () => {
@@ -347,19 +349,19 @@ describe("TC002 music sideload session", () => {
     expect(aliveCall).toContain("|| [ ! -f /tmp/tc002-sideload.id ]");
   });
 
-  test("the arcade alive check has no legacy escape hatch", async () => {
-    const fixture = await releaseFixture("tc002-arcade");
+  test("the ZOS alive check has no legacy escape hatch", async () => {
+    const fixture = await releaseFixture("tc002-os");
     const calls: string[][] = [];
     const installer = new Tc002SideloadInstaller({
       clockHost: "192.0.2.20",
-      profile: ARCADE_SIDELOAD_PROFILE,
-      bundleStore: new MusicPlayerBundleStore(fixture.directory, ARCADE_SIDELOAD_PROFILE),
+      profile: OS_SIDELOAD_PROFILE,
+      bundleStore: new MusicPlayerBundleStore(fixture.directory, OS_SIDELOAD_PROFILE),
       processRunner: fakeRunner(calls),
       verifyClock: async () => ({}),
     });
     await installer.probe();
     const aliveCall = calls.map((call) => call.at(-1)).find((arg) => arg?.includes("echo running"));
-    expect(aliveCall).toContain('[ "$(cat /tmp/tc002-sideload.id 2>/dev/null)" = "tc002-arcade" ]');
+    expect(aliveCall).toContain('[ "$(cat /tmp/tc002-sideload.id 2>/dev/null)" = "tc002-os" ]');
     expect(aliveCall).not.toContain("|| [ ! -f /tmp/tc002-sideload.id ]");
   });
 

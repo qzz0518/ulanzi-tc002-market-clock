@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createControlHandler } from "../src/control-api.ts";
-import type { DashboardController } from "../src/controller.ts";
+import type { WorkspaceController } from "../src/workspace-controller.ts";
 import { drawPageHtml, padPageHtml } from "../src/web-ui.ts";
 
-const controller = {} as DashboardController;
+const controller = {} as WorkspaceController;
 
 // /pad and /draw are the QR-scan companion pages: self-contained inline HTML
 // with zero build products, talking only to the same-origin WebSocket relay.

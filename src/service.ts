@@ -31,7 +31,6 @@ import { WorkspaceController } from "./workspace-controller.ts";
 import { PixelAssetStore } from "./pixel-asset-store.ts";
 import { UlanziPixelAssetClient } from "./ulanzi-pixel-assets.ts";
 import {
-  ARCADE_SIDELOAD_PROFILE,
   MUSIC_SIDELOAD_PROFILE,
   OS_SIDELOAD_PROFILE,
   MusicPlayerBundleStore,
@@ -206,9 +205,9 @@ const controller = new WorkspaceController({
   vibeClient,
   vibeStarred: () => vibeStore.getStarred(),
 });
-// Both sideloadable apps (music player, arcade) share one installer class and
+// Both sideloadable apps (music player, ZOS) share one installer class and
 // the same clock verification / service-origin closures; only the profile
-// differs (ADR 0004).
+// differs (ADR 0014).
 const verifySideloadClock = async () => {
   const info = await readClockInfo(config);
   return { mcuVersion: info.mcuVersion, appVersion: info.appVersion };
@@ -230,20 +229,6 @@ const musicInstaller = new Tc002SideloadInstaller({
   bundleStore: new MusicPlayerBundleStore(
     MUSIC_SIDELOAD_PROFILE.releaseDirectory,
     MUSIC_SIDELOAD_PROFILE,
-  ),
-  verifyClock: verifySideloadClock,
-  serviceOrigin: sideloadServiceOrigin,
-  // Deferred read: osLink is constructed below, and what a power cycle brings
-  // back is a fact only the device reports.
-  zosFlashed: () => osLink.zosFlashed(),
-});
-const arcadeInstaller = new Tc002SideloadInstaller({
-  get clockHost() { return config.clockHost; },
-  adbPath: process.env.ADB_BIN,
-  profile: ARCADE_SIDELOAD_PROFILE,
-  bundleStore: new MusicPlayerBundleStore(
-    ARCADE_SIDELOAD_PROFILE.releaseDirectory,
-    ARCADE_SIDELOAD_PROFILE,
   ),
   verifyClock: verifySideloadClock,
   serviceOrigin: sideloadServiceOrigin,
@@ -602,7 +587,6 @@ const controlHandler = createControlHandler(controller, {
   pixelAssetLibrary: { client: ulanziPixelAssets, store: pixelAssetStore },
   music,
   musicInstaller,
-  arcadeInstaller,
   osInstaller,
   live: {
     push: (appName, payload) => queueLiveWrite(() => pushClockPayloadNamed(config, appName, payload, fetch)),

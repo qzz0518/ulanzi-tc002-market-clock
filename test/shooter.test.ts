@@ -207,7 +207,7 @@ describe("shooter engine", () => {
 
   test("replays the device's wave layout for a pinned seed", () => {
     // Every number below is the C++ ShooterEngine trace for seedRandom(5),
-    // ticked at the arcade's 30ms UI period — the two engines must not drift.
+    // ticked at the firmware's 30ms UI period — the two engines must not drift.
     const game = playing(5);
     for (let t = 0; t < 1_800; t += 30) game.tick(30, input());
     expect(game.enemies.length).toBe(1);

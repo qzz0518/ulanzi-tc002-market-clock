@@ -9,10 +9,8 @@ import {
   Bird,
   Blocks,
   Car,
-  ChevronRight,
   Gamepad2,
   Grid2x2,
-  HardDrive,
   MonitorCog,
   Pause,
   PinOff,
@@ -36,7 +34,6 @@ import {
   ToggleButton,
   ToggleGroup,
 } from "@cladd-ui/react";
-import { jsonApi } from "@/lib/api";
 import {
   GAME_SCREEN_HEIGHT,
   GAME_SCREEN_WIDTH,
@@ -60,11 +57,9 @@ import { connectRoomSocket, type RoomSocket } from "@/lib/game-socket";
 import { createLiveScreen, type LiveScreen } from "@/lib/live-screen";
 import { useZosFocus } from "@/lib/use-zos-focus";
 import { zosGameFocus } from "@/lib/zos-link";
-import { FirmwarePanel, useFirmwarePanel } from "@/components/firmware-panel";
 import { InviteQrDialog } from "@/components/game/invite-qr-dialog";
 import { errorMessage } from "@/lib/utils";
 import type { FirmwareMode } from "@/lib/firmware-mode";
-import type { ArcadeStatus, FirmwareKind } from "@/types";
 
 // How long the engine-rendered settlement screen keeps streaming to the device
 // before the shell wipes it (same v1 semantics, now driven by hud().phase).
@@ -153,23 +148,16 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 interface GameShellProps {
-  // 任一侧载固件（音乐或游戏）直连中：官方固件的上屏通道此时不存在。
+  // 侧载的音乐固件直连中：官方固件的上屏通道此时不存在。
   firmwareOnline: boolean;
-  firmwareKind?: FirmwareKind | null;
-  // 时钟当前跑的固件。ZOS 与两套侧载固件互斥，所以 zos 时 firmwareOnline 必为
+  // 时钟当前跑的固件。ZOS 与侧载固件互斥，所以 zos 时 firmwareOnline 必为
   // false——但上屏同样不可能：ZOS 没有官方的 Custom App 接收端。
   firmwareMode?: FirmwareMode;
-  // 游戏页挂载期间轮询 /api/arcade/status，把在线状态上报给工作台归一。
-  onArcadeOnlineChange?: (online: boolean) => void;
 }
-
-const ARCADE_STATUS_POLL_MS = 10_000;
 
 export function GameShell({
   firmwareOnline,
-  firmwareKind = null,
   firmwareMode = "official",
-  onArcadeOnlineChange,
 }: GameShellProps) {
   const zos = firmwareMode === "zos";
   // 上屏走 /api/live/frames → 官方 Custom App。两种情况下这条路都不存在：
@@ -209,14 +197,6 @@ export function GameShell({
   const [paddleWidth, setPaddleWidth] = useState<BreakoutPaddleWidth>(8);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [padOnline, setPadOnline] = useState(false);
-  const [arcadeStatus, setArcadeStatus] = useState<ArcadeStatus | null>(null);
-  // 游戏固件的侧载面板：与音乐页共用同一套组件与流程，仅前缀/口令/文案不同。
-  const firmwarePanel = useFirmwarePanel({
-    apiPrefix: "/api/arcade",
-    confirmation: "START_TC002_ARCADE_SESSION",
-    firmwareLabel: "游戏固件",
-    firmwareMode,
-  });
 
   pausedRef.current = paused;
   screenOnRef.current = screenOn;
@@ -297,31 +277,6 @@ export function GameShell({
   useEffect(() => {
     if (liveBlocked) clearLive();
   }, [clearLive, liveBlocked]);
-
-  // 游戏固件在线检测（调研方案 A）：挂载期间 10 秒一轮询，纯内存读零成本；
-  // 卸载时上报离线，避免锁死其他视图。
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const status = await jsonApi<ArcadeStatus>("/api/arcade/status");
-        if (cancelled) return;
-        setArcadeStatus(status);
-        onArcadeOnlineChange?.(status.online);
-      } catch {
-        if (cancelled) return;
-        setArcadeStatus(null);
-        onArcadeOnlineChange?.(false);
-      }
-    };
-    void poll();
-    const timer = window.setInterval(() => void poll(), ARCADE_STATUS_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      onArcadeOnlineChange?.(false);
-    };
-  }, [onArcadeOnlineChange]);
 
   // Host side of the WS gamepad (two-player games only): pad {type:"input"}
   // messages steer the second paddle through GameInput.p2PointerY, and the
@@ -605,23 +560,6 @@ export function GameShell({
               onChange={toggleScreen}
             />
           </label>
-          <Button
-            type="button"
-            className="music-device-trigger game-firmware-trigger"
-            contentClassName="music-device-trigger__content"
-            size="sm"
-            color="neutral"
-            variant="transparent"
-            outline
-            tightFocusRing
-            aria-haspopup="dialog"
-            aria-label={`侧载游戏固件，${firmwarePanel.statusLabel}`}
-            onClick={firmwarePanel.openPanel}
-          >
-            <HardDrive aria-hidden="true" />
-            <span>游戏固件</span>
-            <ChevronRight aria-hidden="true" />
-          </Button>
         </div>
       </div>
 
@@ -742,13 +680,21 @@ export function GameShell({
               时钟自带同样七款游戏：点「在时钟上玩」把它切到当前这款，用旋钮和按键在设备上开一局；
               两边各自开局，进度和随机数都不共享。
             </p>
-          ) : firmwareOnline && (
-            <p className="game-note game-note--warning" role="status">
-              <WifiOff aria-hidden="true" />
-              {firmwareKind === "arcade"
-                ? "游戏固件直连中，正在时钟上原生运行；恢复官方固件后才能上屏。"
-                : "音乐固件直连中，恢复官方固件后才能上屏。"}
-            </p>
+          ) : (
+            <>
+              {firmwareOnline && (
+                <p className="game-note game-note--warning" role="status">
+                  <WifiOff aria-hidden="true" />
+                  音乐固件直连中，恢复官方固件后才能上屏。
+                </p>
+              )}
+              {/* 这里曾是「侧载游戏固件」的入口。那套固件退役了（ADR 0014），想用
+                  旋钮玩的答案只剩一个，就一句话说清。 */}
+              <p className="game-note">
+                <MonitorCog aria-hidden="true" />
+                想在时钟上用旋钮玩？ZOS 系统固件自带同样七款游戏，在它的「游戏」菜单里。
+              </p>
+            </>
           )}
           {paused && (
             <p className="game-note" role="status">
@@ -769,44 +715,6 @@ export function GameShell({
           )}
         </section>
       </div>
-
-      <FirmwarePanel
-        controller={firmwarePanel}
-        heading="侧载游戏固件"
-        description={zos
-          ? "把游戏固件推进时钟内存临时运行，用旋钮和按键玩七款像素小游戏；它与 ZOS 互斥，侧载期间 ZOS 会被顶下去。"
-          : "把游戏固件推进时钟内存临时运行，用旋钮和按键玩七款像素小游戏；官方固件原封不动，断电重启即自动恢复。"}
-        dialogClassName="arcade-firmware-dialog"
-      >
-        {zos && (
-          // 恢复承诺本身已经交给面板正文按 restoresTo 说（ZOS 刷在 mtd3 res 上，
-          // 断电重启回到的是 ZOS）。这里只留侧载期间会中断什么——那是正文没有的。
-          <Surface
-            color="orange"
-            variant="solid"
-            outline
-            className="rounded-lg"
-            contentClassName="flex flex-col gap-1 px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
-          >
-            <strong className="text-cladd-fg">时钟当前运行 ZOS，两套固件不能同时跑。</strong>
-            <span>
-              侧载会把 ZOS 顶下去，控制台的频道拉取、画面镜像与固定旋钮在这期间都会中断；
-              结束侧载或断电重启后回到的是 ZOS，不是 Ulanzi 官方固件。
-            </span>
-          </Surface>
-        )}
-        {arcadeStatus?.online && (
-          <dl className="fw-device-facts" aria-label="游戏固件实时状态">
-            <div><dt>当前游戏</dt><dd>{arcadeStatus.game || "—"}</dd></div>
-            <div><dt>阶段</dt><dd>{arcadeStatus.phase || "—"}</dd></div>
-            <div><dt>分数</dt><dd>{arcadeStatus.score}</dd></div>
-            <div>
-              <dt>心跳</dt>
-              <dd>{arcadeStatus.ageMs >= 0 ? `${Math.max(0, Math.round(arcadeStatus.ageMs / 1000))} 秒前` : "等待中"}</dd>
-            </div>
-          </dl>
-        )}
-      </FirmwarePanel>
 
       <InviteQrDialog
         open={inviteOpen}

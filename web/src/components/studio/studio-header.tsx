@@ -24,7 +24,7 @@ import {
   type FirmwareMode,
   type FirmwareStatus,
 } from "@/lib/firmware-mode";
-import type { FirmwareKind, RuntimeState, StudioView } from "@/types";
+import type { RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
 
 interface StudioHeaderProps {
@@ -33,10 +33,8 @@ interface StudioHeaderProps {
   runtime: RuntimeState | null;
   // 时钟此刻在跑哪套固件，以及（只有 ZOS 会上报的）电量读数。
   firmwareStatus?: FirmwareStatus;
-  // 侧载固件直连中：其他视图与常规设置都走官方固件通道，此时全部禁用。
+  // 侧载的音乐固件直连中：其他视图与常规设置都走官方固件通道，此时全部禁用。
   firmwareLocked?: boolean;
-  // 哪种固件在直连（音乐/游戏），决定设置按钮 tooltip 的文案。
-  firmwareKind?: FirmwareKind | null;
 }
 
 // 还没人告诉过我们时钟在跑什么，就等于「没有任何固件在上报」——这正是控制台
@@ -44,13 +42,11 @@ interface StudioHeaderProps {
 const UNREPORTED_FIRMWARE = describeFirmware({
   osState: null,
   musicFirmwareOnline: false,
-  arcadeOnline: false,
 });
 
 const MODE_ICONS: Record<FirmwareMode, LucideIcon> = {
   official: Cpu,
   music: Music2,
-  arcade: Gamepad2,
   // 与「系统」标签同一个图标：Chip 说的就是那一页在讲的固件。
   zos: MonitorCog,
 };
@@ -58,7 +54,6 @@ const MODE_ICONS: Record<FirmwareMode, LucideIcon> = {
 const MODE_COLORS: Record<FirmwareMode, "neutral" | "cyan" | "brand"> = {
   official: "neutral",
   music: "cyan",
-  arcade: "cyan",
   zos: "brand",
 };
 
@@ -84,10 +79,8 @@ export function StudioHeader({
   runtime,
   firmwareStatus = UNREPORTED_FIRMWARE,
   firmwareLocked = false,
-  firmwareKind = null,
 }: StudioHeaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const kindLabel = firmwareKind === "arcade" ? "游戏固件" : "音乐固件";
   const tone = runtime?.healthy
     ? "is-good"
     : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
@@ -173,7 +166,7 @@ export function StudioHeader({
             <span>{runtimeLabel(runtime)}</span>
           </div>
         )}
-        <Tooltip tooltip={firmwareLocked ? `${kindLabel}运行中，恢复官方固件后可用` : "常规设置"}>
+        <Tooltip tooltip={firmwareLocked ? "音乐固件运行中，结束侧载后可用" : "常规设置"}>
           <Button
             type="button"
             size="sm"

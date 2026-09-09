@@ -6,9 +6,11 @@ import type { FirmwareMode } from "@/lib/firmware-mode";
 import { errorMessage } from "@/lib/utils";
 import type { MusicDeviceAppStatus, MusicDeviceProbe } from "@/types";
 
-// 侧载面板是两种固件（音乐 / 游戏）共用的：同一套三步流程、三重确认与恢复
-// 指南，只有 API 前缀、确认口令和文案不同。状态与动作放在 hook 里，宿主页面
-// 因此能用 statusLabel 渲染自己的触发按钮；<FirmwarePanel> 只负责抽屉本身。
+// 音乐固件的侧载面板：三步流程、三重确认与恢复指南。游戏固件退役后
+// （ADR 0014）它只剩音乐页这一个宿主，但 API 前缀、确认口令和文案仍是参数——
+// 服务端的 SideloadProfile 同样是参数化的，两边保持同构。状态与动作放在 hook
+// 里，宿主页面因此能用 statusLabel 渲染自己的触发按钮；<FirmwarePanel> 只负责
+// 抽屉本身。
 
 // 侧载只占内存，所以「结束侧载 / 断电重启」之后回到的是**闪存里那一套**，
 // 不一定是官方固件：本机的 ZOS 是刷进 res 分区的，断电重启回到的是 ZOS。
@@ -68,15 +70,15 @@ export function firmwareStatusLabel(
 }
 
 export function useFirmwarePanel(options: {
-  apiPrefix: string;      // "/api/music" | "/api/arcade"
+  apiPrefix: string;      // "/api/music"
   confirmation: string;   // the exact phrase the server demands
-  firmwareLabel: string;  // "音乐固件" | "游戏固件"
+  firmwareLabel: string;  // "音乐固件"
   /** 侧载前时钟在跑什么。ZOS 意味着闪存里是 ZOS，恢复承诺得跟着改。 */
   firmwareMode?: FirmwareMode;
 }): FirmwarePanelController {
   const { apiPrefix, confirmation, firmwareLabel, firmwareMode = "official" } = options;
   // Latched, not read live: starting the sideload flips firmwareMode to
-  // music/arcade, and forgetting that ZOS was underneath would put the panel
+  // music, and forgetting that ZOS was underneath would put the panel
   // back to promising the official firmware exactly while it is most wrong.
   const [restoresToZos, setRestoresToZos] = useState(firmwareMode === "zos");
   useEffect(() => {
@@ -338,12 +340,12 @@ export function FirmwarePanel({
   children,
 }: {
   controller: FirmwarePanelController;
-  heading: string;          // "侧载音乐固件" | "侧载游戏固件"
+  heading: string;          // "侧载音乐固件"
   description: string;
-  dialogClassName: string;  // "music-firmware-dialog" | "arcade-firmware-dialog"
+  dialogClassName: string;  // "music-firmware-dialog"
   eyebrow?: string;
   title?: string;
-  /** Extra live status (e.g. the arcade's current game) below the probe facts. */
+  /** Extra host-page content (e.g. the ZOS interruption notice) below the probe facts. */
   children?: ReactNode;
 }) {
   const { busy } = controller;

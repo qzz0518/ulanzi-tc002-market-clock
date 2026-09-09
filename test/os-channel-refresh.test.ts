@@ -366,7 +366,7 @@ describe("an options edit reaches the panel", () => {
     });
     report(true);
     expect(osLink.zosFlashed()).toBe(true);
-    // Sticky on purpose: sideloading the music or arcade firmware over a flashed
+    // Sticky on purpose: sideloading the music firmware over a flashed
     // ZOS takes ZOS off the air, and resuming pushes then would resume writing
     // into nothing while claiming it worked.
     report(false);

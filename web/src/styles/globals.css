@@ -771,10 +771,6 @@
 }
 .game-picker svg { width: 0.95rem; height: 0.95rem; }
 .game-topbar__status { display: inline-flex; align-items: center; gap: 0.85rem; flex-wrap: wrap; }
-/* 复用 .music-device-trigger 的排版；它的 --music-ink 只在音乐页定义，
-   游戏页里换回全局前景色（更高特异性盖过同为 !important 的原规则）。 */
-.game-topbar .music-device-trigger { color: var(--foreground) !important; }
-.game-topbar .music-device-trigger .music-device-trigger__content > svg { color: var(--muted-foreground); }
 .game-screen-toggle { display: inline-flex; flex: none; align-items: center; gap: 0.55rem; cursor: pointer; }
 .game-screen-toggle > span:first-child { color: var(--foreground); font-family: var(--sans); font-size: 0.68rem; letter-spacing: 0; }
 

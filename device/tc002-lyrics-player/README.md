@@ -1,5 +1,8 @@
 # TC002 音乐歌词固件（非持久化侧载播放器）
 
+> **过渡期固件，已冻结。** ZOS 已有音乐页，设备端出声正并入 ZOS；扬声器在真机验证通过后
+> 本目录整体删除，在那之前不再改动（[ADR 0014](../../docs/adr/0014-two-tiers-official-and-zos.md)）。
+
 这是 Pixel Studio「音乐」页面对应的 **TC002 原生设备应用**：一个用 FlyThings
 SDK 编写、交叉编译为 `libzkgui.so` 的 C++ 播放器。它在真机上完成网络音频下载、
 扬声器播放、进度跳转，并直接驱动 52×16 LED 点阵渲染四种歌词主题——中文、日文、
@@ -31,17 +34,19 @@ device/tc002-lyrics-player/
 │   ├── src/logic/        # lyricsLogic.cc：轮询/心跳线程、按键映射、状态应用
 │   ├── src/pages/        # LyricsPage（四主题渲染）、SplashPage、VolumePage 等
 │   ├── src/managers/     # AudioManager（play/pause/seek）、KeyManager、McuManager
-│   ├── src/visual/       # CjkFont.h / LatinFont.h（生成物）、调色板、图标、频谱
+│   ├── src/visual/       # 调色板、图标、频谱（字模在 device/shared-visual/）
 │   └── ui/               # FlyThings 资源目录（随侧载一起推送）
 ├── app.manifest.json     # 应用元数据：平台、分辨率、依赖包清单
 ├── core/                 # 与 FlyThings 无关的歌词时间轴/版式核心（可在主机用 C++11 自测）
 ├── tools/gen-fonts.py    # 离线字体光栅化器：woff2 → CjkFont.h + LatinFont.h
-├── flythings-build/      # 无 IDE 的 Docker 交叉编译环境（见其 README）
 ├── flythings-overlay/    # 合入官方 Z21 Demo 工程所需的依赖清单
 ├── sideload/             # 网页「侧载固件」的入口脚本（部署到 /tmp 并拉起框架）
 ├── release/              # 发布产物区：bundle/ + manifest.json（由工具生成，已 gitignore）
 └── probe/                # 纯 shell 设备探针，验证侧载链路并采集真机情报
 ```
+
+交叉编译工具链不在这里：它在仓库的 [`device/flythings-build/`](../flythings-build/README.md)，
+与 ZOS 共用。
 
 ## 与服务端的协议
 
@@ -98,7 +103,7 @@ socket）。每轮循环先拉状态、再发心跳，然后 `sleep(2)`：
 python3 tools/gen-fonts.py <完整 SC 字体.woff2>   # 需要 fontTools + brotli + Pillow
 ```
 
-从 Fusion Pixel 12px 的 woff2 离线光栅化生成 `app/src/visual/CjkFont.h`
+从 Fusion Pixel 12px 的 woff2 离线光栅化生成 `device/shared-visual/CjkFont.h`
 （全宽 12×12，按码点严格升序，运行期二分查找）和 `LatinFont.h`（半宽 6×12，
 ASCII 连续存储 O(1) 索引）。位图约定与 `LyricsPage.cpp` 一致：CJK 每行一个
 12 位掩码、bit11 为最左列；Latin 每行只用低 6 位、bit5 为最左列。
@@ -115,16 +120,16 @@ ASCII 连续存储 O(1) 索引）。位图约定与 `LyricsPage.cpp` 一致：CJ
 ## 构建
 
 无需 Windows/FlyThings IDE，Docker 交叉编译（amd64 容器，Apple Silicon 下自动
-模拟）。工具链与 z21 依赖包的获取、Makefile 还原细节见
-[flythings-build/README.md](flythings-build/README.md)。
+模拟）。工具链在仓库的 `device/flythings-build/`（与 ZOS 共用），依赖包获取、Makefile
+还原细节见 [../flythings-build/README.md](../flythings-build/README.md)。
 
 ```bash
-cd device/tc002-lyrics-player/flythings-build
-./fetch-deps.sh                     # 工具链 + 基础依赖包；播放器额外包需手动补齐，见 flythings-build/README.md
+cd device/flythings-build
+./fetch-deps.sh                     # 工具链 + 基础依赖包；播放器额外包需手动补齐，见其 README
 docker build --platform linux/amd64 -t flythings-build .
 docker run --rm --platform linux/amd64 \
-  -v "$PWD/..":/work -w /work/flythings-build flythings-build make
-# → libzkgui.so（ELF32 ARM，已 strip）
+  -v "$PWD/..":/work -w /work/flythings-build flythings-build make   # Makefile 默认 APP=../tc002-lyrics-player/app
+# → device/flythings-build/libzkgui.so（ELF32 ARM，已 strip）
 ```
 
 两个不能省的构建事实：
@@ -158,9 +163,9 @@ docker run --rm --platform linux/amd64 \
 adb connect <device-ip>:5555
 adb shell rm -f /tmp/track.mp3          # 关键：tmpfs 很小，先清旧音频再推新 .so，
                                         # 否则 adbd 会在推送中途卡死（显示 online 但 shell 报 error:closed）
-adb push flythings-build/libzkgui.so /tmp/libzkgui.so
+adb push ../flythings-build/libzkgui.so /tmp/libzkgui.so
 adb push app/ui /tmp/ui
-adb push flythings-build/EasyUI.cfg /tmp/EasyUI.cfg   # startupLibPath=/tmp/libzkgui.so
+adb push ../flythings-build/EasyUI.cfg /tmp/EasyUI.cfg   # startupLibPath=/tmp/libzkgui.so
 adb shell 'setprop ctl.restart zkswe'   # 框架从 /tmp 加载播放器
 ```
 
@@ -177,10 +182,10 @@ adb shell 'setprop ctl.restart zkswe'   # 框架从 /tmp 加载播放器
 
 ```bash
 STAGE=$(mktemp -d)
-cp device/tc002-lyrics-player/sideload/player             "$STAGE/"
-cp device/tc002-lyrics-player/flythings-build/libzkgui.so "$STAGE/"
-cp device/tc002-lyrics-player/flythings-build/EasyUI.cfg  "$STAGE/"
-cp -R device/tc002-lyrics-player/app/ui                   "$STAGE/ui"
+cp device/tc002-lyrics-player/sideload/player "$STAGE/"
+cp device/flythings-build/libzkgui.so         "$STAGE/"
+cp device/flythings-build/EasyUI.cfg          "$STAGE/"
+cp -R device/tc002-lyrics-player/app/ui       "$STAGE/ui"
 bun run music-release -- "$STAGE" 0.1.0 player
 ```
 

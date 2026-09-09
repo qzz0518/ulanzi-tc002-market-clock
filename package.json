@@ -12,7 +12,6 @@
     "build": "bun run scripts/build.ts",
     "preview": "bun run scripts/preview.ts",
     "music-release": "bun run scripts/create-music-release.ts",
-    "arcade-release": "bun run scripts/create-arcade-release.ts",
     "status": "bun run scripts/status.ts",
     "agent": "bun run src/vibe-agent.ts",
     "agent-build": "bun run scripts/build-agent.ts",

@@ -104,7 +104,7 @@ VIBE 是 **ZOS 上的一个独立 App**，在旋钮主菜单里与「音乐」�
 轮播 / **VIBE** / 设置）。进去以后旋钮翻页：第一页是两个代理并排的总览，之后每个代理一页
 （指标行、进度条、重置倒计时），按下在「已用」与「剩余」之间切换，长按返回。它**不是频道**——
 频道是一段定时重拉的动画，既没有输入也做不了推送，而 VIBE 之后要做本机 vibe coding 状态的
-实时联动（[ADR 0011](adr/0011-vibe-is-a-firmware-app.md)）。官方固件与两个侧载固件上没有根菜单
+实时联动（[ADR 0011](adr/0011-vibe-is-a-firmware-app.md)）。官方固件与侧载的音乐固件上没有根菜单
 可加，因此 **VIBE 只在 ZOS 上存在**。
 
 数值由本服务自己采集，**不需要额外装任何应用**：每家一个适配器（`src/vibe/providers/<厂商>.ts`），
@@ -321,40 +321,30 @@ FFT。这三种来源都显示模拟律动，并在主题面板标明——否�
   器，扬声器出声必须由设备端应用调用 `AudioManager`——这正是侧载固件存在的原因（MQTT
   只能传控制消息，替代不了它）。
 
+**侧载播放器是过渡方案**（[ADR 0014](adr/0014-two-tiers-official-and-zos.md)）：ZOS 已有
+音乐页，设备端出声正以设备侧开关（默认关）并入 ZOS，走的是同一套 `/api/music/device/*`
+协议；扬声器在真机验证通过后，侧载播放器连同它的 profile、面板与固件模式一起删除。在那
+之前它冻结不再改动。
+
 侧载始终是非持久化的：固件只推进设备内存盘临时运行，点「恢复官方固件」或断电重启即回到
 原样，flash 从不被写入。侧载前需三重确认：固件包逐文件 SHA-256 与发布清单一致、官方
 HTTP 接口与 Wi-Fi ADB 双重确认真机、用户勾选已知恢复方式。固件源码、协议、构建与部署
 详见 [device/tc002-lyrics-player](../device/tc002-lyrics-player/README.md)。
 
-### 游戏固件（tc002-arcade）
-
-第二个侧载 App（[ADR 0004](adr/0004-arcade-firmware.md)）：开机动画、卡带式游戏菜单、
-设备信息页与七款旋钮+按键小游戏。前四款（打砖块 / Flappy / 贪吃蛇 / Pong）物理参数直译自
-网页版游戏引擎；后三款是固件专属、网页不做引擎的原生玩法：**极速车道**（racer）旋钮左右
-变道、躲开迎面而来的车流，**太空射击**（shooter）旋钮平移飞船、按键开火清掉下压的敌群，
-**横版方块**（tetris）在 52×16 的横屏里把方块从右侧推入、消掉填满的竖列。七款都带低延迟
-游戏音效；固件专属三款不提供网页试玩。服务端侧载栈不复制而是参数化：同一个安装器
-类加一份 profile（appId、远端目录、确认口令、清理列表），打包走 `bun run arcade-release`
-（清单 schema v3 不变），构建复用音乐固件的 `flythings-build/` Docker 工具链。两个固件都
-争夺 `/tmp/EasyUI.cfg` 与 zkswe，因此天然互斥；入口脚本写 `/tmp/tc002-sideload.id` 声明
-会话身份，两边的存活检查各认各的 id（旧音乐包没有 id 文件，视为音乐自己的会话，向后兼容）。
-在线检测不走音乐固件的 2 秒状态轮询，而是固件每 5 秒 `POST /api/arcade/heartbeat`（当前
-游戏/阶段/分数），网页游戏厅每 10 秒读 `GET /api/arcade/status`；任一固件直连时，工作台
-同样锁定内容/画板/素材库与常规设置，游戏页顶栏的「游戏固件」按钮打开与音乐页同构的侧载
-面板（暗色主题），在线时显示当前游戏与分数。侧载、恢复与断电自愈流程与音乐固件完全一致。
-
 ## ZOS 系统固件（tc002-os）
 
-前两套固件是官方 app 之外的临时房客，**ZOS**（`device/tc002-os/`）是替换品：它顶掉官方
-app，自己就是这台设备的系统，因此也继承了官方 app 的全部职责——菜单、网络、配网页面。
-三套固件共用同一条 `/tmp` 加载路径与 `/tmp/tc002-sideload.id` 会话标识，天然互斥
-（[ADR 0004](adr/0004-arcade-firmware.md)）。
+官方固件是第一层级，服务只往上推帧；**ZOS**（`device/tc002-os/`）是第二层级、整机替换品：
+它顶掉官方 app，自己就是这台设备的系统，因此也继承了官方 app 的全部职责——菜单、网络、
+配网页面；新的设备端功能只做给它（[ADR 0014](adr/0014-two-tiers-official-and-zos.md)）。
+它与过渡期的侧载音乐固件共用同一条 `/tmp` 加载路径与 `/tmp/tc002-sideload.id` 会话标识，
+天然互斥。
 
 工程上只有一条铁律：**Screen 只往 Surface 里画，永远不碰 SPI；全工程只有 `platform/Presenter`
 写 LED 总线**，时间以 `nowMs` 参数传入，Screen 必须是 `(state, nowMs)` 的纯函数。LED 总线
 只写、`/dev/fb0` 与面板无关，真机上读不回一帧，所以 UI 回归只能在 Mac 上断言——
-`mise run os-hostcheck` 用 clang++ 编译 `ui/`、`core/`、`net/` 并逐像素比对。这条铁律同时
-让「画面镜像」只有一个接入点：合成收口在 `Shell::render` 之后一处。
+`mise run os-hostcheck` 用 clang++ 编译 `ui/`、`core/`、`net/` 并逐像素比对，游戏引擎的
+自检也在这条任务里。这条铁律同时让「画面镜像」只有一个接入点：合成收口在 `Shell::render`
+之后一处。
 
 ### 菜单与操作
 
@@ -390,10 +380,11 @@ CRT 式收拢），全程程序生成、不含任何字模，因此在字体表�
   画面是服务端已经排好的内容，在它前面再画一个标签等于描述用户正在看的东西；名字只在帧还
   没下载完时出现。只拉取停稳的那一个频道，不预取邻居（一个包可达数百 KB，而同一条无线还
   扛着长轮询）。
-- **游戏**：七款游戏，引擎从 `device/tc002-arcade` 原样编入而不是移植——它们已在真机验证、
-  已被 arcade 自己的自检覆盖，移植等于把这份保证分叉。每款一张卡片，配自己的 12×12 动态
+- **游戏**：七款游戏，引擎在 `app/src/games/`——从已退役的游戏固件原样搬入，连同它的自检
+  `hostcheck/games-selfcheck.cpp`，与 UI 自检一起由 `mise run os-hostcheck` 编译；它们已在
+  真机验证，搬而不改就是为了不把这份保证分叉。每款一张卡片，配自己的 12×12 动态
   图标（按引擎调色板画出来，不是存位图）和自己的音效。音效是**合成**的而非播放采样：
-  方波 / 三角波 / 噪声加频率扫描与衰减包络，直接写进 `base::AudioPlayer`；arcade 那套 .wav
+  方波 / 三角波 / 噪声加频率扫描与衰减包络，直接写进 `base::AudioPlayer`；播放 .wav
   要经 MediaPlayer 解码，会拖进约 1.1MB .text + 856KB .bss 的 ffmpeg，对几声短音是荒谬的价钱。
 - **音乐**：控制台当前在放什么（曲名、歌手、当前歌词行、进度）。设备侧没有音频，按键是转成
   Connect 命令由服务端执行的；进度由本地时钟按服务端给的时间戳外推，所以在几分钟才更新一次
@@ -649,14 +640,14 @@ seq+1 起步等于凭空造出一个没人要求的上升沿，会把控制台�
 
 ### 侧载与 host 文件
 
-侧载走与音乐 / 游戏固件完全相同的参数化安装器（`/api/os/device-app/*`，确认口令
+侧载走与音乐固件完全相同的参数化安装器（`/api/os/device-app/*`，确认口令
 `START_TC002_OS_SESSION`）：逐文件 SHA-256 比对发布清单、官方 HTTP 接口与 Wi-Fi ADB 双重
 确认真机、用户勾选已知恢复方式。全程只写 tmpfs，闪存一次都不碰；**断电即恢复官方固件**：
 `/tmp` 被清空，框架回落到 `/res/etc/EasyUI.cfg`，官方 app 连同它自带的 WiFi 配置网页一起
-回来。这是这套固件出任何问题时的通用救砖手段。控制台目前还没有 ZOS 的侧载面板（音乐和
-游戏各有一个），这四条路由要自己调。
+回来。这是这套固件出任何问题时的通用救砖手段。控制台目前还没有 ZOS 的侧载面板（只有
+音乐固件有一个），这四条路由要自己调。
 
-ZOS 比另外两套多一步：**包里要放一个 `host` 文件写上控制台地址**。这台设备的局域网里没有
+ZOS 比音乐固件多一步：**包里要放一个 `host` 文件写上控制台地址**。这台设备的局域网里没有
 任何东西会广播这个服务——它是某台笔记本上的一个 Bun 进程，不是有名字的路由器服务，所以只能
 告诉它。启动脚本把 `host` 移到 `/tmp/zos-host`，固件启动时读它（也接受留在原地的
 `/tmp/tc002-os/host`）。三种人会写的写法都认：
@@ -824,8 +815,6 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `DELETE` | `/api/vibe/ingest/machine?machine=…` | 忘掉某台机器推来的数据（控制台的「移除」按钮，同源）。应答 `{forgotten, machines}`；`forgotten:false` 表示本来就没有这台。这只是忘掉——采集器若仍在那台机器上跑，下次推送还会出现 |
 | `PUT` | `/api/vibe/key` | 为 key 制厂商存一把 API key：`{providerId, key}`，`key` 传空串即清除；应答只有 `keys` 那张状态表，**绝不回显 key**（同源 + JSON，校验失败 400）。**当前四家代理都借 CLI 登录，key 制厂商列表为空，任何 `providerId` 都返回 400** |
 | `GET` | `/api/presets`、`/api/icons/:id.png` | 兼容旧客户端的市场预设与内置资产图标 |
-| `GET` / `PUT` | `/api/settings` | 兼容旧版单市场轮播设置 |
-| `POST` | `/api/preview` | 兼容旧版：直接返回渲染的 GIF/PNG 字节 |
 | `GET` | `/api/library/ulanzi/pixel-assets` | 查询官方社区素材、分类、搜索和分页 |
 | `GET` | `/api/library/ulanzi/media` | 安全代理官方素材缩略图 |
 | `POST` | `/api/library/ulanzi/import` | 校验并导入官方 `contentView` 链接或作品 ID |
@@ -844,9 +833,6 @@ JavaScript，不受信任的插件应走独立进程协议并另写 ADR。
 | `GET` | `/api/music/netease/daily` | 网易云每日推荐歌曲（需登录 Cookie；上游报错按错误返回，不会渲染成空列表） |
 | `GET` | `/api/music/netease/liked/random` | 从「喜欢的歌曲」里随机取一首可播放的（需登录 Cookie；抽 8 首用一次 `song_detail` 过滤掉已下架的） |
 | `GET` / `POST` | `/api/music/device-app/*` | 校验固件包、检测真机、侧载固件与恢复官方固件（内存盘会话） |
-| `GET` / `POST` | `/api/arcade/device-app/*` | 游戏固件的同一套侧载生命周期（与音乐共用一个参数化安装器） |
-| `POST` | `/api/arcade/heartbeat` | 游戏固件 5 秒心跳（免同源；`{game, phase, score, uptimeMs}` 校验后记内存） |
-| `GET` | `/api/arcade/status` | 游戏固件在线快照 `{online, ageMs, game, phase, score}`（心跳 age<12s 或侧载会话活跃即在线） |
 | `GET` / `POST` | `/api/os/device-app/*` | ZOS 的同一套侧载生命周期（确认口令 `START_TC002_OS_SESSION`） |
 | `GET` | `/api/os/pull` | ZOS 长轮询状态文档（`?seq=`，最多挂起 8 秒；行式 `KEY\tVALUE` 纯文本，免同源） |
 | `GET` | `/api/os/frames` | ZOS 按 `?app=` 拉取一个频道渲染好的帧包（`TCF1` 原始 RGB 二进制，免同源） |

@@ -550,7 +550,7 @@ describe("zos link polling", () => {
 });
 
 describe("zos focus targets", () => {
-  // The seven ids are the arcade engines' own id() strings on both sides. This
+  // The seven ids are the firmware engines' own id() strings on both sides. This
   // list is duplicated on purpose: importing GAME_REGISTRY would let a rename
   // sail through, and the firmware would just silently ignore the new value.
   const GAME_IDS = ["breakout", "flappy", "snake", "pong", "racer", "shooter", "tetris"] as const;

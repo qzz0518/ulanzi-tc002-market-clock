@@ -9,8 +9,6 @@ import {
   DEFAULT_DEVICE_GENERAL_SETTINGS,
   type DeviceGeneralSettings,
 } from "../src/device-settings.ts";
-import { DEFAULT_SETTINGS } from "../src/settings.ts";
-import type { DashboardController } from "../src/controller.ts";
 import { renderOfflineDashboard } from "../src/pixel-ui.ts";
 import { MusicServiceError } from "../src/netease-music.ts";
 import type { MusicHub } from "../src/music/hub.ts";
@@ -69,24 +67,6 @@ function fakeMusicHub(
   } as unknown as MusicHub;
 }
 
-function fakeController(): DashboardController {
-  let settings = structuredClone(DEFAULT_SETTINGS);
-  return {
-    getSettings: () => structuredClone(settings),
-    saveSettings: async (value: unknown) => {
-      settings = value as typeof settings;
-      return structuredClone(settings);
-    },
-    getState: () => ({
-      service: "ulanzi-tc002-market-clock",
-      healthy: true,
-      settings,
-    }),
-    preview: async () => renderOfflineDashboard(),
-    pushNow: async () => ({ healthy: true }),
-  } as unknown as DashboardController;
-}
-
 function fakeWorkspaceController(previewCalls?: boolean[]): WorkspaceController {
   let workspace = createDefaultWorkspace("markets");
   return {
@@ -95,15 +75,12 @@ function fakeWorkspaceController(previewCalls?: boolean[]): WorkspaceController 
       workspace = value as typeof workspace;
       return structuredClone(workspace);
     },
-    getSettings: () => structuredClone(DEFAULT_SETTINGS),
-    saveSettings: async () => structuredClone(DEFAULT_SETTINGS),
     getState: () => ({
       service: "ulanzi-tc002-content-hub",
       healthy: true,
       workspace,
       channels: [],
     }),
-    preview: async () => renderOfflineDashboard(),
     previewChannel: async (_target: unknown, forceRefresh = false) => {
       previewCalls?.push(forceRefresh);
       return renderOfflineDashboard() as never;
@@ -116,7 +93,7 @@ function fakeWorkspaceController(previewCalls?: boolean[]): WorkspaceController 
 
 describe("local control API", () => {
   test("serves the GUI, official clock frame, ten presets, and pixel icons", async () => {
-    const handler = createControlHandler(fakeController());
+    const handler = createControlHandler(fakeWorkspaceController());
     const page = await handler(new Request("http://127.0.0.1:43820/"));
     expect(page.status).toBe(200);
     const pageHtml = await page.text();
@@ -174,33 +151,10 @@ describe("local control API", () => {
       lanEnabled: true,
       sameSubnetAsClock: true,
     };
-    const handler = createControlHandler(fakeController(), { controlAccess: () => access });
+    const handler = createControlHandler(fakeWorkspaceController(), { controlAccess: () => access });
     const response = await handler(new Request("http://127.0.0.1:43820/api/access"));
     expect(response.status).toBe(200);
     expect((await response.json()).access).toEqual(access);
-  });
-
-  test("persists same-origin JSON settings and rejects cross-origin writes", async () => {
-    const handler = createControlHandler(fakeController());
-    const body = JSON.stringify({ ...DEFAULT_SETTINGS, assets: ["eth", "sol"] });
-    const saved = await handler(
-      new Request("http://127.0.0.1:43820/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:43820" },
-        body,
-      }),
-    );
-    expect(saved.status).toBe(200);
-    expect((await saved.json()).settings.assets).toEqual(["eth", "sol"]);
-
-    const rejected = await handler(
-      new Request("http://127.0.0.1:43820/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Origin: "https://example.com" },
-        body,
-      }),
-    );
-    expect(rejected.status).toBe(400);
   });
 
   test("reads and writes every device general setting through a same-origin adapter", async () => {
@@ -694,91 +648,6 @@ describe("local control API", () => {
     expect(started).toBe(false);
   });
 
-  test("serves the same device-app lifecycle under the arcade prefix", async () => {
-    let probed = 0;
-    const installer = {
-      status: async () => ({
-        artifact: { state: "ready", appId: "tc002-arcade", bundleId: "b".repeat(64), message: "ok" },
-        adb: "ready",
-        busy: false,
-        session: { active: false },
-        restore: { title: "恢复", steps: [] },
-      }),
-      probe: async () => {
-        probed += 1;
-        return { adb: "ready", connected: true, message: "ok" };
-      },
-      sessionState: () => ({ active: false }),
-    } as unknown as Tc002MusicInstaller;
-    const handler = createControlHandler(fakeWorkspaceController(), { arcadeInstaller: installer });
-
-    const status = await handler(new Request("http://127.0.0.1:43820/api/arcade/device-app"));
-    expect(status.status).toBe(200);
-    expect((await status.json()).deviceApp.artifact.appId).toBe("tc002-arcade");
-
-    const probe = await handler(new Request("http://127.0.0.1:43820/api/arcade/device-app/probe", {
-      method: "POST",
-    }));
-    expect(probe.status).toBe(200);
-    expect(probed).toBe(1);
-
-    // The music prefix stays independent: no music installer configured here.
-    const music = await handler(new Request("http://127.0.0.1:43820/api/music/device-app"));
-    expect(music.status).toBe(404);
-    expect((await music.json()).error).toContain("music device installer");
-  });
-
-  test("records arcade heartbeats and answers the status poll from memory", async () => {
-    const handler = createControlHandler(fakeWorkspaceController(), {});
-
-    // Before any heartbeat (module state starts cold in this suite): offline.
-    const before = await handler(new Request("http://127.0.0.1:43820/api/arcade/status"));
-    expect(before.status).toBe(200);
-    const beforeBody = await before.json();
-    expect(beforeBody.online).toBe(false);
-    expect(beforeBody.ageMs).toBe(-1);
-
-    // Malformed heartbeats are refused before touching the snapshot.
-    const bad = await handler(new Request("http://127.0.0.1:43820/api/arcade/heartbeat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ game: "DROP TABLE", phase: "playing", score: 3, uptimeMs: 1 }),
-    }));
-    expect(bad.status).toBe(400);
-    const negative = await handler(new Request("http://127.0.0.1:43820/api/arcade/heartbeat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ game: "breakout", phase: "playing", score: -1, uptimeMs: 1 }),
-    }));
-    expect(negative.status).toBe(400);
-
-    // The firmware calls cross-origin (no browser Origin header): accepted.
-    const beat = await handler(new Request("http://127.0.0.1:43820/api/arcade/heartbeat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ game: "breakout", phase: "playing", score: 128, uptimeMs: 60_000 }),
-    }));
-    expect(beat.status).toBe(200);
-
-    const after = await handler(new Request("http://127.0.0.1:43820/api/arcade/status"));
-    const afterBody = await after.json();
-    expect(afterBody.online).toBe(true);
-    expect(afterBody.ageMs).toBeGreaterThanOrEqual(0);
-    expect(afterBody.ageMs).toBeLessThan(12_000);
-    expect(afterBody.game).toBe("breakout");
-    expect(afterBody.phase).toBe("playing");
-    expect(afterBody.score).toBe(128);
-  });
-
-  test("an active installer session counts as online before the first heartbeat", async () => {
-    const installer = {
-      sessionState: () => ({ active: true, version: "0.1.0" }),
-    } as unknown as Tc002MusicInstaller;
-    const handler = createControlHandler(fakeWorkspaceController(), { arcadeInstaller: installer });
-    const status = await handler(new Request("http://127.0.0.1:43820/api/arcade/status"));
-    expect((await status.json()).online).toBe(true);
-  });
-
   test("encodes mirror frames into one custom-app push and supports clearing", async () => {
     const payloads: { duration: number; image: { data: string }[] }[] = [];
     let cleared = 0;
@@ -855,18 +724,8 @@ describe("local control API", () => {
     expect(cleared).toBe(1);
   });
 
-  test("returns preview bytes and supports direct push", async () => {
-    const handler = createControlHandler(fakeController());
-    const preview = await handler(
-      new Request("http://127.0.0.1:43820/api/preview", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(DEFAULT_SETTINGS),
-      }),
-    );
-    expect(preview.status).toBe(200);
-    expect(preview.headers.get("Content-Type")).toBe("image/png");
-
+  test("supports a direct push of every channel", async () => {
+    const handler = createControlHandler(fakeWorkspaceController());
     const pushed = await handler(
       new Request("http://127.0.0.1:43820/api/push", { method: "POST" }),
     );

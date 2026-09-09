@@ -147,7 +147,7 @@
 ## 内置 HTTP 服务
 
 registry 里有 `civetweb-cxx`，但为了一个两字段的表单引入一个 HTTP 服务器框架
-不划算。`device/tc002-arcade/app/src/net/NetClient.cpp` 已经证明了裸 socket 上
+不划算。`device/tc002-lyrics-player/app/src/net/NetClient.cpp` 已经证明了裸 socket 上
 手写 HTTP/1.0 是可行的（那是客户端方向），服务端方向约 180 行同类代码即可：
 `accept` → 读请求行与头 → 路由 → 回应。
 

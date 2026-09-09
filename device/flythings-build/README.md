@@ -31,9 +31,10 @@ ELF32-ARM shared object.
 [ -d upstream ] || git clone --depth 1 \
   https://github.com/UlanziTechnology/Ulanzi-U-Clock-TC002 upstream
 docker build --platform linux/amd64 -t flythings-build .
-# Mount the PARENT dir: the Makefile's APP defaults to ../app (a sibling of this
-# folder), so it must be visible inside the container. Mounting only "$PWD" leaves
-# ../app outside the mount → find matches nothing → an empty (code-less) .so.
+# Mount the PARENT dir (device/): the Makefile's APP defaults to
+# ../tc002-lyrics-player/app and tc002-os builds pass APP=../tc002-os/app, so the
+# firmware trees must be visible inside the container. Mounting only "$PWD"
+# leaves them outside the mount → find matches nothing → an empty (code-less) .so.
 docker run --rm --platform linux/amd64 -v "$PWD/..":/work -w /work/flythings-build flythings-build make
 # → libzkgui.so  (ELF 32-bit ARM, NEEDED libeasyui/libzkhardware/liblog)
 ```
@@ -101,8 +102,10 @@ ctl.restart zkswe` — or just power-cycle (tmpfs is wiped).
 
 ## The lyrics player builds here too
 
-The real player (`../app`) is compiled by this same environment — `make` with
-the default `APP=../app`. Facts learned while bringing it up:
+The real player (`../tc002-lyrics-player/app`) is compiled by this same
+environment — `make` with the default `APP`. tc002-os builds through
+`mise run os-build` at the repo root, which passes `APP=../tc002-os/app`.
+Facts learned while bringing the player up:
 
 - **Strip is mandatory** (the Makefile does it): the unstripped `.so` is
   ~6.7MB and OOM-reboots the 36MB device; stripped it is ~1.8MB.

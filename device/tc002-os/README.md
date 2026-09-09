@@ -38,16 +38,20 @@ app/src/platform/ Presenter, Sfx, DeviceControls, NetInfo,
                   DeviceProvisioning                                  ← 唯一的设备侧
 app/src/visual/   Glyphs.cpp                    ← 唯一允许 include 字模表的翻译单元
                   VibeIcons.h                   ← 生成物：厂商标记点阵
+                  PixelFont.h                   ← 游戏 HUD 用的 ASCII 小字模
+app/src/games/    七款游戏引擎                    ← 原样来自已退役的 arcade 固件，host 可编译
+app/src/utils/    Surface.h                     ← 桥接头：引擎 include 的路径 → core/Surface.h
 app/src/managers/ KeyManager, McuManager        ← 沿用 arcade 已验证实现
 app/src/uart/     串口 / MCU 协议                ← 同上
 app/src/activity/ FlyThings Activity 外壳        ← 精简版，无 ZK 控件
 app/src/logic/    osLogic.cc                    ← 组合根与渲染循环，被 activity include
-hostcheck/        selfcheck.cpp, link-audit.sh
+hostcheck/        selfcheck.cpp, games-selfcheck.cpp, link-audit.sh
 sideload/os       侧载启动脚本
 ```
 
-七款游戏引擎不在这棵树里：`../tc002-arcade/app/src/games` 被原样编入（`EXTRA_SRC_DIRS`），
-不做移植——它们已在真机验证并被 arcade 自己的自检覆盖，移植等于把这份保证分叉。
+游戏引擎是从 arcade 固件**整体搬来**而不是移植的（[ADR 0014](../../docs/adr/0014-two-tiers-official-and-zos.md)）：
+它们已在真机验证，物理常数照抄网页版，`hostcheck/games-selfcheck.cpp` 逐帧断言全部七款；
+连 include 路径都没改，`utils/Surface.h` 是为此留的桥接头。改它们的任何一行都得先过这份自检。
 
 ## 输入
 
@@ -243,7 +247,7 @@ mise run os-linkaudit    # 链接审计，见下
 
 # 出固件镜像还有中间一步，别跳：os-image 打的是 release/bundle/，不是编译产物
 rm -rf .runtime/os-stage && cp -R device/tc002-os/release/bundle .runtime/os-stage
-cp device/tc002-lyrics-player/flythings-build/libzkgui-os.so .runtime/os-stage/libzkgui.so
+cp device/flythings-build/libzkgui-os.so .runtime/os-stage/libzkgui.so
 bun run scripts/create-os-release.ts -- "$PWD/.runtime/os-stage" <版本> os
 mise run os-image        # 打包成可刷的 update.img
 ```
@@ -276,7 +280,7 @@ mise run os-image        # 打包成可刷的 update.img
   3 KB，其实一点都不剩——链接器给只读段补页，**文件大小只按 4,096 字节一跳**，下一档
   1,259,256 就已经超了 965 字节。任何一个功能都会被这条线拦下，词级歌词时间轴就是这么撞上去的。
 
-三个固件共用同一个构建目录，因此 `BUILD_DIR` 按 app 隔离——否则切换 `APP` 而不
+工具链在 `device/flythings-build/`，几个 app 共用同一个构建目录，因此 `BUILD_DIR` 按 app 隔离——否则切换 `APP` 而不
 `make clean` 会把上一个 app 的 .o 静默链进来：能编、能加载、跑的是另一个固件。
 
 ## 侧载与恢复

@@ -401,7 +401,7 @@ const restoreDir = restoreArg === "" ? null : resolve(restoreArg);
  * timestamps. Silent only when the two agree.
  */
 async function assertBundleIsCurrent(dir: string): Promise<void> {
-  const builtPath = join(repoRoot, "device/tc002-lyrics-player/flythings-build/libzkgui-os.so");
+  const builtPath = join(repoRoot, "device/flythings-build/libzkgui-os.so");
   let built: Buffer | null = null;
   try {
     built = await readFile(builtPath);

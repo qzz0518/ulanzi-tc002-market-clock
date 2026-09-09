@@ -158,7 +158,6 @@ export function App() {
   const [category, setCategory] = useState<ContentCategory>("market");
   const [view, setView] = useState<StudioView>("console");
   const [musicFirmwareOnline, setMusicFirmwareOnline] = useState(false);
-  const [arcadeOnline, setArcadeOnline] = useState(false);
   const [osState, setOsState] = useState<FirmwareOsState | null>(null);
   const [mobileConsolePane, setMobileConsolePane] = useState<MobileConsolePane>("compose");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -773,14 +772,13 @@ export function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // 两种侧载固件（音乐/游戏）归一成一个「固件直连」状态：任一在线时，官方
-  // 固件的推送与设置通道都不存在，内容/画板/素材库视图一律锁定。
-  const firmwareOnline = musicFirmwareOnline || arcadeOnline;
-  const firmwareKind = musicFirmwareOnline ? "music" as const : arcadeOnline ? "arcade" as const : null;
+  // 侧载的音乐固件直连中就是「固件直连」：官方固件的推送与设置通道都不存在，
+  // 内容/画板/素材库视图一律锁定。（游戏固件已退役，同样七款游戏在 ZOS 里原生跑。）
+  const firmwareOnline = musicFirmwareOnline;
 
   // 时钟究竟在跑哪套固件：ZOS 的实时上报 > 侧载固件的心跳 > 官方固件（推导规则
   // 见 lib/firmware-mode.ts）。整份控制台只有这一处判定。
-  const firmwareStatus = describeFirmware({ osState, musicFirmwareOnline, arcadeOnline });
+  const firmwareStatus = describeFirmware({ osState, musicFirmwareOnline });
   const firmwareMode = firmwareStatus.mode;
 
   // ZOS 的音乐页是一块由控制台喂的歌词显示器：网页就是网易云的播放器，除了它没人
@@ -1009,7 +1007,6 @@ export function App() {
         runtime={runtime}
         firmwareStatus={firmwareStatus}
         firmwareLocked={firmwareOnline}
-        firmwareKind={firmwareKind}
       />
       <div className="page-heading">
         <div>
@@ -1183,8 +1180,6 @@ export function App() {
           <GameShell
             firmwareMode={firmwareMode}
             firmwareOnline={firmwareOnline}
-            firmwareKind={firmwareKind}
-            onArcadeOnlineChange={setArcadeOnline}
           />
         ) : view === "zos" ? (
           // 系统页同样不接 firmwareMode：它自己持有 /api/os/state 长轮询，

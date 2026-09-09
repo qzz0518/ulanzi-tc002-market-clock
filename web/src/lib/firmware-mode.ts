@@ -8,12 +8,14 @@
 // The evidence is uneven, so the precedence is too:
 //   zos      — the device itself is reporting to /api/os/state right now.
 //   music    — the music sideload's own heartbeat endpoint answered recently.
-//   arcade   — likewise for the arcade sideload.
 //   official — nothing is reporting; the stock firmware has nothing to report.
 // A live ZOS report therefore wins over a sideload guess, and "official" is
-// only ever the absence of the other three, never a positive detection.
+// only ever the absence of the other two, never a positive detection.
+//
+// The arcade sideload used to sit between music and official; it is retired
+// (ADR 0014) because ZOS runs the same seven games natively.
 
-export type FirmwareMode = "official" | "music" | "arcade" | "zos";
+export type FirmwareMode = "official" | "music" | "zos";
 
 /** The slice of `GET /api/os/state`'s telemetry this module reads. */
 export interface FirmwareTelemetry {
@@ -47,14 +49,11 @@ export interface FirmwareModeInput {
   osState: FirmwareOsState | null;
   /** The music sideload firmware's heartbeat, as app.tsx already tracks it. */
   musicFirmwareOnline: boolean;
-  /** The arcade sideload firmware's heartbeat. */
-  arcadeOnline: boolean;
 }
 
 export function deriveFirmwareMode(input: FirmwareModeInput): FirmwareMode {
   if (input.osState?.live === true) return "zos";
   if (input.musicFirmwareOnline) return "music";
-  if (input.arcadeOnline) return "arcade";
   return "official";
 }
 
@@ -121,7 +120,6 @@ export interface FirmwareStatus {
 const MODE_LABELS: Record<FirmwareMode, string> = {
   official: "官方固件",
   music: "音乐固件",
-  arcade: "游戏固件",
   zos: "ZOS",
 };
 
@@ -131,7 +129,6 @@ const MODE_DESCRIPTIONS: Record<FirmwareMode, string> = {
   // 就是 ZOS 而不是官方固件。这里没有判断闪存内容的依据，所以只说确定的部分；
   // 具体是哪一套由侧载面板的 restoresTo 说（它见过 ZOS 在跑）。
   music: "侧载的音乐固件正在直连时钟；断电即恢复闪存里的固件。",
-  arcade: "侧载的游戏固件正在直连时钟；断电即恢复闪存里的固件。",
   zos: "时钟正在运行 ZOS 自制固件，并持续上报设备状态。",
 };
 

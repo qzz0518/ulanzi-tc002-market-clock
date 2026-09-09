@@ -63,8 +63,7 @@
 .music-section-heading > span,
 .music-stage__heading > span,
 .music-lyrics-panel > header span,
-.music-firmware-dialog__title span,
-.arcade-firmware-dialog__title span {
+.music-firmware-dialog__title span {
   color: var(--music-ink-soft);
   font-family: var(--mono);
   font-size: 0.61rem;
@@ -1597,10 +1596,9 @@
 }
 
 /* The Cladd dialog surface is restyled as an off-canvas firmware drawer.
-   两种固件共用同一套纸面皮肤：暗色变体曾把亮色前景铺在未染色的浅背景上
+   纸面皮肤只有这一套：暗色变体曾把亮色前景铺在未染色的浅背景上
    (白字白底),在补齐全部背景层之前不再提供。 */
-.music-firmware-dialog,
-.arcade-firmware-dialog {
+.music-firmware-dialog {
   --music-ink: oklch(0.19 0.018 128);
   --music-ink-soft: oklch(0.31 0.018 128);
   --music-paper: oklch(0.972 0.016 102);
@@ -1610,8 +1608,7 @@
   --music-signal: oklch(0.56 0.17 142);
 }
 
-.music-firmware-dialog,
-.arcade-firmware-dialog {
+.music-firmware-dialog {
   --tw-scale-x: 1 !important;
   --tw-scale-y: 1 !important;
   --tw-scale-z: 1 !important;
@@ -1637,28 +1634,24 @@
   font-family: "Avenir Next", "PingFang SC", "Noto Sans CJK SC", sans-serif;
 }
 
-.music-firmware-dialog[data-open],
-.arcade-firmware-dialog[data-open] {
+.music-firmware-dialog[data-open] {
   opacity: 1 !important;
   transform: translateX(0) !important;
 }
 
-.music-firmware-dialog__content,
-.arcade-firmware-dialog__content {
+.music-firmware-dialog__content {
   height: 100%;
   gap: 0 !important;
   padding: 0 !important;
   overflow: hidden;
 }
 
-.music-firmware-dialog__content > [data-part="title"],
-.arcade-firmware-dialog__content > [data-part="title"] {
+.music-firmware-dialog__content > [data-part="title"] {
   padding: max(1rem, env(safe-area-inset-top)) 1rem 0.9rem;
   border-bottom: 1px solid var(--music-line);
 }
 
-.music-firmware-dialog__title,
-.arcade-firmware-dialog__title {
+.music-firmware-dialog__title {
   display: flex;
   width: 100%;
   align-items: center;
@@ -1666,20 +1659,18 @@
   gap: 1rem;
 }
 
-.music-firmware-dialog__title > div,
-.arcade-firmware-dialog__title > div {
+.music-firmware-dialog__title > div {
   display: grid;
   gap: 0.12rem;
 }
 
-.music-firmware-dialog__title strong,
-.arcade-firmware-dialog__title strong {
+.music-firmware-dialog__title strong {
   color: var(--music-ink);
   font-size: 0.92rem;
   font-weight: 680;
 }
 
-/* 固件抽屉的结构段两页共用，主前缀 .fw-*；旧的 .music-* 名字保留为别名，
+/* 固件抽屉的结构段主前缀 .fw-*；旧的 .music-* 名字保留为别名，
    防止历史引用漏改。 */
 .fw-deploy,
 .music-deploy {
@@ -1873,8 +1864,7 @@
 
 /* Inside the firmware drawer the alert sits right below the action row and
    right above the reconnect card — give it breathing room on both sides. */
-.music-firmware-dialog .music-inline-error,
-.arcade-firmware-dialog .music-inline-error {
+.music-firmware-dialog .music-inline-error {
   margin: 0.75rem 0;
 }
 
@@ -2055,8 +2045,7 @@
     grid-template-columns: 1fr;
   }
 
-  .music-firmware-dialog,
-  .arcade-firmware-dialog {
+  .music-firmware-dialog {
     right: 0 !important;
     left: 0 !important;
     width: auto !important;
@@ -2080,9 +2069,7 @@
   .music-studio *::before,
   .music-studio *::after,
   .music-firmware-dialog,
-  .music-firmware-dialog *,
-  .arcade-firmware-dialog,
-  .arcade-firmware-dialog * {
+  .music-firmware-dialog * {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

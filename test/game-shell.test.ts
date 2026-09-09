@@ -9,15 +9,16 @@ describe("game shell", () => {
   test("renders the stage: picker, screen with HUD, console", () => {
     const html = renderToStaticMarkup(createElement(GameShell, { firmwareOnline: false }));
 
-    // 顶栏：游戏切换 + 上屏开关 + 连接状态 + 游戏固件入口。
+    // 顶栏：游戏切换 + 上屏开关 + 连接状态。
     expect(html).toContain("选择游戏");
     expect(html).toContain("时间打砖块");
     expect(html).toContain("上屏");
     // 未上屏,不是直播中:上屏默认关闭(见 game-shell.tsx 的 mirrorEnabled 初值),
     // 先在浏览器里玩,想投到时钟再手动打开。
     expect(html).toContain("未上屏");
-    expect(html).toContain("游戏固件");
-    expect(html).toContain("侧载游戏固件");
+    // 游戏固件的侧载入口没了（ADR 0014）；想用旋钮玩只剩一句指路：ZOS 自带同样七款。
+    expect(html).not.toContain("侧载游戏固件");
+    expect(html).toContain("ZOS 系统固件自带同样七款游戏");
     // 舞台：52×16 LED 屏 + 像素 HUD。
     expect(html).toContain('width="52" height="16"');
     expect(html).toContain("分数");
@@ -35,7 +36,6 @@ describe("game shell", () => {
   test("keeps the game tab available but disables live output during firmware mode", () => {
     const game = renderToStaticMarkup(createElement(GameShell, {
       firmwareOnline: true,
-      firmwareKind: "music",
     }));
     const header = renderToStaticMarkup(createElement(StudioHeader, {
       view: "game",
@@ -44,10 +44,8 @@ describe("game shell", () => {
       firmwareStatus: describeFirmware({
         osState: null,
         musicFirmwareOnline: true,
-        arcadeOnline: false,
       }),
       firmwareLocked: true,
-      firmwareKind: "music",
     }));
 
     expect(game).toContain("音乐固件直连中，恢复官方固件后才能上屏");
@@ -56,29 +54,6 @@ describe("game shell", () => {
     expect(header).toContain("音乐固件");
     expect(header).toContain("游戏");
     expect(header).toMatch(/>内容<[\s\S]*?disabled/);
-  });
-
-  test("labels the arcade firmware distinctly when it is the one online", () => {
-    const game = renderToStaticMarkup(createElement(GameShell, {
-      firmwareOnline: true,
-      firmwareKind: "arcade",
-    }));
-    const header = renderToStaticMarkup(createElement(StudioHeader, {
-      view: "game",
-      onViewChange: () => {},
-      runtime: null,
-      firmwareStatus: describeFirmware({
-        osState: null,
-        musicFirmwareOnline: false,
-        arcadeOnline: true,
-      }),
-      firmwareLocked: true,
-      firmwareKind: "arcade",
-    }));
-
-    expect(game).toContain("游戏固件直连中");
-    expect(game).not.toContain("音乐固件直连中");
-    expect(header).toContain("游戏固件");
   });
 
   test("wires input capture and batched live streaming", async () => {
@@ -104,22 +79,20 @@ describe("game shell", () => {
     expect(shellSource).toContain("const GAME_OVER_STREAM_MS = 3_000;");
     expect(shellSource).toContain("GAME_REGISTRY");
 
-    // 游戏固件面板与在线轮询（方案 A）：挂载期间 10s 一拉，卸载即上报离线。
-    expect(shellSource).toContain('apiPrefix: "/api/arcade"');
-    expect(shellSource).toContain('confirmation: "START_TC002_ARCADE_SESSION"');
-    expect(shellSource).toContain("/api/arcade/status");
-    expect(shellSource).toContain("const ARCADE_STATUS_POLL_MS = 10_000;");
-    expect(shellSource).toContain("onArcadeOnlineChange?.(false)");
-    expect(shellSource).toContain('dialogClassName="arcade-firmware-dialog"');
+    // 游戏固件退役了（ADR 0014）：游戏页没有侧载抽屉，不轮询 /api/arcade/*，
+    // 也不再向工作台上报第二种侧载在线状态。
+    expect(shellSource).not.toContain("/api/arcade");
+    expect(shellSource).not.toContain("FirmwarePanel");
+    expect(shellSource).not.toContain("onArcadeOnlineChange");
 
-    // 页面接线与横屏 gate 保持；firmwareOnline 是两种固件的派生量。
+    // 页面接线与横屏 gate 保持；firmwareOnline 现在就是音乐固件的心跳。
     expect(headerSource).toContain('value="game"><Gamepad2 />游戏</Tab>');
-    // Tooltip 文案按固件种类区分（弹层内容不进 SSR，只能查源码）。
-    expect(headerSource).toContain("`${kindLabel}运行中，恢复官方固件后可用`");
+    // Tooltip 文案（弹层内容不进 SSR，只能查源码）。
+    expect(headerSource).toContain('"音乐固件运行中，结束侧载后可用"');
     expect(appSource).toContain('view === "game"');
-    expect(appSource).toContain("const firmwareOnline = musicFirmwareOnline || arcadeOnline;");
+    expect(appSource).toContain("const firmwareOnline = musicFirmwareOnline;");
     expect(appSource).toContain("firmwareOnline={firmwareOnline}");
-    expect(appSource).toContain("onArcadeOnlineChange={setArcadeOnline}");
+    expect(appSource).not.toContain("arcadeOnline");
     expect(appSource).toContain('className="game-orientation-gate"');
 
     // LED 屏质感与触控行为;竖屏 gate 隐藏游戏布局。

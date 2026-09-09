@@ -4,7 +4,7 @@
 
 TOOLCHAIN := toolchain/toolchain
 CXX       := $(TOOLCHAIN)/bin/arm-linux-gnueabihf-g++
-APP       ?= ../app
+APP       ?= ../tc002-lyrics-player/app
 PKG       := packages
 OUT       ?= libzkgui.so
 # Object directory, per app. Three firmwares share this build dir; with a single
@@ -16,15 +16,16 @@ BUILD_DIR ?= build
 DEP_INC := easyui base-utility log zkhardware transfer-protocols audio-utility base-json ffmpeg z
 # BOOST_INC points at the isolated boost/ subtree provided by the Docker image.
 BOOST_INC ?= /opt/boost
-# SHARED is the device/ root, so the generated glyph tables can be included as
-# "shared-visual/CjkFont.h" from any firmware. One copy in the repo is what keeps
-# the panel and the browser preview bit-for-bit identical (test/pixel-glyphs.test.ts).
-SHARED    ?= ../..
-# Extra source trees and include roots an app can pull in. tc002-os compiles the
-# arcade's seven game engines unchanged rather than porting them: they are
-# hardware-verified and already covered by the arcade's own self-check, so a
-# port would fork that guarantee. EXTRA_INC comes AFTER $(APP)/src so the app's
-# own headers still win (tc002-os provides utils/Surface.h as a bridge).
+# SHARED is the device/ root (this directory's parent), so the generated glyph
+# tables can be included as "shared-visual/CjkFont.h" from any firmware. One
+# copy in the repo is what keeps the panel and the browser preview bit-for-bit
+# identical (test/pixel-glyphs.test.ts).
+SHARED    ?= ..
+# Extra source trees and include roots an app can pull in. Nothing in the repo
+# needs them any more — tc002-os used to compile the arcade's game engines out
+# of the arcade tree this way, until the engines moved into tc002-os itself
+# (ADR 0014) — but the mechanism is two lines and the upstream demo builds may
+# still want it. EXTRA_INC comes AFTER $(APP)/src so the app's own headers win.
 EXTRA_SRC_DIRS ?=
 EXTRA_INC ?=
 # Extra dependency packages, opt-in per app. tc002-os adds `zknet` for exactly

@@ -286,18 +286,6 @@ export interface MusicDeviceProbe {
   message: string;
 }
 
-// GET /api/arcade/status —— 游戏固件的在线快照（心跳记忆 + 会话状态）。
-export interface ArcadeStatus {
-  online: boolean;
-  ageMs: number;
-  game: string;
-  phase: string;
-  score: number;
-}
-
-// 哪种侧载固件正在直连；两种固件互斥，最多一种在线。
-export type FirmwareKind = "music" | "arcade";
-
 // 时钟此刻在跑哪套固件。判定规则与文案都在 lib/firmware-mode.ts —— 那里是唯一
 // 真源，这里只是转出类型，好让习惯从 @/types 取类型的组件拿到同一个定义。
 export type { FirmwareMode } from "@/lib/firmware-mode";

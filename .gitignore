@@ -6,6 +6,4 @@ npm-debug.log*
 output/
 device/tc002-lyrics-player/release/bundle/
 device/tc002-lyrics-player/release/manifest.json
-device/tc002-arcade/release/bundle/
-device/tc002-arcade/release/manifest.json
-device/tc002-lyrics-player/flythings-build/libzkgui-arcade.so
+device/flythings-build/libzkgui-arcade.so

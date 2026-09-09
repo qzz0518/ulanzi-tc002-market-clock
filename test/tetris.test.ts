@@ -101,7 +101,7 @@ function wait(game: TetrisGame, ms: number): void {
 }
 
 // Seeds whose bag opens with the pieces a scenario needs, found the same way the
-// firmware selfcheck finds them (device/tc002-arcade/hostcheck/selfcheck.cpp
+// firmware selfcheck finds them (device/tc002-os/hostcheck/games-selfcheck.cpp
 // findTetrisSeed): 0 = I, 3 = O.
 const SEED_I = 1;
 const SEED_IIO = 6;

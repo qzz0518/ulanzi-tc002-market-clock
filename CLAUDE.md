@@ -6,9 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Bun service that turns the Ulanzi TC002 pixel clock (52×16 LED) into a multi-channel content
 studio: market tickers, tools, visual effects, a drawing canvas, a music/lyrics workstation
-(NetEase + Spotify Connect), and a game arcade. Two optional native C++ firmwares (music player,
-arcade) can be sideloaded to the device. Runtime is Bun 1.3.14 (pinned in `mise.toml`);
-`CLOCK_HOST` (the clock's LAN IP/hostname) is required for the service to start.
+(NetEase + Spotify Connect), and a game arcade. The device has two tiers (ADR 0014): the
+official Ulanzi firmware, which the service pushes rendered frames to, and **ZOS**
+(`device/tc002-os/`), the one native C++ firmware in this repo — a full replacement that pulls
+from the service; every new device-side feature targets ZOS only. A sideloaded C++ music
+player (`device/tc002-lyrics-player/`) remains as a transitional artifact until ZOS's
+device-side audio is verified on hardware, and receives no changes. Runtime is Bun 1.3.14
+(pinned in `mise.toml`); `CLOCK_HOST` (the clock's LAN IP/hostname) is required for the
+service to start.
 
 ## Commands
 
@@ -24,15 +29,17 @@ bun run preview                   # render every saved channel to .runtime/previ
 bun run status                    # query a running service
 bun run agent -- --help           # VIBE usage collector, for when the service is not on the machine holding the CLI logins
 bun run agent-build -- --all      # compile that collector to dist/agent/ for every platform
-mise run arcade-hostcheck         # compile+run the arcade game-engine self-checks on the host (clang++)
+mise run os-hostcheck             # compile+run the ZOS UI self-check and the games self-check on the host (clang++)
 ```
 
 There is **no Vite dev server**. The web UI is built as a library bundle (`dist/assets/studio.js`
 + `studio.css`) and served by the Bun process, so any change under `web/` requires `bun run build`
 before it shows up in the browser. `dist/` and `.runtime/` are gitignored.
 
-Firmware builds (Docker cross-compile, optional) and release packaging are documented in
-`device/tc002-lyrics-player/README.md` and `device/tc002-arcade/README.md`.
+Firmware builds (Docker cross-compile, optional) are `mise run os-build`, `os-linkaudit` and
+`os-image`, documented in `device/tc002-os/README.md`; the shared toolchain lives in
+`device/flythings-build/`. The transitional music sideload keeps `music-release` and its own
+`device/tc002-lyrics-player/README.md` until it goes.
 
 ## Architecture
 
@@ -62,10 +69,11 @@ bypass the proxy, on their own serial `liveWriteQueue` (~16 ms vs ~170 ms per wr
 makes 25 fps live streaming work — ADR 0003).
 
 **Sideload installers** — `src/tc002-music-installer.ts` is one parameterized `Tc002SideloadInstaller`
-used twice via `MUSIC_SIDELOAD_PROFILE` / `ARCADE_SIDELOAD_PROFILE` (appId, remote dir, confirm
+used twice via `MUSIC_SIDELOAD_PROFILE` / `OS_SIDELOAD_PROFILE` (appId, remote dir, confirm
 phrase, cleanup list). Sideloading is always non-persistent: files go to the device's tmpfs, flash
 is never written, power-cycle restores the official firmware. The two firmwares are mutually
-exclusive and distinguish sessions via `/tmp/tc002-sideload.id` (ADR 0004).
+exclusive and distinguish sessions via `/tmp/tc002-sideload.id`. ZOS can also be flashed for good
+(ADR 0012); the music profile leaves with the sideloaded player (ADR 0014).
 
 **Web UI** — React 19 + `@cladd-ui/react` + Tailwind v4, entry `web/src/main.tsx` → `web/src/app.tsx`,
 alias `@/` → `web/src/`. Pure logic lives in `web/src/lib/` (game engines, live-screen batching,
@@ -74,7 +82,7 @@ and `/draw` companion pages are intentionally standalone inline-script HTML stri
 `src/web-ui.ts` — a scanned QR code should get a working control in one request, with no bundle.
 
 **Shared pixel glyphs** — the 12×12 CJK / 6×12 ASCII bitmaps are generated once offline and used
-by both the firmware (`device/tc002-lyrics-player/app/src/visual/CjkFont.h`) and the web preview
+by both the firmwares (`device/shared-visual/CjkFont.h`) and the web preview
 (`web/src/lib/pixel-glyph-data.ts`). After regenerating fonts, run
 `bun run scripts/gen-web-glyphs.ts`; `test/pixel-glyphs.test.ts` verifies the two sides bit-for-bit.
 This is why preview, mirrored frames, and native firmware are pixel-identical.
@@ -83,9 +91,10 @@ This is why preview, mirrored frames, and native firmware are pixel-identical.
 atomically from the legacy `settings.json`), `pixel-assets/`, `market-instruments/`, `market-icons/`,
 and credential files (`music-session.json`, `spotify-session.json`) written `0600`.
 
-`src/controller.ts` (`DashboardController`) + `src/settings.ts` are the **legacy** single-market
-path, kept only so `/api/settings` and `/api/preview` stay compatible. New work belongs in
-`WorkspaceController`.
+`src/settings.ts` is the settings model (`DashboardSettings`, `validateSettings`) that
+`WorkspaceController` builds on, and the home of the shared `SettingsValidationError`. The legacy
+single-market path (`src/controller.ts`, `/api/settings`, `/api/preview`) is deleted (ADR 0014);
+new work belongs in `WorkspaceController`.
 
 ## Invariants worth preserving
 
@@ -93,8 +102,9 @@ path, kept only so `/api/settings` and `/api/preview` stay compatible. New work 
   360 frames/channel, 256 KiB request body; live/mirror endpoints are the exception at 2 MiB and
   ≤400 frames; video import is multipart at 100 MB.
 - Write endpoints require JSON and pass a same-origin check. Exceptions are deliberate: the
-  firmware-called `/api/music/device/report`, `/api/music/device/heartbeat`,
-  `/api/arcade/heartbeat`, and the external `/api/notify` (rate-limited, optional `NOTIFY_TOKEN`).
+  firmware-called `/api/music/device/report`, `/api/music/device/heartbeat`, the ZOS-called
+  `/api/os/report` and `/api/os/mirror`, and the external `/api/notify` (rate-limited, optional
+  `NOTIFY_TOKEN`).
 - App names are unique, 1–32 ASCII `[A-Za-z0-9_-]`; `notify` and `music_lyrics` are reserved.
 - Never fabricate market data: quote failures fall back to cache within `SOURCE_STALE_MS`, then the
   item is skipped rather than shown wrong; icons are generated procedurally when a brand match is
@@ -110,7 +120,9 @@ path, kept only so `/api/settings` and `/api/preview` stay compatible. New work 
 
 - `docs/reference.md` — env vars, data sources, full local API table, webhook payloads.
 - `docs/adr/` — 0001 content registry, 0002 native music player boundary, 0003 live frame channel,
-  0004 arcade firmware, 0005 runtime clock host, 0010 VIBE collects usage itself,
-  0013 that collector can also run out of process and push in.
-- `docs/design/` — pixel playground and arcade firmware designs; `docs/research/` — real-device
+  0004 arcade firmware (superseded), 0005 runtime clock host, 0010 VIBE collects usage itself,
+  0013 that collector can also run out of process and push in, 0014 two device tiers — the
+  official firmware and ZOS — and why the sideloads are transitional.
+- `docs/design/` — pixel playground, ZOS provisioning, VIBE, and the retired arcade firmware's
+  design; `docs/research/` — real-device
   probes and the no-IDE FlyThings build path.

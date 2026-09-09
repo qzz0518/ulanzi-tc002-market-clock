@@ -1127,17 +1127,6 @@ export class WorkspaceController {
     void this.appCleanupStore?.save({ ...this.cleanupErrors });
   }
 
-  async pushNow(reason: "scheduled" | "manual" = "manual"): Promise<WorkspaceRuntimeSnapshot> {
-    return reason === "scheduled" ? this.pushDue() : this.pushAll(reason);
-  }
-
-  async preview(value?: unknown): Promise<RenderedChannel> {
-    if (value === undefined) return this.previewChannel(this.workspace.channels[0]!.id);
-    const settings = validateSettings(value);
-    const migrated = migrateDashboardSettings(settings, this.config.appName);
-    return this.renderChannel(migrated.channels[0]!, false);
-  }
-
   private queueDeviceWrite<T>(operation: () => Promise<T>): Promise<T> {
     const queued = this.deviceQueue.then(operation, operation);
     this.deviceQueue = queued.then(() => undefined, () => undefined);

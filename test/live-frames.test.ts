@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createControlHandler } from "../src/control-api.ts";
-import type { DashboardController } from "../src/controller.ts";
+import type { WorkspaceController } from "../src/workspace-controller.ts";
 import type { ClockPayload } from "../src/display.ts";
 
-const controller = {} as DashboardController;
+const controller = {} as WorkspaceController;
 const pixels = Buffer.alloc(52 * 16 * 3, 48).toString("base64");
 
 describe("generalized live frame channel", () => {

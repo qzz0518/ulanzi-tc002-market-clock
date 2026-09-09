@@ -1,6 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename } from "node:fs/promises";
-import { dirname } from "node:path";
 import { ASSET_IDS, getAssetPreset, isAssetId, type AssetId } from "./assets.ts";
 
 export interface DashboardSettings {
@@ -24,23 +21,6 @@ export class SettingsValidationError extends Error {
     super(message);
     this.name = "SettingsValidationError";
   }
-}
-
-function migrateSavedSettings(value: unknown): { value: unknown; migrated: boolean } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { value, migrated: false };
-  }
-  const input = value as Record<string, unknown>;
-  if (!Array.isArray(input.assets) || !input.assets.includes("usdjpy")) {
-    return { value, migrated: false };
-  }
-  return {
-    value: {
-      ...input,
-      assets: input.assets.map((asset) => asset === "usdjpy" ? "usdcny" : asset),
-    },
-    migrated: true,
-  };
 }
 
 function validateDuration(
@@ -101,36 +81,4 @@ export function maximumAnimationDurationMs(settings: DashboardSettings): number 
     : 0;
   return settings.assets.length * settings.priceDurationMs
     + changeFrames * settings.changeDurationMs;
-}
-
-export class SettingsStore {
-  constructor(readonly path: string) {}
-
-  async load(): Promise<DashboardSettings> {
-    try {
-      const json = await readFile(this.path, "utf8");
-      const migration = migrateSavedSettings(JSON.parse(json));
-      const settings = validateSettings(migration.value);
-      return migration.migrated ? this.save(settings) : settings;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return structuredClone(DEFAULT_SETTINGS);
-      }
-      if (error instanceof SyntaxError) {
-        throw new SettingsValidationError("saved settings contain invalid JSON");
-      }
-      throw error;
-    }
-  }
-
-  async save(value: DashboardSettings): Promise<DashboardSettings> {
-    const settings = validateSettings(value);
-    await mkdir(dirname(this.path), { recursive: true });
-    // tmp 名必须逐次唯一：同一进程里并发写会共用 `pid` 后缀，先落地的那次 rename
-    // 会把文件抢走，后一次就撞上 ENOENT（Spotify 令牌刷新最容易触发）。
-    const temporaryPath = `${this.path}.${randomUUID()}.tmp`;
-    await Bun.write(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`);
-    await rename(temporaryPath, this.path);
-    return settings;
-  }
 }

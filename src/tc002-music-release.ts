@@ -38,7 +38,7 @@ export async function createSideloadRelease(input: {
   }
   const appId = input.appId ?? MUSIC_SIDELOAD_PROFILE.appId;
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(appId)) {
-    throw new Error("appId must be a plain lowercase identifier, for example tc002-arcade");
+    throw new Error("appId must be a plain lowercase identifier, for example tc002-os");
   }
   const entry = input.entry ?? "player";
   if (!isValidBundleEntry(entry)) {

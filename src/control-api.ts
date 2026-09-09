@@ -2,7 +2,6 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { basename } from "node:path";
 import { ASSET_PRESETS, isAssetId, type AssetId } from "./assets.ts";
 import { getContentCatalog } from "./content-registry.ts";
-import type { DashboardController } from "./controller.ts";
 import {
   DeviceSettingsValidationError,
   validateDeviceGeneralSettings,
@@ -151,7 +150,6 @@ export interface ControlApiOptions {
   };
   music?: MusicHub;
   musicInstaller?: Tc002SideloadInstaller;
-  arcadeInstaller?: Tc002SideloadInstaller;
   osInstaller?: Tc002SideloadInstaller;
   musicMirror?: {
     push: (payload: ClockPayload) => Promise<{ status: number }>;
@@ -375,27 +373,6 @@ const sDeviceLive: DeviceLiveStatus = {
   playing: false,
 };
 
-// The arcade firmware's liveness channel: a 5s POST with the current game,
-// phase and score. Unlike the music firmware there is no control state for
-// the device to pull, so a tiny push endpoint plus this in-memory snapshot is
-// the whole protocol. Single-device service, so module state is fine.
-interface ArcadeLiveStatus {
-  heartbeatAt: number; // Date.now() of the last heartbeat, 0 if never
-  game: string;        // "menu" | "breakout" | "flappy" | "snake" | "pong" | ...
-  phase: string;       // "ready" | "playing" | "over" | ...
-  score: number;
-  uptimeMs: number;
-}
-const sArcadeLive: ArcadeLiveStatus = {
-  heartbeatAt: 0,
-  game: "",
-  phase: "",
-  score: 0,
-  uptimeMs: 0,
-};
-// Heartbeats come every 5s; two misses plus network slack means offline.
-const ARCADE_ONLINE_WINDOW_MS = 12_000;
-
 interface IconAsset {
   bytes: Uint8Array;
   version: string;
@@ -479,7 +456,7 @@ async function readJson(
 async function deviceAppResponse(
   request: Request,
   url: URL,
-  scope: "music" | "arcade" | "os",
+  scope: "music" | "os",
   installer: Tc002SideloadInstaller | undefined,
 ): Promise<Response | null> {
   const base = `/api/${scope}/device-app`;
@@ -532,12 +509,6 @@ function marketInstrumentPayload(
     iconUrl: `/api/market/icons/${instrument.iconRef}.png${icon ? `?v=${icon.pixelSha256.slice(0, 12)}` : ""}`,
     iconMode: icon?.mode ?? null,
   };
-}
-
-type ControlController = DashboardController | WorkspaceController;
-
-function supportsWorkspace(controller: ControlController): controller is WorkspaceController {
-  return "getWorkspace" in controller && "previewChannel" in controller;
 }
 
 function boundedQueryInteger(
@@ -1066,7 +1037,7 @@ function previewResponse(preview: {
 }
 
 export function createControlHandler(
-  controller: ControlController,
+  controller: WorkspaceController,
   options: ControlApiOptions = {},
 ): (request: Request) => Promise<Response> {
   const consumeNotifyToken = createNotifyRateLimiter(options.notifyNow ?? (() => Date.now()));
@@ -1537,65 +1508,8 @@ export function createControlHandler(
       // Sideload lifecycle for both device apps, same four routes each.
       const deviceAppRouted =
         await deviceAppResponse(request, url, "music", options.musicInstaller)
-        ?? await deviceAppResponse(request, url, "arcade", options.arcadeInstaller)
         ?? await deviceAppResponse(request, url, "os", options.osInstaller);
       if (deviceAppRouted) return deviceAppRouted;
-
-      if (request.method === "POST" && url.pathname === "/api/arcade/heartbeat") {
-        // The arcade firmware checks in every 5s with what it is running
-        // (cross-origin: the caller is the TC002, not the browser).
-        const input = await readJson(request) as {
-          game?: unknown;
-          phase?: unknown;
-          score?: unknown;
-          uptimeMs?: unknown;
-        };
-        if (typeof input.game !== "string" || !/^[a-z][a-z0-9-]{0,23}$/.test(input.game)) {
-          throw new SettingsValidationError("game is invalid");
-        }
-        if (typeof input.phase !== "string" || !/^[a-z][a-z0-9-]{0,23}$/.test(input.phase)) {
-          throw new SettingsValidationError("phase is invalid");
-        }
-        if (
-          !Number.isSafeInteger(input.score)
-          || (input.score as number) < 0
-          || (input.score as number) > 1_000_000_000
-        ) {
-          throw new SettingsValidationError("score is invalid");
-        }
-        if (
-          typeof input.uptimeMs !== "number"
-          || !Number.isFinite(input.uptimeMs)
-          || input.uptimeMs < 0
-        ) {
-          throw new SettingsValidationError("uptimeMs is invalid");
-        }
-        sArcadeLive.heartbeatAt = Date.now();
-        sArcadeLive.game = input.game;
-        sArcadeLive.phase = input.phase;
-        sArcadeLive.score = input.score as number;
-        sArcadeLive.uptimeMs = input.uptimeMs;
-        return jsonResponse({ ok: true });
-      }
-
-      if (request.method === "GET" && url.pathname === "/api/arcade/status") {
-        // The web's "is the arcade firmware live?" read: pure memory, so the
-        // game view can poll it every 10s for free. A fresh heartbeat proves
-        // liveness; right after a sideload the installer's session bridges
-        // the gap until the first heartbeat lands.
-        assertSameOrigin(request);
-        const ageMs = sArcadeLive.heartbeatAt > 0 ? Date.now() - sArcadeLive.heartbeatAt : -1;
-        const online = (ageMs >= 0 && ageMs < ARCADE_ONLINE_WINDOW_MS)
-          || options.arcadeInstaller?.sessionState().active === true
-          || options.osInstaller?.sessionState().active === true;
-        return jsonResponse({
-          online,
-          ageMs,
-          game: sArcadeLive.game,
-          phase: sArcadeLive.phase,
-          score: sArcadeLive.score,
-        });
-      }
 
       if (["POST", "DELETE"].includes(request.method) && url.pathname === "/api/notify") {
         if (!options.notify) {
@@ -2009,9 +1923,6 @@ export function createControlHandler(
       }
 
       if (request.method === "GET" && url.pathname === "/api/workspace") {
-        if (!supportsWorkspace(controller)) {
-          return jsonResponse({ error: "workspace API is unavailable" }, 404);
-        }
         return jsonResponse({ workspace: controller.getWorkspace() });
       }
 
@@ -2160,7 +2071,7 @@ export function createControlHandler(
 
       // --- tc002-os link -----------------------------------------------------
       // The firmware calls these two, so like the other device-called routes
-      // (/api/arcade/heartbeat, /api/music/device/*) they carry no same-origin
+      // (/api/music/device/*) they carry no same-origin
       // check: the device is not a browser and has no Origin to send.
       if (request.method === "GET" && url.pathname === "/api/os/pull") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
@@ -2179,9 +2090,6 @@ export function createControlHandler(
 
       if (request.method === "GET" && url.pathname === "/api/os/frames") {
         if (!options.osLink) return jsonResponse({ error: "os link is unavailable" }, 404);
-        if (!supportsWorkspace(controller)) {
-          return jsonResponse({ error: "workspace API is unavailable" }, 404);
-        }
         const appName = url.searchParams.get("app") ?? "";
         const channel = controller.getWorkspace().channels.find((c) => c.appName === appName);
         if (!channel) return jsonResponse({ error: "channel not found" }, 404);
@@ -2749,42 +2657,17 @@ export function createControlHandler(
       }
 
       if (request.method === "PUT" && url.pathname === "/api/workspace") {
-        if (!supportsWorkspace(controller)) {
-          return jsonResponse({ error: "workspace API is unavailable" }, 404);
-        }
         assertSameOrigin(request);
         const workspace = await controller.saveWorkspace(await readJson(request));
         options.onSettingsChanged?.();
         return jsonResponse({ workspace, state: controller.getState() });
       }
 
-      if (request.method === "GET" && url.pathname === "/api/settings") {
-        return jsonResponse({ settings: controller.getSettings() });
-      }
-
-      if (request.method === "PUT" && url.pathname === "/api/settings") {
-        assertSameOrigin(request);
-        const settings = await controller.saveSettings(await readJson(request));
-        options.onSettingsChanged?.();
-        return jsonResponse({ settings });
-      }
-
       if (request.method === "GET" && ["/api/state", "/health"].includes(url.pathname)) {
         return jsonResponse(controller.getState());
       }
 
-      if (request.method === "POST" && url.pathname === "/api/preview") {
-        assertSameOrigin(request);
-        const contentLength = Number(request.headers.get("Content-Length") ?? 0);
-        const settings = contentLength > 0 ? await readJson(request) : undefined;
-        const preview = await controller.preview(settings);
-        return previewResponse(preview);
-      }
-
       if (request.method === "POST" && url.pathname === "/api/channels/preview") {
-        if (!supportsWorkspace(controller)) {
-          return jsonResponse({ error: "workspace API is unavailable" }, 404);
-        }
         assertSameOrigin(request);
         const input = await readJson(request) as {
           channelId?: unknown;
@@ -2799,9 +2682,6 @@ export function createControlHandler(
       }
 
       if (request.method === "POST" && url.pathname === "/api/channels/push") {
-        if (!supportsWorkspace(controller)) {
-          return jsonResponse({ error: "workspace API is unavailable" }, 404);
-        }
         assertSameOrigin(request);
         const input = await readJson(request) as { channelId?: unknown };
         if (typeof input.channelId !== "string") {
@@ -2812,10 +2692,7 @@ export function createControlHandler(
 
       if (request.method === "POST" && url.pathname === "/api/push") {
         assertSameOrigin(request);
-        const state = supportsWorkspace(controller)
-          ? await controller.pushAll("manual")
-          : await controller.pushNow("manual");
-        return jsonResponse({ state });
+        return jsonResponse({ state: await controller.pushAll("manual") });
       }
 
       return jsonResponse({ error: "not found" }, 404);

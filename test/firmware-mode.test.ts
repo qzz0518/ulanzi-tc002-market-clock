@@ -24,7 +24,6 @@ function input(overrides: Partial<Parameters<typeof describeFirmware>[0]> = {}) 
   return {
     osState: null,
     musicFirmwareOnline: false,
-    arcadeOnline: false,
     ...overrides,
   };
 }
@@ -56,14 +55,11 @@ describe("firmware mode", () => {
     expect(deriveFirmwareMode(input({
       osState: osState(),
       musicFirmwareOnline: true,
-      arcadeOnline: true,
     }))).toBe("zos");
   });
 
-  test("sideload heartbeats rank above official, music above arcade", () => {
+  test("the music sideload's heartbeat ranks above official", () => {
     expect(deriveFirmwareMode(input({ musicFirmwareOnline: true }))).toBe("music");
-    expect(deriveFirmwareMode(input({ arcadeOnline: true }))).toBe("arcade");
-    expect(deriveFirmwareMode(input({ musicFirmwareOnline: true, arcadeOnline: true }))).toBe("music");
   });
 
   test("an offline ZOS state is not ZOS", () => {
@@ -71,14 +67,13 @@ describe("firmware mode", () => {
     expect(deriveFirmwareMode(input({ osState: osState({ live: false }) }))).toBe("official");
     expect(deriveFirmwareMode(input({
       osState: osState({ live: false }),
-      arcadeOnline: true,
-    }))).toBe("arcade");
+      musicFirmwareOnline: true,
+    }))).toBe("music");
   });
 
   test("labels stay in Simplified Chinese", () => {
     expect(firmwareModeLabel("official")).toBe("官方固件");
     expect(firmwareModeLabel("music")).toBe("音乐固件");
-    expect(firmwareModeLabel("arcade")).toBe("游戏固件");
     expect(firmwareModeLabel("zos")).toBe("ZOS");
   });
 });
@@ -179,8 +174,6 @@ describe("studio header indicator", () => {
     expect(header()).toContain("官方固件");
     expect(header({ firmwareStatus: describeFirmware(input({ musicFirmwareOnline: true })) }))
       .toContain("音乐固件");
-    expect(header({ firmwareStatus: describeFirmware(input({ arcadeOnline: true })) }))
-      .toContain("游戏固件");
   });
 
   test("shows the battery like a phone once ZOS reports one", () => {

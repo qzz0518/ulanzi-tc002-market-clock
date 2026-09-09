@@ -295,8 +295,8 @@ describe("racer engine", () => {
   });
 
   test("replays the device engine frame for frame from the same seed", () => {
-    // Fixture captured by compiling device/tc002-arcade/app/src/games/racer.cpp on
-    // the host and driving it with this exact script at the arcade's 30ms tick:
+    // Fixture captured by compiling device/tc002-os/app/src/games/racer.cpp on
+    // the host and driving it with this exact script at the firmware's 30ms tick:
     // Middle every 97th frame, Right on every 20th, Left on every 37th. The two
     // engines were compared over 3000 frames on ten seeds — state and the full
     // 52x16 RGB buffer matched everywhere except the 3x5 glyph tables, which

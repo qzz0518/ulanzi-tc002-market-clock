@@ -485,7 +485,7 @@ export const ZOS_MUSIC_FOCUS = "music";
 export const ZOS_SETTINGS_FOCUS = "settings";
 
 /**
- * One arcade game on the device: `game:<engineId>`.
+ * One of the device's own games: `game:<engineId>`.
  *
  * Plain `game` only pushes the games ring (measured: `telemetry.screen` →
  * "games"); the suffix also selects that card and enters the engine. The id is
@@ -1086,7 +1086,7 @@ export interface ZosUpgradeGateStatus {
  */
 export function describeUpgradeGate(mode: FirmwareMode, zosFlashed: boolean): ZosUpgradeGateStatus {
   if (mode === "zos") return { gate: "ready", note: null };
-  if (mode === "music" || mode === "arcade") {
+  if (mode === "music") {
     return {
       gate: "foreign",
       note: {

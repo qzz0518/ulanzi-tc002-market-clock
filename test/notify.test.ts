@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createControlHandler } from "../src/control-api.ts";
-import type { DashboardController } from "../src/controller.ts";
+import type { WorkspaceController } from "../src/workspace-controller.ts";
 import {
   NotifyManager,
   parseNotifyMessage,
@@ -10,7 +10,7 @@ import {
 import { cjkTextWidth } from "../src/pixel-cjk.ts";
 import { glyphCellWidth, glyphRows } from "../web/src/lib/pixel-glyphs.ts";
 
-const controller = {} as DashboardController;
+const controller = {} as WorkspaceController;
 
 function notifyRequest(body: unknown, token?: string): Request {
   return new Request("http://clock.test:43820/api/notify", {

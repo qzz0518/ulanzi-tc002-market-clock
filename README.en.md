@@ -11,8 +11,20 @@ frames by a local Bun service that pushes them to the clock.
 
 ## What it does
 
-**A channel = one Custom App on the clock**, directly selectable with the TC002 knob;
-multiple items in one channel are composed into an ordered carousel.
+The device has two tiers, and everything else follows from them
+([ADR 0014](docs/adr/0014-two-tiers-official-and-zos.md)):
+
+- **The official firmware.** The device is untouched; the service renders pixel frames on
+  this machine and pushes them to the clock. Channels, live streaming, notices and the
+  lyric mirror live here. It is the zero-risk entry point, and it stops at what pushing a
+  Custom App can express — no new feature lands here.
+- **ZOS.** The replacement firmware shipped in this repository; the direction is inverted
+  and the device pulls. Input, games, music, VIBE, night sleep, the mirror and the upgrade
+  chain live here, and every new device-side feature targets it (see below).
+
+**A channel = one Custom App on the clock**: selected with the TC002 knob under the
+official firmware, one page of the Channels menu under ZOS; multiple items in one channel
+are composed into an ordered carousel.
 
 | Category | Content |
 | --- | --- |
@@ -68,12 +80,16 @@ Two paths put lyrics on the clock:
   this repository — speaker audio on the device, lyrics driving the LED matrix directly,
   bidirectional real-time sync with the web. The sideload lives only in device memory: a
   power cycle or one click restores the stock firmware, and flash is never written.
+  **This is transitional**: ZOS already has the music page, and device-side audio is being
+  folded into it behind a device-side switch (off by default); once the speaker is verified
+  on hardware the sideloaded player is deleted, and until then it is frozen
+  ([ADR 0014](docs/adr/0014-two-tiers-official-and-zos.md)).
 
 <p align="center">
   <img src="docs/images/tc002-music-firmware-preview.png" width="720" alt="The 52×16 pixel lyric screen — the preview and the music firmware share one rendering algorithm">
 </p>
 
-## Game arcade and arcade firmware
+## Game arcade
 
 The "Games" tab is a pixel arcade: **time breakout, flappy bird, snake, two-player Pong,
 lane racer, space shooter, and Tetris** — all seven run right in the browser (touch /
@@ -82,11 +98,8 @@ real time — no flashing, the clock is simply a second screen. Two-player Pong 
 phone into the second paddle via a QR code. The last three were written for the firmware's
 knob first and ported back here; the two simulations are byte-identical.
 
-To play on the clock itself with its knob and buttons, sideload the bundled
-**arcade firmware**: a boot animation, a cartridge-style game menu, a device info
-page (battery / USB / versions / IP, knob-adjustable volume), and the same seven games
-with 8-bit sound effects. Sideloading works exactly like the music firmware: memory-only,
-a power cycle or one click restores the official firmware, flash is never written.
+To play on the clock itself with its knob and buttons, the same seven games are ZOS's
+Games menu (below).
 
 ## AI usage (VIBE)
 
@@ -124,9 +137,10 @@ refreshes — each CLI's login, so **run it only on the machine those credential
 
 ## ZOS system firmware
 
-The first two firmwares are things you sideload for a while; **ZOS** (`device/tc002-os/`)
-replaces the whole thing: it takes the official app's place and *is* the device's system.
-Boot is a 2.5-second ZOS wordmark animation, then a knob-driven root menu —
+The official firmware is the first tier and the service only pushes frames to it; **ZOS**
+(`device/tc002-os/`) is the second, a replacement for the whole thing: it takes the
+official app's place, *is* the device's system, and every new device-side feature targets
+it. Boot is a 2.5-second ZOS wordmark animation, then a knob-driven root menu —
 **Music / Games / Channels / VIBE / Settings** — one item per page, full-bleed (a list does
 not fit on 52×16: four 12px CJK cells fill the width, one label's worth, and squeezing the
 neighbours in leaves three unreadable rows). The knob pages, a press descends, a hold goes
@@ -139,9 +153,9 @@ its own.
 - **Channels** holds the console's channels, one per page, and each page **is** its
   channel — no icon, no label; the name appears only while frames are still downloading.
   A press pauses and resumes.
-- **Games** holds the same seven engines the arcade firmware runs, one card each, with a
-  per-game 12×12 animated icon and per-game synthesised sound (square / triangle / noise
-  sweeps — no .wav files, and therefore no ffmpeg).
+- **Games** holds the browser arcade's seven games as native engines (`app/src/games/`),
+  one card each, with a per-game 12×12 animated icon and per-game synthesised sound
+  (square / triangle / noise sweeps — no .wav files, nothing to decode).
 - **Music** shows what the console is playing (title, artist, current lyric line, playhead);
   the knob is previous/next and a press toggles play.
 - **Settings** lists network, IP, console address, volume, brightness, MAC, the setup-page
@@ -153,8 +167,8 @@ and the now-playing text, and the console never opens a connection to the device
 device also ships each composed frame back at 10fps, which is how the console can show what
 the panel is really displaying.
 
-Sideloading follows the same path as the other two firmwares: memory only, a power cycle
-restores the official firmware, flash is never written. ZOS adds one step — a `host` file in
+To try it without flashing, ZOS can be sideloaded too: memory only, a power cycle restores
+the official firmware, flash is never written. Sideloading adds one step — a `host` file in
 the bundle carries the console's address, which is how the device finds the service; without
 it the firmware still runs, it just has no channels and no mirror. Its own setup page already
 lists scanned networks and accepts a submission, but **the half that actually changes the
@@ -180,9 +194,9 @@ bash scripts/install-docker.sh --host TC002_IP   # Docker Compose
 ## More documentation
 
 - [Technical reference](docs/reference.en.md): environment variables, market data sources, Library and Music details, architecture, and the local API
-- [Music firmware](device/tc002-lyrics-player/README.md): firmware sources, protocol, build, and sideload safety
-- [Arcade firmware](device/tc002-arcade/README.md): the seven games' controls, build, and packaging
 - [ZOS system firmware](device/tc002-os/README.md): the architectural rule, build and link audit, sideload and recovery
+- [Music firmware](device/tc002-lyrics-player/README.md) (transitional): firmware sources, protocol, build, and sideload safety
+- [Cross-compile toolchain](device/flythings-build/README.md): the IDE-free Docker build environment both firmwares share
 - [ADRs](docs/adr/): key architecture decisions
 
 ## License

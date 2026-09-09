@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMusicRelease, createSideloadRelease } from "../src/tc002-music-release.ts";
 import {
-  ARCADE_SIDELOAD_PROFILE,
   MusicPlayerBundleStore,
+  OS_SIDELOAD_PROFILE,
 } from "../src/tc002-music-installer.ts";
 
 const directories: string[] = [];
@@ -68,8 +68,8 @@ describe("TC002 music sideload release staging", () => {
     expect((await new MusicPlayerBundleStore(releaseDirectory).inspect()).state).toBe("ready");
   });
 
-  test("stages an arcade bundle whose manifest only the arcade store accepts", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tc002-arcade-release-"));
+  test("stages a ZOS bundle whose manifest only the ZOS store accepts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tc002-os-release-"));
     directories.push(root);
     const sourceDirectory = join(root, "build");
     const releaseDirectory = join(root, "release");
@@ -80,14 +80,14 @@ describe("TC002 music sideload release staging", () => {
     const manifest = await createSideloadRelease({
       sourceDir: sourceDirectory,
       version: "0.1.0",
-      appId: "tc002-arcade",
+      appId: "tc002-os",
       releaseDirectory,
     });
-    expect(manifest.appId).toBe("tc002-arcade");
+    expect(manifest.appId).toBe("tc002-os");
     expect(manifest.schemaVersion).toBe(3);
 
-    const arcadeStore = new MusicPlayerBundleStore(releaseDirectory, ARCADE_SIDELOAD_PROFILE);
-    expect((await arcadeStore.inspect()).state).toBe("ready");
+    const osStore = new MusicPlayerBundleStore(releaseDirectory, OS_SIDELOAD_PROFILE);
+    expect((await osStore.inspect()).state).toBe("ready");
     // The music store must refuse it: appId is part of the manifest contract.
     const musicStore = new MusicPlayerBundleStore(releaseDirectory);
     expect((await musicStore.inspect()).state).toBe("invalid");
@@ -102,7 +102,7 @@ describe("TC002 music sideload release staging", () => {
     await expect(createSideloadRelease({
       sourceDir: sourceDirectory,
       version: "0.1.0",
-      appId: "TC002 Arcade!",
+      appId: "TC002 OS!",
       releaseDirectory: join(root, "release"),
     })).rejects.toThrow("appId");
   });

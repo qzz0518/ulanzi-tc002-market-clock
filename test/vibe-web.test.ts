@@ -645,7 +645,7 @@ describe("drawVibeScreen — 52x16, the layout the firmware reuses", () => {
 });
 
 describe("上屏 — VIBE is an app on the clock, not a channel", () => {
-  const displayMarkup = (firmwareMode: "official" | "music" | "arcade" | "zos") =>
+  const displayMarkup = (firmwareMode: "official" | "music" | "zos") =>
     renderToStaticMarkup(createElement(
       CladdProvider,
       null,
@@ -676,7 +676,6 @@ describe("上屏 — VIBE is an app on the clock, not a channel", () => {
 
   test("a sideloaded firmware is named as itself, not lumped in with 官方", () => {
     expect(displayMarkup("music")).toContain("音乐固件");
-    expect(displayMarkup("arcade")).toContain("游戏固件");
   });
 });
 

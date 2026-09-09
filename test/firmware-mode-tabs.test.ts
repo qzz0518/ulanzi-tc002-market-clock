@@ -396,20 +396,21 @@ describe("游戏 under ZOS", () => {
     expect(html).not.toContain("在时钟上玩");
     expect(html).toContain("重开");
   });
-
-  test("warns that a sideload would push ZOS off the device", async () => {
-    const source = await Bun.file(
-      new URL("../web/src/components/game/game-shell.tsx", import.meta.url),
-    ).text();
-    expect(source).toContain("它与 ZOS 互斥，侧载期间 ZOS 会被顶下去。");
-    // ZOS 刷在 res 分区上,所以断电重启回到的是 ZOS 而不是官方固件。这条承诺
-    // 现在由共享面板按 restoresTo 说,宿主页只负责把固件模式喂进去。
-    expect(source).toContain("结束侧载或断电重启后回到的是 ZOS，不是 Ulanzi 官方固件。");
-    expect(source).toContain("firmwareMode,");
-  });
 });
 
 describe("音乐 under ZOS", () => {
+  test("the sideload panel warns that it would push ZOS off the device", async () => {
+    // 游戏固件退役后（ADR 0014）音乐页是侧载面板唯一的宿主，这条警告只剩这一处。
+    const source = await Bun.file(
+      new URL("../web/src/components/music/music-player.tsx", import.meta.url),
+    ).text();
+    expect(source).toContain("它与 ZOS 互斥，侧载期间 ZOS 会被顶下去。");
+    // ZOS 刷在 res 分区上,所以断电重启回到的是 ZOS 而不是官方固件。这条承诺
+    // 现在由面板按 restoresTo 说,宿主页只负责把固件模式喂进去。
+    expect(source).toContain("结束侧载或断电重启后回到的是 ZOS，不是 Ulanzi 官方固件。");
+    expect(source).toContain("firmwareMode,");
+  });
+
   test("replaces the mirror toggle with a real jump to the device's music page", () => {
     const html = renderToStaticMarkup(createElement(MusicPlayer, { firmwareMode: "zos" }));
 

@@ -311,7 +311,6 @@ describe("zos panel", () => {
       onViewChange: () => {},
       runtime: null,
       firmwareLocked: true,
-      firmwareKind: "arcade",
     }));
     expect(header).toContain("系统");
     // 内容页锁,系统页不锁——它读的是 tc002-os 自己的拉取链路。

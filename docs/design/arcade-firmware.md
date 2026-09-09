@@ -1,6 +1,11 @@
 # TC002 游戏固件(tc002-arcade)设计
 
-- 状态:定稿,实施中
+> **历史设计。** 该固件已于 2026-09-09 退役（[ADR 0014](../adr/0014-two-tiers-official-and-zos.md)）：
+> 七款引擎原样搬入 `device/tc002-os/app/src/games/`，由 `mise run os-build` 编进 ZOS，
+> 自检由 `mise run os-hostcheck` 运行；侧载的游戏 App、`/api/arcade/*` 与「游戏固件」面板已删除。
+> 下文按当时的设计原样保留。
+
+- 状态:已退役(原「定稿,实施中」)
 - 日期:2026-08-10
 - 设计:Claude Fable(基于三线调研:音乐固件复用盘点 / MCU 电量与音效路径 / 侧载栈泛化面)
 
@@ -21,7 +26,7 @@ Racer/Shooter/Tetris 三款固件原生)、低延迟游戏音效、运行心跳,
 - **原样复制**:KeyManager、PageManager、McuManager、AudioManager、mcuProtoParse、uart/ 全套
   (Main.cpp 的 onEasyUIDeinit 依赖,不可删)、PageBase、NetClient、Palette.h、PixelFont.h、
   LatinFont.h、Spectrum.h(菜单背景动效备用)、EasyUI.cfg、Dockerfile/fetch-deps.sh 不复制
-  (共享音乐固件的 flythings-build,见 2.6)。
+  (共享 `device/flythings-build/`,见 2.8)。
 - **修复后复制**:`utils/Surface.{h,cpp}` —— `fill()` 的 `i*4` 改 `i*3`(堆越界写);补上
   `getPixel` 实现(头文件声明了但 cpp 缺失,链接期才炸)。
 - **改造**:Main.cpp(`onStartupApp` → `"arcadeActivity"`)、activity 壳五处同改(类名/
@@ -121,10 +126,11 @@ public:
 
 ### 2.8 构建与打包
 
-- **共享音乐固件的 flythings-build**(工具链/packages/device-audio 全复用,零复制):
+- **共享 `device/flythings-build/`**(工具链/packages/device-audio 全复用,零复制;当时它还在
+  `tc002-lyrics-player/` 下面,随 ADR 0014 上提到 `device/`):
   `docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
-   -w /work/tc002-lyrics-player/flythings-build flythings-build \
-   make APP=../../tc002-arcade/app OUT=libzkgui-arcade.so`
+   -w /work/flythings-build flythings-build \
+   make APP=../tc002-arcade/app OUT=libzkgui-arcade.so`
   (Makefile 的 APP/OUT 本就是 ?= 可覆盖变量;挂载 device/ 使两工程互见。)
 - 保留完整音频链依赖(音效需要);`-D__PLATFORM_Z21__`、`-DLOG_TAG`、strip 步骤一个不动。
 - `sideload/player`:BUNDLE=/tmp/tc002-arcade;清理列表含 `/tmp/tc002-sideload.id`;

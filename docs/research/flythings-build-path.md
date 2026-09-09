@@ -110,7 +110,7 @@ liblog, defines the app's `PetAnimationPage::*` symbols, leaves framework
 symbols like `EasyUIContext::getInstance` undefined for load-time resolution —
 exactly like an IDE build). Reproducible: `rm -rf build libzkgui.so && make`
 rebuilds it. Full method + the reversed registry API are in
-`device/tc002-lyrics-player/flythings-build/` (`README.md`, `Makefile`,
+`device/flythings-build/` (`README.md`, `Makefile`,
 `Dockerfile`, `fetch-deps.sh`).
 
 Points nailed down along the way: registry platform id is lowercase `z21`; the

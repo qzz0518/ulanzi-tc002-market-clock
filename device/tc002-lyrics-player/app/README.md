@@ -1,7 +1,7 @@
 # TC002 Pixel Music — native lyrics player app
 
 A FlyThings native app for the TC002, cross-compiled headlessly (see
-`../flythings-build/`) and sideloaded to `/tmp` non-persistently — no flashing,
+`../../flythings-build/`) and sideloaded to `/tmp` non-persistently — no flashing,
 power-cycle restores the official firmware.
 
 ## What runs today (verified on real hardware)
@@ -43,8 +43,8 @@ power-cycle restores the official firmware.
 - Reused device infra from pixel-pet: `PageBase`, `Surface`, `McuManager`,
   `KeyManager`, `PageManager`, `uart/*`, `mcuProtocol/*`.
 
-Build & sideload: `../flythings-build/` (plain `make` — the default
-`APP=../app` already points here — then push to `/tmp` + `EasyUI.cfg` +
+Build & sideload: `../../flythings-build/` (plain `make` — the default
+`APP=../tc002-lyrics-player/app` already points here — then push to `/tmp` + `EasyUI.cfg` +
 `ctl.restart zkswe`; the exact push order is in the
 [player README](../README.md)).
 

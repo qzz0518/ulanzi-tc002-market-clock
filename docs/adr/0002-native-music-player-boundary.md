@@ -15,6 +15,10 @@
   counts as alive while `/tmp/EasyUI.cfg` exists and `zkswe` is running.
 - Amended: 2026-08-09 — music became multi-source (NetEase + Spotify), which splits
   decision 1–3 along a new axis; see "Playback modes" below.
+- Amended: 2026-09-09 — the sideloaded player is transitional. ZOS carries the music page
+  and, pending hardware verification, device-side audio over the same
+  `/api/music/device/*` protocol; once the speaker is verified the sideload is deleted, and
+  until then it receives no changes. See [ADR 0014](0014-two-tiers-official-and-zos.md).
 
 ## Context
 

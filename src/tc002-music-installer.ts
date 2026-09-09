@@ -4,11 +4,10 @@ import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 export const MUSIC_SESSION_CONFIRMATION = "START_TC002_MUSIC_SESSION";
-export const ARCADE_SESSION_CONFIRMATION = "START_TC002_ARCADE_SESSION";
 export const OS_SESSION_CONFIRMATION = "START_TC002_OS_SESSION";
 
 /**
- * The sideload stack is shared by every sideloadable TC002 app (ADR 0004): the
+ * The sideload stack is shared by the music player and ZOS (ADR 0014): the
  * installer class encodes the tmpfs/busybox constraints once, and a profile
  * carries the per-app facts. Both apps claim the same framework load path
  * (/tmp/EasyUI.cfg + zkswe restart), so they are mutually exclusive by
@@ -37,26 +36,15 @@ export const MUSIC_SIDELOAD_PROFILE: SideloadProfile = {
   },
 };
 
-export const ARCADE_SIDELOAD_PROFILE: SideloadProfile = {
-  appId: "tc002-arcade",
-  slug: "arcade",
-  confirmation: ARCADE_SESSION_CONFIRMATION,
-  releaseDirectory: "device/tc002-arcade/release",
-  packagingDoc: "device/tc002-arcade/README.md",
-  extraCleanupPaths: [],
-  copy: {
-    running: "设备在线，游戏固件正在运行",
-    started: "游戏固件已在时钟内存运行；点「恢复官方固件」或断电重启即可回到原样",
-  },
-};
-
 export const OS_SIDELOAD_PROFILE: SideloadProfile = {
   appId: "tc002-os",
   slug: "os",
   confirmation: OS_SESSION_CONFIRMATION,
   releaseDirectory: "device/tc002-os/release",
   packagingDoc: "device/tc002-os/README.md",
-  extraCleanupPaths: [],
+  // ZOS is gaining device-side audio playback that downloads the current
+  // track here, the same path the music player uses.
+  extraCleanupPaths: ["/tmp/track.mp3"],
   copy: {
     running: "设备在线，系统固件正在运行",
     started: "系统固件已在时钟内存运行；点「恢复官方固件」或断电重启即可回到原样",
@@ -67,7 +55,9 @@ export const OS_SIDELOAD_PROFILE: SideloadProfile = {
 // whose session is live; the file lives in tmpfs like everything else.
 const SESSION_ID_FILE = "/tmp/tc002-sideload.id";
 // Every remote dir any profile may have used; the start cleanup clears them
-// all so switching apps never pushes on top of a full tmpfs.
+// all so switching apps never pushes on top of a full tmpfs. /tmp/tc002-arcade
+// outlives its profile (retired, ADR 0014): a device not power-cycled since an
+// arcade session still holds that bundle in tmpfs.
 const ALL_REMOTE_DIRS = ["/tmp/tc002-music", "/tmp/tc002-arcade", "/tmp/tc002-os"] as const;
 
 function remoteDir(profile: SideloadProfile): string {

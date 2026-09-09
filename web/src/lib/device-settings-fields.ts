@@ -9,7 +9,7 @@
 //              telemetry block. Everything the stock firmware reads from
 //              /getDeviceInfo (SN / MAC / MCU / SOC / brand) simply does not
 //              exist here, and an empty row for it is worse than no row.
-//   sideload — the music/arcade firmware holds the device; the official
+//   sideload — the music sideload holds the device; the official
 //              endpoints are gone and nothing has replaced them.
 //
 // What lives here is only what stays true away from the DOM: which surface a
@@ -35,9 +35,9 @@ export type DeviceSettingsSurface = "official" | "zos" | "sideload";
 /**
  * Which surface the dialog renders.
  *
- * Deliberately collapses 音乐/游戏 into one: both are the same situation for
- * this dialog (a sideload occupies the device, the official endpoints answer
- * nothing), and the sideload panel is where their differences belong.
+ * "sideload" is the music player's alone since the arcade sideload was
+ * retired (ADR 0014): a sideload occupies the device, the official endpoints
+ * answer nothing, and the sideload panel is where the rest of that story lives.
  *
  * `zosFlashed` is why this takes two arguments instead of one. `mode` is
  * derived from a *live* report, so a flashed ZOS that fell off the Wi-Fi reads
@@ -52,7 +52,7 @@ export function deviceSettingsSurface(
   zosFlashed = false,
 ): DeviceSettingsSurface {
   if (mode === "zos") return "zos";
-  if (mode === "music" || mode === "arcade") return "sideload";
+  if (mode === "music") return "sideload";
   if (zosFlashed) return "zos";
   return "official";
 }

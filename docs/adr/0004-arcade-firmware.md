@@ -1,6 +1,7 @@
 # ADR 0004: The arcade is a second sideloaded app on a parameterized sideload stack
 
-- Status: Accepted
+- Status: Superseded by [ADR 0014](0014-two-tiers-official-and-zos.md) (2026-09-09) — the
+  engines live in `device/tc002-os`; the sideloaded arcade app is removed.
 - Date: 2026-08-10
 
 ## Context

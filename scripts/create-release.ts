@@ -2,7 +2,7 @@ import { createSideloadRelease } from "../src/tc002-music-release.ts";
 
 /**
  * Shared CLI body for staging a sideload release. The per-app entrypoints
- * (create-music-release.ts, create-arcade-release.ts) supply the appId and
+ * (create-music-release.ts, create-os-release.ts) supply the appId and
  * release directory; argv carries `<source-dir> <version> [entry]`.
  */
 export async function runCreateRelease(options: {

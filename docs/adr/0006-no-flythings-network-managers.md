@@ -28,7 +28,7 @@ bad network call removes the only debug channel the device has.
    DHCP client binary at all and that function is the same libnetutils code the stock firmware has
    used on this chip for years. Only `include/net/NetUtils.h` (pure statics, zero includes) is
    vendored; `NetManager.h` / `WifiManager.h` / `SoftApManager.h` are deliberately absent from the
-   build tree (`device/tc002-lyrics-player/flythings-build/Makefile`, `EXTRA_PKGS`).
+   build tree (`device/flythings-build/Makefile`, `EXTRA_PKGS`).
 2. Everything the managers would have answered comes from **wpa_supplicant's control socket**
    instead (`net/WpaCtrl.h`): about two hundred lines over a datagram socket. That class exposes
    read-only commands (`STATUS`, `SCAN_RESULTS` — the last sweep's cache, which does not start a

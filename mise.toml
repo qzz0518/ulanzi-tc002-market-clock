@@ -17,10 +17,6 @@ run = "bun run typecheck"
 description = "Validate and stage a FlyThings TC002 lyrics-player sideload bundle"
 run = "bun run music-release"
 
-[tasks.arcade-release]
-description = "Validate and stage a FlyThings TC002 arcade sideload bundle"
-run = "bun run arcade-release"
-
 [tasks.install-macos]
 description = "Build and install the native macOS background service"
 run = "bash scripts/install.sh"
@@ -36,10 +32,6 @@ run = "bash scripts/install-docker.sh"
 [tasks.uninstall-docker]
 description = "Stop and remove the Docker Compose service"
 run = "bash scripts/uninstall-docker.sh"
-
-[tasks.arcade-hostcheck]
-description = "Compile and run the arcade engine self-checks on the host"
-run = "clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-arcade/app/src' device/tc002-arcade/hostcheck/selfcheck.cpp device/tc002-arcade/app/src/games/*.cpp device/tc002-arcade/app/src/utils/Surface.cpp -o .runtime/arcade-selfcheck && .runtime/arcade-selfcheck"
 
 # tc002-os. Everything below the device glue is FlyThings-free on purpose, so
 # the UI can be compiled and asserted here rather than only on hardware.
@@ -150,20 +142,26 @@ fi
 # the table for the life of the firmware, because the character set was generated
 # from song lyrics and lyrics do not use it.
 python3 device/tc002-os/hostcheck/glyph-coverage.py || exit 1
-# The seven game engines are compiled in unchanged from the arcade tree, so its
-# src is on the include path AFTER this firmware's own: utils/Surface.h resolves
-# to the bridge here, visual/PixelFont.h falls through to the arcade's.
+# The game engines came over verbatim from the retired arcade firmware
+# (ADR 0014) and keep that firmware's own self-check, which drives every
+# engine's physics frame by frame. It is a separate binary with its own main();
+# it links the same core/Surface.cpp the UI check does, through the
+# utils/Surface.h bridge the engines include.
 clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
-  -I 'device/tc002-arcade/app/src' \
+  device/tc002-os/hostcheck/games-selfcheck.cpp \
+  device/tc002-os/app/src/games/*.cpp \
+  device/tc002-os/app/src/core/Surface.cpp \
+  -o .runtime/os-games-selfcheck && .runtime/os-games-selfcheck
+clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/hostcheck/selfcheck.cpp \
   device/tc002-os/app/src/core/*.cpp \
   device/tc002-os/app/src/ui/*.cpp \
   device/tc002-os/app/src/visual/*.cpp \
   device/tc002-os/app/src/net/*.cpp \
+  device/tc002-os/app/src/games/*.cpp \
   device/tc002-os/app/src/platform/BatteryPolicy.cpp \
   device/tc002-os/app/src/platform/InstallMode.cpp \
   device/tc002-os/app/src/platform/ProvisionLog.cpp \
-  device/tc002-arcade/app/src/games/*.cpp \
   -o .runtime/os-selfcheck && .runtime/os-selfcheck
 """
 
@@ -176,9 +174,8 @@ run = """
 rev=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 [ -n "$(git status --porcelain 2>/dev/null)" ] && rev="$rev-dirty"
 docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
-  -w /work/tc002-lyrics-player/flythings-build flythings-build \
-  make APP=../../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os \
-    EXTRA_SRC_DIRS=../../tc002-arcade/app/src/games EXTRA_INC=../../tc002-arcade/app/src \
+  -w /work/flythings-build flythings-build \
+  make APP=../tc002-os/app OUT=libzkgui-os.so BUILD_DIR=build-os \
     EXTRA_PKGS=zknet EXTRA_LIBS=-lzknet \
     ZOS_BUILD_ID="$rev-$(date +%Y%m%d%H%M)"
 """
@@ -187,8 +184,8 @@ docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
 description = "Assert tc002-os only needs libraries the real device maps, and links no ffmpeg"
 run = """
 docker run --rm --platform linux/amd64 -v "$PWD/device":/work \
-  -w /work/tc002-lyrics-player/flythings-build flythings-build \
-  sh ../../tc002-os/hostcheck/link-audit.sh libzkgui-os.so libzkgui-arcade.so device-dump/maps-baseline.txt
+  -w /work/flythings-build flythings-build \
+  sh ../tc002-os/hostcheck/link-audit.sh libzkgui-os.so libzkgui-arcade.so device-dump/maps-baseline.txt
 """
 
 # Permanent install. Unlike os-release (which stages a /tmp sideload bundle that

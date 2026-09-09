@@ -253,7 +253,6 @@ describe("mini player — rendered", () => {
     const official = describeFirmware({
       osState: null,
       musicFirmwareOnline: false,
-      arcadeOnline: false,
     });
     expect(official.mode).toBe("official");
     expect(headerHtml(official)).toContain("has-wide-actions");
@@ -261,7 +260,6 @@ describe("mini player — rendered", () => {
     const zos = describeFirmware({
       osState: { live: true, battery: { percent: 72, charging: false } } as never,
       musicFirmwareOnline: false,
-      arcadeOnline: false,
     });
     expect(zos.mode).toBe("zos");
     expect(headerHtml(zos)).not.toContain("has-wide-actions");

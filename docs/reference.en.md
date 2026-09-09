@@ -127,7 +127,7 @@ first, then one page per agent (metric rows, meters, reset countdown); press tog
 left, hold goes back. It is deliberately **not a channel** — a channel is an animation fetched
 on a timer, with no input and no way to be pushed to, and VIBE's next step is reacting live to
 the vibe-coding session on this machine ([ADR 0011](adr/0011-vibe-is-a-firmware-app.md)). The
-official firmware and the two sideloaded ones have no root ring to add to, so **VIBE exists
+official firmware and the sideloaded music player have no root ring to add to, so **VIBE exists
 only under ZOS**.
 
 The service collects the numbers itself and **nothing extra has to be installed**: one adapter
@@ -393,6 +393,12 @@ Details of the two display paths:
   `AudioManager`, which is exactly why the sideloaded firmware exists (MQTT can carry
   control messages but cannot replace it).
 
+**The sideloaded player is transitional** ([ADR 0014](adr/0014-two-tiers-official-and-zos.md)):
+ZOS already has the music page, and device-side audio is being folded into it behind a
+device-side switch (off by default), over the same `/api/music/device/*` protocol; once the
+speaker is verified on hardware, the sideloaded player goes together with its profile, panel
+and firmware mode. Until then it receives no changes.
+
 Sideloading is always non-persistent: the firmware only ever runs from the device tmpfs, and
 hitting **Restore official firmware** — or any power cycle — brings the stock firmware back
 because flash is never written. Sideloading requires the bundle to match its per-file SHA-256
@@ -402,12 +408,13 @@ restore acknowledgement. Firmware sources, the protocol, build, and deployment l
 
 ## ZOS system firmware (tc002-os)
 
-The first two firmwares are temporary lodgers beside the official app; **ZOS**
-(`device/tc002-os/`) is a replacement. It takes the official app's place and *is* the
-device's system, which means it inherits all of that app's duties — the menu, the network,
-the setup page. All three firmwares claim the same `/tmp` load path and the same
-`/tmp/tc002-sideload.id` session identity, so they are mutually exclusive by construction
-([ADR 0004](adr/0004-arcade-firmware.md)).
+The official firmware is the first tier, and the service only pushes frames to it; **ZOS**
+(`device/tc002-os/`) is the second — a replacement. It takes the official app's place and
+*is* the device's system, which means it inherits all of that app's duties — the menu, the
+network, the setup page — and every new device-side feature targets it
+([ADR 0014](adr/0014-two-tiers-official-and-zos.md)). It shares the `/tmp` load path and
+the `/tmp/tc002-sideload.id` session identity with the transitional music sideload, so the
+two are mutually exclusive by construction.
 
 There is exactly one architectural rule: **a Screen only draws into a Surface and never
 touches SPI; `platform/Presenter` is the only writer of the LED bus in the whole project.**
@@ -415,8 +422,8 @@ Time arrives as the `nowMs` parameter, so a Screen must be a pure function of
 `(state, nowMs)`. The LED bus is write-only and `/dev/fb0` is unrelated to the matrix — a
 frame cannot be read back on hardware — so UI regressions can only be caught on the Mac:
 `mise run os-hostcheck` compiles `ui/`, `core/` and `net/` with clang++ and asserts exact
-pixels. The same rule gives the console mirror exactly one tee point, immediately after
-`Shell::render`.
+pixels, and runs the game engines' self-check in the same pass. The same rule gives the
+console mirror exactly one tee point, immediately after `Shell::render`.
 
 ### Menu and controls
 
@@ -465,13 +472,14 @@ backwards — so an entry can never look right going in and wrong coming out.
   name appears only while the frames are still downloading. Only the settled channel is
   fetched — prefetching neighbours would mean several bundles of a few hundred KB resident
   to show one, on a radio that is also carrying the long poll.
-- **Games**: seven of them, with the engines compiled in unchanged from
-  `device/tc002-arcade` rather than ported — they are hardware-verified and already covered
-  by the arcade's own self-check, and a port would fork that guarantee. One card each, with
+- **Games**: seven of them, with the engines in `app/src/games/` — moved in unchanged from
+  the retired arcade firmware together with its self-check (`hostcheck/games-selfcheck.cpp`,
+  run by `mise run os-hostcheck` alongside the UI checks). They are hardware-verified, and
+  moving rather than porting keeps that guarantee intact. One card each, with
   a per-game 12×12 animated icon (drawn in that engine's palette, not stored as a bitmap)
   and per-game sound. The sounds are **synthesised, not sampled**: square, triangle and noise
   waveforms with a frequency sweep and a decay envelope written straight into
-  `base::AudioPlayer`. The arcade's .wav clips go through MediaPlayer, which drags in ffmpeg
+  `base::AudioPlayer`. Playing .wav clips would go through MediaPlayer, which drags in ffmpeg
   — measured at ~1.1 MB of .text plus 856 KB of .bss — an absurd price for a handful of beeps.
 - **Music**: what the console is playing (title, artist, current lyric line, playhead). The
   device has no audio of its own, so a key press becomes a Connect command executed by the
@@ -803,17 +811,17 @@ month could repaint the clock from memory.
 
 ### Sideloading and the `host` file
 
-Sideloading uses the same parameterized installer as the music and arcade firmwares
+Sideloading uses the same parameterized installer as the music firmware
 (`/api/os/device-app/*`, confirmation phrase `START_TC002_OS_SESSION`): per-file SHA-256
 against the release manifest, the device identified through both its official HTTP API and
 Wi-Fi ADB, and an explicit restore acknowledgement. Everything lives in tmpfs and flash is
 never touched. **A power cycle restores the official firmware**: `/tmp` is wiped, the
 framework falls back to `/res/etc/EasyUI.cfg`, and the official app returns with its own Wi-Fi
 setup page. That is the universal rescue for anything this firmware gets wrong. The console
-has no ZOS sideload panel yet (music and arcade each have one), so these four routes are
+has no ZOS sideload panel yet (only the music firmware has one), so these four routes are
 called directly for now.
 
-ZOS adds one step the other two do not have: **the bundle must carry a `host` file with the
+ZOS adds one step the music sideload does not have: **the bundle must carry a `host` file with the
 console's address.** Nothing on this LAN announces the service — it is a Bun process on
 someone's laptop, not a router service with a name — so the device has to be told. The entry
 script moves `host` to `/tmp/zos-host`, and the firmware reads it at startup (it also accepts
@@ -1021,8 +1029,6 @@ renderer. The music architecture boundary (web / service / firmware responsibili
 | `DELETE` | `/api/vibe/ingest/machine?machine=…` | Forget one machine's pushed rows (the console's 「移除」 button, same-origin). Replies `{forgotten, machines}`; `forgotten:false` means it was not known. This forgets only — an agent still running over there reappears on its next push |
 | `PUT` | `/api/vibe/key` | Store an API key for a key-based vendor: `{providerId, key}`, an empty string clears it; the reply is only the `keys` state table and **never echoes the key back** (same-origin + JSON, 400 on validation failure). **All four agents borrow a CLI login today, so the key-vendor list is empty and every `providerId` gets a 400** |
 | `GET` | `/api/presets`, `/api/icons/:id.png` | Legacy market presets and built-in asset icons |
-| `GET` / `PUT` | `/api/settings` | Legacy single-carousel settings |
-| `POST` | `/api/preview` | Legacy: returns rendered GIF/PNG bytes directly |
 | `GET` | `/api/library/ulanzi/pixel-assets` | Browse, search, filter, and page community assets |
 | `GET` | `/api/library/ulanzi/media` | Safely proxy official preview media |
 | `POST` | `/api/library/ulanzi/import` | Validate and import a `contentView` link or work ID |
