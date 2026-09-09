@@ -1,9 +1,11 @@
-seq	4
+seq	5
 pinned	1
 mirror	0
 focus	notice
 mode	spotlight
 skin	signal
+vibeauto	15
+vibedwell	3200	1600
 vibe	2
 vibea	claude	Claude	Max 20x
 vibem	claude	Session	11	100	18000

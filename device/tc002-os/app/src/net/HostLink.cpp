@@ -583,6 +583,12 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   // would leave quota numbers on the panel that the service has stopped
   // standing behind.
   mSnapshot.vibe = doc.vibe();
+  // Copied beside the agents rather than derived from them: the page dwell
+  // outlives every login, so a document that says nobody is signed in must not
+  // also be read as "and stop turning the pages".
+  mSnapshot.vibeAutoSec = doc.vibeAutoSec();
+  mSnapshot.vibeValueDwellMs = doc.vibeValueDwellMs();
+  mSnapshot.vibeResetDwellMs = doc.vibeResetDwellMs();
   mSnapshot.upgradeSeq = doc.upgradeSeq();
   // The console asking for an install ARMS A DOWNLOAD; nothing is installed
   // until a whole image is on the device. The gate is here rather than in the

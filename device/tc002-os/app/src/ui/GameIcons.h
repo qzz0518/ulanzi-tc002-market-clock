@@ -7,7 +7,7 @@ namespace tcos {
 namespace gameicons {
 
 /**
- * One 12x12 animated icon per arcade game.
+ * One 12x12 animated icon per entry on the games ring.
  *
  * All seven games shipped wearing the same generic Pong glyph, which made the
  * games ring useless: you could not tell what you were about to launch without
@@ -30,7 +30,8 @@ enum Icon {
   kRacer = 4,
   kShooter = 5,
   kTetris = 6,
-  kIconCount = 7,
+  kEye = 7,
+  kIconCount = 8,
 };
 
 /** Draws icon `which` with its top-left at (x, y). Stays inside 12x12. */

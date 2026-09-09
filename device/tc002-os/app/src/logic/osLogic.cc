@@ -44,6 +44,7 @@
 #include "games/shooter.h"
 #include "games/snake.h"
 #include "games/tetris.h"
+#include "games/eye.h"
 #include "ui/BootScreen.h"
 #include "ui/ChannelRingScreen.h"
 #include "ui/GameScreen.h"
@@ -256,9 +257,51 @@ PongEngine sPong;
 RacerEngine sRacer;
 ShooterEngine sShooter;
 TetrisEngine sTetris;
-GameEngine* sEngines[7] = {
-	&sBreakout, &sFlappy, &sSnake, &sPong, &sRacer, &sShooter, &sTetris,
+// 「EYE」 is on this ring rather than the root one because it needs what only a
+// game gets: the whole panel with no HUD over it, the Shell's 20 ms tick, and a
+// hold that walks back out. It is last so the seven arcade cards keep the
+// positions three releases of muscle memory put them in.
+EyeEngine sEye;
+GameEngine* sEngines[] = {
+	&sBreakout, &sFlappy, &sSnake, &sPong, &sRacer, &sShooter, &sTetris, &sEye,
 };
+// Derived, never written down twice. Four separate hardcoded 7s used to say how
+// many games there were — the ring build, the focus router, the launch range and
+// the array itself — and an eighth engine would have been live in some of them
+// and invisible in the others.
+const int kEngineCount = static_cast<int>(sizeof(sEngines) / sizeof(sEngines[0]));
+
+// --- 「EYE」's microphone ----------------------------------------------------
+//
+// The mic hangs off the MCU, not the SoC: this device has no PCM capture at all
+// (no /dev/mi_ai, no mi_ai kernel module — checked on hardware). What the MCU
+// sends is one 16-bit loudness number, and these two functions are the whole of
+// getting at it.
+bool sMicReporting = false;
+
+int readMcuMic() {
+	if (!McuManager::getInstance().isInitialized()) return -1;
+	// A CACHED read. queryMicValue() only goes to the wire when it has never had
+	// a value; afterwards it returns whatever the MCU last pushed. Which is why
+	// auto-report below is not optional — without it this returns one stale
+	// number forever and the face sits at whatever the room sounded like when
+	// the game opened.
+	//
+	// BatteryMonitor does the opposite: it writes -1 to invalidate and forces a
+	// round trip. It can afford that at one poll every few seconds; a face
+	// running at fifty frames a second cannot, and fifty blocking serial round
+	// trips a second would be fighting the battery poll for the same bus.
+	return McuManager::getInstance().queryMicValue();
+}
+
+void setMicReporting(bool wanted) {
+	// Each call IS a blocking round trip, so this is gated on a change rather
+	// than sent every tick.
+	if (wanted == sMicReporting) return;
+	if (!McuManager::getInstance().isInitialized()) return;
+	McuManager::getInstance().setAutoMicReport(wanted);
+	sMicReporting = wanted;
+}
 
 // Launcher ids. Channels will take 100+ once the poll thread lands, so the
 // built-ins are numbered low and the games ring uses its own range.
@@ -1703,7 +1746,7 @@ static void onUI_show() {
 	// The games ring: one card per engine, titles straight from the engines so
 	// the two can never disagree about what is installed.
 	std::vector<tcos::LauncherScreen::Entry> games;
-	for (int i = 0; i < 7; ++i) {
+	for (int i = 0; i < kEngineCount; ++i) {
 		tcos::LauncherScreen::Entry game;
 		game.label = sEngines[i]->title();
 		// One sprite per engine, in that engine's own palette. The order here
@@ -1738,6 +1781,10 @@ static void onUI_show() {
 	// destination must raise that constant, because overflow degrades silently.
 	shell().setEntryStyle(&sVibe, tcos::Shell::kEntryEqualiser);
 	shell().setEntryStyle(&sSettings, tcos::Shell::kEntryDrop);
+	// The face reads the room through this. Injected rather than called
+	// directly so games/eye.cpp stays free of the vendor MCU headers and can be
+	// compiled — and driven — by the host self-checks.
+	sEye.setMicSource(&readMcuMic);
 	shell().setEntryStyle(&sProvision, tcos::Shell::kEntryDrop);
 	// volume/brightness already adopted in onUI_init
 	sHandedOff = false;
@@ -2021,7 +2068,7 @@ static bool onUI_Timer(int id) {
 				// in the whole system rather than a console-side table to drift.
 				const std::string wanted = sLink.focus.substr(5);
 				int index = -1;
-				for (int i = 0; i < 7; ++i) {
+				for (int i = 0; i < kEngineCount; ++i) {
 					if (wanted == sEngines[i]->id()) index = i;
 				}
 				if (index >= 0) {
@@ -2308,6 +2355,17 @@ static bool onUI_Timer(int id) {
 		// signed in, and saying 未登录 would send the user hunting a login they
 		// already have.
 		sVibe.setLink(!hostLink().baseUrl().empty(), sLink.online);
+		// Fed every tick, not gated on the sequence: the screen no-ops an
+		// unchanged value and re-arms the dwell only on a real change, which is
+		// the half a seq gate would get wrong — sVibeFedSeq is forced to -1 on
+		// every entry to this page, so a gated feed would re-arm on arrival too.
+		// An offline device keeps the last interval and keeps turning; a failed
+		// poll never reaches adoptDocument, so nothing here says otherwise.
+		sVibe.setAutoAdvanceMs(sLink.vibeAutoSec * 1000, nowMs);
+		// Same every-tick feed, and idempotent for the same reason. No nowMs:
+		// this changes the SHAPE of the value/countdown cycle, not when the page
+		// started, so there is no anchor to re-arm.
+		sVibe.setCellDwell(sLink.vibeValueDwellMs, sLink.vibeResetDwellMs);
 		if (sLink.seq != sVibeFedSeq) {
 			sVibeFedSeq = sLink.seq;
 			sVibe.setAgents(sLink.vibe, nowMs);
@@ -2352,7 +2410,7 @@ static bool onUI_Timer(int id) {
 		}
 	}
 	const int gamePick = sGameList.takeActivated();
-	if (gamePick >= ID_GAME_BASE && gamePick < ID_GAME_BASE + 7) {
+	if (gamePick >= ID_GAME_BASE && gamePick < ID_GAME_BASE + kEngineCount) {
 		sGameScreen.setEngine(sEngines[gamePick - ID_GAME_BASE]);
 		shell().push(&sGameScreen, nowMs);
 		sSfxGame = tcos::Sfx::gameFromId(sEngines[gamePick - ID_GAME_BASE]->id());
@@ -2361,6 +2419,12 @@ static bool onUI_Timer(int id) {
 	if (sGameScreen.takeExitRequest()) {
 		shell().pop(nowMs);
 	}
+	// Ask the MCU to stream loudness only while the face is actually up. Left on
+	// it would put traffic on the MCU bus and a draw on the battery for a screen
+	// nobody is looking at; derived from what is on top rather than set at the
+	// launch site so every way in and out — knob, console focus, a hold that
+	// leaves — is covered by one rule.
+	setMicReporting(shell().top() == &sGameScreen && sGameScreen.engine() == &sEye);
 
 	// Score and game-over are edges in the engine's own state, so they are
 	// watched here rather than guessed from input: a point can be scored by the

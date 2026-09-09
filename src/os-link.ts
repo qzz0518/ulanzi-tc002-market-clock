@@ -187,6 +187,40 @@ export const OS_SLEEP_MAX_IDLE_SEC = 7200;
 export const OS_SLEEP_MAX_MINUTE = 1439;
 
 /**
+ * Bounds on how long 「VIBE」 holds a page before turning itself, in seconds.
+ *
+ * 0 sits OUTSIDE them deliberately: it is the off state — the knob is the only
+ * thing that turns the ring, which is what the app did before this existed —
+ * and not a small interval to be floored up to the minimum.
+ *
+ * The floor is the panel's own value/countdown cycle (kValueDwellMs +
+ * kResetDwellMs = 4.8 s in ui/VibeScreen.h): under it the reset countdown never
+ * gets its turn in the cell it shares with the number, so a page would show
+ * half of what it has. The ceiling is this hub's republish cadence — past five
+ * minutes the numbers move more often than the page does, and the setting stops
+ * meaning anything. The firmware clamps to the same two numbers because it does
+ * not trust the wire either (net/StateDoc.h).
+ */
+export const OS_VIBE_MIN_PAGE_INTERVAL_SEC = 5;
+export const OS_VIBE_MAX_PAGE_INTERVAL_SEC = 300;
+
+/**
+ * Bounds on either half of the value cell's time-share, in milliseconds.
+ *
+ * MILLISECONDS, unlike the page interval beside it, because these are
+ * sub-second quantities: the shipped 3200/1600 rounded to whole seconds is a
+ * different layout. 0 is legal on the countdown half ALONE, where it means the
+ * cell never leaves the number — a choice, not an absence.
+ *
+ * The floor is what a person reads a three-digit number in; the ceiling keeps
+ * the other half coming round inside any page dwell somebody would set.
+ */
+export const OS_VIBE_MIN_CELL_DWELL_MS = 500;
+export const OS_VIBE_MAX_CELL_DWELL_MS = 20_000;
+export const OS_VIBE_DEFAULT_VALUE_DWELL_MS = 3_200;
+export const OS_VIBE_DEFAULT_RESET_DWELL_MS = 1_600;
+
+/**
  * The console's 主题设置, carried to whichever firmware is on the device.
  *
  * These are the same two enums and the same accent the sideloaded lyrics player
@@ -411,6 +445,30 @@ function sanitizeField(value: string): string {
 }
 
 /** Whole percent, floored into what three digit cells can show. */
+/**
+ * 0, or a whole number of seconds inside the app's bounds.
+ *
+ * A non-finite or negative value lands on 0 — off — rather than on the floor:
+ * a caller that could not say what it wanted has not asked for page turning.
+ */
+function clampVibePageInterval(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  const seconds = Math.round(value);
+  if (seconds <= 0) return 0;
+  if (seconds < OS_VIBE_MIN_PAGE_INTERVAL_SEC) return OS_VIBE_MIN_PAGE_INTERVAL_SEC;
+  if (seconds > OS_VIBE_MAX_PAGE_INTERVAL_SEC) return OS_VIBE_MAX_PAGE_INTERVAL_SEC;
+  return seconds;
+}
+
+/** A dwell inside the bounds, or the shipped default when the caller made no sense. */
+function clampVibeCellDwell(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const ms = Math.round(value);
+  if (ms < OS_VIBE_MIN_CELL_DWELL_MS) return OS_VIBE_MIN_CELL_DWELL_MS;
+  if (ms > OS_VIBE_MAX_CELL_DWELL_MS) return OS_VIBE_MAX_CELL_DWELL_MS;
+  return ms;
+}
+
 function clampVibeNumber(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(999, Math.round(value)));
@@ -486,6 +544,15 @@ export class OsLinkHub {
   private seq = 1;
   private menu: OsMenuEntry[] = [];
   private vibe: OsVibeAgent[] = [];
+  // Beside the agents rather than inside them: the page dwell is a property of
+  // the screen, and it outlives every login — a round where nobody is signed in
+  // must not be read as "and stop turning the pages".
+  private vibePageIntervalSec = 0;
+  // The value cell's time-share. Held as the firmware's own shipped defaults so
+  // an install that never touches the control sends exactly what the panel
+  // already did.
+  private vibeValueDwellMs = OS_VIBE_DEFAULT_VALUE_DWELL_MS;
+  private vibeResetDwellMs = OS_VIBE_DEFAULT_RESET_DWELL_MS;
   private upgradeSeq = 0;
   // The highest id ever issued, kept THROUGH a withdrawal. `upgradeSeq` goes
   // back to 0 when a reboot consumes the request, and reusing an id from that
@@ -632,6 +699,52 @@ export class OsLinkHub {
 
   getVibe(): OsVibeAgent[] {
     return this.vibe.map((agent) => ({ ...agent, metrics: agent.metrics.map((metric) => ({ ...metric })) }));
+  }
+
+  /**
+   * How long the panel's VIBE app holds a page before turning itself; 0 = the
+   * knob is the only thing that turns it.
+   *
+   * NO SEQUENCE, exactly like the lyric theme and for the same reason: the
+   * console is the only writer, so restating it on every document is idempotent
+   * and makes a cold-booted device correct on its first poll. If a 设置 row for
+   * it is ever added on the device, that stops being true and this needs a
+   * `vibeautoseq` with rising-edge gating — the same warning setLyricTheme
+   * carries.
+   *
+   * Clamped rather than rejected, like the sleep window above: the route
+   * rejects an out-of-range value first, and this clamps again because it does
+   * not trust its caller.
+   */
+  setVibePageInterval(seconds: number): void {
+    const next = clampVibePageInterval(seconds);
+    if (next === this.vibePageIntervalSec) return;
+    this.vibePageIntervalSec = next;
+    this.bump();
+  }
+
+  getVibePageInterval(): number {
+    return this.vibePageIntervalSec;
+  }
+
+  /**
+   * How the panel splits the value cell between the number and the countdown.
+   *
+   * Same no-sequence reasoning as the page interval: one writer, restated every
+   * document. `resetMs` of 0 is passed through rather than floored — that is the
+   * user asking for the number alone.
+   */
+  setVibeCellDwell(valueMs: number, resetMs: number): void {
+    const value = clampVibeCellDwell(valueMs, OS_VIBE_DEFAULT_VALUE_DWELL_MS);
+    const reset = resetMs === 0 ? 0 : clampVibeCellDwell(resetMs, OS_VIBE_DEFAULT_RESET_DWELL_MS);
+    if (value === this.vibeValueDwellMs && reset === this.vibeResetDwellMs) return;
+    this.vibeValueDwellMs = value;
+    this.vibeResetDwellMs = reset;
+    this.bump();
+  }
+
+  getVibeCellDwell(): { valueMs: number; resetMs: number } {
+    return { valueMs: this.vibeValueDwellMs, resetMs: this.vibeResetDwellMs };
   }
 
   /**
@@ -1261,6 +1374,13 @@ export class OsLinkHub {
     if (this.bleOpenSeq > 0 && Math.floor(this.now() / 1000) < this.bleOpenUntil) {
       lines.push(`bleopen\t${this.bleOpenSeq}`);
     }
+    // Emitted from here rather than from serializeVibe, which early-returns a
+    // bare `vibe\t0` when nobody is signed in — the one branch that would
+    // silently drop the setting on exactly the rounds where a vendor failed.
+    // Its own line, and a NEW KEY, so a panel flashed before this existed
+    // ignores it and keeps doing what it has always done.
+    lines.push(`vibeauto\t${this.vibePageIntervalSec}`);
+    lines.push(`vibedwell\t${this.vibeValueDwellMs}\t${this.vibeResetDwellMs}`);
     lines.push(this.serializeVibe(this.vibe));
     lines.push(`menu\t${this.menu.length}`);
     for (const entry of this.menu) {

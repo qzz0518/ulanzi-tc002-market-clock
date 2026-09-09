@@ -46,6 +46,7 @@ class LauncherScreen : public Screen {
     kIconGameRacer,
     kIconGameShooter,
     kIconGameTetris,
+    kIconGameEye,
   };
 
   struct Entry {

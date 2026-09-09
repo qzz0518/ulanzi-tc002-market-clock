@@ -26,6 +26,10 @@
 #include "core/Surface.h"
 #include "core/Text.h"
 #include "core/Transitions.h"
+#include "games/eye.h"
+#include "visual/EyeBox.h"
+#include "visual/EyeFace.h"
+#include "visual/EyeSkin.h"
 #include "net/BleProtocol.h"
 #include "net/BleProvisionSession.h"
 #include "net/ConsoleDiscovery.h"
@@ -3603,6 +3607,69 @@ void checkVibeScreen() {
           "a metric the vendor gave no reset time for never invents a countdown");
   }
 
+  // --- the value cell's time-share is the user's ---------------------------
+  //
+  // Same cell, same phase anchor; only how long each half holds is now a
+  // setting. The defaults are what shipped, so everything above still describes
+  // an untouched install.
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    StateDoc::VibeAgent agent = vibeAgent("claude", "Max 20x", false);
+    agent.metrics.push_back(vibeMetric("Session", 41, 100, 18000));
+    agents.push_back(agent);
+
+    VibeScreen fast;
+    fast.setAgents(agents, 0);
+    fast.onEnter(0);
+    fast.onInput(tcos::kInputTurnCw, 0);
+    check(fast.valueDwellMs() == VibeScreen::kValueDwellMs
+              && fast.resetDwellMs() == VibeScreen::kResetDwellMs,
+          "an untouched screen holds the two numbers it shipped with");
+    // -1 is a service that never mentioned the key; the defaults must stand
+    // rather than the cell collapsing to one half.
+    fast.setCellDwell(-1, -1);
+    check(fast.valueDwellMs() == VibeScreen::kValueDwellMs
+              && fast.resetDwellMs() == VibeScreen::kResetDwellMs,
+          "and a document that does not say leaves them alone");
+
+    fast.setCellDwell(1000, 1000);
+    Surface early(52, 16);
+    Surface late(52, 16);
+    fast.render(early, 400);
+    fast.render(late, 1400);
+    check(surfacesDiffer(early, late),
+          "a shorter value dwell hands the cell over sooner");
+    // At the shipped 3200 that same instant would still be the number, which is
+    // what makes this an assertion about the setting and not about the clock.
+    VibeScreen shipped;
+    shipped.setAgents(agents, 0);
+    shipped.onEnter(0);
+    shipped.onInput(tcos::kInputTurnCw, 0);
+    Surface stillValue(52, 16);
+    Surface firstValue(52, 16);
+    shipped.render(firstValue, 400);
+    shipped.render(stillValue, 1400);
+    check(!surfacesDiffer(firstValue, stillValue),
+          "and the default would still be showing the number at that instant");
+
+    // 0 on the countdown half is a choice: the cell never leaves the number.
+    VibeScreen numberOnly;
+    numberOnly.setAgents(agents, 0);
+    numberOnly.onEnter(0);
+    numberOnly.onInput(tcos::kInputTurnCw, 0);
+    numberOnly.setCellDwell(3200, 0);
+    Surface one(52, 16);
+    Surface two(52, 16);
+    numberOnly.render(one, 400);
+    numberOnly.render(two, VibeScreen::kValueDwellMs + 400);
+    check(!surfacesDiffer(one, two), "0 means the countdown never takes the cell");
+    // Clamped here too — the hub is not the only thing that can call this.
+    numberOnly.setCellDwell(1, 1);
+    check(numberOnly.valueDwellMs() == StateDoc::kMinVibeDwellMs
+              && numberOnly.resetDwellMs() == StateDoc::kMinVibeDwellMs,
+          "and a dwell below what a person can read is floored, not honoured");
+  }
+
   // --- the worst case the layout has to survive ----------------------------
   //
   // Two agents, two metrics each, every one of them a three-digit percentage,
@@ -3703,6 +3770,118 @@ void checkVibeScreen() {
     check(!rectIsDark(detail, 0, 2, kMarkBoxX1, 13) && !rectIsDark(detail, 17, 2, 51, 13),
           "and the agent's own page keeps its mark beside the words");
   }
+
+  // --- 自动翻页 -------------------------------------------------------------
+  //
+  // The whole behaviour lives in render(), so it can be driven frame by frame
+  // here exactly as the countdown alternation is. A three-agent ring is four
+  // pages, which is enough for a lap to be distinguishable from a stall.
+  {
+    std::vector<StateDoc::VibeAgent> agents;
+    for (int i = 0; i < 3; ++i) {
+      StateDoc::VibeAgent agent =
+          vibeAgent(i == 0 ? "claude" : (i == 1 ? "codex" : "grok"), "Max 20x", false);
+      agent.metrics.push_back(vibeMetric("Session", 11, 100, -1));
+      agents.push_back(agent);
+    }
+    Surface frame(52, 16);
+
+    // 0 is the state the app shipped in: the knob is the only thing that turns
+    // the ring, however long anyone leaves it alone.
+    {
+      VibeScreen vibe;
+      vibe.setAgents(agents, 0);
+      vibe.onEnter(0);
+      check(vibe.pageCount() == 4, "three agents make four pages");
+      vibe.render(frame, 600000);
+      check(vibe.page() == 0, "with 自动翻页 off the page never turns itself");
+    }
+
+    {
+      VibeScreen vibe;
+      vibe.setAgents(agents, 0);
+      vibe.onEnter(0);
+      vibe.setAutoAdvanceMs(10000, 0);
+      vibe.render(frame, 9999);
+      check(vibe.page() == 0, "the page holds for the whole interval");
+      vibe.render(frame, 10000);
+      check(vibe.page() == 1, "and turns on it");
+      vibe.render(frame, 19999);
+      check(vibe.page() == 1, "then holds again from the turn, not from entry");
+      vibe.render(frame, 20000);
+      vibe.render(frame, 30000);
+      vibe.render(frame, 40000);
+      check(vibe.page() == 0, "a full lap comes back to the overview");
+    }
+
+    // A hand on the knob re-arms the dwell — both the detent and the press.
+    // Nobody wants the page pulled away half a second after they touched it.
+    {
+      VibeScreen vibe;
+      vibe.setAgents(agents, 0);
+      vibe.onEnter(0);
+      vibe.setAutoAdvanceMs(10000, 0);
+      vibe.render(frame, 9000);
+      vibe.onInput(tcos::kInputTurnCw, 9000);
+      check(vibe.page() == 1, "the detent turns the page itself");
+      vibe.render(frame, 10000);
+      check(vibe.page() == 1, "and the dwell starts over from the detent");
+      vibe.render(frame, 18000);
+      vibe.onInput(tcos::kInputPress, 18000);
+      vibe.render(frame, 19000);
+      check(vibe.page() == 1, "a press re-arms it too, without turning anything");
+      vibe.render(frame, 28000);
+      check(vibe.page() == 2, "and then it turns as usual");
+    }
+
+    // Changing the interval re-arms it. Without this the console saving 30 秒
+    // while somebody stands on a page they have been reading for four minutes
+    // flips it on the very next frame — the elapsed time already exceeds the
+    // new dwell. An UNCHANGED value must not re-arm, or a screen fed every tick
+    // would never turn at all.
+    {
+      VibeScreen vibe;
+      vibe.setAgents(agents, 0);
+      vibe.onEnter(0);
+      vibe.render(frame, 240000);
+      vibe.setAutoAdvanceMs(30000, 240000);
+      vibe.render(frame, 240020);
+      check(vibe.page() == 0, "a new interval starts its dwell now, not retroactively");
+      for (int t = 240040; t <= 269980; t += 20) {
+        vibe.setAutoAdvanceMs(30000, t);  // fed every tick, as osLogic feeds it
+        vibe.render(frame, t);
+      }
+      check(vibe.page() == 0, "and feeding the same value every tick does not re-arm it");
+      vibe.setAutoAdvanceMs(30000, 270000);
+      vibe.render(frame, 270000);
+      check(vibe.page() == 1, "so the page still turns when the dwell is up");
+    }
+
+    // 夜间息屏 stops calling render() for the whole night, and the Shell rasters
+    // the screen being LEFT one last time on the way out. Both arrive back here
+    // with an anchor hours old; turning then would read as the clock losing the
+    // user's place while they were away.
+    {
+      VibeScreen vibe;
+      vibe.setAgents(agents, 0);
+      vibe.onEnter(0);
+      vibe.setAutoAdvanceMs(10000, 0);
+      vibe.render(frame, 8 * 3600 * 1000);
+      check(vibe.page() == 0, "coming back from a dark panel re-arms instead of turning");
+      vibe.render(frame, 8 * 3600 * 1000 + 10000);
+      check(vibe.page() == 1, "and the next dwell runs from the moment it came back");
+    }
+
+    // Signed into nothing is one page. The setting is not refused, it simply has
+    // nothing to turn — and it must not turn the empty page into a flicker.
+    {
+      VibeScreen vibe;
+      vibe.onEnter(0);
+      vibe.setAutoAdvanceMs(5000, 0);
+      vibe.render(frame, 60000);
+      check(vibe.page() == 0, "one page never turns, whatever the interval says");
+    }
+  }
 }
 
 // The seam between the parser, the link and 「VIBE」.
@@ -3720,6 +3899,12 @@ void checkVibePath() {
 
   static const char* kDoc =
       "seq\t21\npinned\t0\nmirror\t0\nmode\tspotlight\nskin\tsignal\n"
+      // Present and OFF on purpose: the two pixel assertions after the tick loop
+      // below read the FINAL frame, and both only hold on the overview. A live
+      // interval here would be testing the ring, not the seam this function is
+      // about — that lives in checkVibeScreen.
+      "vibeauto\t0\n"
+      "vibedwell\t3200\t1600\n"
       "vibe\t2\n"
       "vibea\tclaude\tClaude\tMax 20x\n"
       "vibem\tclaude\tSession\t11\t100\t18000\n"
@@ -3745,6 +3930,12 @@ void checkVibePath() {
   }
   check(snap.items.size() == 2 && snap.items[0].kind == StateDoc::kVibe,
         "the menu entry the console pins arrives beside it");
+  // The setting makes the same hop as the rows, and it is the half that has no
+  // pixel to give it away: a field that parses and then dies in the copy would
+  // simply be a clock that never turns its pages.
+  check(snap.vibeAutoSec == 0, "the page dwell survives the copy too");
+  check(snap.vibeValueDwellMs == 3200 && snap.vibeResetDwellMs == 1600,
+        "and so does the value cell's time-share");
 
   LauncherScreen launcher;
   VibeScreen vibe;
@@ -3926,10 +4117,51 @@ void checkStateDoc() {
 
   StateDoc doc;
   check(doc.parse(body), "the real service document parses");
-  check(doc.seq() == 4, "seq is read");
+  check(doc.seq() == 5, "seq is read");
   check(doc.pinned(), "pinned is read");
   check(!doc.mirror(), "the mirror flag is read");
   check(doc.focus() == "notice", "focus is read");
+  // The page dwell rides the VIBE block as its own key. Read from THE fixture
+  // rather than a hand-written line, so a service that stopped emitting it —
+  // or emitted it as a field on `vibe` — fails here rather than on a clock.
+  check(doc.vibeAutoSec() == 15, "the VIBE page dwell is read");
+  check(doc.vibeValueDwellMs() == 3200 && doc.vibeResetDwellMs() == 1600,
+        "and the value cell's time-share beside it");
+  {
+    // Clamped here as well as in the hub: the service is not the only thing that
+    // can put bytes on this socket, and a raw atoi reaching `* 1000` in the UI
+    // is an int overflow. 0 stays 0 — it is the OFF state, not a small value.
+    StateDoc clamped;
+    check(clamped.parse("seq\t1\nvibeauto\t1\n") && clamped.vibeAutoSec() == 5,
+          "a dwell under the value/countdown cycle is floored");
+    check(clamped.parse("seq\t1\nvibeauto\t99999\n") && clamped.vibeAutoSec() == 300,
+          "and one past the republish cadence is capped");
+    check(clamped.parse("seq\t1\nvibeauto\t0\n") && clamped.vibeAutoSec() == 0,
+          "0 is off rather than a value to floor up");
+    check(clamped.parse("seq\t1\nvibeauto\t-9\n") && clamped.vibeAutoSec() == 0,
+          "and so is anything below it");
+    // Absence reads as off, which is what a service predating the key looks
+    // like and also exactly what the app used to do.
+    check(clamped.parse("seq\t1\nvibe\t0\n") && clamped.vibeAutoSec() == 0,
+          "a document that never mentions it means knob-only");
+
+    // The cell's time-share, same three rules — except that 0 survives on the
+    // countdown half, where it is the user asking for the number alone.
+    check(clamped.parse("seq\t1\nvibedwell\t9\t9\n")
+              && clamped.vibeValueDwellMs() == StateDoc::kMinVibeDwellMs
+              && clamped.vibeResetDwellMs() == StateDoc::kMinVibeDwellMs,
+          "a dwell too short to read is floored on both halves");
+    check(clamped.parse("seq\t1\nvibedwell\t99999\t99999\n")
+              && clamped.vibeValueDwellMs() == StateDoc::kMaxVibeDwellMs
+              && clamped.vibeResetDwellMs() == StateDoc::kMaxVibeDwellMs,
+          "and one the other half would never come round from is capped");
+    check(clamped.parse("seq\t1\nvibedwell\t3200\t0\n")
+              && clamped.vibeResetDwellMs() == 0,
+          "0 survives on the countdown half — it is the number-only choice");
+    check(clamped.parse("seq\t1\nvibe\t0\n")
+              && clamped.vibeValueDwellMs() == -1 && clamped.vibeResetDwellMs() == -1,
+          "and a document that never mentions it leaves the screen its defaults");
+  }
   check(doc.items().size() == 7, "every item is read");
   if (doc.items().size() == 7) {
     // Every field of every record, not a spot check: a partial assertion here
@@ -10041,6 +10273,315 @@ void checkDeviceAudio() {
         "the file is where the sideloaded player put it, so the cleanup lists stay true");
 }
 
+// --- 「EYE」 ---------------------------------------------------------------
+//
+// The face reacts to a microphone this host does not have, so every check below
+// drives it with a scripted room. That is the whole reason the loudness tracker
+// and the mood machine are pure and the MCU arrives through a function pointer:
+// on the device there is no way to read a frame back off the LED bus, so if a
+// mood cannot be proved here it cannot be proved anywhere.
+
+int gFakeMic = -1;
+int fakeMicSource() { return gFakeMic; }
+
+/** Run the room at one loudness for a while, at the shell's real 20 ms tick. */
+void feed(EyeEngine& eye, int raw, int ms) {
+  gFakeMic = raw;
+  for (int t = 0; t < ms; t += 20) eye.tick(20);
+}
+
+int rowLit(const Surface& s, int row) {
+  int n = 0;
+  for (int x = 0; x < s.getWidth(); ++x) {
+    const Color c = s.getPixel(x, row);
+    if (c.r || c.g || c.b) ++n;
+  }
+  return n;
+}
+
+/** Runs of lit columns, and the widest dark gap between them. */
+void columnRuns(const Surface& s, int& runs, int& widestGap) {
+  runs = 0;
+  widestGap = 0;
+  int gap = 0;
+  bool inRun = false;
+  for (int x = 0; x < s.getWidth(); ++x) {
+    bool lit = false;
+    for (int y = 0; y < s.getHeight() && !lit; ++y) {
+      const Color c = s.getPixel(x, y);
+      if (c.r || c.g || c.b) lit = true;
+    }
+    if (lit) {
+      if (!inRun) ++runs;
+      inRun = true;
+      gap = 0;
+    } else {
+      if (runs > 0) ++gap;
+      if (gap > widestGap) widestGap = gap;
+      inRun = false;
+    }
+  }
+}
+
+void checkEyeBox() {
+  const tcos::EyeBox capsule = tcos::makeEyeBox(3.5f, 6.2f, 3.5f);
+  check(tcos::eyeBoxCoverage(0.0f, 0.0f, capsule) == 1.0f, "eye centre is fully lit");
+  check(tcos::eyeBoxCoverage(0.0f, 20.0f, capsule) == 0.0f, "far outside the eye is dark");
+  // A sample exactly on the edge is half lit. That one-pixel ramp IS the
+  // anti-aliasing, and it is why a 7x13 capsule reads as curved rather than as
+  // the four-step staircase whole pixels would give.
+  const float edge = tcos::eyeBoxCoverage(0.0f, capsule.halfH, capsule);
+  check(edge > 0.49f && edge < 0.51f, "the eye's edge is half a pixel lit");
+  // The square corner of the bounding box. A rectangle would light it; a capsule
+  // must not, and if this ever passes the eyes have become bricks.
+  check(tcos::eyeBoxCoverage(capsule.halfW, capsule.halfH, capsule) == 0.0f,
+        "the capsule's corner is empty");
+
+  const tcos::EyeBox bar = tcos::makeEyeBox(4.0f, 0.6f, 0.6f, 45.0f);
+  check(tcos::eyeBoxCoverage(1.5f, 1.5f, bar) == 1.0f, "a tilted bar rotates with its tilt");
+  check(tcos::eyeBoxCoverage(1.5f, -1.5f, bar) == 0.0f, "and not the other way");
+
+  // A square box has square corners — this is what the hard-edged skin is built
+  // from, and it is the same rasteriser with the radius taken away.
+  const tcos::EyeBox block = tcos::makeEyeBox(3.0f, 3.0f, 0.0f);
+  // Solid to its corner, where the capsule above was empty at the same point.
+  // Sampled 1 px in, because ON the corner is the half-lit edge for any shape —
+  // pinning the value there would be testing the ramp, not the radius.
+  check(tcos::eyeBoxCoverage(2.0f, 2.0f, block) == 1.0f, "a radius of zero keeps its corners");
+  check(tcos::eyeBoxCoverage(3.4f, 3.4f, block) == 0.0f, "and still ends somewhere");
+}
+
+void checkEyeLoudness() {
+  tcos::LoudnessTracker room;
+  // Nothing heard yet, so there is no scale to report a level against. Silence
+  // is a state, not a failure: the face stays calm rather than reading a wild 0
+  // or 1 off a floor and ceiling that have not separated.
+  check(!room.calibrated(), "a tracker with no readings is not calibrated");
+  check(room.level() == 0.0f, "and reports no level");
+
+  for (int i = 0; i < 200; ++i) room.push(100, 20);
+  check(!room.calibrated(), "a dead-flat room never calibrates");
+  check(room.level() == 0.0f, "so its level stays at zero");
+
+  for (int i = 0; i < 60; ++i) room.push(900, 20);
+  check(room.calibrated(), "a loud sound gives the tracker its scale");
+  check(room.level() > 0.5f, "and the loud reading sits high in it");
+  check(room.lastRaw() == 900, "the raw reading is reported unchanged");
+  check(room.floorRaw() < room.ceilRaw(), "the floor stays under the ceiling");
+
+  for (int i = 0; i < 200; ++i) room.push(100, 20);
+  check(room.level() < 0.25f, "going quiet brings the level back down");
+
+  // An unreadable mic decays toward quiet rather than freezing the face
+  // mid-expression: a face stuck in a flinch because the serial link hiccuped
+  // looks broken, one that relaxes looks like nothing happened.
+  for (int i = 0; i < 100; ++i) room.push(-1, 20);
+  check(room.level() < 0.05f, "an unreadable mic decays to quiet");
+}
+
+void checkEyeMoods() {
+  EyeEngine eye;
+  eye.setMicSource(&fakeMicSource);
+  eye.reset();
+
+  feed(eye, 120, 3000);
+  check(eye.mood() == tcos::kEyeCalm, "a quiet room leaves the face calm");
+  check(eye.face().expression().brow < 0.1f, "and wears no brow");
+
+  feed(eye, 900, 400);
+  feed(eye, 120, 2000);
+  feed(eye, 520, 700);
+  check(eye.mood() == tcos::kEyeAlert || eye.mood() == tcos::kEyeStartled,
+        "a sustained sound gets its attention");
+
+  feed(eye, 950, 3200);
+  check(eye.mood() == tcos::kEyeAnnoyed, "loud for long enough turns into a scowl");
+  const tcos::EyeExpression sulk = eye.face().expression();
+  check(sulk.brow > 0.5f, "the scowl brings a brow in");
+  check(sulk.hood > 0.5f, "and hoods the eye under it");
+
+  feed(eye, 120, 4000);
+  check(eye.mood() == tcos::kEyeCalm, "quiet settles it again");
+  check(eye.face().expression().brow < 0.2f, "and the brow goes away");
+}
+
+void checkEyeStartle() {
+  EyeEngine eye;
+  eye.setMicSource(&fakeMicSource);
+  eye.reset();
+  feed(eye, 800, 200);
+  feed(eye, 100, 4000);
+
+  // A bang. The flinch has to land ON the noise, so this is the one transition
+  // that is not debounced — a startle 100 ms late is not a startle. And it
+  // SQUEEZES before it goes wide: straight to wide reads as interest.
+  gFakeMic = 4000;
+  bool startled = false;
+  bool squeezed = false;
+  for (int t = 0; t < 400; t += 20) {
+    eye.tick(20);
+    if (eye.mood() == tcos::kEyeStartled) {
+      startled = true;
+      if (eye.face().expression().openness < 0.4f) squeezed = true;
+    }
+  }
+  check(startled, "a bang startles the face");
+  check(squeezed, "and the flinch shuts it before it opens wide");
+
+  feed(eye, 100, 3000);
+  check(eye.mood() != tcos::kEyeStartled, "and it recovers");
+}
+
+void checkEyeSkins() {
+  EyeEngine eye;
+  eye.setMicSource(&fakeMicSource);
+  eye.reset();
+  check(eye.skin() == tcos::kSkinNomi, "the knob opens on the first face");
+
+  // The knob turns through the faces and wraps both ways. This is the gesture
+  // the game exists for, which is why it is on the knob and sensitivity is not.
+  GameInputEvent cw;
+  cw.kind = GameInputEvent::KnobCw;
+  cw.down = true;
+  for (int i = 1; i < tcos::kEyeSkinCount; ++i) {
+    eye.onInput(cw);
+    check(eye.skin() == static_cast<tcos::EyeSkin>(i), "the knob steps to the next face");
+  }
+  eye.onInput(cw);
+  check(eye.skin() == tcos::kSkinNomi, "and wraps round");
+  GameInputEvent ccw;
+  ccw.kind = GameInputEvent::KnobCcw;
+  ccw.down = true;
+  eye.onInput(ccw);
+  check(eye.skin() == static_cast<tcos::EyeSkin>(tcos::kEyeSkinCount - 1),
+        "and wraps back the other way");
+
+  // Every face must survive every mood without being sliced by an edge, and
+  // must always draw something. A pose that renders empty reads as the game
+  // having crashed, and the closed-lid poses are exactly where an off-by-one
+  // would produce one.
+  const int kRooms[5] = {120, 300, 700, 1500, 4000};
+  for (int skin = 0; skin < tcos::kEyeSkinCount; ++skin) {
+    EyeEngine face;
+    face.setMicSource(&fakeMicSource);
+    face.reset();
+    for (int i = 0; i < skin; ++i) face.onInput(cw);
+    Surface panel(52, 16);
+    bool everLit = false;
+    for (int r = 0; r < 5; ++r) {
+      gFakeMic = kRooms[r];
+      for (int t = 0; t < 4000; t += 20) {
+        face.tick(20);
+        panel.clear();
+        face.render(panel);
+        check(rowLit(panel, 0) == 0, "no face touches the top row");
+        check(rowLit(panel, 15) == 0, "no face touches the bottom row");
+        if (litPixels(panel) > 0) everLit = true;
+      }
+    }
+    check(everLit, "every face is drawn");
+  }
+
+  // The set has to be a SET: four pairs and one single. A visor that renders as
+  // two shapes is just another pair, and the reason it is in the set at all is
+  // that this panel is visor-shaped and a pair can only use its middle third.
+  for (int skin = 0; skin < tcos::kEyeSkinCount; ++skin) {
+    EyeEngine face;
+    face.setMicSource(&fakeMicSource);
+    face.reset();
+    for (int i = 0; i < skin; ++i) face.onInput(cw);
+    feed(face, 120, 600);
+    Surface panel(52, 16);
+    panel.clear();
+    face.render(panel);
+    // Counted as holes rather than as runs of lit columns: the cat punches a
+    // pupil out of its iris and the grid skin is made of separated cells, so one
+    // side legitimately renders as several runs.
+    bool on[52];
+    int first = -1;
+    int last = -1;
+    int lit = 0;
+    for (int x = 0; x < 52; ++x) {
+      on[x] = false;
+      for (int y = 0; y < 16 && !on[x]; ++y) {
+        const Color c = panel.getPixel(x, y);
+        if (c.r || c.g || c.b) on[x] = true;
+      }
+      if (on[x]) {
+        if (first < 0) first = x;
+        last = x;
+        ++lit;
+      }
+    }
+    check(first >= 0, "the face is drawn at all");
+    int holes = 0;
+    for (int x = first + 1; x < last; ++x) {
+      if (!on[x]) ++holes;
+    }
+    // All five are pairs, so all five must have a hole. Measured between their
+    // own outermost lit columns rather than at fixed centre columns: the pair
+    // saccades up to 5 px, so a gap pinned to the middle of the panel is testing
+    // where the eyes happened to be looking.
+    check(holes >= 3, "every face is two sides with a gap between them");
+    check(lit > 8, "and draws enough of them to see");
+  }
+}
+
+void checkEyeInput() {
+  EyeEngine eye;
+  eye.setMicSource(&fakeMicSource);
+  eye.reset();
+  check(!eye.showsMeter(), "the face opens showing the face");
+
+  GameInputEvent press;
+  press.kind = GameInputEvent::KnobPress;
+  press.down = true;
+  eye.onInput(press);
+  check(eye.showsMeter(), "a press opens the calibration read-out");
+  eye.onInput(press);
+  check(!eye.showsMeter(), "and a second press closes it");
+
+  // The release edge must not toggle it back: the knob's press arrives on
+  // RELEASE in this firmware, and acting on both edges would cancel itself.
+  press.down = false;
+  eye.onInput(press);
+  check(!eye.showsMeter(), "the release edge does nothing");
+
+  // Sensitivity is on the +/- keys, NOT the knob — the knob changes the face.
+  const tcos::EyeSkin before = eye.skin();
+  GameInputEvent right;
+  right.kind = GameInputEvent::Right;
+  right.down = true;
+  for (int i = 0; i < 50; ++i) eye.onInput(right);
+  check(eye.gain() <= 2.0f, "sensitivity clamps at the top");
+  check(eye.gain() > 1.0f, "and the + key raised it");
+  check(eye.skin() == before, "and the + key left the face alone");
+  GameInputEvent left;
+  left.kind = GameInputEvent::Left;
+  left.down = true;
+  for (int i = 0; i < 50; ++i) eye.onInput(left);
+  check(eye.gain() >= 0.5f, "sensitivity clamps at the bottom");
+
+  // No microphone at all is the state of a device whose MCU has not answered.
+  // The face must idle rather than pretend to hear something.
+  EyeEngine deaf;
+  deaf.reset();
+  for (int t = 0; t < 4000; t += 20) deaf.tick(20);
+  check(deaf.mood() == tcos::kEyeCalm, "with no mic wired the face stays calm");
+  Surface panel(52, 16);
+  deaf.render(panel);
+  check(litPixels(panel) > 0, "and is still drawn");
+}
+
+void checkEye() {
+  checkEyeBox();
+  checkEyeLoudness();
+  checkEyeMoods();
+  checkEyeStartle();
+  checkEyeSkins();
+  checkEyeInput();
+}
+
 int main() {
   std::printf("tc002-os host self-check\n");
   checkEase();
@@ -10057,6 +10598,8 @@ int main() {
   std::printf("  shell ok\n");
   checkTransitions();
   std::printf("  transitions ok\n");
+  checkEye();
+  std::printf("  eye ok\n");
   checkLauncher();
   std::printf("  launcher ok\n");
   checkStateDoc();

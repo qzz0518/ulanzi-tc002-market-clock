@@ -119,6 +119,20 @@ if [ "$routes" != "7" ]; then
   echo "FAIL the pinned-focus router should route every destination through navigate(); expected 7 sites, found $routes" >&2
   exit 1
 fi
+# 「VIBE」 turns its own pages only if something feeds it the interval, and the
+# feed is one line in the file no host check compiles. The screen half is
+# asserted below (checkVibeScreen drives advanceIfDue frame by frame); this half
+# is invisible from every check there is — the panel simply never turns, which
+# reads as the console's setting having been ignored rather than as a missing
+# call. It must be fed EVERY tick and with nowMs: gated behind the sequence it
+# would re-arm on arrival, and without nowMs an interval change would flip the
+# page the user is reading on the very next frame.
+autofeed=$(grep -cF 'sVibe.setAutoAdvanceMs(sLink.vibeAutoSec * 1000, nowMs);' "$oslogic" || true)
+if [ "$autofeed" != "1" ]; then
+  echo "FAIL 「VIBE」自动翻页 needs exactly one feed of sLink.vibeAutoSec into the screen, with nowMs; found $autofeed" >&2
+  exit 1
+fi
+
 # Same guard, for the rule that decides whether a BLE join needs the pairing
 # code. `host`, `host:port` and `http://host:port` all name one console, and
 # BleProvisionSession::hostIsTakeover folds an over-the-air host through
@@ -148,10 +162,13 @@ python3 device/tc002-os/hostcheck/glyph-coverage.py || exit 1
 # it links the same core/Surface.cpp the UI check does, through the
 # utils/Surface.h bridge the engines include.
 # `|| exit 1` because this is the first of two compiles in one script and a
-# failure here would otherwise be hidden behind the second one's success.
+# failure here would otherwise be hidden behind the second one's success. The
+# Eye*.cpp are for games/eye.cpp, this firmware's own game in the same
+# directory; the seven engines need Surface alone.
 clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \
   device/tc002-os/hostcheck/games-selfcheck.cpp \
   device/tc002-os/app/src/games/*.cpp \
+  device/tc002-os/app/src/visual/Eye*.cpp \
   device/tc002-os/app/src/core/Surface.cpp \
   -o .runtime/os-games-selfcheck && .runtime/os-games-selfcheck || exit 1
 clang++ -std=gnu++11 -Wall -Wextra -I 'device/tc002-os/app/src' -I device \

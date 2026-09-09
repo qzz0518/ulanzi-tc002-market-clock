@@ -1322,6 +1322,13 @@
 
 .vibe-display { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
 .vibe-display__actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+/* 标签在左、控件在右，说明行跟着标签走——和设备设置里那一排 SettingField 同一个
+   读法，只是那个组件没导出，这里不为一处控件把它搬出来。 */
+.vibe-field { display: flex; align-items: start; justify-content: space-between; gap: 0.8rem; }
+.vibe-field__copy { min-width: 0; }
+.vibe-field__copy label { font-size: 0.72rem; font-weight: 520; }
+.vibe-field__copy p { margin: 0.15rem 0 0; color: var(--muted-foreground); font-size: 0.63rem; line-height: 1.45; }
+.vibe-field__control { flex: none; }
 .vibe-note__icon { width: 0.75rem; height: 0.75rem; margin-right: 0.3rem; vertical-align: -0.1em; }
 .vibe-provider__stale, .vibe-provider__origin { margin-left: 0.35rem; }
 

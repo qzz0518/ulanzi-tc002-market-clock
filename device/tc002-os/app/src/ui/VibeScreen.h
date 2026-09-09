@@ -79,6 +79,42 @@ class VibeScreen : public Screen {
   /** True once since the user last pressed. Reading it clears it. */
   bool takeShowLeftChanged();
 
+  /**
+   * How long a page holds before the ring turns itself, or 0 for knob-only.
+   *
+   * Published by the console (`vibeauto` on the wire) rather than kept in prefs,
+   * because unlike `vibe.showLeft` this one has no local control: the knob
+   * cannot set it, so there is exactly one writer and the document may simply
+   * state it on every poll — the same shape the lyric theme uses. If a 设置 row
+   * for it is ever added on the device, that stops being true and this needs a
+   * sequence with rising-edge gating, exactly as `setLyricTheme` warns.
+   *
+   * Takes `nowMs` because a CHANGE has to re-arm the dwell. osLogic feeds this
+   * on every tick, so without the anchor a user who has been reading one page
+   * for four minutes would see it flip the instant the console saved 30 秒 —
+   * the elapsed time already exceeds the new interval. An unchanged value is a
+   * no-op for the same reason: re-anchoring 50 times a second would mean the
+   * page never turns at all.
+   */
+  void setAutoAdvanceMs(int ms, int nowMs);
+  int autoAdvanceMs() const { return mAutoAdvanceMs; }
+
+  /**
+   * How the value cell is split in time between the number and the countdown.
+   *
+   * kValueDwellMs / kResetDwellMs below are what this screen shipped with; this
+   * is the user moving them. `-1` on either means the service did not say and
+   * the default stands — a build that predates the key must not lose half the
+   * row. `resetMs == 0` is a real choice, not an absence: it means the cell
+   * never leaves the number, for people who never wanted the countdown.
+   *
+   * Takes no nowMs and re-anchors nothing: this changes the SHAPE of the cycle,
+   * not when the page started, and the phase is the page's (mPageMs).
+   */
+  void setCellDwell(int valueMs, int resetMs);
+  int valueDwellMs() const { return mValueDwellMs; }
+  int resetDwellMs() const { return mResetDwellMs; }
+
   /** Pages on the ring: 1 + one per agent, or 1 for the empty state. */
   int pageCount() const;
   int page() const { return mRing.index(); }
@@ -90,7 +126,8 @@ class VibeScreen : public Screen {
 
   /**
    * How long the value column shows the percentage before the reset countdown
-   * takes it, and how long the countdown holds.
+   * takes it, and how long the countdown holds — the DEFAULTS, which the
+   * console can move per install (see setCellDwell).
    *
    * The two share the cell because there is nowhere else for the countdown to
    * go: the meter takes x=19..32 and a three-digit value takes x=37..51, which
@@ -102,6 +139,12 @@ class VibeScreen : public Screen {
   static const int kResetDwellMs = 1600;
 
  private:
+  /**
+   * Turns the ring when the dwell is up. Called from render(), like
+   * ProvisionScreen's, so the whole behaviour stays inside (state, nowMs) and
+   * the host self-check can drive it frame by frame.
+   */
+  void advanceIfDue(int nowMs);
   void renderPage(Surface& out, int index, int originX, int nowMs) const;
   void renderOverview(Surface& out, int originX, int nowMs) const;
   void renderAgent(Surface& out, const StateDoc::VibeAgent& agent, int originX,
@@ -117,6 +160,14 @@ class VibeScreen : public Screen {
   // When the visible page last changed, so the value/countdown alternation
   // starts on the value rather than wherever the wall clock happens to be.
   int mPageMs;
+  int mAutoAdvanceMs;  // 0 = knob only
+  // When the auto-advance dwell was last armed. SEPARATE from mPageMs on
+  // purpose: a press must re-arm the dwell — nobody wants the page yanked away
+  // half a second after they toggled 已用/剩余 — but it must NOT restart the
+  // value/countdown phase, which is anchored to the page itself.
+  int mAutoAtMs;
+  int mValueDwellMs;
+  int mResetDwellMs;  // 0 = the countdown never takes the cell
   int mPressFlashMs;  // when the confirm flash started, or -1
 };
 

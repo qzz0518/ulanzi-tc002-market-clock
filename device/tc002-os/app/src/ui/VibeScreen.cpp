@@ -60,6 +60,16 @@ void plot(Surface& out, int x, int y, const Color& c) {
   out.setPixel(x, y, c);
 }
 
+// The cell is shared in TIME, so both halves need a floor a person can read and
+// a ceiling short enough that the other half still comes round. Clamped here as
+// well as on the wire, for the reason StateDoc states: neither end should depend
+// on the other behaving.
+int clampDwell(int ms) {
+  if (ms < StateDoc::kMinVibeDwellMs) return StateDoc::kMinVibeDwellMs;
+  if (ms > StateDoc::kMaxVibeDwellMs) return StateDoc::kMaxVibeDwellMs;
+  return ms;
+}
+
 Color dim(const Color& c, float k) {
   if (k <= 0.0f) return Color(0, 0, 0);
   if (k > 1.0f) k = 1.0f;
@@ -319,12 +329,16 @@ char metricInitial(const std::string& label) {
 // True while the value column is showing the reset countdown rather than the
 // number. Phase-anchored to the page change by the caller, so walking onto a
 // page always starts on the number.
-bool showingReset(const StateDoc::VibeMetric& metric, int phaseMs) {
+bool showingReset(const StateDoc::VibeMetric& metric, int phaseMs, int valueMs,
+                  int resetMs) {
   if (metric.resetSec < 0) return false;
-  const int cycle = VibeScreen::kValueDwellMs + VibeScreen::kResetDwellMs;
+  // A zero countdown share is the user saying "just the number" — the cell then
+  // never leaves the value, which is what the arithmetic below already does.
+  if (resetMs <= 0) return false;
+  const int cycle = valueMs + resetMs;
   int at = phaseMs % cycle;
   if (at < 0) at += cycle;
-  return at >= VibeScreen::kValueDwellMs;
+  return at >= valueMs;
 }
 
 }  // namespace
@@ -335,7 +349,9 @@ VibeScreen::VibeScreen()
     // how much they have left — nobody rations against a number that grows.
     // The knob still toggles it, and the choice is remembered in prefs.
     : mLinkConfigured(true), mLinkOnline(true), mShowLeft(true),
-      mShowLeftChanged(false), mPageMs(0), mPressFlashMs(-1) {}
+      mShowLeftChanged(false), mPageMs(0), mAutoAdvanceMs(0), mAutoAtMs(0),
+      mValueDwellMs(kValueDwellMs), mResetDwellMs(kResetDwellMs),
+      mPressFlashMs(-1) {}
 
 void VibeScreen::setAgents(const std::vector<StateDoc::VibeAgent>& agents, int nowMs) {
   const int before = pageCount();
@@ -347,6 +363,7 @@ void VibeScreen::setAgents(const std::vector<StateDoc::VibeAgent>& agents, int n
   // no longer names the same thing. Only then is a rewind honest.
   mRing.setIndex(0, nowMs);
   mPageMs = nowMs;
+  mAutoAtMs = nowMs;
 }
 
 void VibeScreen::setLink(bool configured, bool online) {
@@ -364,6 +381,47 @@ bool VibeScreen::takeShowLeftChanged() {
   return changed;
 }
 
+void VibeScreen::setAutoAdvanceMs(int ms, int nowMs) {
+  if (ms < 0) ms = 0;
+  if (ms == mAutoAdvanceMs) return;  // fed every tick; only a CHANGE re-arms
+  mAutoAdvanceMs = ms;
+  mAutoAtMs = nowMs;
+}
+
+void VibeScreen::setCellDwell(int valueMs, int resetMs) {
+  // A value the service did not send (-1) keeps the shipped default rather than
+  // collapsing the cell: this arrives on every document, and a build that
+  // predates the key must not silently stop showing one half of the row.
+  mValueDwellMs = valueMs > 0 ? clampDwell(valueMs) : kValueDwellMs;
+  if (resetMs < 0) {
+    mResetDwellMs = kResetDwellMs;
+  } else {
+    mResetDwellMs = resetMs == 0 ? 0 : clampDwell(resetMs);
+  }
+}
+
+void VibeScreen::advanceIfDue(int nowMs) {
+  if (mAutoAdvanceMs <= 0) return;
+  if (pageCount() < 2) return;  // signed into nothing: one page, nothing to turn
+  const int elapsed = nowMs - mAutoAtMs;
+  if (elapsed < mAutoAdvanceMs) return;
+  // Far past due means nobody was watching this clock run: 夜间息屏 stops calling
+  // render() for the whole night (logic/osLogic.cc), and the Shell rasters the
+  // screen being LEFT one last time on the way out. Both would otherwise land a
+  // page turn on the first frame the panel comes back, which reads as the clock
+  // losing the user's place while they were away. Re-arm instead of turning.
+  if (elapsed > 2 * mAutoAdvanceMs) {
+    mAutoAtMs = nowMs;
+    return;
+  }
+  // One page per frame, and mRing.turn() directly rather than onInput(): this is
+  // not a press, so it must not click (logic/osLogic.cc plays Sfx::kTick on the
+  // knob) and must not toggle anything.
+  mRing.turn(1, nowMs);
+  mPageMs = nowMs;
+  mAutoAtMs = nowMs;
+}
+
 int VibeScreen::pageCount() const {
   if (mAgents.empty()) return 1;  // the empty state is still a page
   return 1 + static_cast<int>(mAgents.size());
@@ -371,6 +429,7 @@ int VibeScreen::pageCount() const {
 
 void VibeScreen::onEnter(int nowMs) {
   mPageMs = nowMs;
+  mAutoAtMs = nowMs;
   mPressFlashMs = -1;
   // NOT reset to page 0: coming back to the agent you were reading is the whole
   // point of a ring, and a hold to check the time should not cost your place.
@@ -384,15 +443,21 @@ bool VibeScreen::onInput(Input input, int nowMs) {
     case kInputTurnCw:
       mRing.turn(1, nowMs);
       mPageMs = nowMs;
+      mAutoAtMs = nowMs;
       return true;
     case kInputTurnCcw:
       mRing.turn(-1, nowMs);
       mPageMs = nowMs;
+      mAutoAtMs = nowMs;
       return true;
     case kInputPress:
       mShowLeft = !mShowLeft;
       mShowLeftChanged = true;
       mPressFlashMs = nowMs;
+      // A hand is on the knob, so the dwell starts over — but mPageMs is left
+      // alone, or the countdown the user was reading would jump back to the
+      // number under their thumb.
+      mAutoAtMs = nowMs;
       return true;
     default:
       // A hold is not ours: the Shell turns it into "up one level", which is how
@@ -486,7 +551,7 @@ void VibeScreen::renderOverview(Surface& out, int originX, int nowMs) const {
       const StateDoc::VibeMetric& metric = cells[i]->metrics[r];
       const int y = (rows[i] == 1) ? kRowSoloY : (r == 0 ? kRowTopY : kRowBottomY);
       char reset[8];
-      const bool asReset = showingReset(metric, phaseMs);
+      const bool asReset = showingReset(metric, phaseMs, mValueDwellMs, mResetDwellMs);
       if (asReset) formatReset(reset, sizeof(reset), metric.resetSec);
       const char* text = asReset ? reset : values[i][r];
       const Color& colour = asReset ? kLabelSoft : severityFor(utilPercent(metric));
@@ -553,7 +618,7 @@ void VibeScreen::renderAgent(Surface& out, const StateDoc::VibeAgent& agent, int
     if (percent >= 0) drawMeter(out, originX + kMeterX, y, percent);
 
     char text[8];
-    const bool asReset = showingReset(metric, phaseMs);
+    const bool asReset = showingReset(metric, phaseMs, mValueDwellMs, mResetDwellMs);
     if (asReset) {
       formatReset(text, sizeof(text), metric.resetSec);
     } else {
@@ -576,6 +641,10 @@ void VibeScreen::renderPage(Surface& out, int index, int originX, int nowMs) con
 
 void VibeScreen::render(Surface& out, int nowMs) {
   out.clear(Color(0, 0, 0));
+  // Before anything is measured, the way ProvisionScreen does it: the ring's
+  // index is what the rest of this function reads, so turning it afterwards
+  // would draw one frame of the page the user has already left.
+  advanceIfDue(nowMs);
 
   if (mAgents.empty()) {
     // Which emptiness this is. Two of the three are not about VIBE at all, and

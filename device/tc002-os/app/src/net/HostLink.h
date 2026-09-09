@@ -49,6 +49,16 @@ class HostLink {
     // dropping the row. Empty means nobody is signed in on the host — or that
     // the service predates the VIBE block, which the panel words the same way.
     std::vector<StateDoc::VibeAgent> vibe;
+    // How long 「VIBE」 holds a page before turning itself, in seconds; 0 is
+    // knob-only. A SETTING, not a reading: the console is its only writer, so
+    // it is simply restated on every document and needs no sequence.
+    int vibeAutoSec;
+    // How the value cell is split between the number and the reset countdown,
+    // in ms. -1 on either means the document did not say and the screen keeps
+    // its default; 0 on the countdown half means the user asked for the number
+    // alone.
+    int vibeValueDwellMs;
+    int vibeResetDwellMs;
     /**
      * Console-initiated install request; 0 when never asked.
      *
@@ -124,6 +134,7 @@ class HostLink {
     // firmware that can decide to reinstall itself out of stack garbage before
     // the first document has even arrived.
     Snapshot() : online(false), seq(0), pinned(false), mirrorWanted(false),
+                 vibeAutoSec(0), vibeValueDwellMs(-1), vibeResetDwellMs(-1),
                  upgradeSeq(0),
                  consecutiveFailures(0), lastPullMonoMs(0),
                  nowPlaying(false), playing(false),

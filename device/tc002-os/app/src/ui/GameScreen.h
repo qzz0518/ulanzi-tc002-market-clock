@@ -9,7 +9,8 @@ namespace tcos {
 /**
  * Hosts one arcade GameEngine as a Shell screen.
  *
- * The seven engines are compiled in unchanged from device/tc002-arcade: they are
+ * The seven arcade engines are compiled in unchanged from device/tc002-arcade:
+ * they are
  * hardware-verified, their physics constants are ports of the web engines, and
  * the arcade's own 668-line self-check already asserts every one. Porting them
  * would fork that guarantee for nothing.

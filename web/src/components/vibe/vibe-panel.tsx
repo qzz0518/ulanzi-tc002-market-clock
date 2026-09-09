@@ -11,6 +11,9 @@ import {
   vibeSignedInCount,
   vibeSourceSummary,
   VIBE_MAX_STARRED,
+  VIBE_DEFAULT_RESET_DWELL_MS,
+  VIBE_DEFAULT_VALUE_DWELL_MS,
+  type VibeDisplayResponse,
   type VibeStarredResponse,
   type VibeStatusResponse,
 } from "@/lib/vibe";
@@ -36,6 +39,7 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
   const [refreshing, setRefreshing] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [starBusyId, setStarBusyId] = useState<string | null>(null);
+  const [intervalBusy, setIntervalBusy] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   // `load` is created once, so it reads the live status through a ref rather
@@ -98,6 +102,40 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
       toast.error("星标未保存", { description: errorMessage(error) });
     } finally {
       setStarBusyId(null);
+    }
+  }, [status, toast]);
+
+  const setDisplay = useCallback(async (patch: {
+    pageIntervalSec?: number;
+    valueDwellMs?: number;
+    resetDwellMs?: number;
+  }) => {
+    if (!status) return;
+    const previous = {
+      pageIntervalSec: status.pageIntervalSec ?? 0,
+      valueDwellMs: status.valueDwellMs ?? VIBE_DEFAULT_VALUE_DWELL_MS,
+      resetDwellMs: status.resetDwellMs ?? VIBE_DEFAULT_RESET_DWELL_MS,
+    };
+    const unchanged = (Object.keys(patch) as (keyof typeof previous)[])
+      .every((key) => patch[key] === previous[key]);
+    if (unchanged) return;
+    // Optimistic like the star above, and rolled back the same way: these
+    // controls are the only feedback until somebody looks at the clock across
+    // the room. A partial PUT, so two of them cannot clobber each other.
+    setStatus({ ...status, ...patch });
+    setIntervalBusy(true);
+    try {
+      const response = await jsonApi<VibeDisplayResponse>("/api/vibe/display", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      setStatus((live) => live === null ? live : { ...live, ...response });
+    } catch (error) {
+      setStatus((live) => live === null ? live : { ...live, ...previous });
+      toast.error("播放设置未保存", { description: errorMessage(error) });
+    } finally {
+      setIntervalBusy(false);
     }
   }, [status, toast]);
 
@@ -239,7 +277,8 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
             <section className="vibe-preview-section" aria-labelledby="vibe-preview-title">
               <div className="vibe-section__head">
                 <h2 id="vibe-preview-title">屏幕预览</h2>
-                <p>时钟上旋钮翻的就是这几页；改星标，这里与时钟一起变。</p>
+                {/* 「旋钮翻的」在自动翻页之后不再成立，改成中性的说法。 */}
+                <p>时钟上就是这几页；改星标，这里与时钟一起变。</p>
               </div>
               <VibePreview
                 catalog={status.catalog}
@@ -248,7 +287,14 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
               />
             </section>
 
-            <VibeDisplay firmwareMode={firmwareMode} />
+            <VibeDisplay
+              firmwareMode={firmwareMode}
+              pageIntervalSec={status.pageIntervalSec ?? 0}
+              valueDwellMs={status.valueDwellMs ?? VIBE_DEFAULT_VALUE_DWELL_MS}
+              resetDwellMs={status.resetDwellMs ?? VIBE_DEFAULT_RESET_DWELL_MS}
+              savingInterval={intervalBusy}
+              onDisplayChange={(patch) => void setDisplay(patch)}
+            />
           </aside>
         </div>
       </Surface>

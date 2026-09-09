@@ -191,8 +191,24 @@ export interface ControlApiOptions {
       starred: Record<string, string[]>;
       snapshot: VibeUsageSnapshot | null;
       error: string | null;
+      /** Seconds the panel holds a VIBE page before turning itself; 0 = knob only. */
+      pageIntervalSec: number;
+      /** How a metric row's value cell is split, in ms; resetMs 0 = number only. */
+      valueDwellMs: number;
+      resetDwellMs: number;
     }>;
     setStarred: (providerId: string, starred: unknown) => Record<string, string[]>;
+    /**
+     * How the panel plays 「VIBE」: the page dwell and the value cell's split.
+     *
+     * A PARTIAL — an unnamed field is left alone, like PUT /api/os/sleep — so
+     * two controls on one section cannot clobber each other.
+     */
+    setDisplay: (patch: {
+      pageIntervalSec?: unknown;
+      valueDwellMs?: unknown;
+      resetDwellMs?: unknown;
+    }) => { pageIntervalSec: number; valueDwellMs: number; resetDwellMs: number };
   };
   /**
    * Receives usage pushed by `src/vibe-agent.ts` running on the machine the
@@ -1949,6 +1965,11 @@ export function createControlHandler(
           starred: status.starred,
           snapshot: status.snapshot,
           error: status.error,
+          // Flat beside `starred`, not folded into a settings bag: each is one
+          // thing the user set, and the console reads them the same way.
+          pageIntervalSec: status.pageIntervalSec,
+          valueDwellMs: status.valueDwellMs,
+          resetDwellMs: status.resetDwellMs,
           // The console's 「远程采集」 guide needs to say whether this
           // deployment can receive a push at all, and which machines already
           // do. The token itself is never echoed — only whether one is set.
@@ -2016,6 +2037,34 @@ export function createControlHandler(
           throw new SettingsValidationError("providerId is required");
         }
         return jsonResponse({ starred: options.vibe.setStarred(input.providerId, input.starred) });
+      }
+
+      // How 「VIBE」 PLAYS on the panel — the page dwell and the value cell's
+      // split. Its own route rather than fields on the starred PUT above: that
+      // one is per provider, these are per screen. Partial like the sleep
+      // route: naming one field must not reset the two beside it.
+      if (request.method === "PUT" && url.pathname === "/api/vibe/display") {
+        if (!options.vibe) {
+          return jsonResponse({ error: "vibe usage is unavailable" }, 404);
+        }
+        assertSameOrigin(request);
+        const input = await readJson(request) as {
+          pageIntervalSec?: unknown;
+          valueDwellMs?: unknown;
+          resetDwellMs?: unknown;
+        };
+        if (
+          input.pageIntervalSec === undefined
+          && input.valueDwellMs === undefined
+          && input.resetDwellMs === undefined
+        ) {
+          throw new SettingsValidationError(
+            "name at least one of pageIntervalSec, valueDwellMs, resetDwellMs",
+          );
+        }
+        // Only the shape is checked here; the store owns every range, the way it
+        // owns the two-star cap the starred route does not restate.
+        return jsonResponse(options.vibe.setDisplay(input));
       }
 
 

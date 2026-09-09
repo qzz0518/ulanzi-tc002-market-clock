@@ -133,6 +133,8 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
  *   lyricend\t21500
  *   lyricuntil\t34800
  *   lyricw\t0,420,420,380,800,300,…
+ *   vibeauto\t15
+ *   vibedwell\t3200\t1600
  *   vibe\t2
  *   vibea\tclaude\tClaude\tMax 20x
  *   vibem\tclaude\tSession\t11\t100\t18000
@@ -281,6 +283,30 @@ class StateDoc {
   static const int kMaxVibeAgents = 10;
   static const int kMaxVibeMetrics = 2;
 
+  /**
+   * Bounds on the VIBE page dwell, in seconds. 0 — knob only — is outside them
+   * on purpose: it is a state, not a small interval to be floored up.
+   *
+   * The floor is the value/countdown cycle (kValueDwellMs + kResetDwellMs =
+   * 4.8 s in ui/VibeScreen.h): under it a metric's reset countdown would never
+   * get its turn in the cell it shares with the number, so the page would show
+   * half of what it has. The ceiling is the service's own republish cadence —
+   * past five minutes the numbers change more often than the page does.
+   */
+  static const int kMinVibeAutoSec = 5;
+  static const int kMaxVibeAutoSec = 300;
+
+  /**
+   * Bounds on either half of the value cell's time-share (`vibedwell`).
+   *
+   * 0 for the countdown half is outside them and means "never show it" — a
+   * choice, not a small interval. The floor is what a person can actually read
+   * a three-digit number in; the ceiling keeps the other half coming round
+   * inside a page dwell somebody would plausibly set.
+   */
+  static const int kMinVibeDwellMs = 500;
+  static const int kMaxVibeDwellMs = 20000;
+
   StateDoc();
 
   /** Returns false only when the document carried no usable `seq`. */
@@ -321,6 +347,29 @@ class StateDoc {
    * looks like, which is the same situation from the panel's side.
    */
   const std::vector<VibeAgent>& vibe() const { return mVibe; }
+
+  /**
+   * How long 「VIBE」 holds a page before turning itself, in seconds; 0 = the
+   * knob is the only thing that turns it.
+   *
+   * A SETTING, unlike vibe() beside it — the console is its only writer, so the
+   * document simply states it on every poll and this parser does not gate it on
+   * a sequence. Absence reads as 0, which is what a service predating the key
+   * looks like and also exactly what it used to do.
+   */
+  int vibeAutoSec() const { return mVibeAutoSec; }
+
+  /**
+   * How the value cell is split between the number and the reset countdown, in
+   * ms. `-1` on either means the document did not say — a service predating the
+   * key — and the screen keeps its shipped default; `0` on the countdown half
+   * means the user asked for the number alone.
+   *
+   * Milliseconds, unlike `vibeAutoSec` beside it, because these are sub-second
+   * quantities: a 3.2 s dwell rounded to whole seconds is a different layout.
+   */
+  int vibeValueDwellMs() const { return mVibeValueDwellMs; }
+  int vibeResetDwellMs() const { return mVibeResetDwellMs; }
 
   /**
    * Now playing, resolved to text by the service.
@@ -447,6 +496,9 @@ class StateDoc {
   std::string mFocus;
   std::vector<Item> mItems;
   std::vector<VibeAgent> mVibe;
+  int mVibeAutoSec;
+  int mVibeValueDwellMs;
+  int mVibeResetDwellMs;
   SettingsRequest mSettings;
   SleepRequest mSleep;
   std::vector<Input> mInputs;

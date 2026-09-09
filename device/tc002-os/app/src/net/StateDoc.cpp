@@ -83,6 +83,16 @@ struct VibeRecord {
   VibeRecord() : isMetric(false) {}
 };
 
+// Either half of the value cell's time-share. Clamped here as well as in the
+// hub for the reason the caps above are: the service is not the only thing that
+// can put bytes on this socket, and a cycle of a few milliseconds would strobe
+// the one cell a person reads a number out of.
+int clampVibeDwell(int ms) {
+  if (ms < StateDoc::kMinVibeDwellMs) return StateDoc::kMinVibeDwellMs;
+  if (ms > StateDoc::kMaxVibeDwellMs) return StateDoc::kMaxVibeDwellMs;
+  return ms;
+}
+
 // The service already clamps these to 0..999, so this is belt and braces — but
 // the page has three digit cells and a 14 px meter, and neither should be able
 // to be widened by a document.
@@ -153,6 +163,7 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
 
 StateDoc::StateDoc()
     : mSeq(-1), mPinned(false), mMirror(false), mUpgradeSeq(0), mBleOpenSeq(0),
+      mVibeAutoSec(0), mVibeValueDwellMs(-1), mVibeResetDwellMs(-1),
       mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
       mLyricEndMs(-1), mLyricUntilMs(-1), mLyricMode(kDefaultMode),
@@ -170,6 +181,14 @@ bool StateDoc::parse(const std::string& body) {
   mFocus.clear();
   mItems.clear();
   mVibe.clear();
+  // Same rule: a service that stopped sending it — an older build, a rollback —
+  // means knob-only, not "keep turning at whatever the last document said".
+  mVibeAutoSec = 0;
+  // -1, not the shipped default: "the service did not say" and "the service
+  // said 3200" must stay distinguishable, or a rollback would read as a
+  // deliberate setting instead of an absence.
+  mVibeValueDwellMs = -1;
+  mVibeResetDwellMs = -1;
   mSettings = SettingsRequest();
   mSleep = SleepRequest();
   mInputs.clear();
@@ -349,6 +368,32 @@ bool StateDoc::parse(const std::string& body) {
       agent.label = fields[2];
       agent.plan = fields[3];
       mVibe.push_back(agent);
+    } else if (fields[0] == "vibeauto" && n >= 2) {
+      // The app's own page dwell, in SECONDS — a property of the screen, not of
+      // any agent, so it rides the block rather than repeating on every record.
+      //
+      // Clamped here as well as in the hub, for the reason kMaxVibeAgents is:
+      // the service is not the only thing that can put bytes on this socket, and
+      // a raw `atoi` reaching `* 1000` in the UI is an int overflow. 0 stays 0
+      // — it is the OFF state, not an out-of-range value to be floored up.
+      const int declared = atoi(fields[1].c_str());
+      if (declared <= 0) {
+        mVibeAutoSec = 0;
+      } else if (declared < StateDoc::kMinVibeAutoSec) {
+        mVibeAutoSec = StateDoc::kMinVibeAutoSec;
+      } else if (declared > StateDoc::kMaxVibeAutoSec) {
+        mVibeAutoSec = StateDoc::kMaxVibeAutoSec;
+      } else {
+        mVibeAutoSec = declared;
+      }
+    } else if (fields[0] == "vibedwell" && n >= 3) {
+      // How the value cell is split in time. Both halves clamped here as well as
+      // in the hub, same rule as vibeauto; 0 survives only on the countdown
+      // half, where it means "just the number, never the countdown".
+      const int value = atoi(fields[1].c_str());
+      const int reset = atoi(fields[2].c_str());
+      mVibeValueDwellMs = value <= 0 ? -1 : clampVibeDwell(value);
+      mVibeResetDwellMs = reset < 0 ? -1 : (reset == 0 ? 0 : clampVibeDwell(reset));
     } else if (fields[0] == "vibes" && n >= 3) {
       // Sent only when the agent IS stale, so its absence is the statement
       // "these numbers are fresh" rather than a gap in the document.

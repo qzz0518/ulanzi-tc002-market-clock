@@ -15,6 +15,7 @@ import type { WeatherCondition } from "./weather/client.ts";
 // already at the size where one more 200-line face stops being readable.
 import { renderSign } from "./visual/sign.ts";
 import { renderBoldClock } from "./visual/boldclock.ts";
+import { renderEyes } from "./visual/eyes.ts";
 import { renderNyan } from "./visual/nyan.ts";
 import { renderViewfinderClock } from "./visual/viewfinder.ts";
 
@@ -22,6 +23,7 @@ export const VISUAL_EFFECT_IDS = [
   "ant",
   "aquarium",
   "boldclock",
+  "eyes",
   "fire",
   "fireworks",
   "flipclock",
@@ -1406,6 +1408,7 @@ export function renderVisualEffect(
     // registry's observation passes straight through.
     return renderBoldClock(durationMs, nowMs, options.weather, options.weatherNotice);
   }
+  if (effectId === "eyes") return renderEyes(durationMs, speed);
   if (effectId === "fire") return renderFire(durationMs, random, speed);
   if (effectId === "fireworks") {
     return renderFireworks(durationMs, random, speed, options.fireworkDensity ?? 2);

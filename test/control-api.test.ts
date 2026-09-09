@@ -761,7 +761,7 @@ describe("local control API", () => {
     const handler = createControlHandler(fakeWorkspaceController(previewCalls));
     const catalog = await handler(new Request("http://127.0.0.1:43820/api/catalog"));
     const catalogBody = await catalog.json();
-    expect(catalogBody.contents).toHaveLength(35);
+    expect(catalogBody.contents).toHaveLength(36);
     expect(catalogBody.categories.map((category: { id: string }) => category.id)).toEqual([
       "market", "tools", "visual", "creative",
     ]);
@@ -2304,9 +2304,21 @@ describe("vibe usage routes", () => {
             starred: store.getStarred(),
             snapshot: status.snapshot === undefined ? fakeSnapshot() : status.snapshot,
             error: status.error ?? null,
+            pageIntervalSec: store.getPageIntervalSec(),
+            valueDwellMs: store.getCellDwell().valueMs,
+            resetDwellMs: store.getCellDwell().resetMs,
           };
         },
         setStarred: (providerId: string, starred: unknown) => store.setStarred(providerId, starred),
+        setDisplay: (patch: { pageIntervalSec?: unknown; valueDwellMs?: unknown; resetDwellMs?: unknown }) => {
+          const pageIntervalSec = patch.pageIntervalSec === undefined
+            ? store.getPageIntervalSec()
+            : store.setPageIntervalSec(patch.pageIntervalSec);
+          const dwell = patch.valueDwellMs === undefined && patch.resetDwellMs === undefined
+            ? store.getCellDwell()
+            : store.setCellDwell({ valueMs: patch.valueDwellMs, resetMs: patch.resetDwellMs });
+          return { pageIntervalSec, valueDwellMs: dwell.valueMs, resetDwellMs: dwell.resetMs };
+        },
         setKey: async () => {},
       },
     };
@@ -2450,12 +2462,91 @@ describe("vibe usage routes", () => {
     expect((await crossOrigin.json()).error).toContain("cross-origin");
   });
 
+  test("the play settings round-trip through status, and out-of-range is refused", async () => {
+    const { option, store } = await vibeOption();
+    const handler = createControlHandler(fakeWorkspaceController(), { vibe: option });
+
+    const before = await (await handler(new Request(`${ORIGIN}/api/vibe/status`))).json();
+    expect(before.pageIntervalSec).toBe(0);
+
+    const saved = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ pageIntervalSec: 30 }),
+    }));
+    expect(saved.status).toBe(200);
+    expect((await saved.json()).pageIntervalSec).toBe(30);
+    // Read back through the same envelope the console loads, not through the
+    // store: the panel has no other channel to learn this from.
+    expect((await (await handler(new Request(`${ORIGIN}/api/vibe/status`))).json()).pageIntervalSec)
+      .toBe(30);
+
+    // Below the panel's own value↔countdown cycle, so it is refused rather than
+    // silently floored — the console must not report a value it did not save.
+    const tooFast = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ pageIntervalSec: 2 }),
+    }));
+    expect(tooFast.status).toBe(400);
+    expect((await tooFast.json()).error).toContain("must be 0 or between 5 and 300");
+
+    const missing = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({}),
+    }));
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).error).toContain("name at least one of");
+
+    // A partial: naming the cell split must leave the page dwell alone, the way
+    // PUT /api/os/sleep leaves an unnamed field alone.
+    const split = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ valueDwellMs: 5_000, resetDwellMs: 0 }),
+    }));
+    expect(split.status).toBe(200);
+    expect(await split.json()).toEqual({
+      pageIntervalSec: 30,
+      valueDwellMs: 5_000,
+      resetDwellMs: 0,
+    });
+
+    // 0 is legal on the countdown half only: a cell that never shows the number
+    // is not a row.
+    const noValue = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ valueDwellMs: 0 }),
+    }));
+    expect(noValue.status).toBe(400);
+    expect((await noValue.json()).error).toContain("valueDwellMs must be between 500 and 20000");
+
+    const crossOrigin = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+      body: JSON.stringify({ pageIntervalSec: 30 }),
+    }));
+    expect(crossOrigin.status).toBe(400);
+    expect((await crossOrigin.json()).error).toContain("cross-origin");
+    await store.settled();
+  });
+
   test("both routes 404 when the vibe option is not wired", async () => {
     const handler = createControlHandler(fakeWorkspaceController());
 
     const status = await handler(new Request(`${ORIGIN}/api/vibe/status`));
     expect(status.status).toBe(404);
     expect((await status.json()).error).toContain("vibe usage is unavailable");
+
+    const interval = await handler(new Request(`${ORIGIN}/api/vibe/display`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+      body: JSON.stringify({ pageIntervalSec: 30 }),
+    }));
+    expect(interval.status).toBe(404);
+    expect((await interval.json()).error).toContain("vibe usage is unavailable");
 
     // The 404 has to come before the same-origin check, or a console probing a
     // service without the collector would read "cross-origin" for a missing feature.
@@ -2492,8 +2583,16 @@ describe("vibe usage ingest", () => {
   /** Enough of the vibe option for /api/vibe/status to answer; ingest is the subject here. */
   function minimalVibeOption() {
     return {
-      status: async () => ({ starred: {}, snapshot: null, error: null }),
+      status: async () => ({
+        starred: {},
+        snapshot: null,
+        error: null,
+        pageIntervalSec: 0,
+        valueDwellMs: 3_200,
+        resetDwellMs: 1_600,
+      }),
       setStarred: () => ({}),
+      setDisplay: () => ({ pageIntervalSec: 0, valueDwellMs: 3_200, resetDwellMs: 1_600 }),
     };
   }
 

@@ -254,6 +254,10 @@ const VISUAL_NAMES: Readonly<Record<VisualEffectId, { title: string; description
   life: { title: "生命游戏", description: "环面边界的康威生命游戏，可用当前时间播种。" },
   matrixclock: { title: "数字雨时钟", description: "Matrix 代码雨上叠加当前时间。" },
   maze: { title: "走迷宫", description: "随机生成迷宫并演示最短路径。" },
+  eyes: {
+    title: "一对眼睛",
+    description: "两个圆角矩形演的一张脸：眨眼、扫视、瞪圆、眯起、皱眉。形状是算出来的，不是画好的帧。",
+  },
   nyan: { title: "彩虹猫", description: "Nyan Cat：煎饼猫踩着六色彩虹阶梯飞行，星点从背后掠过。" },
   pet: { title: "像素宠物", description: "橘猫的待机、散步、奔跑与攻击动画。" },
   sand: { title: "落沙", description: "彩色沙粒受重力下落并逐渐堆积。" },

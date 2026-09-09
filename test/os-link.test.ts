@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BLE_OPEN_WINDOW_SEC, OsLinkHub, OS_PROTO_LYRIC_WINDOW, type OsMenuEntry } from "../src/os-link.ts";
+import {
+  BLE_OPEN_WINDOW_SEC,
+  OsLinkHub,
+  OS_PROTO_LYRIC_WINDOW,
+  OS_VIBE_MAX_PAGE_INTERVAL_SEC,
+  OS_VIBE_MIN_CELL_DWELL_MS,
+  OS_VIBE_MIN_PAGE_INTERVAL_SEC,
+  type OsMenuEntry,
+} from "../src/os-link.ts";
 
 const entry = (id: string, label: string, kind: OsMenuEntry["kind"] = "channel"): OsMenuEntry => ({
   id,
@@ -383,6 +391,10 @@ describe("tc002-os host link", () => {
       entry("settings", "设置", "settings"),
     ]);
     hub.setDisplay({ focus: "notice", pinned: true });
+    // A live interval rather than the 0 default, so the cross-language check
+    // covers a value the parser has to clamp and read rather than a field it
+    // could drop without either side noticing.
+    hub.setVibePageInterval(15);
     // The VIBE block is in the fixture for the same reason the channels' rev and
     // ttl are: its records are what the firmware's parser is written against —
     // one `vibea` per agent, an optional `vibes`, then that agent's metric rows,
@@ -434,6 +446,63 @@ describe("tc002-os host link", () => {
     moved[0]!.metrics[0]!.used = 12;
     hub.setVibe(moved);
     expect(hub.currentSeq()).toBe(afterFirst + 1);
+  });
+
+  test("the VIBE page dwell survives a round where nobody is signed in", () => {
+    const hub = new OsLinkHub();
+    hub.setVibePageInterval(20);
+    // The collector failing is `setVibe([])` — src/service.ts does exactly that
+    // in its catch — and the block collapses to a bare `vibe\t0`. The dwell is
+    // a setting, not an agent row, so it has to still be in the document: this
+    // is why the key is emitted from serialize() and not from serializeVibe().
+    hub.setVibe([]);
+    const doc = hub.serialize();
+    expect(doc).toContain("vibeauto\t20");
+    expect(doc).toContain("vibe\t0");
+  });
+
+  test("the page dwell is 0 or in range, and an equal write wakes nobody", () => {
+    const hub = new OsLinkHub();
+    expect(hub.getVibePageInterval()).toBe(0);
+
+    hub.setVibePageInterval(15);
+    const afterFirst = hub.currentSeq();
+    hub.setVibePageInterval(15);
+    expect(hub.currentSeq()).toBe(afterFirst);
+
+    // Clamped rather than rejected — the route rejects first, and the hub does
+    // not trust its caller. 0 is the off state and stays 0 rather than being
+    // floored up to the minimum.
+    hub.setVibePageInterval(1);
+    expect(hub.getVibePageInterval()).toBe(OS_VIBE_MIN_PAGE_INTERVAL_SEC);
+    hub.setVibePageInterval(99_999);
+    expect(hub.getVibePageInterval()).toBe(OS_VIBE_MAX_PAGE_INTERVAL_SEC);
+    hub.setVibePageInterval(0);
+    expect(hub.getVibePageInterval()).toBe(0);
+    hub.setVibePageInterval(Number.NaN);
+    expect(hub.getVibePageInterval()).toBe(0);
+    expect(hub.serialize()).toContain("vibeauto\t0");
+  });
+
+  test("页内那一格的时间分配也在线上，默认值也照发", () => {
+    const hub = new OsLinkHub();
+    // Emitted even untouched: the panel's shipped 3200/1600 are what a fresh
+    // install must keep drawing, and absence is what an OLD service looks like.
+    expect(hub.serialize()).toContain("vibedwell\t3200\t1600");
+
+    hub.setVibeCellDwell(5_000, 0);
+    expect(hub.getVibeCellDwell()).toEqual({ valueMs: 5_000, resetMs: 0 });
+    // 0 passes through on the countdown half — that is "just the number" — but
+    // the value half is floored, because a cell that never shows it is not a row.
+    hub.setVibeCellDwell(1, 1);
+    expect(hub.getVibeCellDwell()).toEqual({
+      valueMs: OS_VIBE_MIN_CELL_DWELL_MS,
+      resetMs: OS_VIBE_MIN_CELL_DWELL_MS,
+    });
+
+    const afterFirst = hub.currentSeq();
+    hub.setVibeCellDwell(OS_VIBE_MIN_CELL_DWELL_MS, OS_VIBE_MIN_CELL_DWELL_MS);
+    expect(hub.currentSeq()).toBe(afterFirst);
   });
 
   test("vibe values are clamped and separators can never reach the wire", () => {

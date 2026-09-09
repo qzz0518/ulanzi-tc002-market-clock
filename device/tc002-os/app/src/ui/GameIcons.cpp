@@ -190,6 +190,46 @@ void drawTetris(Surface& out, int x, int y, int t) {
 
 }  // namespace
 
+// --- eye: an almond that looks around and blinks ---------------------------
+//
+// Deliberately NOT a miniature of the screen it launches. The face itself is
+// two solid capsules with no pupil, which at 12x12 would be a pair of 3x7 bars
+// — unreadable as an eye, and indistinguishable from Tetris's blocks on the
+// ring. An almond with a pupil is the shape everyone already reads as an eye,
+// and the ring's job is to say what you are about to open.
+//
+// It blinks rather than pulsing, because the whole icon set displaces pixels
+// instead of changing brightness: at this size a brightness change is invisible
+// and the card reads as frozen.
+void drawEye(Surface& out, int x, int y, int t) {
+  // Half-widths per row, describing the almond from row 3 to row 9.
+  static const int kRows[7][2] = {
+      {4, 7}, {2, 9}, {1, 10}, {1, 10}, {1, 10}, {2, 9}, {4, 7}};
+  const Color kIris(228, 233, 255);
+  const Color kPupil(28, 34, 58);
+
+  // One blink every 2.1 s, 160 ms long. The lid is drawn as the eye collapsing
+  // to its middle two rows rather than as a separate eyelid: fewer pixels, and
+  // it matches what the real face does on the panel.
+  const int cycle = t % 2100;
+  const bool shut = cycle > 1940;
+
+  if (shut) {
+    rect(out, x, y, 1, 5, 10, 2, kIris);
+    return;
+  }
+
+  for (int r = 0; r < 7; ++r) {
+    const int row = 3 + r;
+    rect(out, x, y, kRows[r][0], row, kRows[r][1] - kRows[r][0] + 1, 1, kIris);
+  }
+
+  // The pupil wanders across the middle of the almond. 2..7 keeps it inside the
+  // white at every position, so the eye never looks burst.
+  const int px = 2 + static_cast<int>(triangle(fract(t / 1700.0f)) * 5.0f + 0.5f);
+  rect(out, x, y, px, 5, 3, 3, kPupil);
+}
+
 void draw(Surface& out, int which, int x, int y, int phaseMs) {
   switch (which) {
     case kBreakout: drawBreakout(out, x, y, phaseMs); break;
@@ -199,6 +239,7 @@ void draw(Surface& out, int which, int x, int y, int phaseMs) {
     case kRacer:    drawRacer(out, x, y, phaseMs); break;
     case kShooter:  drawShooter(out, x, y, phaseMs); break;
     case kTetris:   drawTetris(out, x, y, phaseMs); break;
+    case kEye:      drawEye(out, x, y, phaseMs); break;
     default: break;
   }
 }
@@ -212,6 +253,7 @@ Color headline(int which) {
     case kRacer:    return Color(193, 255, 61);
     case kShooter:  return Color(214, 244, 255);
     case kTetris:   return Color(182, 108, 255);
+    case kEye:      return Color(228, 233, 255);
     default:        return Color(120, 170, 255);
   }
 }

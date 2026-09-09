@@ -96,10 +96,25 @@ export interface VibeStatusResponse {
   error: string | null;
   /** Absent on a service older than the ingest route; the dialog copes. */
   ingest?: VibeIngestStatus;
+  /** Absent on a service older than 自动翻页; the panel reads it as 0 — off. */
+  pageIntervalSec?: number;
+  /**
+   * How the clock splits a metric row's value cell between the number and the
+   * reset countdown, in ms. Absent on an older service; the panel then shows
+   * the firmware's shipped 3200 / 1600.
+   */
+  valueDwellMs?: number;
+  resetDwellMs?: number;
 }
 
 export interface VibeStarredResponse {
   starred: Record<string, string[]>;
+}
+
+export interface VibeDisplayResponse {
+  pageIntervalSec: number;
+  valueDwellMs: number;
+  resetDwellMs: number;
 }
 
 /**
@@ -170,6 +185,74 @@ export const VIBE_ZOS_FOCUS = "vibe";
 
 // Mirrors LayoutStore.maxPinsPerProvider: the LED strip only has room for two.
 export const VIBE_MAX_STARRED = 2;
+
+export interface VibePageIntervalOption {
+  seconds: number;
+  label: string;
+}
+
+/**
+ * 自动翻页 — how long the clock holds one VIBE page before turning to the next.
+ *
+ * 0 first and worded, not "0 秒", the way the stock firmware's 自动翻页速度 does
+ * it: it is the state the app shipped in, where only the knob turns the ring.
+ *
+ * The floor is the panel's own value↔countdown cycle (3200 + 1600 ms in
+ * ui/VibeScreen.h) — under it a metric's reset countdown never gets its turn in
+ * the cell it shares with the number. The ceiling is the five-minute republish
+ * cadence, past which the numbers move more often than the page does. Both are
+ * OS_VIBE_MIN/MAX_PAGE_INTERVAL_SEC in src/os-link.ts, and the ladder reaches
+ * the ceiling so no legal value is unreachable from here.
+ */
+export const VIBE_PAGE_INTERVAL_OPTIONS: readonly VibePageIntervalOption[] = [
+  { seconds: 0, label: "不翻页" },
+  { seconds: 5, label: "5 秒" },
+  { seconds: 10, label: "10 秒" },
+  { seconds: 15, label: "15 秒" },
+  { seconds: 20, label: "20 秒" },
+  { seconds: 30, label: "30 秒" },
+  { seconds: 60, label: "1 分钟" },
+  { seconds: 120, label: "2 分钟" },
+  { seconds: 300, label: "5 分钟" },
+];
+
+export function vibePageIntervalLabel(seconds: number): string {
+  const preset = VIBE_PAGE_INTERVAL_OPTIONS.find((option) => option.seconds === seconds);
+  if (preset) return preset.label;
+  // An API-set value between presets still has to be said honestly rather than
+  // snapped — opening the page must not silently edit the clock.
+  if (seconds <= 0) return "不翻页";
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
+}
+
+/**
+ * The option list to render, with the current value folded in when it is not a
+ * preset. Same rule the 息屏等待 select follows: a value the console cannot
+ * offer is still a value the clock is running.
+ */
+/**
+ * The value cell is shared in TIME — the meter takes x=21..34 and a three-digit
+ * number takes x=37..51, so the reset countdown has nowhere to go but the same
+ * cell, later. These are how long each half holds; the defaults are what the
+ * firmware shipped with (VibeScreen.h kValueDwellMs / kResetDwellMs).
+ */
+export const VIBE_DEFAULT_VALUE_DWELL_MS = 3_200;
+export const VIBE_DEFAULT_RESET_DWELL_MS = 1_600;
+export const VIBE_MIN_CELL_DWELL_MS = 500;
+export const VIBE_MAX_CELL_DWELL_MS = 20_000;
+
+/** "3.2 秒" / "不显示" — seconds to one decimal, the way the channel editor reads. */
+export function vibeCellDwellLabel(ms: number): string {
+  if (ms <= 0) return "不显示";
+  return `${Math.round(ms / 100) / 10} 秒`;
+}
+
+export function vibePageIntervalChoices(current: number): number[] {
+  const presets = VIBE_PAGE_INTERVAL_OPTIONS.map((option) => option.seconds);
+  if (presets.includes(current)) return presets;
+  return [...presets, current].sort((a, b) => a - b);
+}
 // OpenUsage's absolute meter bands (80% / 90% used); the LED renderer uses the
 // same two numbers, so a row that reads amber on screen reads amber on glass.
 export const VIBE_SEVERITY_WARNING = 0.8;

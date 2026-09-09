@@ -321,6 +321,14 @@ osLink.restoreSleepRequest(restoredSleepRequest);
 // unanswerable while this lived in module memory, and the failure it causes is
 // invisible from both ends — the route answers 200 and the panel does nothing.
 log("os_sleep_request_restored", { seq: restoredSleepRequest?.seq ?? 0 });
+// Restored SYNCHRONOUSLY, for the same reason the sleep request above is: the
+// device polls long before anybody opens a browser, and publishOsVibe() — the
+// funnel everything else about VIBE goes through — is fire-and-forget and waits
+// on a vendor round trip. A clock that came up before that resolved would spend
+// its first minutes not turning pages the user had already asked it to turn.
+osLink.setVibePageInterval(vibeStore.getPageIntervalSec());
+const restoredCellDwell = vibeStore.getCellDwell();
+osLink.setVibeCellDwell(restoredCellDwell.valueMs, restoredCellDwell.resetMs);
 function publishOsMenu(): void {
   const entries: OsMenuEntry[] = controller.getWorkspace().channels
     .filter((channel) => channel.enabled)
@@ -611,6 +619,9 @@ const controlHandler = createControlHandler(controller, {
           starred: view.starred,
           snapshot: view.snapshot,
           error: null,
+          pageIntervalSec: vibeStore.getPageIntervalSec(),
+          valueDwellMs: vibeStore.getCellDwell().valueMs,
+          resetDwellMs: vibeStore.getCellDwell().resetMs,
         };
       } catch (error) {
         // Signed into nothing yet is the normal first-run state, so the console
@@ -619,8 +630,26 @@ const controlHandler = createControlHandler(controller, {
           starred: vibeStore.getStarred(),
           snapshot: null,
           error: errorMessage(error),
+          pageIntervalSec: vibeStore.getPageIntervalSec(),
+          valueDwellMs: vibeStore.getCellDwell().valueMs,
+          resetDwellMs: vibeStore.getCellDwell().resetMs,
         };
       }
+    },
+    setDisplay: (patch) => {
+      const pageIntervalSec = patch.pageIntervalSec === undefined
+        ? vibeStore.getPageIntervalSec()
+        : vibeStore.setPageIntervalSec(patch.pageIntervalSec);
+      const dwell = patch.valueDwellMs === undefined && patch.resetDwellMs === undefined
+        ? vibeStore.getCellDwell()
+        : vibeStore.setCellDwell({ valueMs: patch.valueDwellMs, resetMs: patch.resetDwellMs });
+      // Straight to the hub, not through publishOsVibe: these are not made of
+      // agent rows, so they must still reach a clock on a round where every
+      // vendor failed. The hub bumps its own sequence, which is what releases
+      // the device's parked long poll.
+      osLink.setVibePageInterval(pageIntervalSec);
+      osLink.setVibeCellDwell(dwell.valueMs, dwell.resetMs);
+      return { pageIntervalSec, valueDwellMs: dwell.valueMs, resetDwellMs: dwell.resetMs };
     },
     setStarred: (providerId, starred) => {
       const next = vibeStore.setStarred(providerId, starred);

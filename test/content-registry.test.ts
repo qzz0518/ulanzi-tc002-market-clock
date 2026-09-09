@@ -91,7 +91,7 @@ describe("built-in content registry", () => {
         };
       },
     };
-    expect(CONTENT_DEFINITIONS).toHaveLength(35);
+    expect(CONTENT_DEFINITIONS).toHaveLength(36);
     expect(new Set(getContentCatalog().map((entry) => entry.category))).toEqual(
       new Set(["market", "tools", "visual", "creative"]),
     );

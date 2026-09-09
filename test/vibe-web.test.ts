@@ -5,6 +5,13 @@ import { CladdProvider } from "@cladd-ui/react";
 import { VibeDisplay } from "../web/src/components/vibe/vibe-display";
 import { VibeProviderList } from "../web/src/components/vibe/vibe-provider-list";
 import {
+  OS_VIBE_MAX_PAGE_INTERVAL_SEC,
+  OS_VIBE_MIN_PAGE_INTERVAL_SEC,
+} from "../src/os-link";
+import {
+  VIBE_DEFAULT_RESET_DWELL_MS,
+  VIBE_DEFAULT_VALUE_DWELL_MS,
+  VIBE_PAGE_INTERVAL_OPTIONS,
   VIBE_SCREEN_HEIGHT,
   VIBE_SCREEN_WIDTH,
   VIBE_ZOS_FOCUS,
@@ -20,6 +27,9 @@ import {
   vibeScreenPageLabel,
   vibeScreenPages,
   vibeSeverity,
+  vibeCellDwellLabel,
+  vibePageIntervalChoices,
+  vibePageIntervalLabel,
   vibeSignedInCount,
   vibeSourceSummary,
   type VibeCatalogEntry,
@@ -645,11 +655,23 @@ describe("drawVibeScreen — 52x16, the layout the firmware reuses", () => {
 });
 
 describe("上屏 — VIBE is an app on the clock, not a channel", () => {
-  const displayMarkup = (firmwareMode: "official" | "music" | "zos") =>
+  const displayMarkup = (
+    firmwareMode: "official" | "music" | "zos",
+    pageIntervalSec = 0,
+    valueDwellMs = 3_200,
+    resetDwellMs = 1_600,
+  ) =>
     renderToStaticMarkup(createElement(
       CladdProvider,
       null,
-      createElement(VibeDisplay, { firmwareMode }),
+      createElement(VibeDisplay, {
+        firmwareMode,
+        pageIntervalSec,
+        valueDwellMs,
+        resetDwellMs,
+        savingInterval: false,
+        onDisplayChange: () => {},
+      }),
     ));
 
   test("the focus id is the one the service puts in the ZOS menu", () => {
@@ -676,6 +698,77 @@ describe("上屏 — VIBE is an app on the clock, not a channel", () => {
 
   test("a sideloaded firmware is named as itself, not lumped in with 官方", () => {
     expect(displayMarkup("music")).toContain("音乐固件");
+  });
+
+  test("自动翻页 shows the value the clock is running, and says what a pin does to it", () => {
+    const off = displayMarkup("zos", 0);
+    expect(off).toContain("自动翻页");
+    // 0 gets a word, not "0 秒" — it is the state the app shipped in.
+    expect(off).toContain("不翻页");
+
+    expect(displayMarkup("zos", 30)).toContain("30 秒");
+    // A value only the API can set is still what the clock is doing, so it is
+    // said honestly rather than snapped to the nearest preset.
+    expect(displayMarkup("zos", 45)).toContain("45 秒");
+  });
+
+  test("页内两段停留读出秒数，倒计时拖到 0 说的是不显示", () => {
+    const html = displayMarkup("zos", 15, 3_200, 1_600);
+    expect(html).toContain("数值停留");
+    expect(html).toContain("倒计时停留");
+    // The scrubbers read in seconds to one decimal, like 内容刷新间隔 does; the
+    // wire and the firmware stay in ms because 3.2 s has no whole-second form.
+    expect(html).toContain("3.2 秒");
+    expect(html).toContain("1.6 秒");
+    expect(displayMarkup("zos", 15, 3_200, 0)).toContain("不显示");
+  });
+
+  test("the setting is absent where there is no app to turn, and says the value keeps", () => {
+    const html = displayMarkup("official", 30);
+    // The word survives — the note explains what happens to the value — but the
+    // control does not: there is no app on this firmware for it to steer.
+    expect(html).not.toContain("vibe-page-interval");
+    expect(html).not.toContain("30 秒");
+    expect(html).toContain("刷了 ZOS 就生效");
+  });
+});
+
+describe("自动翻页 — the interval the clock turns its own pages on", () => {
+  test("every preset says itself, and an off-preset value is still said honestly", () => {
+    for (const option of VIBE_PAGE_INTERVAL_OPTIONS) {
+      expect(vibePageIntervalLabel(option.seconds)).toBe(option.label);
+    }
+    expect(vibePageIntervalLabel(45)).toBe("45 秒");
+    expect(vibePageIntervalLabel(180)).toBe("3 分钟");
+    expect(vibePageIntervalLabel(-5)).toBe("不翻页");
+  });
+
+  test("the ladder reaches both ends of what the wire accepts", () => {
+    const seconds = VIBE_PAGE_INTERVAL_OPTIONS.map((option) => option.seconds);
+    // A control that cannot reach a legal value is a control the user has to go
+    // around; the floor is the panel's 4.8 s value/countdown cycle and the
+    // ceiling is the service's five-minute republish cadence.
+    expect(seconds[0]).toBe(0);
+    expect(seconds[1]).toBe(OS_VIBE_MIN_PAGE_INTERVAL_SEC);
+    expect(seconds[seconds.length - 1]).toBe(OS_VIBE_MAX_PAGE_INTERVAL_SEC);
+  });
+
+  test("页内停留按秒读出，0 是「不显示」而不是「0 秒」", () => {
+    expect(vibeCellDwellLabel(3_200)).toBe("3.2 秒");
+    expect(vibeCellDwellLabel(1_600)).toBe("1.6 秒");
+    expect(vibeCellDwellLabel(5_000)).toBe("5 秒");
+    // 0 是一个选择——这一格永远不让给倒计时——不是一个时长。
+    expect(vibeCellDwellLabel(0)).toBe("不显示");
+    // 默认值就是固件出厂的那两个数，改了这里等于改了面板的排版节奏。
+    expect(VIBE_DEFAULT_VALUE_DWELL_MS).toBe(3_200);
+    expect(VIBE_DEFAULT_RESET_DWELL_MS).toBe(1_600);
+  });
+
+  test("an off-preset value joins the option list rather than being dropped", () => {
+    // Opening the page must not silently edit the clock: a 45 s interval set
+    // through the API has to be selectable, and in order.
+    expect(vibePageIntervalChoices(45)).toEqual([0, 5, 10, 15, 20, 30, 45, 60, 120, 300]);
+    expect(vibePageIntervalChoices(30)).toEqual([0, 5, 10, 15, 20, 30, 60, 120, 300]);
   });
 });
 
