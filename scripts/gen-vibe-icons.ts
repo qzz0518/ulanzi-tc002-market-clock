@@ -60,7 +60,7 @@ writeFileSync(join(REPO, "web/src/lib/vibe-icon-svg.ts"), module);
 
 const PIXEL_LOGO_SIZE = 16;
 const PIXEL_LOGO_DIR = join(ICON_DIR, "pixel");
-const PIXEL_LOGO_PREVIEW = join(REPO, "docs/images/vibe-pixel-logos-16x16.png");
+const PIXEL_LOGO_PREVIEW = join(REPO, "images/vibe-pixel-logos-16x16.png");
 
 function setPngPixel(png: PNG, x: number, y: number, color: PixelLogoRgba): void {
   const offset = (y * png.width + x) * 4;

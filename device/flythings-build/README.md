@@ -75,7 +75,7 @@ docker run --rm --platform linux/amd64 -v "$PWD/..":/work -w /work/flythings-bui
     excluded from `SRCS`.
 - Install (non-persistent): `adb push update.img /tmp` + `setprop
   sys.zkupgrade.flag 255` + `sys.zkupgrade.dir /tmp` + `ctl.restart zkswe`;
-  power cycle returns to official firmware. See `docs/research/`.
+  power cycle returns to official firmware.
 
 ## Two IDE-injected globals the headless build must set (in the Makefile)
 

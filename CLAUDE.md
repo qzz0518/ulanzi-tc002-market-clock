@@ -114,9 +114,12 @@ new work belongs in `WorkspaceController`.
 - Style with cladd tokens/primitives (`bg-cladd-surface`, `Surface`, `Button`, size scale) rather
   than hand-rolled CSS.
 - Docs are bilingual and paired: `README.md`/`README.en.md`, `docs/reference.md`/`docs/reference.en.md`.
-  Update both sides when changing user-visible behaviour.
+  Update both sides when changing user-visible behaviour. The READMEs are for users: what it
+  does, how to install, how to use — no implementation detail, no ADR links.
+- `docs/` is gitignored: working notes for this machine, not part of the public repository.
+  A fresh clone has none of it, so nothing tracked may link into it (plain mentions are fine).
 
-## Further reading
+## Further reading (local `docs/`, not in git)
 
 - `docs/reference.md` — env vars, data sources, full local API table, webhook payloads.
 - `docs/adr/` — 0001 content registry, 0002 native music player boundary, 0003 live frame channel,

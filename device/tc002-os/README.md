@@ -4,7 +4,7 @@
 自带 WiFi 配网、频道 / 音乐 / 游戏 / VIBE / 设置统一入口，以及可从 Pixel Studio 控制台
 直接控制与实时镜像的设备画面。
 
-这是这台设备的第二层，也是新功能唯一的目标（[ADR 0014](../../docs/adr/0014-two-tiers-official-and-zos.md)）：
+这是这台设备的第二层，也是新功能唯一的目标（ADR 0014）：
 第一层是官方固件加服务端推送。过渡期的侧载音乐播放器（`../tc002-lyrics-player`）与它互斥，
 共用同一条 `/tmp` 加载路径与 `/tmp/tc002-sideload.id` 会话标识；原来的游戏固件已并入这棵树。
 
@@ -51,7 +51,7 @@ hostcheck/        selfcheck.cpp, games-selfcheck.cpp, link-audit.sh
 sideload/os       侧载启动脚本
 ```
 
-游戏引擎是从 arcade 固件**整体搬来**而不是移植的（[ADR 0014](../../docs/adr/0014-two-tiers-official-and-zos.md)）：
+游戏引擎是从 arcade 固件**整体搬来**而不是移植的（ADR 0014）：
 它们已在真机验证，物理常数照抄网页版，`hostcheck/games-selfcheck.cpp` 逐帧断言全部七款；
 连 include 路径都没改，`utils/Surface.h` 是为此留的桥接头。改它们的任何一行都得先过这份自检。
 
@@ -194,7 +194,7 @@ raw NAND 上的 jffs2，一次擦除绝不能落在输入路径上。
 **每一种时间上的不确定都解析为一块亮着的面板**：从未校时、同步早于 26 小时、prefs 损坏、
 单调时钟回绕、低电量关机倒计时挂起，全部 100% 亮着。这条不是洁癖：这台设备在 TimeSync 之前
 实测停在 1970-01-01 00:00，而那个时刻**就在 23:00→07:00 里面**。理由与全部九条恢复路径见
-[ADR 0009](../../docs/adr/0009-night-sleep.md)。
+ADR 0009。
 
 **息屏后的第一次输入唤醒面板，并且被吞掉。** 凌晨两点转旋钮是为了看时间，如果那一下同时翻了
 频道，用户就得摸黑把它调回来。按下与抬起成对吞（游戏引擎读的是原始按键边沿，只吞下按下会让
@@ -225,7 +225,7 @@ raw NAND 上的 jffs2，一次擦除绝不能落在输入路径上。
 `osLogic.cc` 是被 activity `#include` 的，任何 host 自检都编不到它，而一条**能把面板抹黑**的
 规则是最不该写在那里的。`osLogic.cc` 只读 `decideSleep()` 的四个字段，自己不做任何时间运算。
 控制台一侧的完整契约（能力探测、`describeMirror` 的 `sleeping` 阶段、文案、预设）在
-[`docs/design/zos-night-sleep-console.md`](../../docs/design/zos-night-sleep-console.md)。
+`docs/design/zos-night-sleep-console.md`。
 
 ## 控制台链路
 
@@ -301,7 +301,7 @@ mise run os-image        # 打包成可刷的 update.img
   调 rmmod/insmod，走进那个分支 `wlan0` 就没了，而 adb 正骑在这条链路上——只能物理断电
   恢复。管理器类是 C++ 的，一旦有人 `#include <net/NetManager.h>`，改写后的符号名就会留在
   未定义符号里，构建在这里失败而不是在台架上失败。详见
-  [ADR 0006](../../docs/adr/0006-no-flythings-network-managers.md)。
+  ADR 0006。
 - **体积上限 2,600,000 字节。** 这个数字在 ADR 0014 之前是 1,400,000，当时它只为拦一件事：
   把 ffmpeg 解码路径链进来——侧载音乐固件需要它，这套固件不需要。现在设备端放音就是靠
   `base::MediaPlayer` 解 MP3，那些静态库成了功能而不是失手：实测 1,353,484 → 2,299,288 字节，
@@ -321,7 +321,7 @@ mise run os-image        # 打包成可刷的 update.img
 侧载全程只写 tmpfs，闪存一次都不碰。**断电即恢复官方固件**：`/tmp` 被清空，
 框架回落到 `/res/etc/EasyUI.cfg`，官方 app 连同它自带的 WiFi 配置网页一起回来。
 这是这套固件出任何问题时的通用救砖手段，也正是固化（写 `/res`）会删掉的那张安全网
-（[ADR 0006](../../docs/adr/0006-no-flythings-network-managers.md)）。
+（ADR 0006）。
 
 服务端走与另外两套固件同一个参数化安装器（`/api/os/device-app/*`，确认口令
 `START_TC002_OS_SESSION`，ADR 0004）；控制台目前还没有 ZOS 的侧载面板，这四条路由要自己调。
@@ -503,7 +503,7 @@ adb shell sync
 #### 谁来发起：是**应用**，不是框架
 
 这一条是这套固件最容易丢、丢了最贵的知识（见
-[ADR 0012](../../docs/adr/0012-the-app-must-knock-for-upgrades.md)）：
+ADR 0012）：
 
 - 写 `mtd3` 的 `zk_upgrade_perform()` 只被 `UpgradeMonitor::threadLoop()` 调用，
   而后者只被 `UpgradeMonitor::startUpgrade()` 启动。

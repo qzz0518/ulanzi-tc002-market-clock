@@ -15,7 +15,7 @@ PNGs and the enlarged review sheet with:
 mise exec -- bun run scripts/gen-vibe-icons.ts
 ```
 
-The generated review sheet is `docs/images/vibe-pixel-logos-16x16.png`; its
+The generated review sheet is `images/vibe-pixel-logos-16x16.png`; its
 order is Claude, Codex, OpenCode, Grok from left to right, top to bottom.
 
 Do not smooth or resample these files. Scale them by an integer factor with

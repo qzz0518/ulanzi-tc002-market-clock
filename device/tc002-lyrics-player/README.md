@@ -1,7 +1,7 @@
 # TC002 音乐歌词固件（非持久化侧载播放器）
 
 > **过渡期固件，已冻结。** ZOS 已有音乐页，设备端出声正并入 ZOS；扬声器在真机验证通过后
-> 本目录整体删除，在那之前不再改动（[ADR 0014](../../docs/adr/0014-two-tiers-official-and-zos.md)）。
+> 本目录整体删除，在那之前不再改动（ADR 0014）。
 
 这是 Pixel Studio「音乐」页面对应的 **TC002 原生设备应用**：一个用 FlyThings
 SDK 编写、交叉编译为 `libzkgui.so` 的 C++ 播放器。它在真机上完成网络音频下载、
@@ -218,7 +218,7 @@ c++ -std=c++11 -Wall -Wextra -Werror \
 - 「设备同屏」（不侧载、走官方固件 Custom App 通道推 GIF 帧）依然可用，但受
   官方通道的帧数/帧率上限约束；原生固件模式才是完整体验。
 - 架构边界（网页/服务端/固件各自负责什么）见
-  [ADR 0002](../../docs/adr/0002-native-music-player-boundary.md)；真机探针
-  情报见 [docs/research/tc002-device-probe.md](../../docs/research/tc002-device-probe.md)；
+  ADR 0002；真机探针
+  情报见 docs/research/tc002-device-probe.md；
   无 IDE 构建路径的考古记录见
-  [docs/research/flythings-build-path.md](../../docs/research/flythings-build-path.md)。
+  docs/research/flythings-build-path.md。

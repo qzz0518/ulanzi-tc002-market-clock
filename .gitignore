@@ -7,3 +7,7 @@ output/
 device/tc002-lyrics-player/release/bundle/
 device/tc002-lyrics-player/release/manifest.json
 device/flythings-build/libzkgui-arcade.so
+# Working notes (ADRs, reference, design, research) stay local; README carries what users need.
+docs/
+# Local tool configuration.
+.codex/
