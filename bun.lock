@@ -5,7 +5,7 @@
     "": {
       "name": "ulanzi-tc002-content-studio",
       "dependencies": {
-        "@cladd-ui/react": "^0.18.5",
+        "@cladd-ui/react": "^0.19.0",
         "clsx": "^2.1.1",
         "gifenc": "^1.0.3",
         "gifuct-js": "^2.1.2",
@@ -33,7 +33,7 @@
     },
   },
   "packages": {
-    "@cladd-ui/react": ["@cladd-ui/react@0.18.5", "", { "dependencies": { "clsx": "^2.1.1", "tailwind-merge": "^3.5.0" }, "peerDependencies": { "react": ">=19", "react-day-picker": ">=10", "react-dom": ">=19" }, "optionalPeers": ["react-day-picker"] }, "sha512-FzyQydhK1orNwGva5mH2deK8Uu/sbYzd11Vy5b9JWIfbXeAAu4Jjn/7QoY2oinR/Zy7anYP1bnf+QWMMuAk04A=="],
+    "@cladd-ui/react": ["@cladd-ui/react@0.19.0", "", { "dependencies": { "clsx": "^2.1.1", "tailwind-merge": "^3.5.0" }, "peerDependencies": { "react": ">=19", "react-day-picker": ">=10", "react-dom": ">=19" }, "optionalPeers": ["react-day-picker"] }, "sha512-2Jid4GD2v/HeJcgXUjmXGB2ticFY3tdEktDRTDWVp+gk/sQ0SntKn6LxIh6j9t2ILvppoTyKokzBQwYWCP6AAw=="],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 
