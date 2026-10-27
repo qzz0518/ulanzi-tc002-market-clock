@@ -272,10 +272,12 @@ describe("zos panel", () => {
     // 结构本身由 zos-menu.test.ts 真渲染出来看(五个目的地、单开、标记只出现
     // 一次)。这里只留 markup 里看不见的那几条:组件的取舍,以及不该复活的旧写法。
     const html = markup(createElement(ZosPanel));
-    // 分组小标题全 app 一个样,所以用 SectionTitle 而不是自己写一层眉题。
+    // 右栏的标题走全 app 的栏标题 / 小节标题(h2 + h3,和 VIBE 那张双栏卡同构),
+    // 不再是大写的 SectionTitle 眉题——那和它下面「音量」「亮度」的字段标签一模一样。
     // 两块:设备菜单、下发到设备。固件那一块搬去 常规设置 了。
-    expect(html).toContain("cladd-section-title");
-    expect(html.match(/cladd-section-title/g)?.length ?? 0).toBe(2);
+    expect(html).not.toContain("cladd-section-title");
+    expect(html).toMatch(/<h2[^>]*>设备菜单<\/h2>/);
+    expect(html).toMatch(/<h3[^>]*>下发到设备<\/h3>/);
     // 音量与亮度都用 Slider:全 app 只有「常规设置」那一处在调这两个值,
     // 那边两条都是 Slider,这里跟着走。
     expect(html).toContain("cladd-slider");

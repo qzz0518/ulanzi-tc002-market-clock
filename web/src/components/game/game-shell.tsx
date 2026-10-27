@@ -30,6 +30,7 @@ import {
   Button,
   Chip,
   Surface,
+  SurfaceCut,
   Switch,
   ToggleButton,
   ToggleGroup,
@@ -521,8 +522,6 @@ export function GameShell({
           size="md"
           variant="transparent"
           outline
-          activeVariant="gradient"
-          activeOutline
           role="group"
           aria-label="选择游戏"
           onValueChange={(next) => {
@@ -532,7 +531,7 @@ export function GameShell({
           {GAME_REGISTRY.map((entry) => {
             const Icon = entry.icon;
             return (
-              <ToggleButton key={entry.id} value={entry.id} activeColor="lime">
+              <ToggleButton key={entry.id} value={entry.id}>
                 <Icon aria-hidden="true" />
                 {entry.title}
               </ToggleButton>
@@ -541,7 +540,7 @@ export function GameShell({
         </ToggleGroup>
         <div className="game-topbar__status">
           <Chip
-            size="sm"
+            size="md"
             color={liveChip.color}
             variant="transparent"
             icon={liveChip.icon}
@@ -647,25 +646,30 @@ export function GameShell({
             {gameId === "breakout" && (
               <div className="game-console__options" aria-label="挡板宽度">
                 <span>难度</span>
-                <ToggleGroup
-                  value={String(paddleWidth)}
-                  size="md"
-                  variant="transparent"
+                <SurfaceCut
+                  className="segmented-track"
+                  color="neutral"
                   outline={false}
-                  activeVariant="gradient"
-                  role="group"
-                  aria-label="挡板宽度"
-                  onValueChange={(next) => {
-                    const width = Number(next) as BreakoutPaddleWidth;
-                    if (BREAKOUT_PADDLE_WIDTHS.includes(width)) choosePaddleWidth(width);
-                  }}
+                  contentClassName="segmented-track__content"
                 >
-                  {BREAKOUT_PADDLE_WIDTHS.map((width) => (
-                    <ToggleButton key={width} value={String(width)} activeColor="brand">
-                      {width === 6 ? "难" : width === 8 ? "标准" : "轻松"}
-                    </ToggleButton>
-                  ))}
-                </ToggleGroup>
+                  <ToggleGroup
+                    value={String(paddleWidth)}
+                    size="sm"
+                    activeColor="brand"
+                    role="group"
+                    aria-label="挡板宽度"
+                    onValueChange={(next) => {
+                      const width = Number(next) as BreakoutPaddleWidth;
+                      if (BREAKOUT_PADDLE_WIDTHS.includes(width)) choosePaddleWidth(width);
+                    }}
+                  >
+                    {BREAKOUT_PADDLE_WIDTHS.map((width) => (
+                      <ToggleButton key={width} value={String(width)}>
+                        {width === 6 ? "难" : width === 8 ? "标准" : "轻松"}
+                      </ToggleButton>
+                    ))}
+                  </ToggleGroup>
+                </SurfaceCut>
               </div>
             )}
           </Surface>
@@ -676,9 +680,11 @@ export function GameShell({
             // 措辞刻意不提"同步"：设备用 time(0) 播种，两边跑出来必然不一样。
             <p className="game-note game-note--warning" role="status">
               <MonitorCog aria-hidden="true" />
-              时钟正在运行 ZOS，官方固件的上屏通道已经不存在，这局只在浏览器里跑。
-              时钟自带同样七款游戏：点「在时钟上玩」把它切到当前这款，用旋钮和按键在设备上开一局；
-              两边各自开局，进度和随机数都不共享。
+              {/* One string: JSX joins wrapped lines with a space, which shows up
+                  as a stray gap after every CJK full stop. */}
+              {"时钟正在运行 ZOS，官方固件的上屏通道已经不存在，这局只在浏览器里跑。"
+                + "时钟自带同样七款游戏：点「在时钟上玩」把它切到当前这款，用旋钮和按键在设备上开一局；"
+                + "两边各自开局，进度和随机数都不共享。"}
             </p>
           ) : (
             <>
@@ -697,12 +703,13 @@ export function GameShell({
             </>
           )}
           {paused && (
-            <p className="game-note" role="status">
+            <p className="game-note motion-enter" role="status">
+              <Pause aria-hidden="true" />
               {liveBlocked ? "游戏已暂停。" : "游戏已暂停，设备画面已清除。"}
             </p>
           )}
           {hud.phase === "game-over" && (
-            <p className="game-note" role="status">
+            <p className="game-note motion-enter" role="status">
               <Gamepad2 aria-hidden="true" />
               {liveBlocked ? "游戏结束。" : "游戏结束，结算画面几秒后自动从设备清除。"}
             </p>
@@ -724,7 +731,7 @@ export function GameShell({
         path={`pad?room=${padRoomRef.current}`}
         hint={(
           <Chip
-            size="sm"
+            size="md"
             color={padOnline ? "brand" : "neutral"}
             variant="transparent"
             icon={Gamepad2}

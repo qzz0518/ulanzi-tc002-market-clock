@@ -26,12 +26,20 @@ import type { StudioView } from "@/types";
  */
 export function MiniPlayer({
   view,
+  arrive = false,
   onOpen,
 }: {
   view: StudioView;
+  // Whether the current view switch plays its arrival (app.tsx viewMotion).
+  arrive?: boolean;
   onOpen: () => void;
 }) {
   const mini = useMiniPlayerView(view);
+  // Read once, when the widget appears: it stays mounted across later
+  // switches, and a class that flipped on then would replay its arrival.
+  // Present at page load, it simply is there.
+  const [appeared, setAppeared] = useState<{ arrive: boolean } | null>(() => (mini ? { arrive: false } : null));
+  if ((mini === null) !== (appeared === null)) setAppeared(mini ? { arrive } : null);
   const store = musicPlaybackStore();
   // Keyed by cover URL so a stale tint can never outlive the track it came from
   // — the widget is one element reused across songs, and the artwork loads
@@ -47,7 +55,9 @@ export function MiniPlayer({
       // Ink follows the sleeve. A frosted panel takes its lightness from the
       // artwork, so nothing but the artwork can decide whether black or white
       // type reads on it — see --mini-ink in globals.css.
-      className={"mini-player" + (live?.dark ? " is-dark" : " is-light")}
+      // motion-enter: it mounts when the user leaves 音乐 with a track loaded, so
+      // it arrives with the view instead of popping in beside the title.
+      className={"mini-player" + (appeared?.arrive ? " motion-enter" : "") + (live?.dark ? " is-dark" : " is-light")}
       contentClassName="mini-player__content"
       size="sm"
       // Squared off rather than the default pill: this sits under a heading, in

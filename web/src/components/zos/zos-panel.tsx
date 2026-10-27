@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   BatteryCharging,
   BatteryFull,
@@ -14,7 +14,7 @@ import {
   Wifi,
   WifiOff,
 } from "lucide-react";
-import { Button, Chip, SectionTitle, Surface } from "@cladd-ui/react";
+import { Button, Chip, Surface } from "@cladd-ui/react";
 import {
   createZosLink,
   describeDriver,
@@ -30,9 +30,9 @@ import {
   defaultOpenSection,
   describeSections,
   pinIntent,
-  type ZosSection,
 } from "@/lib/zos-sections";
 import type { BleSupport } from "@/lib/ble-provisioning";
+import { Callout } from "@/components/callout";
 import { ZosMenu, type ZosPinTarget } from "@/components/zos/zos-menu";
 import { ZosMirrorScreen } from "@/components/zos/zos-mirror-screen";
 import { ZosInputDeck } from "@/components/zos/zos-input-deck";
@@ -75,6 +75,7 @@ export function ZosPanel() {
   // The gate is read here, not only in the dialog: a browser that cannot do
   // Web Bluetooth must never be offered the button in the first place.
   const bleSupport = useBleSupport();
+  const headId = useId();
 
   useEffect(() => {
     const link = createZosLink({
@@ -165,20 +166,18 @@ export function ZosPanel() {
     live,
   });
 
-  // The accordion is controlled so the first non-empty menu can pick what is
-  // open (the menu arrives a poll after mount, which an uncontrolled
-  // defaultValue would miss). After that the user owns it, "all closed"
-  // included — hence the ref rather than a re-derive on every render.
+  // The open section is controlled so the first non-empty menu can pick what is
+  // open (the menu arrives a poll after mount, which an uncontrolled default
+  // would miss). After that the user owns it, "all closed" included — hence the
+  // one-shot flag rather than a re-derive on every render. Chosen during render,
+  // not in an effect: the menu's first committed frame already has the default
+  // section open, so it does not land closed and then animate open on load.
   const [openSection, setOpenSection] = useState<string | undefined>(undefined);
-  const openChosenRef = useRef(false);
-  const sectionsRef = useRef<ZosSection[]>(sections);
-  sectionsRef.current = sections;
-  const sectionsReady = sections.length > 0;
-  useEffect(() => {
-    if (!sectionsReady || openChosenRef.current) return;
-    openChosenRef.current = true;
-    setOpenSection(defaultOpenSection(sectionsRef.current));
-  }, [sectionsReady]);
+  const [openChosen, setOpenChosen] = useState(false);
+  if (!openChosen && sections.length > 0) {
+    setOpenChosen(true);
+    setOpenSection(defaultOpenSection(sections));
+  }
 
   const deviceChip = linkError
     ? { color: "red" as const, icon: TriangleAlert, label: "链路异常" }
@@ -199,17 +198,9 @@ export function ZosPanel() {
       {/* 页级标题由 app.tsx 的 .page-heading 出，和其他 Tab 同一块骨架；这里再补一个
           sr-only 的 h1 就是同一页有两个名字，读屏器按标题跳转会连报两次。 */}
       <Surface variant="solid" outline className="zc-panel" contentClassName="flex flex-col">
-        {/* ── 状态条：此刻为真的事实，各说一次 ── */}
+        {/* ── 状态条：此刻为真的事实，各说一次。与 VIBE 同一种排法：左边图标＋标题／
+            说明，右边状态芯片。 ── */}
         <div className="zc-strip">
-          <Chip
-            size="md"
-            color={deviceChip.color}
-            variant="transparent"
-            icon={deviceChip.icon}
-            iconProps={{ "aria-hidden": true }}
-          >
-            {deviceChip.label}
-          </Chip>
           {/* 只有「谁在开」这一行播报：运行时长每分钟变一次，整条都设成 live
               区域的话读屏器会跟着报时。 */}
           <span className="zc-driver" role="status" aria-live="polite">
@@ -221,40 +212,51 @@ export function ZosPanel() {
               <small>{driver.detail}</small>
             </span>
           </span>
-          {/* 每个 chip 自己说清是什么：图标是装饰，读屏器只拿得到文字。 */}
-          {live && (
-            <span className="zc-strip__vitals">
-              {vitals.battery && (
-                <Chip
-                  size="md"
-                  variant="transparent"
-                  color={BATTERY_COLORS[vitals.battery.tone]}
-                  icon={vitals.battery.charging ? BatteryCharging : BATTERY_ICONS[vitals.battery.tone]}
-                  iconProps={{ "aria-hidden": true }}
-                  aria-label={`电量 ${vitals.battery.label}${vitals.battery.charging ? "，充电中" : ""}`}
-                >
-                  {vitals.battery.label}{vitals.battery.charging ? " · 充电中" : ""}
-                </Chip>
-              )}
-              {vitals.wifi && (
-                <Chip
-                  size="md"
-                  variant="transparent"
-                  color="neutral"
-                  icon={Wifi}
-                  iconProps={{ "aria-hidden": true }}
-                  aria-label={`Wi-Fi ${vitals.wifi}`}
-                >
-                  {vitals.wifi}
-                </Chip>
-              )}
-              {vitals.uptime && (
-                <Chip size="md" variant="transparent" color="neutral" icon={Timer} iconProps={{ "aria-hidden": true }}>
-                  已运行 {vitals.uptime}
-                </Chip>
-              )}
-            </span>
-          )}
+          <span className="zc-strip__state">
+            <Chip
+              size="md"
+              color={deviceChip.color}
+              variant="transparent"
+              icon={deviceChip.icon}
+              iconProps={{ "aria-hidden": true }}
+            >
+              {deviceChip.label}
+            </Chip>
+            {/* 每个 chip 自己说清是什么：图标是装饰，读屏器只拿得到文字。 */}
+            {live && (
+              <span className="zc-strip__vitals">
+                {vitals.battery && (
+                  <Chip
+                    size="md"
+                    variant="transparent"
+                    color={BATTERY_COLORS[vitals.battery.tone]}
+                    icon={vitals.battery.charging ? BatteryCharging : BATTERY_ICONS[vitals.battery.tone]}
+                    iconProps={{ "aria-hidden": true }}
+                    aria-label={`电量 ${vitals.battery.label}${vitals.battery.charging ? "，充电中" : ""}`}
+                  >
+                    {vitals.battery.label}{vitals.battery.charging ? " · 充电中" : ""}
+                  </Chip>
+                )}
+                {vitals.wifi && (
+                  <Chip
+                    size="md"
+                    variant="transparent"
+                    color="neutral"
+                    icon={Wifi}
+                    iconProps={{ "aria-hidden": true }}
+                    aria-label={`Wi-Fi ${vitals.wifi}`}
+                  >
+                    {vitals.wifi}
+                  </Chip>
+                )}
+                {vitals.uptime && (
+                  <Chip size="md" variant="transparent" color="neutral" icon={Timer} iconProps={{ "aria-hidden": true }}>
+                    已运行 {vitals.uptime}
+                  </Chip>
+                )}
+              </span>
+            )}
+          </span>
         </div>
 
         {/* ── 主体：左＝设备（镜像 + 遥控甲板），右＝设备菜单与下发 ── */}
@@ -265,9 +267,9 @@ export function ZosPanel() {
             <ZosInputDeck live={live} onSend={sendInput} />
 
             {linkError && (
-              <p className="zc-note zc-note--error" role="alert">
-                读取设备状态失败：{linkError}
-              </p>
+              <Callout className="zc-callout" icon={TriangleAlert} tone="error" title="读取设备状态失败" role="alert">
+                <p>{linkError}</p>
+              </Callout>
             )}
             {!live && !linkError && (
               <ZosOfflineNotice
@@ -278,23 +280,28 @@ export function ZosPanel() {
             )}
           </section>
 
-          <aside className="zc-menu">
-            <SectionTitle>
-              设备菜单
+          {/* 栏头与 VIBE 同一套：一栏一个 h2 加一行说明，栏内小节 h3。 */}
+          <aside className="zc-menu" aria-labelledby={`${headId}-menu`}>
+            <div className="zc-menu__heading zc-menu__head">
+              <h2 id={`${headId}-menu`}>设备菜单</h2>
+              <p>与时钟上的菜单一一对应；点条目固定到屏上，再点一次交还。</p>
               {display.pinned && (
+                // aria-disabled + 守卫，与菜单行同一个说法：disabled 会让它在每次
+                // 固定写入时单独闪到 40%。
                 <Button
                   type="button"
                   size="sm"
                   variant="transparent"
                   color="brand"
-                  className="ml-auto normal-case"
-                  disabled={busy}
-                  onClick={release}
+                  aria-disabled={busy || undefined}
+                  onClick={() => {
+                    if (!busy) release();
+                  }}
                 >
                   <PinOff aria-hidden="true" />交还旋钮
                 </Button>
               )}
-            </SectionTitle>
+            </div>
 
             <ZosMenu
               sections={sections}
@@ -308,8 +315,13 @@ export function ZosPanel() {
             {/* 音量亮度不回读——设备旋钮和侧键要能压过控制台，代价就是这里
                 只知道自己发过什么。所以它们是「下发」，不是「读数」。
                 同一对滑块也长在常规设置里（zos-send-row.tsx），一份组件两处用。 */}
-            <SectionTitle className="zc-menu__title">下发到设备</SectionTitle>
-            <ZosSendRows requested={requested} onSend={(patch) => void sendSettings(patch)} />
+            <section className="zc-out-section" aria-labelledby={`${headId}-out`}>
+              <div className="zc-menu__heading">
+                <h3 id={`${headId}-out`}>下发到设备</h3>
+                <p>设备不回读这两项，这里显示的是最后一次下发的值。</p>
+              </div>
+              <ZosSendRows requested={requested} onSend={(patch) => void sendSettings(patch)} />
+            </section>
           </aside>
         </div>
 
@@ -350,56 +362,31 @@ interface ZosOfflineNoticeProps {
  * they should not have to take.
  */
 function ZosOfflineNotice({ zosFlashed, support, onProvision }: ZosOfflineNoticeProps) {
+  // Same callout either way; only the claim and the weight of the button differ.
+  // Brand is earned by the case where the wizard is the known fix.
+  const action = support.ok ? (
+    <Button type="button" size="md" color={zosFlashed ? "brand" : "neutral"} onClick={onProvision}>
+      <Bluetooth />蓝牙配网
+    </Button>
+  ) : (
+    <BleUnavailableNote support={support} />
+  );
+
   if (zosFlashed) {
     return (
-      <Surface
-        variant="solid"
-        outline
-        color="brand"
-        className="mt-3"
-        contentClassName="flex flex-col gap-2 p-4"
-      >
-        <span className="flex items-center gap-2 text-cladd-fg">
-          <WifiOff aria-hidden="true" className="size-4" />
-          <strong>时钟掉线了</strong>
-        </span>
-        <span className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
-          ZOS 已经刷进闪存，所以它还在跑，只是没有在网上。
-          最常见的原因是换了路由器或改了 Wi-Fi 密码——用蓝牙给它重新配一次就行，不用拆机也不用接线。
-        </span>
-        {support.ok ? (
-          <div>
-            <Button type="button" size="lg" color="brand" onClick={onProvision}>
-              <Bluetooth />蓝牙配网
-            </Button>
-          </div>
-        ) : (
-          <BleUnavailableNote support={support} />
-        )}
-      </Surface>
+      <Callout className="zc-callout" icon={WifiOff} title="时钟掉线了" action={action}>
+        {/* One literal: a JSX line break between two CJK sentences renders as a stray space. */}
+        <p>{"ZOS 已经刷进闪存，所以它还在跑，只是没有在网上。最常见的原因是换了路由器或改了 Wi-Fi 密码——用蓝牙给它重新配一次就行，不用拆机也不用接线。"}</p>
+      </Callout>
     );
   }
 
   return (
-    <>
-      <p className="zc-note" role="status">
-        <WifiOff aria-hidden="true" />
-        时钟当前没有在跑 ZOS 固件。频道固定与音量亮度会保存在服务里，固件上线后第一次拉取即生效；远程按键则不会离线排队。
-      </p>
-      <p className="zc-note">
-        {/* 服务只知道「没人上报」。这三种情况在局域网这一侧长得一模一样，
-            所以把假设写出来，而不是让按钮替它断言。 */}
-        没上报也可能是「刷了 ZOS 但掉线了」。如果时钟面板上确实是 ZOS 的界面，可以直接走蓝牙配网。
-      </p>
-      {support.ok ? (
-        <div className="mt-2">
-          <Button type="button" size="md" color="neutral" onClick={onProvision}>
-            <Bluetooth />蓝牙配网
-          </Button>
-        </div>
-      ) : (
-        <div className="mt-2"><BleUnavailableNote support={support} /></div>
-      )}
-    </>
+    <Callout className="zc-callout" icon={WifiOff} title="时钟当前没有在跑 ZOS 固件" role="status" action={action}>
+      <p>频道固定与音量亮度会保存在服务里，固件上线后第一次拉取即生效；远程按键则不会离线排队。</p>
+      {/* 服务只知道「没人上报」。这三种情况在局域网这一侧长得一模一样，
+          所以把假设写出来，而不是让按钮替它断言。 */}
+      <p>没上报也可能是「刷了 ZOS 但掉线了」。如果时钟面板上确实是 ZOS 的界面，可以直接走蓝牙配网。</p>
+    </Callout>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { AppWindow, Check, LoaderCircle, Plus, Search } from "lucide-react";
+import { AppWindow, Check, CloudOff, LoaderCircle, Plus, Search } from "lucide-react";
 import { Button, Input, Select, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
+import { Callout } from "@/components/callout";
 import { jsonApi } from "@/lib/api";
 import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
@@ -80,6 +81,10 @@ export function ContentMarket({
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const [registering, setRegistering] = useState<string | null>(null);
+  const [categorySwitched, setCategorySwitched] = useState(false);
+  // Results ease in only when a search just returned them; coming back to 市场
+  // remounts them inside the pane that is already easing in as a whole.
+  const [resultsFresh, setResultsFresh] = useState(false);
   const searchSequence = useRef(0);
   const toast = useAppToast();
 
@@ -102,6 +107,7 @@ export function ContentMarket({
       const response = await jsonApi<SearchResponse>(`/api/market/search?${parameters}`);
       if (sequence !== searchSequence.current) return;
       setResults(response.results);
+      setResultsFresh(true);
       setSearched(true);
       // 只保留服务端给的说明性提示；「没找到」交给结果区的空状态表达。
       setNotice(response.notice ?? null);
@@ -141,7 +147,14 @@ export function ContentMarket({
         <h2 id="market-title">内容市场</h2>
         <span>当前分类 {contents.length} 项</span>
       </div>
-      <Tabs value={category} onValueChange={(value) => onCategoryChange(value as ContentCategory)}>
+      <Tabs
+        value={category}
+        onValueChange={(value) => {
+          setCategorySwitched(true);
+          setResultsFresh(false);
+          onCategoryChange(value as ContentCategory);
+        }}
+      >
         <SurfaceCut
           className="segmented-track market-filter"
           color="neutral"
@@ -156,135 +169,145 @@ export function ContentMarket({
         </SurfaceCut>
       </Tabs>
       <div className="market-scroll">
-        {category === "market" && (
-          <section className="instrument-search" aria-labelledby="instrument-search-title">
-            <div className="instrument-search__copy">
-              <h3 id="instrument-search-title">搜索更多资产</h3>
-              <p>零 Key 支持 Coinbase 数字货币、Frankfurter 汇率、金属与 Yahoo Finance 股票/ETF。</p>
-            </div>
-            <form className="instrument-search__form" onSubmit={(event) => void searchMarkets(event)}>
-              <Input
-                inputId="market-instrument-search"
-                className="instrument-search__input"
-                inputClassName="instrument-search__input-control"
-                size="sm"
-                color="neutral"
-                icon={<Search aria-hidden="true" />}
-                value={query}
-                maxLength={48}
-                placeholder="BTC、TSLA、EUR/USD、Silver…"
-                inputMode="search"
-                inputComponentProps={{
-                  "aria-label": "资产名称或代码",
-                  autoCapitalize: "characters",
-                  spellCheck: false,
-                }}
-                onChange={(nextValue) => {
-                  searchSequence.current += 1;
-                  setSearching(false);
-                  setNotice(null);
-                  setSearched(false);
-                  setQuery(nextValue);
-                }}
-              />
-              <Select<"" | MarketInstrumentKind>
-                className="instrument-search__kind"
-                aria-label="资产类型"
-                size="sm"
-                color="neutral"
-                value={searchKind}
-                options={SEARCH_KIND_OPTIONS}
-                noneOptionValue=""
-                renderOption={({ value }) => searchKindLabel(value)}
-                onChange={(nextValue) => {
-                  searchSequence.current += 1;
-                  setSearching(false);
-                  setNotice(null);
-                  setSearched(false);
-                  setSearchKind(nextValue);
-                }}
-              >
-                {searchKindLabel(searchKind)}
-              </Select>
-              <Button type="submit" size="sm" disabled={searching || !query.trim()}>
-                {searching ? <LoaderCircle className="is-spinning" /> : <Search />}
-                {searching ? "搜索中" : "搜索"}
-              </Button>
-            </form>
-            {notice && <p className="instrument-search__notice" role="status">{notice}</p>}
-            {searched && !searching && results.length === 0 && (
-              <p className="instrument-search__notice" role="status">没有找到可添加的资产，换个代码或名称再试。</p>
-            )}
-            {results.length > 0 && (
-              <div className="instrument-results" aria-label="资产搜索结果">
-                {results.map((candidate) => {
-                  const known = registeredByCanonical.get(candidate.canonicalKey);
-                  const inChannel = known ? addedRefs.has(known.ref) : false;
-                  const adding = registering === `add:${candidate.candidateRef}`;
-                  const creating = registering === `standalone:${candidate.candidateRef}`;
-                  return (
-                    <article key={candidate.candidateRef} className={inChannel ? "market-item is-added" : "market-item"}>
-                      <div className="market-item__title">
-                        <ContentIcon
-                          contentId="market:instrument"
-                          compact
-                          iconUrl={known?.iconUrl}
-                          fallbackLabel={candidate.baseCode}
-                        />
-                        <div className="instrument-result__identity">
-                          <h3>{candidate.pair}</h3>
-                          <span>{KIND_LABELS[candidate.kind]} · {candidate.sourceLabel}</span>
-                        </div>
-                        {inChannel && <span className="market-added"><Check />已在频道中</span>}
-                      </div>
-                      <p>{candidate.displayName}<br />{candidate.sourceNote}</p>
-                      <div className="market-actions">
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={inChannel || registering !== null}
-                          onClick={() => void register(candidate, false)}
-                        >
-                          {adding ? <LoaderCircle className="is-spinning" /> : inChannel ? <Check /> : <Plus />}
-                          {adding ? "添加中" : inChannel ? "已添加" : "加入频道"}
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={registering !== null}
-                          onClick={() => void register(candidate, true)}
-                        >
-                          {creating ? <LoaderCircle className="is-spinning" /> : <AppWindow />}
-                          {creating ? "创建中" : "设为独立 App"}
-                        </Button>
-                      </div>
-                    </article>
-                  );
-                })}
+        {/* The whole pane is re-keyed per category, search block included, so
+            a tab switch eases it in as one; not on first paint, where nothing
+            was swapped. Query state lives above, so the remount loses nothing. */}
+        <div key={category} className={categorySwitched ? "motion-enter" : undefined}>
+          {category === "market" && (
+            <section className="instrument-search" aria-labelledby="instrument-search-title">
+              <div className="instrument-search__copy">
+                <h3 id="instrument-search-title">搜索更多资产</h3>
+                <p>零 Key 支持 Coinbase 数字货币、Frankfurter 汇率、金属与 Yahoo Finance 股票/ETF。</p>
               </div>
-            )}
-          </section>
-        )}
-        <div className="market-list">
-          {contents.map((item) => {
-            const inChannel = added.has(item.id);
-            return (
-              <article key={item.id} className={inChannel ? "market-item is-added" : "market-item"}>
-                <div className="market-item__title">
-                  <ContentIcon contentId={item.id} compact />
-                  <h3>{item.title}</h3>
-                  {inChannel && <span className="market-added"><Check />已在频道中</span>}
+              <form className="instrument-search__form" onSubmit={(event) => void searchMarkets(event)}>
+                <Input
+                  inputId="market-instrument-search"
+                  className="instrument-search__input"
+                  size="sm"
+                  color="neutral"
+                  icon={<Search aria-hidden="true" />}
+                  value={query}
+                  maxLength={48}
+                  placeholder="BTC、TSLA、EUR/USD、Silver…"
+                  inputMode="search"
+                  inputComponentProps={{
+                    "aria-label": "资产名称或代码",
+                    autoCapitalize: "characters",
+                    spellCheck: false,
+                  }}
+                  onChange={(nextValue) => {
+                    searchSequence.current += 1;
+                    setSearching(false);
+                    setNotice(null);
+                    setSearched(false);
+                    setQuery(nextValue);
+                  }}
+                />
+                <Select<"" | MarketInstrumentKind>
+                  className="instrument-search__kind"
+                  aria-label="资产类型"
+                  size="sm"
+                  // Recessed like the query field it filters; the submit stays raised.
+                  surface="cut"
+                  color="neutral"
+                  value={searchKind}
+                  options={SEARCH_KIND_OPTIONS}
+                  noneOptionValue=""
+                  renderOption={({ value }) => searchKindLabel(value)}
+                  onChange={(nextValue) => {
+                    searchSequence.current += 1;
+                    setSearching(false);
+                    setNotice(null);
+                    setSearched(false);
+                    setSearchKind(nextValue);
+                  }}
+                >
+                  {searchKindLabel(searchKind)}
+                </Select>
+                <Button type="submit" size="sm" disabled={searching || !query.trim()}>
+                  {searching ? <LoaderCircle className="is-spinning" /> : <Search />}
+                  {searching ? "搜索中" : "搜索"}
+                </Button>
+              </form>
+              {notice && <Callout icon={CloudOff} tone="warning" role="status" title={notice} />}
+              {searched && !searching && results.length === 0 && (
+                <p className="instrument-search__empty" role="status">没有找到可添加的资产，换个代码或名称再试。</p>
+              )}
+              {results.length > 0 && (
+                <div
+                  key={results.map((candidate) => candidate.candidateRef).join("|")}
+                  className={resultsFresh ? "instrument-results motion-enter" : "instrument-results"}
+                  aria-label="资产搜索结果"
+                >
+                  {results.map((candidate) => {
+                    const known = registeredByCanonical.get(candidate.canonicalKey);
+                    const inChannel = known ? addedRefs.has(known.ref) : false;
+                    const adding = registering === `add:${candidate.candidateRef}`;
+                    const creating = registering === `standalone:${candidate.candidateRef}`;
+                    return (
+                      <article key={candidate.candidateRef} className={inChannel ? "market-item is-added" : "market-item"}>
+                        <div className="market-item__title">
+                          <ContentIcon
+                            contentId="market:instrument"
+                            compact
+                            iconUrl={known?.iconUrl}
+                            fallbackLabel={candidate.baseCode}
+                          />
+                          <div className="instrument-result__identity">
+                            <h3>{candidate.pair}</h3>
+                            <span>{KIND_LABELS[candidate.kind]} · {candidate.sourceLabel}</span>
+                          </div>
+                          {inChannel && <span className="market-added"><Check />已在频道中</span>}
+                        </div>
+                        <p>{candidate.displayName}<br />{candidate.sourceNote}</p>
+                        <div className="market-actions">
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={inChannel || registering !== null}
+                            onClick={() => void register(candidate, false)}
+                          >
+                            {adding ? <LoaderCircle className="is-spinning" /> : inChannel ? <Check /> : <Plus />}
+                            {adding ? "添加中" : inChannel ? "已添加" : "加入频道"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={registering !== null}
+                            onClick={() => void register(candidate, true)}
+                          >
+                            {creating ? <LoaderCircle className="is-spinning" /> : <AppWindow />}
+                            {creating ? "创建中" : "设为独立 App"}
+                          </Button>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
-                <p>{item.description}</p>
-                <div className="market-actions">
-                  <Button type="button" size="sm" disabled={inChannel} onClick={() => onAdd(item)}>
-                    {inChannel ? <Check /> : <Plus />}{inChannel ? "已添加" : "加入频道"}
-                  </Button>
-                  <Button type="button" size="sm" onClick={() => onStandalone(item)}><AppWindow />设为独立 App</Button>
-                </div>
-              </article>
-            );
-          })}
+              )}
+            </section>
+          )}
+          <div className="market-list">
+            {contents.map((item) => {
+              const inChannel = added.has(item.id);
+              return (
+                <article key={item.id} className={inChannel ? "market-item is-added" : "market-item"}>
+                  <div className="market-item__title">
+                    <ContentIcon contentId={item.id} compact />
+                    <h3>{item.title}</h3>
+                    {inChannel && <span className="market-added"><Check />已在频道中</span>}
+                  </div>
+                  <p>{item.description}</p>
+                  <div className="market-actions">
+                    <Button type="button" size="sm" disabled={inChannel} onClick={() => onAdd(item)}>
+                      {inChannel ? <Check /> : <Plus />}{inChannel ? "已添加" : "加入频道"}
+                    </Button>
+                    <Button type="button" size="sm" onClick={() => onStandalone(item)}><AppWindow />设为独立 App</Button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
         </div>
       </div>
     </aside>

@@ -24,7 +24,7 @@ import {
   SegmentedButton,
   Select,
   Slider,
-  Surface,
+  Spinner,
   SurfaceCut,
   Switch,
   Tab,
@@ -63,6 +63,7 @@ import {
   type SleepPatch,
 } from "@/lib/zos-sleep";
 import { BleUnavailableNote } from "@/components/zos/zos-ble-note";
+import { Callout } from "@/components/callout";
 import { ZosProvisionDialog, useBleSupport } from "@/components/zos/zos-provision-dialog";
 import { useAppToast } from "@/lib/use-app-toast";
 import { errorMessage } from "@/lib/utils";
@@ -192,6 +193,20 @@ function XIcon() {
   );
 }
 
+// keepMounted panels toggle display, and every show restarts each CSS animation
+// inside them. A block that has finished arriving is marked so a tab click does
+// not make it arrive again; a block that mounts later is a fresh node and plays.
+// When the panel's own swap fade starts, whatever is already inside (even what
+// landed while the panel was hidden) rides that fade instead of fading twice.
+function markArrived(event: React.AnimationEvent<HTMLElement>) {
+  const target = event.target as HTMLElement;
+  if (event.type === "animationstart" && target.parentElement === event.currentTarget) {
+    for (const block of target.querySelectorAll<HTMLElement>(".motion-enter")) block.dataset.arrived = "";
+  } else if (event.type === "animationend" && target.classList.contains("motion-enter")) {
+    target.dataset.arrived = "";
+  }
+}
+
 interface SettingFieldProps {
   id: string;
   label: string;
@@ -289,14 +304,14 @@ export function DeviceHostPanel({
         {zos ? (
           zosFacts === null ? (
             <div className="device-settings-state" role="status">
-              <span className="loading-mark" aria-hidden="true" />
+              <Spinner size="md" color="brand" />
               <strong>正在读取设备状态</strong>
               <span>等时钟的下一次上报。</span>
             </div>
           ) : (
             // 同一套只读行的排版（见下面官方固件那份），行里的每一句话都来自
             // 系统面板用的那几个 helper——两处说的必须是同一台设备。
-            <dl className="device-settings-fields device-info-list">
+            <dl className="device-settings-fields device-info-list motion-enter">
               {zosFacts.map((row) => (
                 <div key={row.key} className="device-setting-field">
                   <div className="device-setting-copy">
@@ -310,14 +325,14 @@ export function DeviceHostPanel({
           )
         ) : infoLoading && !hasAnyField ? (
           <div className="device-settings-state" role="status">
-            <span className="loading-mark" aria-hidden="true" />
+            <Spinner size="md" color="brand" />
             <strong>正在读取设备信息</strong>
             <span>正在访问 {host?.host ?? "时钟"}。</span>
           </div>
         ) : hasAnyField && info ? (
           // Same row markup as every settings field, so the two tabs share one
           // type scale instead of inventing a second one for read-only rows.
-          <dl className="device-settings-fields device-info-list">
+          <dl className="device-settings-fields device-info-list motion-enter">
             {DEVICE_INFO_ROWS.map((row) => {
               const value = info[row.key];
               return (
@@ -384,12 +399,12 @@ export function DeviceHostPanel({
             </Button>
           </SettingField>
           {host && host.source === "override" && host.envHost !== host.host ? (
-            <p className="device-host-note">
+            <p className="device-host-note motion-enter">
               安装时配置的是 <code>{host.envHost}</code>，当前生效的是控制台设置的地址。
             </p>
           ) : null}
           {host?.source === "override" ? (
-            <div className="device-host-actions">
+            <div className="device-host-actions motion-enter">
               <Button
                 type="button"
                 size="sm"
@@ -438,6 +453,9 @@ export function DeviceSettingsDialog({
   const [accessCopied, setAccessCopied] = useState(false);
   const [accessPopoverOpen, setAccessPopoverOpen] = useState(false);
   const [tab, setTab] = useState<SettingsTab>("general");
+  // The panel fade is for a swap the user made. Without this gate it also ran on
+  // every open and restarted when data replaced a loading state — a blink.
+  const [tabSwapped, setTabSwapped] = useState(false);
   const [info, setInfo] = useState<DeviceInfo | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
   const [infoError, setInfoError] = useState<string | null>(null);
@@ -631,6 +649,10 @@ export function DeviceSettingsDialog({
   useEffect(() => {
     if (open && tab === "device") void loadDeviceTab();
   }, [loadDeviceTab, open, tab]);
+
+  useEffect(() => {
+    if (!open) setTabSwapped(false);
+  }, [open]);
 
   // Reading the clock's settings failing means the address is the user's real
   // problem — land them on the tab that can fix it instead of on a dead form.
@@ -909,8 +931,7 @@ export function DeviceSettingsDialog({
                 aria-label="打开手机控制"
                 aria-expanded={accessPopoverOpen}
               >
-                <Smartphone />
-                <span className="device-access-trigger__label">手机控制</span>
+                <Smartphone />手机控制
                 {access?.url && <span className="device-access-trigger__status" aria-hidden="true" />}
               </Button>
             </PopoverTrigger>
@@ -934,7 +955,7 @@ export function DeviceSettingsDialog({
 
               {accessLoading && !access ? (
                 <div className="device-access-popover__state" role="status">
-                  <span className="loading-mark" aria-hidden="true" />
+                  <Spinner size="md" color="brand" />
                   <span>正在查找手机访问地址…</span>
                 </div>
               ) : access?.url ? (
@@ -967,7 +988,9 @@ export function DeviceSettingsDialog({
                 <div className="device-access-popover__state is-error" role={accessError ? "alert" : "status"}>
                   <Smartphone aria-hidden="true" />
                   <strong>{accessError ? "暂时无法获取地址" : "当前仅本机可用"}</strong>
-                  <span>{access?.suggestedUrl ?? "请确认服务已启用局域网访问。"}</span>
+                  {access?.suggestedUrl
+                    ? <code className="device-access-popover__url">{access.suggestedUrl}</code>
+                    : <span>请确认服务已启用局域网访问。</span>}
                   <Button type="button" size="sm" onClick={() => void loadAccess()}><RefreshCw />重新获取</Button>
                 </div>
               )}
@@ -986,7 +1009,10 @@ export function DeviceSettingsDialog({
         : surface === "sideload"
           ? "这里读写的是 Ulanzi 官方固件的设备接口；侧载固件正占着时钟。"
           : "直接读取并修改时钟本机配置。保存后会立即写入设备。"}
-      className="device-settings-dialog"
+      // Top-anchored rather than centred: tabs and loading states differ in
+      // height, and a centred box re-centres on each change — the title jumped.
+      // tailwind-merge swaps cladd's top-1/2 / -translate-y-1/2 for these.
+      className={`device-settings-dialog top-[max(1rem,8vh)] translate-y-0${tabSwapped ? " is-tab-swapped" : ""}`}
       contentClassName="device-settings-dialog__content"
       closeOnBackdropClick={!dirty && !saving}
       // 配网向导开着时这一层不吃 Escape，否则一次按键会把向导和它下面的设置一起关掉，
@@ -1046,7 +1072,15 @@ export function DeviceSettingsDialog({
         </div>
       )}
     >
-      <Tabs value={tab} onValueChange={(value) => setTab(value as SettingsTab)}>
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (value === tab) return;
+          // One render: the class lands with the panel it should fade, never later.
+          setTab(value as SettingsTab);
+          setTabSwapped(true);
+        }}
+      >
         <SurfaceCut
           className="segmented-track device-settings-tabs"
           color="neutral"
@@ -1060,7 +1094,7 @@ export function DeviceSettingsDialog({
           </TabsList>
         </SurfaceCut>
 
-        <TabPanel value="general" className="device-settings-panel" keepMounted>
+        <TabPanel value="general" className="device-settings-panel" keepMounted onAnimationStart={markArrived} onAnimationEnd={markArrived}>
       {zos ? (
         <ZosGeneralPanel
           requested={zosState?.requestedSettings ?? null}
@@ -1080,7 +1114,7 @@ export function DeviceSettingsDialog({
         </div>
       ) : loading && !draft ? (
         <div className="device-settings-state" role="status">
-          <span className="loading-mark" aria-hidden="true" />
+          <Spinner size="md" color="brand" />
           <strong>正在读取设备设置</strong>
           <span>请保持时钟与电脑处于同一网络。</span>
         </div>
@@ -1088,14 +1122,14 @@ export function DeviceSettingsDialog({
         <div className="device-settings-state is-error" role="alert">
           <strong>无法读取设备设置</strong>
           <span>{loadError}</span>
-          <Button type="button" onClick={() => void loadSettings()}><RefreshCw />重试</Button>
+          <Button type="button" size="sm" onClick={() => void loadSettings()}><RefreshCw />重试</Button>
         </div>
       ) : draft ? (
         <DeviceGeneralPanel draft={draft} onChange={setDraft} />
       ) : null}
         </TabPanel>
 
-        <TabPanel value="device" className="device-settings-panel" keepMounted>
+        <TabPanel value="device" className="device-settings-panel" keepMounted onAnimationStart={markArrived} onAnimationEnd={markArrived}>
           <div className="device-settings-form">
             <DeviceHostPanel
               info={info}
@@ -1115,7 +1149,7 @@ export function DeviceSettingsDialog({
         </TabPanel>
 
         {zos && (
-          <TabPanel value="firmware" className="device-settings-panel" keepMounted>
+          <TabPanel value="firmware" className="device-settings-panel" keepMounted onAnimationStart={markArrived} onAnimationEnd={markArrived}>
             <ZosFirmwarePanel>
               <ZosFirmwareUpdate
                 // 这一页自己判断适用不适用：一台在跑侧载固件的钟根本到不了这里
@@ -1478,25 +1512,13 @@ export function ZosGeneralPanel({
     : [...SLEEP_IDLE_OPTIONS.map((option) => option.seconds), sleepView.idleSec].sort((a, b) => a - b);
   return (
     <div className="device-settings-form">
+      {/* Unmounted rather than a kept-mounted disclosure: the online markup must
+          not carry the offline sentence at all (device-settings-fields.test). */}
       {!live && (
-        <Surface
-          variant="solid"
-          outline
-          color="brand"
-          role="status"
-          className="device-settings-banner"
-          contentClassName="flex flex-col gap-1.5 p-4"
-        >
-          <span className="flex items-center gap-2 text-cladd-fg text-cladd-sm">
-            <WifiOff aria-hidden="true" className="size-4" />
-            <strong>时钟掉线了</strong>
-          </span>
-          <span className="text-cladd-fg-soft text-cladd-xs leading-relaxed">
-            ZOS 已经刷进闪存，所以它还在跑，只是没有在网上。最常见的原因是换了路由器或改了 Wi-Fi
-            密码——用下面的蓝牙配网重连一次就行，不用拆机也不用接线。
-            这期间下发的音量和亮度会先存在服务里，等它回来第一次拉取时生效。
-          </span>
-        </Surface>
+        <Callout icon={WifiOff} title="时钟掉线了" role="status" className="device-settings-banner motion-enter">
+          {/* One string: a JSX line join leaves a Latin space after 。 */}
+          <p>{"ZOS 已经刷进闪存，所以它还在跑，只是没有在网上。最常见的原因是换了路由器或改了 Wi-Fi 密码——用下面的蓝牙配网重连一次就行，不用拆机也不用接线。这期间下发的音量和亮度会先存在服务里，等它回来第一次拉取时生效。"}</p>
+        </Callout>
       )}
 
       <section className="device-settings-section" aria-labelledby="zos-output-title">

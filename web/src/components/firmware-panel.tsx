@@ -1,6 +1,7 @@
-import { Play, Power, ShieldCheck, Wifi, X } from "lucide-react";
-import { Button, Checkbox, Dialog } from "@cladd-ui/react";
+import { Play, Power, ShieldCheck, TriangleAlert, Wifi, X } from "lucide-react";
+import { Button, Checkbox, Dialog, Surface } from "@cladd-ui/react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Callout } from "@/components/callout";
 import { jsonApi } from "@/lib/api";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import { errorMessage } from "@/lib/utils";
@@ -204,10 +205,9 @@ export function useFirmwarePanel(options: {
 
 export function DeviceReconnectGuidance() {
   return (
-    <p className="music-device-reconnect-guidance" role="status">
-      <Power aria-hidden="true" />
-      <span><strong>仍然无法检测？</strong>如果无法检测到设备，请关机并连接到电脑再开机。</span>
-    </p>
+    <Callout className="motion-enter" icon={Power} tone="warning" title="仍然无法检测？" role="status">
+      <p>如果无法检测到设备，请关机并连接到电脑再开机。</p>
+    </Callout>
   );
 }
 
@@ -282,7 +282,15 @@ export function FirmwarePanelBody({
             back are one decision — grouped so they sit at the tighter gap and
             the group as a whole keeps the section gap from its neighbours. */}
         <div className="fw-deploy-decision">
-          <label className="fw-recovery-acknowledgement">
+          {/* Still a <label> around its checkbox, on the same cladd surface as
+              the notices around it, so the drawer has one card face. */}
+          <Surface
+            as="label"
+            variant="solid"
+            outline
+            className="fw-recovery-acknowledgement"
+            contentClassName="fw-recovery-acknowledgement__content"
+          >
             <Checkbox
               as="span"
               className="fw-recovery-checkbox"
@@ -298,7 +306,7 @@ export function FirmwarePanelBody({
               <strong>{`我知道如何回到${restoresTo}`}</strong>
               {`点「${restoreActionLabel}」立即回到${restoresTo}；断电重启同样自动恢复到${restoresTo}。仍异常时断电后按住 USB-C 旁的复位按钮再上电。`}
             </span>
-          </label>
+          </Surface>
 
           <div className="fw-deploy-actions">
             <Button type="button" variant="transparent" outline loading={busy} disabled={busy} onClick={() => void controller.probeDevice()}><Wifi />检测 TC002</Button>
@@ -308,15 +316,25 @@ export function FirmwarePanelBody({
               <Button type="button" color="brand" loading={busy} disabled={!canStartSession || !recoveryAcknowledged || busy} onClick={() => void controller.startSession()}><Play />侧载固件</Button>
             )}
           </div>
-          {error && <p className="music-inline-error" role="alert">{error}</p>}
+          {/* A probe clears the error before it runs, so each answer mounts
+              afresh and arrives with the shared enter instead of snapping in. */}
+          {error && (
+            <Callout className="motion-enter" icon={TriangleAlert} tone="error" title="设备操作失败" role="alert">
+              <p>{error}</p>
+            </Callout>
+          )}
           {(error || deviceProbe?.connected === false) && <DeviceReconnectGuidance />}
         </div>
 
         {/* 服务端也发一份恢复指南，但它是照官方固件写死的：刷过 ZOS 的机器上
             那份是错的（断电重启回到的是 ZOS），所以这时用本地这份，不用它的。 */}
-        <div className="fw-recovery-guide">
-          <span><ShieldCheck /> 非持久化设计</span>
-          <h3>{(restoresToZos ? ZOS_RESTORE_GUIDE : deviceApp?.restore)?.title ?? "回到 Ulanzi 官方固件"}</h3>
+        {/* A guidance box, so the shared notice card: it used to be the one
+            dark-ink panel in the drawer, louder than the warning above it. */}
+        <Callout
+          className="fw-recovery-guide"
+          icon={ShieldCheck}
+          title={(restoresToZos ? ZOS_RESTORE_GUIDE : deviceApp?.restore)?.title ?? "回到 Ulanzi 官方固件"}
+        >
           <ol>
             {((restoresToZos ? ZOS_RESTORE_GUIDE : deviceApp?.restore)?.steps ?? [
               "点「恢复官方固件」，官方界面立即恢复",
@@ -325,7 +343,7 @@ export function FirmwarePanelBody({
               "恢复后重新检查 Wi-Fi、亮度、时区和音量设置",
             ]).map((step) => <li key={step}>{step}</li>)}
           </ol>
-        </div>
+        </Callout>
       </section>
   );
 }

@@ -1,10 +1,9 @@
-import { useState } from "react";
+import { useRef, useState, type KeyboardEvent, type SVGProps } from "react";
 import {
   Battery,
   BatteryCharging,
   BatteryLow,
   BatteryMedium,
-  Circle,
   Cpu,
   Gamepad2,
   Gauge,
@@ -27,9 +26,14 @@ import {
 import type { RuntimeState, StudioView } from "@/types";
 import { DeviceSettingsDialog } from "@/components/studio/device-settings-dialog";
 
+// The keys TabsList itself turns into a selection (automatic activation).
+const TAB_NAV_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End"]);
+
 interface StudioHeaderProps {
   view: StudioView;
-  onViewChange: (view: StudioView) => void;
+  // viaKeyboard: arrow-key stepping through the tabs lands without the view's
+  // arrival motion (keyboard navigation is never animated).
+  onViewChange: (view: StudioView, viaKeyboard: boolean) => void;
   runtime: RuntimeState | null;
   // 时钟此刻在跑哪套固件，以及（只有 ZOS 会上报的）电量读数。
   firmwareStatus?: FirmwareStatus;
@@ -65,6 +69,17 @@ function batteryIcon(battery: FirmwareBattery): LucideIcon {
   return Battery;
 }
 
+// The device-status chip's glyph. A Chip sizes its icon slot (16px at lg), so a
+// filled lucide Circle would fill it edge to edge; the dot sits small inside the
+// same slot instead, which keeps its label at the firmware label's offset.
+function StatusDot(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 16 16" {...props}>
+      <circle cx="8" cy="8" r="3.5" fill="currentColor" />
+    </svg>
+  );
+}
+
 function runtimeLabel(runtime: RuntimeState | null): string {
   if (!runtime) return "正在连接时钟…";
   if (runtime.pushing) return "正在推送";
@@ -81,6 +96,10 @@ export function StudioHeader({
   firmwareLocked = false,
 }: StudioHeaderProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // One-shot: armed by a navigation key, spent by the change it causes. A
+  // sticky "last input" would misfile a later click that fires no pointer
+  // event (assistive tech, element.click()) as keyboard.
+  const keyNavigation = useRef(false);
   const tone = runtime?.healthy
     ? "is-good"
     : runtime?.degraded || runtime?.deviceReachable ? "is-warn" : "is-offline";
@@ -90,20 +109,8 @@ export function StudioHeader({
   // 根本不存在，再报「设备离线」就是在说一台正在上报的设备掉线了——固件身份
   // 交给 Chip，这里只在官方固件下发言。
   const showRuntimeStatus = firmwareStatus.mode === "official";
-  // 官方固件那句状态文字（「正在连接时钟…」最长）比电量 Chip 还宽一截，
-  // 顶栏最挤的那一档要为它再让出位置。
-  //
-  // Measured on the live console at every width from 1680 down to 360, in both
-  // shapes this row takes. Between 52rem and 70rem the tab strip is still in
-  // the header and eats 415px, leaving the right column about 117px: with the
-  // ZOS battery chip that still fits the mini player's artwork and one
-  // transport button (30px to spare), but the official status line is ~25px
-  // wider and the button no longer fits. The header is the only place that
-  // knows which of the two is on screen, so it says so rather than leaving the
-  // stylesheet to infer it from the shape of its own children.
-  const wideActions = showRuntimeStatus;
   return (
-    <header className={"studio-header" + (wideActions ? " has-wide-actions" : "")}>
+    <header className="studio-header">
       <div className="brand-lockup" aria-label="Pixel Market，Ulanzi TC002">
         <span className="brand-mark" aria-hidden="true">
           <i /><i /><i /><i />
@@ -112,8 +119,20 @@ export function StudioHeader({
         <span className="brand-device">/ Ulanzi TC002</span>
       </div>
 
-      <Tabs value={view} onValueChange={(value) => onViewChange(value as StudioView)}>
-        <TabsList aria-label="主视图" className="main-tabs">
+      <Tabs
+        value={view}
+        onValueChange={(value) => {
+          const viaKeyboard = keyNavigation.current;
+          keyNavigation.current = false;
+          onViewChange(value as StudioView, viaKeyboard);
+        }}
+      >
+        <TabsList
+          aria-label="主视图"
+          className="main-tabs"
+          onKeyDownCapture={(event: KeyboardEvent) => { keyNavigation.current = TAB_NAV_KEYS.has(event.key); }}
+          onPointerDownCapture={() => { keyNavigation.current = false; }}
+        >
           <Tab contentClassName="main-tab__content" value="console" disabled={firmwareLocked}><LayoutGrid />内容</Tab>
           <Tab contentClassName="main-tab__content" value="canvas" disabled={firmwareLocked}><Palette />画板</Tab>
           <Tab contentClassName="main-tab__content" value="library" disabled={firmwareLocked}><Images />素材库</Tab>
@@ -129,10 +148,14 @@ export function StudioHeader({
       </Tabs>
 
       <div className="header-actions">
+        {/* One status group, one grammar: every reading is the same cladd Chip
+            (size, outline, type), so firmware, battery and link health sit on
+            one baseline instead of a 10px chip beside an 11px mono line. One
+            live region for all of it — nested ones double-announce. */}
         <div className="firmware-status" role="status" aria-live="polite">
           <Chip
             className="firmware-chip"
-            size="sm"
+            size="lg"
             color={MODE_COLORS[firmwareStatus.mode]}
             variant="transparent"
             icon={MODE_ICONS[firmwareStatus.mode]}
@@ -140,6 +163,10 @@ export function StudioHeader({
             title={firmwareStatus.description}
             aria-label={`当前固件：${firmwareStatus.label}`}
           >
+            {/* ≤34rem only: the link tone, so the phone header shows one chip
+                (icon + dot) instead of a second box holding just a dot. A span,
+                not an svg — a trailing svg would re-pad the chip at every width. */}
+            {showRuntimeStatus && <span className={`device-status__dot firmware-chip__tone ${tone}`} aria-hidden="true" />}
             {/* 窄屏只留图标，标签仍留在 aria-label 里。 */}
             <span className="firmware-chip__label">{firmwareStatus.label}</span>
           </Chip>
@@ -148,7 +175,7 @@ export function StudioHeader({
           {battery.text !== null && (
             <Chip
               className="firmware-chip"
-              size="sm"
+              size="lg"
               color={battery.charging ? "green" : battery.low ? "red" : "neutral"}
               variant="transparent"
               icon={BatteryIcon}
@@ -159,13 +186,23 @@ export function StudioHeader({
               {battery.percent}%
             </Chip>
           )}
+          {/* Neutral like the official-firmware chip beside it: the dot is the
+              only thing that carries the tone, so the row keeps one accent. */}
+          {showRuntimeStatus && (
+            <Chip
+              className="device-status"
+              size="lg"
+              color="neutral"
+              variant="transparent"
+              icon={StatusDot}
+              iconProps={{ className: `device-status__dot ${tone}`, "aria-hidden": true }}
+              title={runtimeLabel(runtime)}
+              aria-label={runtimeLabel(runtime)}
+            >
+              <span className="device-status__label">{runtimeLabel(runtime)}</span>
+            </Chip>
+          )}
         </div>
-        {showRuntimeStatus && (
-          <div className={`device-status ${tone}`} role="status" aria-live="polite">
-            <Circle className="device-status__dot" fill="currentColor" aria-hidden="true" />
-            <span>{runtimeLabel(runtime)}</span>
-          </div>
-        )}
         <Tooltip tooltip={firmwareLocked ? "音乐固件运行中，结束侧载后可用" : "常规设置"}>
           <Button
             type="button"

@@ -5,7 +5,7 @@ import { CladdProvider } from "@cladd-ui/react";
 import { miniPlayerKey, miniPlayerView } from "../web/src/lib/mini-player";
 import { MiniPlayer } from "../web/src/components/music/mini-player";
 import { StudioHeader } from "../web/src/components/studio/studio-header";
-import { describeFirmware, type FirmwareStatus } from "../web/src/lib/firmware-mode";
+import type { FirmwareStatus } from "../web/src/lib/firmware-mode";
 import type { MusicPlaybackSnapshot } from "../web/src/lib/music-playback-store";
 import type { MusicTrack, StudioView } from "../web/src/types";
 
@@ -242,27 +242,6 @@ describe("mini player — rendered", () => {
     const html = headerHtml();
     expect(html).not.toContain("mini-player");
     expect(html).toContain("firmware-chip");
-  });
-
-  test("the header declares the one state that leaves no room for a play button", () => {
-    // Measured, not guessed: between 52rem and 70rem the tab strip still sits in
-    // the header and the right column is about 117px. The official status line
-    // ("正在连接时钟…") is wide enough that the artwork and one transport button
-    // no longer fit beside it; ZOS's battery chip is not. The stylesheet cannot
-    // see the difference, so the header names it.
-    const official = describeFirmware({
-      osState: null,
-      musicFirmwareOnline: false,
-    });
-    expect(official.mode).toBe("official");
-    expect(headerHtml(official)).toContain("has-wide-actions");
-
-    const zos = describeFirmware({
-      osState: { live: true, battery: { percent: 72, charging: false } } as never,
-      musicFirmwareOnline: false,
-    });
-    expect(zos.mode).toBe("zos");
-    expect(headerHtml(zos)).not.toContain("has-wide-actions");
   });
 });
 

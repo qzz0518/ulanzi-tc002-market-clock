@@ -15,14 +15,26 @@
   border-top: 1px solid var(--border);
 }
 
+/* The music tokens are aliases of the console's own, not a second palette:
+   ink/soft/paper/line used to be a warmer, darker set of their own, so the
+   same "muted help text" role read darker here than on every other tab. Acid
+   stays as the one music-only colour, and only on dark or as light: the
+   LED-style live dot and the index on a playing row's cover. Selected rows
+   use the console's neutral tint. No font-family either: "Avenir Next"
+   existed only on Apple machines, so this page alone switched Latin faces on
+   a Mac and silently fell
+   back to the console's font everywhere else. */
 .music-studio {
-  --music-ink: oklch(0.19 0.018 128);
-  --music-ink-soft: oklch(0.31 0.018 128);
+  --music-ink: var(--foreground);
+  --music-ink-soft: var(--muted-foreground);
   --music-paper: var(--background);
   --music-paper-raised: var(--card);
   --music-line: var(--border);
   --music-acid: oklch(0.79 0.19 126);
-  --music-signal: oklch(0.56 0.17 142);
+  --music-signal: var(--primary);
+  /* The bottom and divider padding of both columns. The top is 1rem below the
+     hero rule on every tab, so it is not part of this. */
+  --music-gutter: 1.5rem;
   display: grid;
   min-width: 0;
   overflow: visible;
@@ -30,7 +42,6 @@
   border-radius: 0;
   color: var(--music-ink);
   background: transparent;
-  font-family: "Avenir Next", "PingFang SC", "Noto Sans CJK SC", sans-serif;
 }
 
 .music-library,
@@ -38,11 +49,13 @@
   min-width: 0;
 }
 
+/* Stacked, the sections are full-width bands between hairlines: content sits
+   on the page gutter like every other tab, so only the block padding remains. */
 .music-library {
   display: grid;
   align-content: start;
   gap: 1.25rem;
-  padding: clamp(1.15rem, 3vw, 2rem);
+  padding: 1rem 0 var(--music-gutter);
   background: transparent;
 }
 
@@ -51,23 +64,31 @@
 .music-library__header {
   display: grid;
   gap: 1rem;
-  padding-bottom: 0.35rem;
 }
 
 .music-section-heading {
   display: grid;
   min-width: 0;
-  gap: 0.28rem;
+  gap: 0.25rem;
 }
 
+/* Every mono kicker on this page and in its drawer is one role: same size,
+   weight, tracking and colour. They had drifted to four trackings
+   (0.04 / 0.07 / 0.08 / 0.1em) and three colours. */
 .music-section-heading > span,
-.music-stage__heading > span,
-.music-lyrics-panel > header span,
-.music-firmware-dialog__title span {
+.music-lyrics-panel > header > div > span,
+.music-firmware-dialog__title > div > span,
+.music-now-playing__identity > span,
+.music-stage__eyebrow-label,
+.music-now-playing__label span,
+.music-now-playing__label strong {
   color: var(--music-ink-soft);
   font-family: var(--mono);
-  font-size: 0.61rem;
-  letter-spacing: 0.1em;
+  font-size: var(--type-micro);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  text-transform: uppercase;
 }
 
 .music-section-heading h2,
@@ -77,53 +98,31 @@
   color: var(--music-ink);
 }
 
+/* The column head role (16 / 600). It was a 28px/700 display line, louder
+   than the page hero's own subtitle and unlike the two columns beside it. */
 .music-section-heading h2 {
-  font-size: clamp(1.45rem, 2.2vw, 1.8rem);
-  font-weight: 680;
-  letter-spacing: -0.045em;
-  line-height: 1.05;
+  font-size: var(--type-title);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 .music-section-heading p {
   max-width: 34rem;
-  margin: 0.12rem 0 0;
+  margin: 0;
   color: var(--music-ink-soft);
-  font-size: 0.76rem;
-  line-height: 1.55;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
+/* Size, glyphs and type all come from cladd's `sm`, exactly like the
+   .music-mirror-toggle beside it. The old overrides (11px label, 14/12px
+   glyphs, a forced ink colour) made the two buttons in one row read as two
+   different kits. */
 .music-device-trigger {
   width: auto;
   min-width: 0;
-  align-self: start;
-  justify-self: start;
-  color: var(--music-ink) !important;
-  cursor: pointer;
   white-space: nowrap;
-}
-
-/* 只补 3 个子元素的间距——高度和内边距交回 cladd 的 size token，
-   否则它会和同一行的 .music-mirror-toggle 不等高。 */
-.music-device-trigger__content {
-  gap: 0.4rem !important;
-}
-
-.music-device-trigger__content > svg:first-child {
-  width: 0.9rem;
-  height: 0.9rem;
-  color: var(--music-ink-soft);
-}
-
-.music-device-trigger__content > svg:last-child {
-  width: 0.78rem;
-  height: 0.78rem;
-  color: var(--music-ink-soft);
-}
-
-.music-device-trigger__content > span {
-  min-width: 0;
-  font-size: 0.68rem;
-  font-weight: 650;
 }
 
 /* Source + account merge into one hairline-bounded bar: both are "where the
@@ -132,103 +131,98 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.55rem 1.1rem;
-  padding: 0.62rem 0;
+  gap: 0.5rem 1rem;
+  padding: 0.75rem 0;
   border-block: 1px solid var(--music-line);
 }
 
-.music-source-switch {
+/* The single-choice control sits in the shared recessed track
+   (.segmented-track, globals.css), like every segmented control. */
+.music-source-track {
   flex: none;
 }
 
-.music-source-switch button {
-  font-size: 0.72rem;
-  font-weight: 650;
+/* The Spotify setup is the shared <Callout> (a not-signed-in notice) with the
+   form as its action. The callout leaves its action at content width; this
+   one holds inputs, so it takes the text column's full width. */
+.music-spotify-setup .callout__action {
+  justify-self: stretch;
+  min-width: 0;
 }
 
-.music-spotify-setup {
+/* minmax(0, 1fr) on both grids: an auto track takes the nowrap redirect URL's
+   full width as its floor, which pushed the field and the URL past the card
+   on a phone instead of letting the URL scroll. */
+.music-spotify-setup__form {
   display: grid;
-  gap: 0.85rem;
-  padding: 1rem;
-  border: 1px solid var(--music-line);
-  border-radius: 0.65rem;
-  background: var(--music-paper-raised);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
 }
 
-.music-spotify-setup__head {
-  display: grid;
-  gap: 0.4rem;
-}
-
-.music-spotify-setup__head > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.38rem;
-  color: var(--music-ink-soft);
-  font-family: var(--mono);
-  font-size: 0.61rem;
-  letter-spacing: 0.1em;
-}
-
-.music-spotify-setup__head svg {
-  width: 0.85rem;
-  height: 0.85rem;
-}
-
-.music-spotify-setup__head p,
 .music-spotify-paste p {
   margin: 0;
   color: var(--music-ink-soft);
-  font-size: 0.66rem;
-  line-height: 1.55;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
+/* Numbered: these are steps in order, and an indented list without markers
+   read as a misaligned paragraph. */
 .music-spotify-steps {
   display: grid;
-  gap: 0.42rem;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
   margin: 0;
-  padding-left: 1.1rem;
+  padding-left: 1rem;
   color: var(--music-ink);
-  font-size: 0.68rem;
-  line-height: 1.55;
+  font-size: var(--type-caption);
+  line-height: 1.45;
+  list-style: decimal;
+}
+
+.music-spotify-steps li::marker,
+.fw-recovery-guide ol li::marker {
+  color: var(--music-ink-soft);
+  font-family: var(--mono);
+  font-size: var(--type-micro);
 }
 
 .music-spotify-steps a {
   display: inline-flex;
   align-items: center;
-  gap: 0.22rem;
+  gap: 0.25rem;
   color: var(--music-signal);
   text-decoration: underline;
   text-underline-offset: 0.15em;
 }
 
 .music-spotify-steps a svg {
-  width: 0.72rem;
-  height: 0.72rem;
+  width: 0.75rem;
+  height: 0.75rem;
 }
 
 .music-spotify-steps code {
   display: block;
-  margin-top: 0.28rem;
-  padding: 0.32rem 0.45rem;
+  margin-top: 0.25rem;
+  padding: 0.375rem 0.5rem;
   overflow-x: auto;
   border: 1px solid var(--music-line);
-  border-radius: 0.3rem;
+  border-radius: var(--radius-control);
   background: var(--music-paper);
   font-family: var(--mono);
-  font-size: 0.63rem;
+  font-size: var(--type-micro);
   white-space: nowrap;
 }
 
 .music-spotify-field {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.375rem;
 }
 
 .music-spotify-field > span {
-  color: var(--music-ink);
-  font-size: 0.7rem;
-  font-weight: 650;
+  color: var(--cladd-fg-soft);
+  font-size: var(--type-small);
+  font-weight: 500;
 }
 
 .music-spotify-actions {
@@ -239,8 +233,8 @@
 
 .music-spotify-paste {
   display: grid;
-  gap: 0.6rem;
-  padding-top: 0.85rem;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
   border-top: 1px dashed var(--music-line);
   justify-items: start;
 }
@@ -255,24 +249,24 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.42rem 0.6rem;
-  padding: 0.7rem 0;
+  gap: 0.5rem 0.75rem;
+  padding: 0.75rem 0;
   border-top: 1px solid var(--music-line);
 }
 
 .music-console-output > span:first-child {
   display: inline-flex;
   align-items: center;
-  gap: 0.38rem;
-  color: var(--music-ink);
-  font-size: 0.72rem;
-  font-weight: 650;
+  gap: 0.375rem;
+  color: var(--cladd-fg-soft);
+  font-size: var(--type-small);
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .music-console-output > span:first-child svg {
-  width: 0.9rem;
-  height: 0.9rem;
+  width: 0.875rem;
+  height: 0.875rem;
 }
 
 .music-console-output__control {
@@ -284,39 +278,41 @@
   grid-column: 1 / -1;
   margin: 0;
   color: var(--music-ink-soft);
-  font-size: 0.64rem;
-  line-height: 1.5;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
+/* Truncation only: the type size is the Select's own. */
 .music-console-output__control [data-part="value"] {
   overflow: hidden;
-  font-size: 0.76rem;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 16rem basis: on a phone the strip takes its own line under the source
+   switch instead of squeezing its help line down to 「使用网易…」. */
 .music-account-strip {
   display: grid;
-  flex: 1 1 14rem;
+  flex: 1 1 16rem;
   min-width: 0;
-  min-height: 2.6rem;
-  grid-template-columns: 2.15rem minmax(0, 1fr) auto;
+  min-height: 2.5rem;
+  grid-template-columns: 2.25rem minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.75rem;
 }
 
 .music-account-strip__avatar {
   display: grid;
   overflow: hidden;
-  width: 2.15rem;
+  width: 2.25rem;
   aspect-ratio: 1;
   place-items: center;
   border-radius: 999px;
   background: var(--music-ink);
   color: var(--music-paper);
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: var(--type-small);
 }
 
 .music-account-strip__avatar-fallback,
@@ -331,7 +327,7 @@
 }
 
 .music-account-strip__avatar.is-signed-out {
-  background: oklch(0.9 0.012 112);
+  background: var(--muted);
   color: var(--music-ink-soft);
 }
 
@@ -343,20 +339,21 @@
 .music-account-strip > div {
   display: grid;
   min-width: 0;
-  gap: 0.13rem;
+  gap: 0.125rem;
 }
 
 .music-account-strip strong {
   overflow: hidden;
-  font-size: 0.78rem;
-  font-weight: 650;
+  font-size: var(--type-body);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .music-account-strip > div > span {
   color: var(--music-ink-soft);
-  font-size: 0.64rem;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
 .music-qr-panel {
@@ -366,7 +363,7 @@
   gap: 1rem;
   padding: 1rem;
   border: 1px solid var(--music-line);
-  border-radius: 0.65rem;
+  border-radius: var(--radius-card);
   background: var(--music-paper-raised);
 }
 
@@ -378,7 +375,7 @@
   place-items: center;
   overflow: hidden;
   border: 1px solid var(--music-line);
-  border-radius: 0.45rem;
+  border-radius: var(--radius-control);
   background: white;
 }
 
@@ -393,48 +390,55 @@
   display: grid;
   place-items: center;
   align-content: center;
-  gap: 0.35rem;
-  background: oklch(0.19 0.018 128 / 0.92);
+  gap: 0.375rem;
+  background: color-mix(in oklab, var(--music-ink) 92%, transparent);
   color: var(--music-paper);
-  font-size: 0.68rem;
+  font-size: var(--type-caption);
 }
 
 .music-qr-panel > div:last-child {
   display: grid;
-  gap: 0.45rem;
+  justify-items: start;
+  gap: 0.5rem;
 }
 
 .music-qr-panel strong {
-  font-size: 0.84rem;
+  font-size: var(--type-body);
+  font-weight: 500;
 }
 
 .music-qr-panel p {
   margin: 0;
   color: var(--music-ink-soft);
-  font-size: 0.66rem;
-  line-height: 1.5;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
 .music-search {
   display: grid;
-  gap: 0.48rem;
+  gap: 0.5rem;
 }
 
+/* Field-label role (12 / 500 / fg-soft), the same as every labelled field in
+   the console. */
 .music-search > label,
 .music-playlist-select > span:first-child {
   display: inline-flex;
   align-items: center;
-  gap: 0.38rem;
-  color: var(--music-ink);
-  font-size: 0.76rem;
-  font-weight: 650;
+  gap: 0.375rem;
+  color: var(--cladd-fg-soft);
+  font-size: var(--type-small);
+  font-weight: 500;
 }
 
+/* Input and button are both cladd `md`, so they are one height and stay side
+   by side even on a phone — 「搜索」 is two glyphs, and a full-width bar under
+   the field was the only control on the page stretched that way. */
 .music-search__controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  gap: 0.6rem;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .music-search-field {
@@ -449,12 +453,12 @@
 .music-playlist-select {
   display: grid;
   width: min(100%, 20rem);
-  gap: 0.48rem;
+  gap: 0.5rem;
 }
 
 .music-playlist-select > span:first-child svg {
-  width: 0.9rem;
-  height: 0.9rem;
+  width: 0.875rem;
+  height: 0.875rem;
 }
 
 .music-playlist-select__control {
@@ -463,7 +467,6 @@
 
 .music-playlist-select__control [data-part="value"] {
   overflow: hidden;
-  font-size: 0.76rem;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -483,30 +486,31 @@
   display: grid;
   width: min(100%, 20rem);
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.48rem;
+  gap: 0.5rem;
 }
 
 .music-track-list {
   display: grid;
   min-height: 0;
-  gap: 0.55rem;
+  gap: 0.5rem;
 }
 
+/* Subsection head over the queue (14 / 600, the console's sans — a CJK queue
+   name in the mono face looked like a code identifier) + a mono counter. */
 .music-track-list__heading {
   display: flex;
   min-width: 0;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.4rem 0;
+  padding: 0.5rem 0;
   border-bottom: 1px solid var(--music-line);
-  font-family: var(--mono);
 }
 
 .music-track-list__heading span {
   overflow: hidden;
-  font-size: 0.66rem;
-  font-weight: 650;
+  font-size: var(--type-title-sm);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -514,7 +518,9 @@
 .music-track-list__heading small {
   flex: none;
   color: var(--music-ink-soft);
-  font-size: 0.58rem;
+  font-family: var(--mono);
+  font-size: var(--type-micro);
+  font-variant-numeric: tabular-nums;
 }
 
 .music-track-list__viewport {
@@ -529,17 +535,16 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.85rem;
-  padding-top: 0.55rem;
-  border-top: 1px solid var(--music-line);
+  gap: 0.75rem;
+  padding-top: 0.5rem;
 }
 
 .music-track-pager__status {
   min-width: 6.5rem;
   color: var(--music-ink-soft);
   font-family: var(--mono);
-  font-size: 0.62rem;
-  font-weight: 650;
+  font-size: var(--type-micro);
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
@@ -552,43 +557,46 @@
   border-radius: 0 !important;
 }
 
+/* Selected rows share the console's one treatment: a 2px primary edge plus the
+   neutral tint of .channel-entry.is-active. Edge and tint were both the lime
+   acid here — the only selected state in the console in a different hue.
+   The row height comes from its content (cover + padding), not a min-height
+   on the cladd control. */
 .music-track-row {
   width: 100%;
-  min-height: 3.6rem;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--music-line);
-  border-left: 3px solid transparent;
+  border-left: 2px solid transparent;
   color: var(--music-ink) !important;
   text-align: left;
   cursor: pointer;
   transition:
-    border-color 150ms cubic-bezier(0.25, 1, 0.5, 1),
-    background-color 150ms cubic-bezier(0.25, 1, 0.5, 1);
+    border-color var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out);
 }
 
 .music-track-row__content {
   display: grid !important;
   width: 100%;
-  min-height: 3.6rem;
   grid-template-columns: 2.5rem minmax(0, 1fr) auto;
   align-items: center;
   justify-content: stretch !important;
-  gap: 0.65rem !important;
-  padding: 0.5rem 0.55rem 0.5rem 0 !important;
+  gap: 0.75rem !important;
+  padding: 0.5rem 0.5rem 0.5rem 0 !important;
 }
 
 .music-track-row[data-disabled] {
   cursor: wait;
-  opacity: 0.58;
 }
 
 .music-track-row.is-active {
-  border-left-color: var(--music-acid);
-  background: color-mix(in oklab, var(--music-acid) 9%, transparent);
+  border-left-color: var(--primary);
+  background: color-mix(in oklch, var(--muted) 82%, transparent);
 }
 
 .music-track-row time {
   font-family: var(--mono);
-  font-size: 0.61rem;
+  font-size: var(--type-micro);
   font-variant-numeric: tabular-nums;
 }
 
@@ -623,18 +631,25 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--motion-base) var(--ease-out);
+}
+
+/* Set by the component on load (music-player.tsx MusicCoverArt). */
+.music-cover__image[data-loaded="true"] {
+  opacity: 1;
 }
 
 .music-cover--row {
   width: 2.5rem;
-  font-size: 0.61rem;
+  font-size: var(--type-micro);
 }
 
 .music-cover--console {
   width: clamp(4.75rem, 8vw, 6.75rem);
   box-shadow: 0 0.45rem 1.1rem oklch(0.2 0.02 130 / 0.12);
-  font-size: 1.5rem;
-  font-weight: 650;
+  font-size: var(--type-headline);
+  font-weight: 600;
 }
 
 .music-track-row.is-active .music-cover__fallback {
@@ -652,25 +667,25 @@
   white-space: nowrap;
 }
 
+/* List-item roles: name 13 / 500, description line 11 / muted. */
 .music-track-row__title {
-  font-size: 0.78rem;
-  font-weight: 650;
+  font-size: var(--type-body);
+  font-weight: 500;
+  line-height: 1.35;
 }
 
 .music-track-row__meta {
   color: var(--music-ink-soft);
-  font-size: 0.61rem !important;
-}
-
-.music-track-row.is-active .music-track-row__meta {
-  color: var(--music-ink-soft);
+  font-size: var(--type-caption);
+  font-weight: 400;
+  line-height: 1.45;
 }
 
 .music-track-row__after {
   display: grid;
   grid-template-columns: auto 1rem;
   align-items: center;
-  gap: 0.7rem;
+  gap: 0.75rem;
 }
 
 .music-track-row__after time {
@@ -678,20 +693,68 @@
 }
 
 .music-track-row__after svg {
-  width: 0.95rem;
-  height: 0.95rem;
+  width: 1rem;
+  height: 1rem;
   opacity: 0;
-  transition: opacity 150ms cubic-bezier(0.25, 1, 0.5, 1);
+  transition: opacity var(--motion-fast) var(--ease-out);
 }
 
-.music-track-row:hover .music-track-row__after svg,
+/* Touch fires :hover on tap and leaves it stuck, so the hover hint is for a
+   fine pointer only; keyboard focus shows it everywhere. */
+@media (hover: hover) and (pointer: fine) {
+  .music-track-row:hover .music-track-row__after svg {
+    opacity: 0.55;
+  }
+}
+
 .music-track-row:focus-visible .music-track-row__after svg {
   opacity: 0.55;
 }
 
 .music-track-row.is-active .music-track-row__after svg {
-  color: var(--music-acid);
+  color: var(--primary);
   opacity: 1;
+}
+
+/* One empty state, three placements. Track list, console and lyric card all
+   draw the same icon tile and the same two text roles (name 13 / 500, help
+   11 / muted); only the arrangement differs — centred where it owns a tall
+   reserved box, inline where it fills a row. They had been a bare 26px glyph,
+   a 42px tile and a bare 19px glyph, with three different type pairs. */
+.music-empty-icon {
+  display: grid;
+  width: 2.25rem;
+  flex: none;
+  aspect-ratio: 1;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--muted);
+  color: var(--music-ink-soft);
+}
+
+.music-empty-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.music-empty-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.125rem;
+}
+
+.music-empty-copy strong {
+  color: var(--music-ink);
+  font-size: var(--type-body);
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.music-empty-copy > :last-child:not(strong) {
+  margin: 0;
+  color: var(--music-ink-soft);
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
 .music-empty-state {
@@ -699,26 +762,13 @@
   min-height: 13rem;
   place-items: center;
   align-content: center;
-  gap: 0.45rem;
+  gap: 0.75rem;
   padding: 1.5rem;
-  color: var(--music-ink-soft);
   text-align: center;
 }
 
-.music-empty-state svg {
-  width: 1.6rem;
-  height: 1.6rem;
-}
-
-.music-empty-state strong {
-  color: var(--music-ink);
-  font-size: 0.82rem;
-}
-
-.music-empty-state span {
+.music-empty-state .music-empty-copy {
   max-width: 20rem;
-  font-size: 0.65rem;
-  line-height: 1.5;
 }
 
 .music-stage {
@@ -728,7 +778,7 @@
      container. cladd portals its popovers to the body, so the containment
      this introduces cannot displace any of them. */
   container-type: inline-size;
-  padding: clamp(1.15rem, 3vw, 2rem);
+  padding: 1rem 0 var(--music-gutter);
   border-top: 1px solid var(--music-line);
   background: transparent;
 }
@@ -751,7 +801,7 @@
   min-width: 0;
   max-height: none;
   align-content: start;
-  gap: 1.3rem;
+  gap: 1.25rem;
   grid-template-columns: minmax(0, 1fr);
   overflow: visible;
   overscroll-behavior: auto;
@@ -764,7 +814,7 @@
 .music-screen {
   display: grid;
   min-width: 0;
-  gap: 0.9rem;
+  gap: 1rem;
 }
 
 /* Wide enough for two columns, and the lyrics take the whole of the second
@@ -788,7 +838,7 @@
        stops spanning. Add a fourth section and this needs bumping. */
     grid-template-rows: repeat(3, auto);
     grid-template-columns: minmax(0, 1fr) minmax(19rem, 0.62fr);
-    gap: 1.3rem 1.5rem;
+    gap: 1.25rem 1.5rem;
     /* Makes the grid the containing block for the rail below, which is what
        turns its grid area into a real box to position against. */
     position: relative;
@@ -834,56 +884,55 @@
 .music-stage__header {
   display: flex;
   flex-wrap: wrap;
-  align-items: end;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.6rem 1rem;
-  padding-bottom: 0.7rem;
+  gap: 0.5rem 1rem;
+  padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--music-line);
 }
 
 .music-stage__heading {
   display: grid;
-  gap: 0.18rem;
+  gap: 0.25rem;
 }
 
+/* Same kicker + divider + status shape as the NOW PLAYING row above it. */
 .music-stage__eyebrow {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.5rem;
   min-height: 1.5rem;
 }
 
 .music-stage__eyebrow svg {
-  width: 0.78rem;
-  height: 0.78rem;
+  width: 0.75rem;
+  height: 0.75rem;
+  margin-right: -0.125rem;
   color: var(--music-ink-soft);
 }
 
-.music-stage__eyebrow-label {
-  font-family: var(--mono);
-  font-size: 0.57rem;
-  letter-spacing: 0.04em;
-  color: var(--music-ink-soft);
-}
-
-/* Play status lives inside the eyebrow now — a dot + label, not a pill. */
+/* Play status lives inside the eyebrow — a dot + label, not a pill. */
 .music-stage__pulse {
   display: inline-flex;
   align-items: center;
-  gap: 0.32rem;
-  margin-left: 0.15rem;
-  padding-left: 0.55rem;
+  gap: 0.375rem;
+  padding-left: 0.5rem;
   border-left: 1px solid var(--music-line);
   font-style: normal;
-  font-size: 0.63rem;
+  font-size: var(--type-micro);
+  line-height: 1.4;
   color: var(--music-ink-soft);
+  transition: color var(--motion-fast) var(--ease-out);
 }
 
 .music-stage__pulse i {
-  width: 0.4rem;
-  height: 0.4rem;
+  width: 0.375rem;
+  height: 0.375rem;
   border-radius: 999px;
   background: var(--music-ink-soft);
+  transition:
+    background-color var(--motion-base) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out);
 }
 
 .music-stage__pulse.is-live {
@@ -892,12 +941,12 @@
 
 .music-stage__pulse.is-live i {
   background: var(--music-acid);
-  box-shadow: 0 0 0 0.18rem oklch(0.79 0.19 126 / 0.14);
+  box-shadow: 0 0 0 0.1875rem oklch(0.79 0.19 126 / 0.14);
 }
 
 .music-stage__header h2 {
-  font-size: 1rem;
-  font-weight: 670;
+  font-size: var(--type-title);
+  font-weight: 600;
   letter-spacing: -0.02em;
 }
 
@@ -910,11 +959,6 @@
 
 .music-mirror-toggle {
   white-space: nowrap;
-}
-
-.music-mirror-toggle svg {
-  width: 0.85rem;
-  height: 0.85rem;
 }
 
 /* The 52×16 preview fills its column now. The old 26rem cap was written when
@@ -933,7 +977,7 @@
   aspect-ratio: 52 / 16;
   overflow: hidden;
   border: clamp(0.46rem, 0.85vw, 0.65rem) solid var(--music-ink);
-  border-radius: 0.72rem;
+  border-radius: var(--radius-card);
   background: var(--music-ink);
   box-shadow: 0 0.65rem 1.5rem oklch(0.2 0.02 130 / 0.12);
   isolation: isolate;
@@ -964,10 +1008,10 @@
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  padding-top: 0.45rem;
+  padding-top: 0.5rem;
   color: var(--music-ink-soft);
   font-family: var(--mono);
-  font-size: 0.55rem;
+  font-size: var(--type-micro);
   letter-spacing: 0.02em;
 }
 
@@ -978,23 +1022,27 @@
   container-type: inline-size;
   display: grid;
   min-width: 0;
-  gap: 0.85rem;
-  padding: 0.85rem 0.9rem;
+  gap: 1rem;
+  padding: 0.75rem 1rem 1rem;
   border: 1px solid var(--music-line);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-card);
   background: var(--music-paper-raised);
 }
 
+/* Card head: the same row as the lyric card's — subsection title (14 / 600)
+   left, status chip right, one 2rem line box so both cards' heads match. */
 .music-theme-panel__head {
   display: flex;
-  align-items: baseline;
+  min-height: 2rem;
+  align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
 }
 
 .music-theme-panel__head strong {
-  font-size: 0.78rem;
-  font-weight: 680;
+  font-size: var(--type-title-sm);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 /* 窄面板：两组上下堆叠。宽面板：并排——横向吃满宽度，总高度还砍一半，
@@ -1002,13 +1050,13 @@
 .music-theme-panel__groups {
   display: grid;
   min-width: 0;
-  gap: 0.85rem;
+  gap: 1rem;
 }
 
 @container (min-width: 50rem) {
   .music-theme-panel__groups {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 1.4rem;
+    gap: 1.5rem;
   }
 }
 
@@ -1016,14 +1064,14 @@
   container-type: inline-size;
   display: grid;
   min-width: 0;
-  gap: 0.42rem;
+  gap: 0.5rem;
 }
 
+/* Field-label role, same as 搜索歌曲… on the left. */
 .music-theme-panel__label {
-  font-size: 0.6rem;
-  font-weight: 620;
-  color: var(--music-ink-soft);
-  letter-spacing: 0.04em;
+  color: var(--cladd-fg-soft);
+  font-size: var(--type-small);
+  font-weight: 500;
 }
 
 /* Theme choices are cladd ToggleGroups laid out as a grid of cells.
@@ -1033,7 +1081,7 @@
   display: grid;
   min-width: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.42rem;
+  gap: 0.5rem;
 }
 
 /* 一组够宽才排成 4 列；否则宁可 2×2，也不要出现 3+1 的断行。 */
@@ -1048,42 +1096,46 @@
 }
 
 /* 一律左对齐：选中项因为右侧多一个勾会被挤成左对齐，
-   未选中项若还居中，切换时整块图文会横向跳一下。 */
+   未选中项若还居中，切换时整块图文会横向跳一下。
+   Height is cladd's `xl` (the tile carries a name and a note); the padding
+   here is horizontal only, so the size token alone decides the height. */
 .music-theme-option__content {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 0.5rem;
+  gap: 0.625rem;
   min-width: 0;
-  padding: 0.18rem 0.55rem;
+  padding-inline: 0.75rem;
 }
 
-/* 选中项除了配色变化，再给一个明确的勾——蓝晒这类冷色在浅底上的色差很弱。 */
+/* 选中项除了配色变化，再给一个明确的勾——浅底上单靠色差太弱。
+   The tick is in every tile and only fades in on the chosen one, so picking a
+   tile no longer mounts a node (and cladd's own 200ms state fade has a partner
+   instead of a tick that pops in ahead of it). */
 .music-theme-option__check {
-  width: 0.8rem;
-  height: 0.8rem;
   flex: 0 0 auto;
   margin-left: auto;
+  opacity: 0;
+  transition: opacity var(--motion-base) var(--ease-out);
 }
 
-.music-theme-option__content > svg {
-  width: 1rem;
-  height: 1rem;
-  flex: 0 0 auto;
+.music-theme-option__check[data-on="true"] {
+  opacity: 1;
 }
 
 .music-theme-option__text {
   display: grid;
   min-width: 0;
-  gap: 0.05rem;
+  gap: 0.125rem;
   text-align: left;
 }
 
 .music-theme-option__text strong {
   overflow: hidden;
   min-width: 0;
-  font-size: 0.62rem;
-  font-weight: 650;
+  font-size: var(--type-small);
+  font-weight: 500;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1091,10 +1143,10 @@
 .music-theme-option__text small {
   overflow: hidden;
   min-width: 0;
-  font-family: var(--mono);
-  font-size: 0.5rem;
-  letter-spacing: 0.03em;
-  opacity: 0.72;
+  color: var(--music-ink-soft);
+  font-size: var(--type-micro);
+  font-weight: 400;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1104,11 +1156,11 @@
 .music-theme-swatch {
   display: flex;
   align-items: flex-end;
-  gap: 0.1rem;
-  height: 1.1rem;
-  padding: 0.16rem;
+  gap: 0.125rem;
+  height: 1rem;
+  padding: 0.1875rem;
   flex: 0 0 auto;
-  border-radius: 0.25rem;
+  border-radius: var(--radius-tile);
   background: var(--music-ink);
 }
 
@@ -1124,8 +1176,8 @@
 .music-theme-panel__accent {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding-top: 0.8rem;
+  gap: 0.75rem;
+  padding-top: 1rem;
   border-top: 1px solid var(--music-line);
 }
 
@@ -1145,17 +1197,17 @@
 }
 
 .music-theme-panel__spectrum-note {
-  margin: -0.3rem 0 0;
+  margin: -0.5rem 0 0;
   color: var(--music-ink-soft);
-  font-family: var(--mono);
-  font-size: 0.55rem;
-  letter-spacing: 0.04em;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
+/* Primary, not the acid: lime text on the paper background was ~1.6:1. */
 .music-timeline__loading {
-  color: var(--music-acid);
-  font-size: 0.66rem;
-  font-weight: 600;
+  color: var(--primary);
+  font-size: var(--type-micro);
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1172,22 +1224,6 @@
   white-space: nowrap;
 }
 
-/* Prominent "syncing to device" banner shown under the preview while the TC002
-   downloads a just-selected track. */
-.music-sync-hint {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 0.6rem 0.85rem;
-  border: 1px solid var(--music-acid);
-  border-radius: 0.6rem;
-  background: color-mix(in oklab, var(--music-acid) 8%, transparent);
-  color: var(--music-ink);
-  font-size: 0.72rem;
-  font-weight: 560;
-}
-
 .music-now-playing {
   display: grid;
   min-width: 0;
@@ -1199,21 +1235,28 @@
   color: var(--music-ink);
 }
 
-.music-now-playing.is-empty {
-  padding: 0.9rem 0;
+/* The console is a gapless stack of hairline rows; a notice in it needs its
+   own air (the other columns get it from their grid gap). */
+.music-now-playing > .callout {
+  margin-block: 0.75rem;
 }
 
-.music-now-playing > .music-inline-error {
-  margin: 0.7rem 0 0.8rem;
+/* Main row + timeline, one block so loading the first track brings them in
+   together (the head row above stays put). */
+.music-now-playing__body {
+  display: grid;
+  min-width: 0;
 }
 
+/* The console's head row. Rendered in both states (empty and loaded) so the
+   column always opens on the same kicker line, level with the library's. */
 .music-now-playing__header {
   display: flex;
   min-width: 0;
+  min-height: 2.5rem;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.58rem 0;
   border-bottom: 1px solid var(--music-line);
 }
 
@@ -1221,27 +1264,12 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 0.55rem;
-}
-
-.music-now-playing__label span,
-.music-now-playing__label strong {
-  font-family: var(--mono);
-  font-size: 0.55rem;
-  letter-spacing: 0.08em;
-  line-height: 1;
-}
-
-.music-now-playing__label span {
-  color: var(--music-ink);
-  font-weight: 700;
+  gap: 0.5rem;
 }
 
 .music-now-playing__label strong {
-  padding-left: 0.55rem;
+  padding-left: 0.5rem;
   border-left: 1px solid var(--music-line);
-  color: var(--music-ink-soft);
-  font-weight: 500;
 }
 
 /* The identity column is sized to the title, not to whatever is left over.
@@ -1261,40 +1289,46 @@
      the space after a right-aligned transport is a mistake. */
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 1rem 1.1rem;
-  padding: 0.95rem 0;
+  gap: 1rem;
+  padding: 1rem 0;
 }
 
 .music-now-playing__identity {
   display: grid;
   min-width: 0;
-  gap: 0.18rem;
+  gap: 0.25rem;
 }
 
-.music-now-playing__identity > span {
-  color: var(--music-signal);
-  font-family: var(--mono);
-  font-size: 0.55rem;
-  letter-spacing: 0.08em;
-}
-
+/* The console's display line — the one 700 on this page, like the page hero.
+   Tracking eased from -0.045em: that much squeezed CJK titles into each other. */
 .music-now-playing__identity h3 {
   overflow: hidden;
   margin: 0;
   color: var(--music-ink);
-  font-size: clamp(1.3rem, 2.7vw, 1.75rem);
-  font-weight: 720;
-  letter-spacing: -0.045em;
-  line-height: 1.08;
+  font-size: var(--type-headline);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A new track swaps the words in a fixed box: a short cross-fade in place,
+   not the rise .motion-enter gives a block that just arrived. The lyric tape
+   is the same kind of swap — its card and header stay put — so 下一首 moves
+   both on one clock. */
+.music-now-playing__identity.motion-enter,
+.music-lyric-tape.motion-enter {
+  --enter-y: 0;
+  animation-duration: var(--motion-base);
 }
 
 .music-now-playing__identity p {
   overflow: hidden;
   margin: 0;
   color: var(--music-ink-soft);
-  font-size: 0.66rem;
+  font-size: var(--type-caption);
+  line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1302,8 +1336,8 @@
 .music-timeline {
   display: grid;
   min-width: 0;
-  gap: 0.42rem;
-  padding: 0.68rem 0 0.8rem;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
   border-top: 1px solid var(--music-line);
 }
 
@@ -1315,15 +1349,14 @@
   gap: 1rem;
   color: var(--music-ink-soft);
   font-family: var(--mono);
-  font-size: 0.55rem;
+  font-size: var(--type-micro);
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em;
 }
 
 .music-timeline__meta > span:last-child {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.375rem;
   color: var(--music-ink);
 }
 
@@ -1357,13 +1390,13 @@
   min-width: 0;
   align-items: center;
   flex-shrink: 0;
-  gap: 0.3rem;
+  gap: 0.25rem;
   padding-left: 1rem;
   border-left: 1px solid var(--music-line);
 }
 
 .music-play-button {
-  margin-inline: 0.08rem;
+  margin-inline: 0.25rem;
 }
 
 .music-play-button svg.lucide-play {
@@ -1372,57 +1405,17 @@
 
 .music-output-chip {
   flex-shrink: 0;
-  --cladd-theme: var(--music-signal);
-  --cladd-primary: var(--music-signal);
-  --cladd-on-primary: var(--music-paper-raised);
-  --cladd-outline: var(--music-line);
-  color: var(--music-ink) !important;
-  font-family: var(--mono);
   white-space: nowrap;
 }
 
-.music-output-chip svg {
-  width: 0.72rem;
-  height: 0.72rem;
-}
-
+/* Inline empty state (tile + copy, see .music-empty-icon). The row keeps the
+   loaded console's identity-row rhythm so the swap is a cross-fade in place. */
 .music-player-empty {
-  display: grid;
-  min-height: 4.7rem;
-  grid-template-columns: 2.7rem minmax(0, 1fr);
+  display: flex;
+  min-height: 4.5rem;
   align-items: center;
   gap: 0.75rem;
-}
-
-.music-player-empty > span {
-  display: grid;
-  width: 2.65rem;
-  aspect-ratio: 1;
-  place-items: center;
-  border-radius: 0.55rem;
-  background: oklch(0.92 0.018 110);
-  color: var(--music-ink-soft);
-}
-
-.music-player-empty > span svg {
-  width: 1.1rem;
-  height: 1.1rem;
-}
-
-.music-player-empty > div {
-  display: grid;
-  gap: 0.18rem;
-}
-
-.music-player-empty strong {
-  font-size: 0.76rem;
-}
-
-.music-player-empty p {
-  margin: 0;
-  color: var(--music-ink-soft);
-  font-size: 0.62rem;
-  line-height: 1.45;
+  padding: 1rem 0;
 }
 
 /* Header pinned, tape taking the rest: the `minmax(0, 1fr)` row is what lets
@@ -1434,33 +1427,40 @@
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--music-line);
-  border-radius: 0.72rem;
+  border-radius: var(--radius-card);
   background: var(--music-paper-raised);
 }
 
+/* Card head, same role as 主题设置: kicker + subsection title (14 / 600) on
+   the left, chip and hint pushed right together rather than the chip
+   floating mid-row between them. */
 .music-lyrics-panel > header {
   display: flex;
-  min-height: 3.15rem;
+  /* 3.75rem centres the two-line title block 14px below the card's edge —
+     the same line as the console's NOW PLAYING kicker beside it. */
+  min-height: 3.75rem;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.6rem 0.75rem;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem 0.5rem 1rem;
   border-bottom: 1px solid var(--music-line);
 }
 
 .music-lyrics-panel > header > div {
   display: grid;
-  gap: 0.08rem;
+  gap: 0.125rem;
+  margin-right: auto;
 }
 
 .music-lyrics-panel > header h3 {
-  font-size: 0.76rem;
-  font-weight: 670;
+  font-size: var(--type-title-sm);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
 }
 
 .music-lyrics-panel > header > small {
   color: var(--music-ink-soft);
-  font-size: 0.56rem;
+  font-size: var(--type-caption);
 }
 
 .music-lyric-tape {
@@ -1470,142 +1470,93 @@
   overscroll-behavior: auto;
 }
 
+/* Same selected treatment as the track rows. Height comes from padding, not a
+   min-height on the cladd control: a bare line and a line with a translation
+   now differ by exactly the translation. flex-shrink:0 because cladd's List is
+   a flex column — in the bounded rail tape every row would otherwise shrink
+   to the control's 32px floor and the line would overflow its own row. */
 .music-lyric-row {
   width: 100%;
-  min-height: 3.2rem;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--music-line);
-  border-left: 3px solid transparent;
+  border-left: 2px solid transparent;
   color: var(--music-ink-soft) !important;
   text-align: left;
   cursor: pointer;
   transition:
-    border-color 150ms cubic-bezier(0.25, 1, 0.5, 1),
-    background-color 150ms cubic-bezier(0.25, 1, 0.5, 1),
-    color 150ms cubic-bezier(0.25, 1, 0.5, 1);
+    border-color var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 
+/* align-content:center centres the one baseline-aligned track in whatever
+   height cladd gives the row; without it the track stretched and the line sat
+   in the top third of the row. */
 .music-lyric-row__content {
   display: grid !important;
   width: 100%;
-  min-height: 3.2rem;
-  grid-template-columns: 2.4rem minmax(0, 1fr);
+  grid-template-columns: 2.5rem minmax(0, 1fr);
   align-items: baseline;
+  align-content: center;
   justify-content: stretch !important;
-  gap: 0.6rem !important;
-  padding: 0.6rem 0.75rem 0.6rem 0.45rem !important;
+  gap: 0.5rem !important;
+  padding: 0.625rem 0.75rem 0.625rem 0.875rem !important;
 }
 
 .music-lyric-row:last-child {
   border-bottom: 0;
 }
 
+/* Colour, not weight, marks the current line: a bolder face is wider, and
+   the line used to re-wrap the instant it became current. */
 .music-lyric-row.is-active {
-  border-left-color: var(--music-acid);
-  background: color-mix(in oklab, var(--music-acid) 9%, transparent);
+  border-left-color: var(--primary);
+  background: color-mix(in oklch, var(--muted) 82%, transparent);
   color: var(--music-ink) !important;
-}
-
-.music-lyric-row.is-active .music-lyric-row__title {
-  font-weight: 700;
 }
 
 .music-lyric-row time {
   color: inherit;
   font-family: var(--mono);
-  font-size: 0.57rem;
+  font-size: var(--type-micro);
   font-variant-numeric: tabular-nums;
 }
 
 .music-lyric-row__title {
-  font-size: 0.71rem;
-  font-weight: 630;
-  line-height: 1.42;
+  font-size: var(--type-body);
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 .music-lyric-row__translation {
   color: var(--music-ink-soft);
-  font-size: 0.58rem !important;
-  line-height: 1.35;
-}
-
-.music-lyrics-empty {
-  display: grid;
-  min-height: 5.25rem;
-  grid-template-columns: 1.8rem minmax(0, 1fr);
-  align-items: center;
-  gap: 0.68rem;
-  padding: 0.8rem;
-  color: var(--music-ink-soft);
-}
-
-.music-lyrics-empty > svg {
-  width: 1.2rem;
-  height: 1.2rem;
-}
-
-.music-lyrics-empty > div {
-  display: grid;
-  gap: 0.16rem;
-}
-
-.music-lyrics-empty strong {
-  color: var(--music-ink);
-  font-size: 0.69rem;
-}
-
-.music-lyrics-empty span {
-  font-size: 0.59rem;
-}
-
-.music-inline-error {
-  margin: 0;
-  padding: 0.7rem 0.8rem;
-  border: 1px solid oklch(0.7 0.16 40);
-  border-radius: 0.5rem;
-  background: oklch(0.95 0.045 55);
-  color: oklch(0.47 0.16 35);
-  font-size: 0.66rem;
+  font-size: var(--type-caption);
+  font-weight: 400;
   line-height: 1.45;
 }
 
-.music-device-reconnect-guidance {
-  display: grid;
-  grid-template-columns: 1.8rem minmax(0, 1fr);
-  align-items: start;
-  gap: 0.65rem;
-  margin: 0.65rem 0 0;
-  padding: 0.75rem;
-  border: 1px solid oklch(0.78 0.09 80);
-  border-radius: 0.55rem;
-  background: oklch(0.96 0.04 88);
-  color: oklch(0.39 0.07 73);
-  font-size: 0.64rem;
-  line-height: 1.48;
-}
-
-.music-device-reconnect-guidance > svg {
-  width: 1rem;
-  height: 1rem;
-  margin-top: 0.08rem;
-}
-
-.music-device-reconnect-guidance strong {
-  display: block;
-  margin-bottom: 0.1rem;
-  color: oklch(0.31 0.07 73);
+.music-lyrics-empty {
+  display: flex;
+  min-height: 4.5rem;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
 }
 
 /* The Cladd dialog surface is restyled as an off-canvas firmware drawer.
    纸面皮肤只有这一套：暗色变体曾把亮色前景铺在未染色的浅背景上
-   (白字白底),在补齐全部背景层之前不再提供。 */
+   (白字白底),在补齐全部背景层之前不再提供。
+   The dialog is portalled to <body>, outside .music-studio, so it restates
+   the same aliases rather than inheriting them. It used to restate a warmer
+   paper and a darker hairline of its own, which made the drawer a different
+   material from the page it slides over. */
 .music-firmware-dialog {
-  --music-ink: oklch(0.19 0.018 128);
-  --music-ink-soft: oklch(0.31 0.018 128);
-  --music-paper: oklch(0.972 0.016 102);
-  --music-paper-raised: oklch(0.987 0.009 102);
-  --music-line: oklch(0.78 0.016 112);
-  --music-acid: oklch(0.79 0.19 126);
-  --music-signal: oklch(0.56 0.17 142);
+  --music-ink: var(--foreground);
+  --music-ink-soft: var(--muted-foreground);
+  --music-paper: var(--background);
+  --music-paper-raised: var(--card);
+  --music-line: var(--border);
+  --music-signal: var(--primary);
 }
 
 .music-firmware-dialog {
@@ -1622,21 +1573,32 @@
   width: min(31rem, 100vw) !important;
   max-width: none !important;
   height: 100dvh !important;
-  border-radius: 1rem 0 0 1rem !important;
+  border-radius: var(--radius-card) 0 0 var(--radius-card) !important;
   opacity: 0 !important;
   transform: translateX(100%) !important;
+  /* Closing (the state without data-open): faster than the entrance. The
+     curve is cladd's — it puts `ease-out!` on every closing dialog, and a
+     layered !important outranks anything written here — so this states the
+     curve that actually runs rather than one that never would. Both
+     properties end together on purpose: cladd unmounts the dialog on the
+     FIRST transitionend it sees, so a shorter fade would cut the slide off. */
   transition:
-    transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 180ms cubic-bezier(0.7, 0, 0.84, 0) !important;
+    transform var(--motion-base) var(--ease-out),
+    opacity var(--motion-base) var(--ease-out) !important;
   overflow: hidden;
   color: var(--music-ink);
   background: var(--music-paper) !important;
-  font-family: "Avenir Next", "PingFang SC", "Noto Sans CJK SC", sans-serif;
 }
 
+/* Opening: the transition that runs is the one on the state being entered, so
+   the entrance timing lives here. The fade used to share the exit's ease-in
+   curve, so the panel arrived nearly invisible for its first 100ms. */
 .music-firmware-dialog[data-open] {
   opacity: 1 !important;
   transform: translateX(0) !important;
+  transition:
+    transform var(--motion-slow) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out) !important;
 }
 
 .music-firmware-dialog__content {
@@ -1646,8 +1608,10 @@
   overflow: hidden;
 }
 
+/* The title bar's text starts on the body's 1.25rem inset; the right side is
+   1rem because the square close button carries its own glyph padding. */
 .music-firmware-dialog__content > [data-part="title"] {
-  padding: max(1rem, env(safe-area-inset-top)) 1rem 0.9rem;
+  padding: max(1rem, env(safe-area-inset-top)) 1rem 1rem 1.25rem;
   border-bottom: 1px solid var(--music-line);
 }
 
@@ -1661,13 +1625,13 @@
 
 .music-firmware-dialog__title > div {
   display: grid;
-  gap: 0.12rem;
+  gap: 0.125rem;
 }
 
 .music-firmware-dialog__title strong {
   color: var(--music-ink);
-  font-size: 0.92rem;
-  font-weight: 680;
+  font-size: var(--type-title-sm);
+  font-weight: 600;
 }
 
 /* 固件抽屉的结构段主前缀 .fw-*；旧的 .music-* 名字保留为别名，
@@ -1688,11 +1652,6 @@
   border-bottom: 1px solid var(--music-line);
 }
 
-.fw-deploy .music-section-heading h2,
-.music-deploy .music-section-heading h2 {
-  font-size: 1.7rem;
-}
-
 .fw-deploy-steps,
 .music-deploy-steps {
   display: grid;
@@ -1704,14 +1663,18 @@
 .fw-deploy-steps li,
 .music-deploy-steps li {
   display: grid;
-  min-height: 4.35rem;
-  grid-template-columns: 2rem minmax(0, 1fr);
+  min-height: 4.25rem;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
   align-items: center;
-  gap: 0.65rem;
+  gap: 0.75rem;
+  padding-block: 0.75rem;
   border-bottom: 1px solid var(--music-line);
-  color: oklch(0.5 0.018 125);
+  color: var(--music-ink-soft);
+  transition: color var(--motion-base) var(--ease-out);
 }
 
+/* A step that completes while the drawer is open changes colour on the
+   same clock as cladd's own state fades, instead of snapping. */
 .fw-deploy-steps li > span,
 .music-deploy-steps li > span {
   display: grid;
@@ -1721,27 +1684,32 @@
   border: 1px solid currentColor;
   border-radius: 999px;
   font-family: var(--mono);
-  font-size: 0.58rem;
+  font-size: var(--type-micro);
+  transition:
+    background-color var(--motion-base) var(--ease-out),
+    border-color var(--motion-base) var(--ease-out),
+    color var(--motion-base) var(--ease-out);
 }
 
 .fw-deploy-steps li > div,
 .music-deploy-steps li > div {
   display: grid;
   min-width: 0;
-  gap: 0.18rem;
+  gap: 0.125rem;
 }
 
 .fw-deploy-steps strong,
 .music-deploy-steps strong {
   color: inherit;
-  font-size: 0.73rem;
+  font-size: var(--type-body);
+  font-weight: 500;
 }
 
 .fw-deploy-steps small,
 .music-deploy-steps small {
-  color: inherit;
-  font-size: 0.59rem;
-  line-height: 1.4;
+  color: var(--music-ink-soft);
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
 .fw-deploy-steps li.is-current,
@@ -1774,17 +1742,17 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 1rem 0 0;
   border: 1px solid var(--music-line);
-  border-radius: 0.55rem;
+  border-radius: var(--radius-card);
   overflow: hidden;
 }
 
 .fw-device-facts div,
 .music-device-facts div {
   display: grid;
-  min-height: 3.6rem;
+  min-height: 3.5rem;
   align-content: center;
   gap: 0.25rem;
-  padding: 0.65rem;
+  padding: 0.625rem 0.75rem;
   border-right: 1px solid var(--music-line);
   border-bottom: 1px solid var(--music-line);
 }
@@ -1802,7 +1770,7 @@
 .fw-device-facts dt,
 .music-device-facts dt {
   color: var(--music-ink-soft);
-  font-size: 0.57rem;
+  font-size: var(--type-micro);
 }
 
 .fw-device-facts dd,
@@ -1810,50 +1778,49 @@
   margin: 0;
   overflow: hidden;
   font-family: var(--mono);
-  font-size: 0.68rem;
+  font-size: var(--type-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.fw-recovery-acknowledgement,
-.music-recovery-acknowledgement {
-  display: grid;
-  grid-template-columns: 1.35rem minmax(0, 1fr);
-  align-items: start;
-  gap: 0.65rem;
-  margin-top: 1rem;
-  padding: 0.85rem;
-  border: 1px solid var(--music-line);
-  border-radius: 0.55rem;
-  background: var(--music-paper-raised);
+/* A cladd Surface rendered as the <label>: the face (fill + outline) is the
+   one the drawer's notices wear; only the layout and corner are set here. */
+.fw-recovery-acknowledgement {
+  border-radius: var(--radius-card);
   cursor: pointer;
 }
 
-.fw-recovery-checkbox,
-.music-recovery-checkbox {
+.fw-recovery-acknowledgement__content {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.75rem;
+  padding: 0.75rem;
+}
+
+.fw-recovery-checkbox {
   margin-top: 0.04rem;
 }
 
-.fw-recovery-acknowledgement > span,
-.music-recovery-acknowledgement > span {
+.fw-recovery-acknowledgement__content > span {
   color: var(--music-ink-soft);
-  font-size: 0.62rem;
-  line-height: 1.48;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
 
-.fw-recovery-acknowledgement strong,
-.music-recovery-acknowledgement strong {
+.fw-recovery-acknowledgement strong {
   display: block;
-  margin-bottom: 0.12rem;
+  margin-bottom: 0.125rem;
   color: var(--music-ink);
-  font-size: 0.7rem;
+  font-size: var(--type-body);
+  font-weight: 500;
 }
 
 .fw-deploy-actions,
 .music-deploy-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.55rem;
+  gap: 0.5rem;
   margin-top: 0.75rem;
 }
 
@@ -1862,74 +1829,46 @@
   min-width: 0;
 }
 
-/* Inside the firmware drawer the alert sits right below the action row and
-   right above the reconnect card — give it breathing room on both sides. */
-.music-firmware-dialog .music-inline-error {
-  margin: 0.75rem 0;
-}
-
-.fw-recovery-guide,
-.music-recovery-guide {
+/* The recovery guide is a <Callout>; its body is a list of steps rather than
+   a paragraph, set in the callout's own body role. */
+.fw-recovery-guide ol {
   display: grid;
-  gap: 0.55rem;
-  margin-top: 1rem;
-  padding: 1rem;
-  border-radius: 0.65rem;
-  background: var(--music-ink);
-  color: var(--music-paper);
-}
-
-.fw-recovery-guide > span,
-.music-recovery-guide > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: var(--music-acid);
-  font-family: var(--mono);
-  font-size: 0.57rem;
-  letter-spacing: 0.07em;
-}
-
-.fw-recovery-guide > span svg,
-.music-recovery-guide > span svg {
-  width: 0.78rem;
-  height: 0.78rem;
-}
-
-.fw-recovery-guide h3,
-.music-recovery-guide h3 {
+  gap: 0.25rem;
   margin: 0;
-  font-size: 0.86rem;
-}
-
-.fw-recovery-guide ol,
-.music-recovery-guide ol {
-  display: grid;
-  gap: 0.4rem;
-  margin: 0;
-  padding-left: 1.1rem;
-  color: oklch(0.8 0.012 104);
-  font-size: 0.62rem;
+  padding-left: 1rem;
+  color: var(--music-ink-soft);
+  font-size: var(--type-caption);
   line-height: 1.45;
+  list-style: decimal;
 }
 
 
 @media (min-width: 70rem) {
   .music-studio {
+    --music-gutter: 2rem;
     grid-template-columns: minmax(22rem, 0.72fr) minmax(32rem, 1.28fr);
     align-items: stretch;
   }
 
+  /* Side by side the gutter only pads the divider: the library's outer edge
+     stays on the page gutter (under the hero) and the stage's on the far one.
+     Both columns open 1rem below the hero rule, like every other tab. */
   .music-library {
-    padding: clamp(1.5rem, 2.4vw, 2.25rem);
+    padding: 1rem var(--music-gutter) var(--music-gutter) 0;
+  }
+
+  /* The stage opens on hairline-topped rows whose kicker sits 14px down (1px
+     rule + a 2.5rem row centring a 14px line); dropping the library's kicker
+     by the same 14px puts SOURCE / NOW PLAYING / LYRICS on one line. */
+  .music-library__header {
+    padding-top: 0.875rem;
   }
 
   .music-stage {
-    padding: clamp(1.35rem, 2vw, 1.85rem);
+    padding: 1rem 0 var(--music-gutter) var(--music-gutter);
     border-top: 0;
     border-left: 1px solid var(--music-line);
   }
-
 }
 
 /* Exact complement of the two-column breakpoint: the sections stack, and DOM
@@ -1939,6 +1878,13 @@
    neither section unmounts; the seam hairline moves to the library so it
    stays between the sections instead of capping the page. */
 @media not all and (min-width: 70rem) {
+  /* Stacked, the console's top rule sat one padding below another rule (the
+     page heading's, or the seam above the stage) — two parallel hairlines
+     18px apart. Side by side it is the top edge of the console row. */
+  .music-now-playing {
+    border-top: 0;
+  }
+
   .music-studio.has-track .music-stage {
     order: -1;
     border-top: 0;
@@ -1956,16 +1902,6 @@
 }
 
 @media (max-width: 32rem) {
-  .music-library,
-  .music-stage {
-    padding: 1rem;
-  }
-
-  .music-account-strip button:not([aria-label]) {
-    padding-inline: 0.55rem;
-    font-size: 0.62rem;
-  }
-
   .music-qr-panel {
     grid-template-columns: 1fr;
   }
@@ -1973,14 +1909,6 @@
   .music-qr-code {
     width: min(10rem, 100%);
     margin-inline: auto;
-  }
-
-  .music-search__controls {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .music-search-submit {
-    width: 100%;
   }
 
   .music-track-row__content {
@@ -1999,26 +1927,18 @@
     display: none;
   }
 
-  .music-stage__header {
-    align-items: center;
-  }
-
-  .pixel-lyric-screen figcaption {
-    font-size: 0.5rem;
-  }
-
   .music-output-chip {
     display: none;
   }
 
   .music-now-playing__main {
     grid-template-columns: auto minmax(0, 1fr);
-    gap: 0.75rem 0.8rem;
+    gap: 0.75rem;
   }
 
   .music-cover--console {
     width: 4rem;
-    font-size: 1.15rem;
+    font-size: var(--type-title-lg);
   }
 
   .music-transport {
@@ -2054,12 +1974,10 @@
 }
 
 @media (pointer: coarse) {
-  /* cladd 控件的触控高度由手机端的 --spacing-cladd-* 统一提档，这里只补
-     非 cladd 的自定义行。旧写法单独点名 .music-device-trigger，导致它比
-     同一行的 .music-mirror-toggle 高出 20px。 */
+  /* 行高同样交给 cladd：ListButton 的最小高度跟着手机端的 --spacing-cladd-*
+     提档，这里只关掉双击缩放的等待。 */
   .music-track-row,
   .music-lyric-row {
-    min-height: 2.75rem;
     touch-action: manipulation;
   }
 }

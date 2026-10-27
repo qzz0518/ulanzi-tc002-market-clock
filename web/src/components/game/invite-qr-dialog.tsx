@@ -33,19 +33,32 @@ const bodyStyle: CSSProperties = {
 const descriptionStyle: CSSProperties = {
   margin: 0,
   color: "var(--muted-foreground)",
-  fontSize: "0.66rem",
-  lineHeight: 1.6,
+  fontSize: "var(--type-caption)",
+  lineHeight: 1.45,
   textAlign: "center",
+  textWrap: "balance",
 };
 
 const addressStyle: CSSProperties = {
   maxWidth: "100%",
+  minHeight: "1lh",
   overflowWrap: "anywhere",
   color: "var(--muted-foreground)",
   fontFamily: "var(--mono)",
-  fontSize: "0.62rem",
+  fontSize: "var(--type-micro)",
   textAlign: "center",
   userSelect: "all",
+};
+
+// Same box as the QR it stands in for (.device-access-qr: 11rem + 1px border),
+// so the dialog does not grow a QR's height when /api/access answers.
+const pendingStyle: CSSProperties = {
+  display: "grid",
+  width: "calc(11rem + 2px)",
+  height: "calc(11rem + 2px)",
+  placeItems: "center",
+  padding: "1rem",
+  boxSizing: "border-box",
 };
 
 export function InviteQrDialog({
@@ -85,15 +98,15 @@ export function InviteQrDialog({
       <div style={bodyStyle}>
         <p style={descriptionStyle}>{description}</p>
         {url ? (
-          <>
-            <div className="device-access-qr" aria-label="邀请二维码">
-              <QRCodeSVG value={url} size={176} level="M" marginSize={2} bgColor="#ffffff" fgColor="#111511" />
-            </div>
-            <code style={addressStyle}>{url}</code>
-          </>
+          <div className="device-access-qr" aria-label="邀请二维码">
+            <QRCodeSVG value={url} size={176} level="M" marginSize={2} bgColor="#ffffff" fgColor="#111511" />
+          </div>
         ) : (
-          <p style={descriptionStyle} role="status">正在获取局域网地址…</p>
+          <div style={pendingStyle}>
+            <p style={descriptionStyle} role="status">正在获取局域网地址…</p>
+          </div>
         )}
+        <code style={addressStyle}>{url}</code>
         {hint}
       </div>
     </Dialog>

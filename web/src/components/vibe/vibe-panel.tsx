@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Chip, Surface } from "@cladd-ui/react";
+import { Button, Chip, Spinner, Surface } from "@cladd-ui/react";
 import { Gauge, Info, RefreshCw, Satellite, TriangleAlert } from "lucide-react";
+import { Callout } from "@/components/callout";
 import { jsonApi } from "@/lib/api";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import { useAppToast } from "@/lib/use-app-toast";
-import { cn, errorMessage } from "@/lib/utils";
+import { errorMessage } from "@/lib/utils";
 import {
   formatVibeRelativeTime,
   toggleVibeStar,
@@ -142,8 +143,8 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
   if (loading) {
     return (
       <main className="vibe-shell">
-        <div className="loading-state" role="status">
-          <span className="loading-mark" aria-hidden="true" />
+        <div className="loading-state motion-enter" role="status">
+          <Spinner size="lg" />
           <strong>正在读取 VIBE</strong>
           <span>正在查看本机各代理的登录…</span>
         </div>
@@ -203,10 +204,11 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
               type="button"
               color="neutral"
               disabled={refreshing}
+              aria-busy={refreshing}
               className="vibe-strip__refresh"
               onClick={() => void load(true)}
             >
-              <RefreshCw aria-hidden="true" />刷新
+              <RefreshCw aria-hidden="true" className={refreshing ? "is-spinning" : undefined} />刷新
             </Button>
           </div>
         </div>
@@ -216,39 +218,38 @@ export function VibePanel({ firmwareMode }: VibePanelProps) {
           // info mark; only a collection that actually failed earns the amber
           // triangle. Dressing a setup step as a fault is the thing this page
           // used to do wrong.
-          <div className={cn("vibe-setup", status.error && "is-error")} role="status">
-            {status.error ? <TriangleAlert aria-hidden="true" /> : <Info aria-hidden="true" />}
-            <div>
-              <strong>这个服务读不到任何代理登录</strong>
-              {/* Two situations produce the same empty panel and they need
-                  opposite actions, so the container check decides which one to
-                  lead with rather than making the reader guess. */}
-              {status.ingest?.containerized
-                ? (
-                  <p>
-                    它跑在容器里，读的是容器内部的凭据，<strong>看不到你电脑上的登录</strong> ——
-                    这不是故障。在装了 Claude Code / Codex 的那台机器上跑一个采集器把额度推过来即可。
-                  </p>
-                )
-                : (
-                  <p>
-                    两种可能：① 这台机器上还没登录过 Claude Code、Codex CLI、OpenCode、Grok CLI
-                    中的任何一个 —— 登录后回来刷新即可；② 这个服务不在你日常写代码的那台机器上，
-                    它读的是自己所在机器的凭据 —— 那就在有登录的那台机器上跑个采集器推过来。
-                  </p>
-                )}
-              <p>在此之前时钟会显示 OFFLINE 提示帧，不会编造数字。</p>
-              <Button
-                type="button"
-                color="neutral"
-                className="vibe-setup__action"
-                onClick={() => setRemoteOpen(true)}
-              >
+          <Callout
+            className="vibe-setup"
+            icon={status.error ? TriangleAlert : Info}
+            tone={status.error ? "warning" : "neutral"}
+            role="status"
+            title="这个服务读不到任何代理登录"
+            action={(
+              <Button type="button" color="neutral" onClick={() => setRemoteOpen(true)}>
                 <Satellite aria-hidden="true" />配置远程采集
               </Button>
-              {status.error && <p className="vibe-setup__error">本次采集的失败原因：{status.error}</p>}
-            </div>
-          </div>
+            )}
+          >
+            {/* Two situations produce the same empty panel and they need
+                opposite actions, so the container check decides which one to
+                lead with rather than making the reader guess. */}
+            {status.ingest?.containerized
+              ? (
+                <p>
+                  它跑在容器里，读的是容器内部的凭据，<strong>看不到你电脑上的登录</strong> ——
+                  这不是故障。在装了 Claude Code / Codex 的那台机器上跑一个采集器把额度推过来即可。
+                </p>
+              )
+              : (
+                <p>
+                  两种可能：① 这台机器上还没登录过 Claude Code、Codex CLI、OpenCode、Grok CLI
+                  中的任何一个 —— 登录后回来刷新即可；② 这个服务不在你日常写代码的那台机器上，它读的是自己所在机器的凭据
+                  —— 那就在有登录的那台机器上跑个采集器推过来。
+                </p>
+              )}
+            <p>在此之前时钟会显示 OFFLINE 提示帧，不会编造数字。</p>
+            {status.error && <p className="vibe-setup__error">本次采集的失败原因：{status.error}</p>}
+          </Callout>
         )}
 
         <div className="vibe-body">

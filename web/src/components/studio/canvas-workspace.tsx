@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -13,6 +14,7 @@ import {
   ImagePlus,
   Move,
   Pencil,
+  Plus,
   QrCode,
   Redo2,
   RotateCcw,
@@ -58,8 +60,10 @@ import {
 } from "@/lib/pixel-text-block";
 import { cn, errorMessage } from "@/lib/utils";
 import { useAppToast } from "@/lib/use-app-toast";
+import { usePhoneTier } from "@/lib/use-phone-tier";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import type { BusyAction, ContentItemConfig } from "@/types";
+import { Disclosure } from "@/components/disclosure";
 import { InviteQrDialog } from "@/components/game/invite-qr-dialog";
 import { WorkspaceActions } from "./workspace-actions";
 
@@ -249,6 +253,7 @@ interface SwatchPickerProps {
 // One swatch row, used by both the pen and the text backdrop — a second colour
 // control built by hand would drift from this one on the first restyle.
 function SwatchPicker({ label, value, active = true, onSelect }: SwatchPickerProps) {
+  const custom = !PALETTE.includes(value);
   return (
     <div className="palette" aria-label={label}>
       {PALETTE.map((swatch) => (
@@ -262,13 +267,21 @@ function SwatchPicker({ label, value, active = true, onSelect }: SwatchPickerPro
           onClick={() => onSelect(swatch)}
         />
       ))}
-      <Input
-        className="custom-color"
-        type="color"
-        value={hexColor(value)}
-        inputComponentProps={{ "aria-label": `${label}（自定义）` }}
-        onChange={(nextValue) => onSelect(Number.parseInt(nextValue.slice(1), 16))}
-      />
+      {/* A native colour well stretched over a swatch-sized tile: cladd has no
+          colour control, and a sized cladd Input could never match the swatches
+          once touch layouts grow them to 44px. It lights up like a swatch when
+          the colour came from it. */}
+      <label
+        className={cn("color-swatch custom-color", active && custom && "is-active")}
+        style={{ "--swatch-value": hexColor(value) } as CSSProperties}
+      >
+        <input
+          type="color"
+          value={hexColor(value)}
+          aria-label={`${label}（自定义）`}
+          onChange={(event) => onSelect(Number.parseInt(event.currentTarget.value.slice(1), 16))}
+        />
+      </label>
     </div>
   );
 }
@@ -320,6 +333,9 @@ export function CanvasWorkspace({
   const [tool, setTool] = useState<CanvasTool>("pen");
   const [color, setColor] = useState(0x00ff66);
   const [showGrid, setShowGrid] = useState(true);
+  // The command bar's buttons step up to 28px on the phone tier; a sm Switch
+  // would stay 24px there, so the switches step up to md with them.
+  const switchSize = usePhoneTier() ? "md" : "sm";
   const [cursor, setCursor] = useState(0);
   const [coordinate, setCoordinate] = useState<[number, number]>([0, 0]);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -1099,7 +1115,7 @@ export function CanvasWorkspace({
               {zos ? " · 写入后由时钟自己拉取" : null}
             </span>
           </div>
-          <Button type="button" size="sm" onClick={onCreateTarget}>新建画板内容</Button>
+          <Button type="button" onClick={onCreateTarget}><Plus />新建画板内容</Button>
           <WorkspaceActions
             busy={busy}
             dirty={dirty}
@@ -1172,15 +1188,15 @@ export function CanvasWorkspace({
 
         <section className="canvas-command-bar">
           <label className="grid-toggle">
-            <Switch as="span" input checked={showGrid} onChange={setShowGrid} />
+            <Switch as="span" size={switchSize} input checked={showGrid} onChange={setShowGrid} />
             显示网格
           </label>
           <label className="grid-toggle">
-            <Switch as="span" input checked={live} onChange={toggleLive} />
+            <Switch as="span" size={switchSize} input checked={live} onChange={toggleLive} />
             {zos ? "涂鸦墙" : "直播上屏"}
           </label>
           {live && (
-            <Button type="button" size="sm" variant="transparent" onClick={() => setLiveInviteOpen(true)}>
+            <Button type="button" size="sm" variant="transparent" className="motion-enter" onClick={() => setLiveInviteOpen(true)}>
               <QrCode />邀请涂鸦
             </Button>
           )}
@@ -1189,7 +1205,7 @@ export function CanvasWorkspace({
             <Button type="button" variant="transparent" outline={false} size="sm" square disabled={future.length === 0} onClick={redo} aria-label="重做" title="重做"><Redo2 /></Button>
             <Button type="button" color="red" variant="transparent" outline={false} size="sm" square onClick={clear} aria-label="清空画布" title="清空画布"><Trash2 /></Button>
           </div>
-          <Button type="button" size="sm" onClick={writeAsChannel}><FilePlus2 />写入为单独 APP</Button>
+          <Button type="button" size="sm" onClick={writeAsChannel}><FilePlus2 />写入为独立 App</Button>
           <Button type="button" color="brand" size="sm" onClick={writeToChannel}><Save />写入到所选频道</Button>
         </section>
 
@@ -1241,23 +1257,27 @@ export function CanvasWorkspace({
                 </Chip>
               )}
             </div>
-            <p className="m-0 text-[0.6rem] leading-[1.5] text-cladd-fg-softer">
+            <p className="canvas-help">
               {textFace === "shared-12"
                 ? `与固件同一套字模，一行最多 ${faceBudget} 个全角字（半角字母与标点各占 6px，还能多挤几个）；放不下会拒绝落字并提示能放几个字。`
                 : `${TEXT_FACE_META[textFace].charset}，一行大约 ${faceBudget} 个字符；中日文请切到「${TEXT_FACE_META["shared-12"].name}」。`}
             </p>
             {textBlock.missing.length > 0 && (
-              <p className="cladd-color-yellow m-0 text-[0.6rem] leading-[1.5] text-cladd-primary">
+              <p className="canvas-help is-warning">
                 字库里没有这些字，落字时会留空：{textBlock.missing.join(" ")}
               </p>
             )}
-            <label className="canvas-switch-row">
-              <span><strong>背景填色</strong><small>整屏铺满底色，只留笔画是文字颜色</small></span>
-              <Switch as="span" input checked={textFill} onChange={setTextFill} />
-            </label>
-            {textFill && (
-              <SwatchPicker label="整屏底色" value={textFillColor} onSelect={setTextFillColor} />
-            )}
+            {/* One grid item, so the closed disclosure does not leave an empty
+                section gap behind it. */}
+            <div>
+              <label className="canvas-switch-row">
+                <span><strong>背景填色</strong><small>整屏铺满底色，只留笔画是文字颜色</small></span>
+                <Switch as="span" input checked={textFill} onChange={setTextFill} />
+              </label>
+              <Disclosure open={textFill} className="canvas-disclosure" bodyClassName="canvas-disclosure-body">
+                <SwatchPicker label="整屏底色" value={textFillColor} onSelect={setTextFillColor} />
+              </Disclosure>
+            </div>
             <Button type="button" color={tool === "text" ? "brand" : "neutral"} onClick={() => activateTool("text")}><Type />在画布上落字</Button>
           </section>
 
@@ -1281,7 +1301,8 @@ export function CanvasWorkspace({
             <div className={cn("canvas-image-preview", !imageUrl && "is-empty")}>
               {imageUrl && imageView && crop ? (
                 <div
-                  className="canvas-crop-stage"
+                  key={imageUrl}
+                  className="canvas-crop-stage motion-enter"
                   role="application"
                   tabIndex={0}
                   aria-label={`裁切框，当前 ${Math.round(crop.width)} 乘 ${Math.round(crop.height)} 像素；方向键移动，加减号缩放`}
@@ -1364,7 +1385,7 @@ export function CanvasWorkspace({
                 )}
               </div>
             )}
-            <p className="m-0 text-[0.6rem] leading-[1.5] text-cladd-fg-softer">
+            <p className="canvas-help">
               拖内部挪位置、拖四角改大小，空白处按下可以重新框；换比例会重新框住整张图。
               方形图标想整个进来，就选「正方形 1:1」加「完整放入」。框得越小画面越清楚。
             </p>

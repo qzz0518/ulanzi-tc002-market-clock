@@ -1,6 +1,7 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { CircleAlert, HardDriveDownload, Info, RefreshCw, RotateCcw, Trash2, Upload } from "lucide-react";
-import { Button, Checkbox, Surface } from "@cladd-ui/react";
+import { Button, Checkbox, Spinner } from "@cladd-ui/react";
+import { Callout } from "@/components/callout";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import {
   ZOS_FIRMWARE_MAX_BYTES,
@@ -103,28 +104,33 @@ export function ZosFirmwareUpdate({
   // Which image is in the slot decides the wording of the consent and the
   // button below — see the comment there.
   const restoreArmed = isRestoreArmed(status);
+  // The card lands at the top of the column, above the button just pressed. On a
+  // short screen the column is scrolled down to that button, so bring the card in.
+  const watchRef = useRef<HTMLDivElement | null>(null);
+  const watching = watch !== null;
+  useEffect(() => {
+    if (!watching) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    watchRef.current?.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+  }, [watching]);
 
   return (
     <div className="device-settings-fields">
       {watch !== null && (
-        <div className="device-settings-note zos-fw__watch-slot">
-          <Surface
-            variant="solid"
-            outline
-            color={watch.phase === "installing" ? "orange" : "brand"}
-            contentClassName="zos-fw__watch"
+        <div ref={watchRef} className="device-settings-note motion-enter">
+          {/* One live region for the whole card: the device leaving and coming
+              back is the only thing here that changes on its own. */}
+          <Callout
+            icon={HardDriveDownload}
+            title={watch.label}
+            tone={watch.phase === "installing" ? "warning" : "neutral"}
+            role="status"
           >
-            {/* One live region for the whole card: the device leaving and
-                coming back is the only thing here that changes on its own. */}
-            <p role="status" aria-live="polite">
-              <strong>{watch.label}</strong>
-              <span>{watch.detail}</span>
-              <small>
-                已过 {watch.elapsed}
-                {watch.receipt === null ? "" : ` · ${watch.receipt}`}
-              </small>
+            <p>{watch.detail}</p>
+            <p className="zos-fw__elapsed">
+              {`已过 ${watch.elapsed}${watch.receipt === null ? "" : ` · ${watch.receipt}`}`}
             </p>
-          </Surface>
+          </Callout>
         </div>
       )}
 
@@ -168,7 +174,7 @@ export function ZosFirmwareUpdate({
           />
 
           {gate === "ready" && status?.packed === true && (
-            <div className="device-settings-note zos-fw__decision">
+            <div className="device-settings-note zos-fw__decision motion-enter">
               {/* Consent and the button it gates are one decision, grouped like
                   the sideload panel's: say what will happen, then ask. */}
               {/* The consent has to describe the image that is ACTUALLY armed.
@@ -249,7 +255,7 @@ function ZosImageFacts({
   // 另一个窗口里打完包）。有镜像的时候，对话框脚上那颗「重新读取」已经把这一页
   // 全部重读一遍了——同一句话在一屏里摆两遍，是家具，不是功能。
   const reread = (
-    <Button type="button" size="sm" variant="transparent" outline disabled={busy} onClick={onRefreshStatus}>
+    <Button type="button" size="sm" disabled={busy} onClick={onRefreshStatus}>
       <RefreshCw />重新读取
     </Button>
   );
@@ -269,7 +275,7 @@ function ZosImageFacts({
   if (status === null) {
     return (
       <p className="device-settings-note zos-fw__note" role="status">
-        <Info aria-hidden="true" />
+        <Spinner size="sm" color="brand" />
         <span>正在读取镜像信息…</span>
       </p>
     );
@@ -301,7 +307,7 @@ function ZosImageFacts({
     <>
       {/* Same read-only row markup as 设备状态 above it: one clock, one table
           shape. */}
-      <dl className="device-settings-fields device-info-list">
+      <dl className="device-settings-fields device-info-list motion-enter">
         <div className="device-setting-field">
           <div className="device-setting-copy">
             <dt>来源</dt>
@@ -315,7 +321,14 @@ function ZosImageFacts({
               <dt>{row.label}</dt>
               {row.note && <p>{row.note}</p>}
             </div>
-            <dd className="device-setting-control device-info-value zos-fw__value">{row.value}</dd>
+            {/* Mono only where a person compares characters (build id, MD5);
+                sizes, partitions and ages read as ordinary values. */}
+            <dd className={row.key === "md5" || row.key === "version"
+              ? "device-setting-control device-info-value zos-fw__value"
+              : "device-setting-control device-info-value"}
+            >
+              {row.value}
+            </dd>
           </div>
         ))}
       </dl>
@@ -387,7 +400,6 @@ function UploadRow({
         {uploaded && (
           <Button
             type="button"
-            size="sm"
             color="neutral"
             variant="transparent"
             outline

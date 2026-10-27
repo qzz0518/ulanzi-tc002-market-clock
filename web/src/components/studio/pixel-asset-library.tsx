@@ -15,6 +15,7 @@ import { Button, Input, Select } from "@cladd-ui/react";
 import { jsonApi } from "@/lib/api";
 import { useAppToast } from "@/lib/use-app-toast";
 import type { FirmwareMode } from "@/lib/firmware-mode";
+import { Disclosure } from "@/components/disclosure";
 
 const CLASSIFICATIONS = [
   { value: "0", label: "全部" },
@@ -133,6 +134,9 @@ export function PixelAssetLibrary({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  // Outlives videoFile so the pending row can still name the file while it
+  // folds away after an import clears the selection.
+  const [videoLabel, setVideoLabel] = useState("");
   const [videoFit, setVideoFit] = useState<"cover" | "contain">("cover");
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
@@ -227,7 +231,8 @@ export function PixelAssetLibrary({
   return (
     <section className="pixel-library" aria-labelledby="pixel-library-title">
       <div className="pixel-library-heading">
-        <div>
+        {/* Same head as the canvas and content pages' main column. */}
+        <div className="preview-copy">
           <h2 id="pixel-library-title">官方社区作品</h2>
           <span>
             {result ? `${result.count} 个公开作品` : "正在连接官方社区"}
@@ -243,78 +248,85 @@ export function PixelAssetLibrary({
       </div>
 
       <div className="pixel-library-controls">
-        <form className="pixel-library-link" onSubmit={(event) => {
-          event.preventDefault();
-          if (source.trim()) void importAsset(source.trim(), "channel");
-        }}>
-          <Input
-            value={source}
-            placeholder="粘贴 Ulanzi contentView 链接"
-            inputComponentProps={{ "aria-label": "Ulanzi 像素素材链接" }}
-            onChange={setSource}
-          />
-          <Button
-            type="submit"
-            color="brand"
-            disabled={!source.trim() || importing !== null}
-          ><Link2 />{importing === `${source.trim()}:channel` ? "导入中" : "加入所选频道"}</Button>
-        </form>
-
-        {/* Layout is inline until the integration pass moves it into globals.css
-            (owned by another workstream in this round). */}
-        <form
-          className="pixel-library-video"
-          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.35rem" }}
-          onSubmit={(event) => {
+        <div className="pixel-library-import">
+          <form className="pixel-library-link" onSubmit={(event) => {
             event.preventDefault();
-            void importVideo("channel");
-          }}
-        >
-          <input
-            ref={videoInputRef}
-            type="file"
-            accept="video/*,.mp4,.mov,.webm,.mkv,.avi"
-            hidden
-            onChange={(event) => setVideoFile(event.target.files?.[0] ?? null)}
-          />
-          <Button
-            type="button"
-            disabled={importing !== null}
-            onClick={() => videoInputRef.current?.click()}
-          ><Upload />导入视频</Button>
-          <Select
-            aria-label="视频画面适配方式"
-            value={videoFit}
-            options={VIDEO_FITS.map((entry) => entry.value)}
-            renderOption={({ value }) => VIDEO_FITS.find((entry) => entry.value === value)?.label ?? value}
-            onChange={(value) => setVideoFit(value as "cover" | "contain")}
-          >{VIDEO_FITS.find((entry) => entry.value === videoFit)?.label}</Select>
-          <Button
-            type="submit"
-            color="brand"
-            disabled={!videoFile || importing !== null}
-          ><Plus />{importing === "video:channel" && videoBusyLabel ? videoBusyLabel : "加入所选频道"}</Button>
-          <Button
-            type="button"
-            disabled={!videoFile || importing !== null}
-            onClick={() => void importVideo("standalone")}
-          ><AppWindow />{importing === "video:standalone" && videoBusyLabel ? videoBusyLabel : "独立 App"}</Button>
-          <span style={{ flexBasis: "100%", fontSize: "0.68rem", opacity: 0.75 }}>
-            {videoFile
-              ? `${videoFile.name} · ${(videoFile.size / (1024 * 1024)).toFixed(1)} MB`
-              : "选择本地视频（≤100MB），服务器转成 52×16 像素动画后进素材库"}
-          </span>
-        </form>
+            if (source.trim()) void importAsset(source.trim(), "channel");
+          }}>
+            <Input
+              value={source}
+              placeholder="粘贴 Ulanzi contentView 链接"
+              inputComponentProps={{ "aria-label": "Ulanzi 像素素材链接" }}
+              onChange={setSource}
+            />
+            <Button
+              type="submit"
+              color="brand"
+              disabled={!source.trim() || importing !== null}
+            ><Link2 />{importing === `${source.trim()}:channel` ? "导入中" : "加入所选频道"}</Button>
+          </form>
+
+          <form
+            className="pixel-library-video"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void importVideo("channel");
+            }}
+          >
+            <input
+              ref={videoInputRef}
+              type="file"
+              accept="video/*,.mp4,.mov,.webm,.mkv,.avi"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                setVideoFile(file);
+                if (file) setVideoLabel(`${file.name} · ${(file.size / (1024 * 1024)).toFixed(1)} MB`);
+              }}
+            />
+            <div className="pixel-library-video-pick">
+              <Button
+                type="button"
+                disabled={importing !== null}
+                onClick={() => videoInputRef.current?.click()}
+              ><Upload />导入视频</Button>
+              <span className="pixel-library-hint">选择本地视频（≤100MB），服务器转成 52×16 像素动画后进素材库</span>
+            </div>
+            {/* Fit and destination only mean something once a file is picked, so
+                they unfold with it instead of sitting there disabled. */}
+            <Disclosure open={videoFile !== null} className="pixel-library-video-disclosure" bodyClassName="pixel-library-video-pending">
+              <span className="pixel-library-video-file" title={videoLabel}><Film aria-hidden="true" />{videoLabel}</span>
+              <Select
+                aria-label="视频画面适配方式"
+                value={videoFit}
+                options={VIDEO_FITS.map((entry) => entry.value)}
+                renderOption={({ value }) => VIDEO_FITS.find((entry) => entry.value === value)?.label ?? value}
+                onChange={(value) => setVideoFit(value as "cover" | "contain")}
+              >{VIDEO_FITS.find((entry) => entry.value === videoFit)?.label}</Select>
+              <Button
+                type="button"
+                disabled={!videoFile || importing !== null}
+                onClick={() => void importVideo("standalone")}
+              ><AppWindow />{importing === "video:standalone" && videoBusyLabel ? videoBusyLabel : "独立 App"}</Button>
+              <Button
+                type="submit"
+                color="brand"
+                disabled={!videoFile || importing !== null}
+              ><Plus />{importing === "video:channel" && videoBusyLabel ? videoBusyLabel : "加入所选频道"}</Button>
+            </Disclosure>
+          </form>
+        </div>
 
         <div className="pixel-library-discovery">
           <form className="pixel-library-search" onSubmit={submitSearch}>
             <Input
               value={queryDraft}
               placeholder="搜索标题"
+              icon={<Search aria-hidden="true" />}
               inputComponentProps={{ "aria-label": "搜索像素素材" }}
               onChange={setQueryDraft}
             />
-            <Button type="submit" square aria-label="搜索"><Search /></Button>
+            <Button type="submit"><Search />搜索</Button>
           </form>
           <div className="pixel-library-filters">
             <Select
@@ -342,11 +354,23 @@ export function PixelAssetLibrary({
           <Button type="button" size="sm" onClick={() => void load()}>重试</Button>
         </div>
       ) : loading && !result ? (
-        <div className="pixel-library-state" role="status"><span>正在载入官方素材…</span></div>
+        // A page of card-shaped placeholders holds the grid's height, so the
+        // first result swaps in place instead of pushing the footer down.
+        <div key="placeholder" className="pixel-library-list is-placeholder" role="status" aria-label="正在载入官方素材…">
+          {Array.from({ length: 12 }, (_, index) => (
+            <div key={index} className="pixel-library-card" aria-hidden="true">
+              <span className="pixel-library-preview" />
+              <span className="pixel-library-copy"><i /><i /></span>
+              <span className="pixel-library-actions"><i /><i /></span>
+            </div>
+          ))}
+        </div>
       ) : result?.items.length === 0 ? (
-        <div className="pixel-library-state"><span>没有找到匹配的素材。</span></div>
+        <div className="pixel-library-state"><strong>没有找到匹配的素材。</strong></div>
       ) : (
-        <div className="pixel-library-list" aria-busy={loading}>
+        // Keyed apart from the placeholder so the first page fades in over it
+        // once; later pages reuse this node and only dim (see aria-busy CSS).
+        <div key="results" className="pixel-library-list is-results motion-enter" aria-busy={loading}>
           {result?.items.map((item) => {
             const inChannel = added.has(item.id);
             const channelKey = `${item.id}:channel`;
@@ -354,7 +378,15 @@ export function PixelAssetLibrary({
             return (
               <article key={item.id} className="pixel-library-card">
                 <a href={item.detailUrl} target="_blank" rel="noreferrer" className="pixel-library-preview">
-                  <img src={item.previewUrl} alt={`${item.title} 像素素材预览`} loading="lazy" />
+                  {/* Fades in on arrival instead of popping into the dark frame;
+                      an error counts as arrival so the alt text still shows. */}
+                  <img
+                    src={item.previewUrl}
+                    alt={`${item.title} 像素素材预览`}
+                    loading="lazy"
+                    onLoad={(event) => { event.currentTarget.dataset.loaded = "true"; }}
+                    onError={(event) => { event.currentTarget.dataset.loaded = "true"; }}
+                  />
                   <span>{item.animatedPreview ? <><Film /> 动画</> : <><ImageIcon /> 静态</>}</span>
                 </a>
                 <div className="pixel-library-copy">

@@ -755,7 +755,7 @@ describe("常规设置 under ZOS", () => {
   });
 });
 
-describe("canvas: 写入为单独 APP", () => {
+describe("canvas: 写入为独立 App", () => {
   test("the button sits left of 写入到所选频道 and is wired to its own handler", async () => {
     const [canvasSource, appSource] = await Promise.all([
       Bun.file(new URL("../web/src/components/studio/canvas-workspace.tsx", import.meta.url)).text(),
@@ -764,7 +764,7 @@ describe("canvas: 写入为单独 APP", () => {
 
     // Order matters: the user asked for it to the LEFT of the existing action,
     // and in this flex row source order is visual order.
-    const asApp = canvasSource.indexOf("写入为单独 APP");
+    const asApp = canvasSource.indexOf("写入为独立 App");
     const toChannel = canvasSource.indexOf("写入到所选频道");
     expect(asApp).toBeGreaterThan(-1);
     expect(asApp).toBeLessThan(toChannel);

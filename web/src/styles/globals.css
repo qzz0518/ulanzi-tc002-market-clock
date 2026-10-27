@@ -47,6 +47,37 @@
   --radius-cladd-toast: 0.7rem;
   --radius-cladd-popup: 0.7rem;
   --radius-cladd-tooltip: 0.4rem;
+
+  /* Type scale. Hand-written CSS had drifted to 47 font sizes (8px–34px in
+     0.01rem steps); every rule now picks one of these. 10px is the floor:
+     below it CJK glyphs smear on a 1x screen. 10/12/14/16 line up with
+     cladd's --text-cladd-2xs/xs/sm/md, so our labels sit on cladd buttons. */
+  --type-micro: 0.625rem;   /* 10px: mono meta, eyebrows, unit labels */
+  --type-caption: 0.6875rem; /* 11px: help text under a field, timestamps */
+  --type-small: 0.75rem;    /* 12px: field labels, secondary rows */
+  --type-body: 0.8125rem;   /* 13px: list item names, readable copy */
+  --type-title-sm: 0.875rem; /* 14px: subsection heads */
+  --type-title: 1rem;       /* 16px: panel heads */
+  --type-title-lg: 1.125rem; /* 18px: the one primary head per column */
+  --type-headline: 1.5rem;  /* 24px: empty/error states that own a column */
+
+  /* Radius. Controls follow cladd (--radius-cladd-md); anything that frames
+     content matches cladd's Surface corner (2xl = 12px at a 7px base). */
+  --radius-tile: 4px;
+  --radius-control: var(--radius-cladd-md);
+  --radius-card: var(--radius-cladd-2xl);
+
+  /* Motion. base matches cladd's own duration-200 hover/press overlays so a
+     hand-written row and the cladd button inside it change together. */
+  --motion-fast: 140ms;  /* hover, press, colour, exits */
+  --motion-base: 200ms;  /* state flips, popover-sized enters */
+  --motion-slow: 280ms;  /* disclosures, view enters, larger travel */
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-in: cubic-bezier(0.55, 0, 1, 0.45);
+
+  /* The one amber for warnings and stale data (four hand-mixed ambers before). */
+  --tone-warning: oklch(0.52 0.13 75);
 }
 
 .light .cladd-color-brand,
@@ -74,6 +105,22 @@
   --shadow-cladd-cut-outline: 0 0 0 1px var(--border) inset;
   --shadow-cladd-outline: 0 0 0 1px var(--border) inset;
   --shadow-cladd-outline-fill: 0 0 0 1px color-mix(in oklab, var(--foreground) 12%, transparent) inset;
+}
+
+/* The page root, dialogs, popovers and neutral Surfaces sit in cladd's NEUTRAL
+   scope, whose soft inks (0.5/0.65/0.75 grey) differ from the brand scope's
+   above — so `text-cladd-fg-soft` changed shade depending on its ancestor, and a
+   field label in fg-soft rendered lighter than the muted help text under it,
+   and a heading inside a neutral Surface printed 0.32 grey where the same
+   heading on the page printed --foreground. One ink ladder in both scopes. */
+:root.light,
+:root .light,
+.light .cladd-color-neutral,
+.light.cladd-color-neutral {
+  --cladd-fg: var(--foreground);
+  --cladd-fg-soft: oklch(0.38 0.012 110);
+  --cladd-fg-softer: var(--muted-foreground);
+  --cladd-fg-softest: oklch(0.65 0.008 110);
 }
 
 @theme inline {
@@ -133,6 +180,64 @@
 
 #root, .app-container { min-height: 100dvh; }
 
+/* Shared motion primitives — every page draws from these two instead of
+   inventing its own keyframes and curves.
+   .motion-enter: one-shot arrival of something the user just caused (a view
+   swap, a freshly added row, a panel that replaced a placeholder). Set
+   --enter-y to come from above (negative) for things that drop out of a
+   trigger. Never put it on content that is simply there at page load. */
+@keyframes motion-enter {
+  from { opacity: 0; transform: translateY(var(--enter-y, 0.25rem)); }
+}
+/* `backwards`, not `both`: the end state IS the element's own style, and a
+   forwards fill keeps the animation in effect forever — a permanent stacking
+   context and, for transform, a containing block that re-parents any
+   position:fixed descendant. */
+.motion-enter { animation: motion-enter var(--motion-slow) var(--ease-out) backwards; }
+/* .motion-exit: the other half, for something leaving under its own power
+   (a dismissed card). Faster and on --ease-in; the caller unmounts on
+   animationend (check animationName — an arrival fires one too). */
+@keyframes motion-exit {
+  to { opacity: 0; transform: translateY(var(--enter-y, 0.25rem)); }
+}
+.motion-exit { animation: motion-exit var(--motion-fast) var(--ease-in) forwards; pointer-events: none; }
+
+/* <Callout> (components/callout.tsx): the one notice card. Neutral face, tone
+   only in the icon, icon in its own 1rem gutter so wrapped copy aligns. */
+.callout { border-radius: var(--radius-card); }
+.callout__content { display: grid; grid-template-columns: 1rem minmax(0, 1fr); gap: 0.5rem; padding: 0.75rem; }
+.callout__icon { width: 1rem; height: 1rem; color: var(--muted-foreground); }
+.callout__icon.is-success { color: var(--primary); }
+.callout__icon.is-warning { color: var(--tone-warning); }
+.callout__icon.is-error { color: var(--destructive); }
+.callout__body { display: grid; justify-items: start; gap: 0.75rem; min-width: 0; }
+.callout__text { display: grid; gap: 0.25rem; }
+.callout__text > strong { color: var(--foreground); font-size: var(--type-small); font-weight: 600; line-height: 1.35; }
+.callout__text p { max-width: 36rem; margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+
+/* .disclosure: open/close a block of unknown height. Animating
+   grid-template-rows 0fr→1fr reaches the content's real height without
+   measuring it; the single child clips while the track is short. Keep the
+   content mounted and mark it inert while closed so Tab skips it. A
+   transition (not keyframes) so reversing mid-way retargets smoothly. The
+   transition on each state is the one used to ENTER it: closing runs on the
+   shorter clock, so the exit is quicker than the open. */
+.disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--motion-base) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
+}
+.disclosure[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition-duration: var(--motion-slow), var(--motion-base);
+}
+.disclosure > * { min-height: 0; overflow: hidden; }
+/* A chevron that belongs to a disclosure turns with it, on the same clocks. */
+.disclosure-chevron { transition: transform var(--motion-base) var(--ease-out); }
+[aria-expanded="true"] > .disclosure-chevron, .disclosure-chevron[data-open="true"] { transform: rotate(180deg); transition-duration: var(--motion-slow); }
+
 .studio-page {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -141,6 +246,10 @@
   margin-inline: auto;
   padding: 0 1.5rem 1.25rem;
   overflow: hidden;
+  /* Sanctioned layout transition (like .disclosure's rows): the room kept
+     clear for the install prompt opens and closes with the card, instead of
+     the columns' bottom edges jumping when it mounts or leaves. */
+  transition: padding-bottom var(--motion-base) var(--ease-in-out);
 }
 .studio-page.is-canvas-page,
 .studio-page.is-game-page { grid-template-rows: auto auto minmax(0, 1fr); }
@@ -148,13 +257,18 @@
 .studio-header {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(16rem, 1fr) auto minmax(16rem, 1fr);
+  /* Equal 1fr sides keep the tab strip optically centred; minmax(0, …) rather
+     than a 16rem floor, which between 52rem and ~70rem pushed the strip below
+     its own width — the labels wrapped one glyph per line and the page
+     scrolled sideways. The squeeze is handled by shedding (see 64rem below). */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  column-gap: 1rem;
   align-items: center;
   min-height: 3.75rem;
   border-bottom: 1px solid var(--border);
 }
 
-.brand-lockup { display: flex; min-width: 0; align-items: center; gap: 0.65rem; }
+.brand-lockup { display: flex; min-width: 0; align-items: center; gap: 0.625rem; white-space: nowrap; }
 .brand-mark {
   display: grid;
   grid-template-columns: repeat(2, 0.42rem);
@@ -165,28 +279,22 @@
   background: var(--green-soft);
 }
 .brand-mark i { background: var(--primary); }
-.brand-name { font-family: var(--mono); font-size: 0.88rem; letter-spacing: 0.045em; }
-.brand-device { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.73rem; text-overflow: ellipsis; white-space: nowrap; }
+.brand-name { font-family: var(--mono); font-size: var(--type-title-sm); letter-spacing: 0.045em; }
+.brand-device { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-small); text-overflow: ellipsis; white-space: nowrap; }
 .main-tabs { justify-self: center; }
-.main-tabs svg { width: 0.95rem; height: 0.95rem; }
+.main-tab__content { white-space: nowrap; }
 
 .header-actions {
   display: inline-flex;
-  /* justify-self:end sizes this to max-content, so before the mini player
-     arrived nothing here could ever be asked to give way. Now something in it
-     can grow with the track title, and a row that cannot be told "you have this
-     much" would simply run into the tab strip. These two let the flex line
-     shrink inside its grid track instead — the chips and buttons are flex:none,
-     so all of the give comes out of the title. */
   max-width: 100%;
   min-width: 0;
   justify-self: end;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.5rem;
 }
 
-/* 固件身份 + 电量：只排版，颜色和尺度全在 cladd Chip 自己身上。 */
-.firmware-status { display: inline-flex; align-items: center; gap: 0.35rem; }
+/* 固件身份 + 电量 + 链路状态：只排版，颜色和尺度全在 cladd Chip 自己身上。 */
+.firmware-status { display: inline-flex; align-items: center; gap: 0.25rem; }
 .firmware-chip { white-space: nowrap; }
 
 /* 标题行迷你播放器（除音乐页外每一页都在）。壳体、按钮、分隔线全是 cladd
@@ -205,9 +313,10 @@
   min-width: 0;
   flex: none;
   overflow: hidden;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   box-shadow: inset 0 0 0 1px rgb(var(--mini-tint, 128 128 128) / 0.45);
-  transition: box-shadow 320ms ease;
+  /* Only the border's colour changes (a new sleeve's tint): a colour flip. */
+  transition: box-shadow var(--motion-base) var(--ease-out);
 }
 
 /* Ink follows the sleeve, and everything on the panel reads from this one
@@ -304,11 +413,12 @@
   height: 2.4rem;
   flex: none;
   place-items: center;
-  border-radius: 6px;
+  /* Concentric with the panel: its corner minus the ~2px the sleeve sits in. */
+  border-radius: calc(var(--radius-card) - 2px);
   background: var(--muted);
   color: var(--muted-foreground);
   font-family: var(--mono);
-  font-size: 0.8rem;
+  font-size: var(--type-body);
   /* A hairline in the ink keeps a sleeve the same tone as the blurred backdrop
      from melting into it — it IS the same image, blurred. */
   box-shadow: 0 0 0 1px rgb(var(--mini-ink, 22 26 34) / 0.18);
@@ -332,8 +442,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mini-player__title { font-size: 0.74rem; line-height: 1.25; }
-.mini-player__artist { font-size: 0.64rem; line-height: 1.25; }
+.mini-player__title { font-size: var(--type-small); line-height: 1.25; }
+.mini-player__artist { font-size: var(--type-micro); line-height: 1.25; }
 .mini-player__rule { flex: none; }
 
 /* 右端八根条。纯 CSS 动画，不接 Web Audio —— 见组件里的说明。 */
@@ -395,7 +505,7 @@
   .mini-player__copy { display: none; }
 }
 
-/* 侧载抽屉正文的纵向节奏（<FirmwarePanelBody>，音乐页与游戏页共用）。
+/* 侧载抽屉正文的纵向节奏（<FirmwarePanelBody>；游戏侧载退役后只剩音乐页这一个宿主）。
    Every section used to carry its own margin-top, so the rhythm was whatever
    each piece happened to bring: measured on the live console at 1440×2 the
    top-level gaps ran 16 / 0 / 16 / 12 / 12 / 12 / 16 px. The 0 is the bug —
@@ -439,20 +549,13 @@
   margin-block: 0;
 }
 
-.device-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  color: var(--muted-foreground);
-  font-family: var(--mono);
-  font-size: 0.7rem;
-}
-.device-status__dot { width: 0.48rem; height: 0.48rem; }
-.device-status.is-good { color: var(--muted-foreground); }
-.device-status.is-good .device-status__dot { color: var(--primary); }
-.device-status.is-warn { color: oklch(0.62 0.16 75); }
-.device-status.is-offline { color: var(--muted-foreground); }
-.device-settings-trigger svg { width: 0.95rem; height: 0.95rem; }
+/* 链路状态是一枚 cladd Chip（与固件 Chip 同尺度），这里只给圆点上色。 */
+.device-status__dot { color: var(--muted-foreground); transition: color var(--motion-base) var(--ease-out); }
+.device-status__dot.is-good { color: var(--primary); }
+.device-status__dot.is-warn { color: var(--tone-warning); }
+/* The same reading as a dot inside the firmware chip, for ≤34rem (see there).
+   7px: the size StatusDot draws inside the status chip's 16px icon slot. */
+.firmware-chip__tone { display: none; width: 0.4375rem; height: 0.4375rem; flex: none; border-radius: 50%; background: currentColor; }
 
 .device-settings-dialog {
   /* 这一屏的左右内缩只有一个来源。行是 padding、说明块是 margin、页脚是 padding
@@ -464,43 +567,53 @@
   max-width: none !important;
   overflow: hidden;
 }
+/* Top-anchored (see the Dialog's className), so the box grows downward only: the
+   cap keeps its bottom on screen, and the form — the one scroller in this flex
+   column — is what gives way. */
 .device-settings-dialog__content {
+  max-height: calc(100dvh - max(1rem, 8vh) - 1rem);
   gap: 0 !important;
   padding: 0 !important;
 }
-.device-settings-dialog__content > :first-child,
-.device-settings-dialog__content > :nth-child(2) {
+/* By cladd's data-part, not position: online ZOS has no subtitle, and
+   :nth-child(2) then caught the tab track (4px under the title, muted ink). */
+.device-settings-dialog__content > [data-part="title"],
+.device-settings-dialog__content > [data-part="text"] {
   margin-inline: var(--device-settings-inset, 1.25rem);
 }
-.device-settings-dialog__content > :first-child { margin-top: 1.15rem; }
-.device-settings-dialog__content > :nth-child(2) {
-  margin-top: 0.2rem;
-  color: var(--muted-foreground);
+.device-settings-dialog__content > [data-part="title"] { margin-top: 1.25rem; }
+/* The dialog's lede: small, soft ink — help-sized grey is for asides. */
+.device-settings-dialog__content > [data-part="text"] {
+  margin-top: 0.25rem;
+  color: var(--cladd-fg-soft);
+  font-size: var(--type-small);
+  /* On a phone it wraps, and a lone 「上。」 was left on the second line. */
+  text-wrap: balance;
 }
 .device-settings-titlebar { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 1rem; }
-.device-access-trigger { position: relative; width: auto; min-width: 0; height: 2.25rem; flex: none; gap: 0.35rem; padding-inline: 0.55rem 0.65rem; white-space: nowrap; }
-.device-access-trigger svg { width: 1rem; height: 1rem; }
-.device-access-trigger__label { font-size: 0.68rem; font-weight: 600; }
-.device-access-trigger__status { width: 0.38rem; height: 0.38rem; flex: none; border-radius: 999px; background: var(--primary); }
+/* Size, padding and glyph come from cladd's sm; only the status dot is ours. */
+.device-access-trigger { position: relative; flex: none; white-space: nowrap; }
+.device-access-trigger__status { width: 0.375rem; height: 0.375rem; flex: none; border-radius: 999px; background: var(--primary); }
 .device-access-popover { width: min(21rem, calc(100vw - 1.5rem)) !important; max-width: none !important; }
-.device-access-popover__content { display: grid; gap: 0.75rem; padding: 0.9rem !important; }
+.device-access-popover__content { display: grid; gap: 0.75rem; padding: 1rem !important; }
 .device-access-popover__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
-.device-access-popover__heading > div { display: grid; gap: 0.16rem; }
-.device-access-popover__heading strong { font-size: 0.8rem; font-weight: 620; }
-.device-access-popover__heading > div > span { color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.35; }
-.device-access-network { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; color: var(--primary); font-size: 0.56rem; white-space: nowrap; }
-.device-access-network svg { width: 0.68rem; height: 0.68rem; }
-.device-access-qr { display: grid; width: fit-content; margin-inline: auto; place-items: center; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; }
+.device-access-popover__heading > div { display: grid; gap: 0.25rem; }
+.device-access-popover__heading strong { font-size: var(--type-title-sm); font-weight: 600; }
+.device-access-popover__heading > div > span { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+.device-access-network { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; color: var(--primary); font-size: var(--type-micro); line-height: 1.6; white-space: nowrap; }
+.device-access-network svg { width: 0.75rem; height: 0.75rem; }
+.device-access-qr { display: grid; width: fit-content; margin-inline: auto; place-items: center; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-control); background: #fff; }
 .device-access-qr svg { display: block; width: 11rem; height: 11rem; }
 .device-access-popover__address { display: grid; min-width: 0; gap: 0.25rem; }
-.device-access-popover__address > span { color: var(--muted-foreground); font-size: 0.56rem; }
-.device-access-popover__address code { overflow: hidden; padding: 0.55rem 0.65rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--muted); color: var(--foreground); font-family: var(--mono); font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
+.device-access-popover__address > span { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.device-access-popover__address code { overflow: hidden; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--muted); color: var(--foreground); font-family: var(--mono); font-size: var(--type-caption); text-overflow: ellipsis; white-space: nowrap; user-select: all; }
 .device-access-popover__content > button { width: 100%; }
-.device-access-popover__content > p { margin: 0; color: var(--muted-foreground); font-size: 0.59rem; line-height: 1.45; text-align: center; }
-.device-access-popover__state { display: grid; min-height: 11rem; place-items: center; align-content: center; gap: 0.55rem; padding: 1rem; color: var(--muted-foreground); text-align: center; }
-.device-access-popover__state > svg { width: 1.35rem; height: 1.35rem; }
-.device-access-popover__state strong { color: var(--foreground); font-size: 0.74rem; }
-.device-access-popover__state > span:last-of-type { max-width: 16rem; font-family: var(--mono); font-size: 0.6rem; overflow-wrap: anywhere; }
+.device-access-popover__content > p { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-align: center; text-wrap: balance; }
+.device-access-popover__state { display: grid; min-height: 11rem; place-items: center; align-content: center; gap: 0.5rem; padding: 1rem; color: var(--muted-foreground); text-align: center; }
+.device-access-popover__state > svg { width: 1.25rem; height: 1.25rem; }
+.device-access-popover__state strong { color: var(--foreground); font-size: var(--type-small); font-weight: 600; }
+.device-access-popover__state > span:not(.cladd-spinner) { max-width: 16rem; font-size: var(--type-caption); line-height: 1.45; }
+.device-access-popover__url { max-width: 16rem; font-family: var(--mono); font-size: var(--type-micro); overflow-wrap: anywhere; }
 .device-access-popover__state.is-error > svg { color: var(--muted-foreground); }
 .device-settings-form {
   max-height: min(74vh, 46rem);
@@ -510,9 +623,21 @@
   scrollbar-gutter: stable;
   border-top: 1px solid var(--border);
 }
+/* A tab the user switched to: a short fade, no travel, and only after a swap
+   (is-tab-swapped) — not on open, not when data replaces a loading state.
+   keepMounted panels toggle display, which restarts the animation on every show.
+   Not under reduced motion: the kill-switch's 0.01ms still paints one blank frame. */
+@media (prefers-reduced-motion: no-preference) {
+  .device-settings-dialog.is-tab-swapped .device-settings-panel:not([hidden]) > * { --enter-y: 0; animation: motion-enter var(--motion-base) var(--ease-out) backwards; }
+}
+/* What arrives inside the body fades on the same clock; once arrived it is marked
+   (markArrived) so a tab show does not replay it. */
+.device-settings-dialog .motion-enter { --enter-y: 0; animation-duration: var(--motion-base); }
+.device-settings-dialog .motion-enter[data-arrived] { animation: none; }
 /* 掉线时压在分节之上的那张卡。分节是整宽带边框的行，卡片按字段栏的 1.25rem
    内缩，读起来是「这一页现在的处境」，而不是又一节设置。 */
-.device-settings-banner { margin: 0.85rem var(--device-settings-inset, 1.25rem); }
+.device-settings-banner { margin: 0.75rem var(--device-settings-inset, 1.25rem); }
+.device-settings-banner + .device-settings-section { border-top: 1px solid var(--border); }
 .device-settings-section {
   display: grid;
   grid-template-columns: 11rem minmax(0, 1fr);
@@ -520,27 +645,29 @@
 }
 .device-settings-section__heading {
   display: flex;
-  align-items: flex-start;
-  gap: 0.7rem;
+  /* The index sits on the h3's baseline, not on a hand-tuned top offset. */
+  align-items: baseline;
+  gap: 0.75rem;
   padding: 1rem 1rem 1rem var(--device-settings-inset, 1.25rem);
   border-right: 1px solid var(--border);
 }
 .device-settings-section__heading > span {
-  padding-top: 0.1rem;
   color: var(--primary);
   font-family: var(--mono);
-  font-size: 0.64rem;
+  font-size: var(--type-micro);
 }
 .device-settings-section__heading h3 {
   margin: 0;
-  font-size: 0.82rem;
-  font-weight: 620;
+  font-size: var(--type-title-sm);
+  font-weight: 600;
+  line-height: 1.4;
 }
 .device-settings-section__heading p {
-  margin: 0.3rem 0 0;
+  margin: 0.25rem 0 0;
   color: var(--muted-foreground);
-  font-size: 0.65rem;
+  font-size: var(--type-caption);
   line-height: 1.45;
+  text-wrap: pretty;
 }
 .device-settings-fields { min-width: 0; }
 .device-setting-field {
@@ -553,17 +680,23 @@
   border-bottom: 1px solid var(--border);
 }
 .device-setting-field:last-child { border-bottom: 0; }
+/* A read-only list followed by more rows (固件: facts, then upload/restore) keeps
+   its closing rule; only the true last row of a column drops it. */
+.device-settings-fields > .device-info-list:not(:last-child) > .device-setting-field:last-child { border-bottom: 1px solid var(--border); }
 .device-setting-copy { min-width: 0; }
-.device-setting-copy label {
+.device-setting-copy label,
+.device-setting-copy dt {
   display: block;
-  font-size: 0.75rem;
-  font-weight: 550;
+  color: var(--cladd-fg-soft);
+  font-size: var(--type-small);
+  font-weight: 500;
 }
 .device-setting-copy p {
-  margin: 0.2rem 0 0;
+  margin: 0.25rem 0 0;
   color: var(--muted-foreground);
-  font-size: 0.62rem;
-  line-height: 1.4;
+  font-size: var(--type-caption);
+  line-height: 1.45;
+  text-wrap: pretty;
 }
 .device-setting-control {
   display: flex;
@@ -575,8 +708,8 @@
 .device-setting-control > span { max-width: 100%; }
 .device-settings-switch {
   display: inline-flex;
-  margin: -0.3rem;
-  padding: 0.3rem;
+  margin: -0.25rem;
+  padding: 0.25rem;
   border-radius: 999px;
   cursor: pointer;
 }
@@ -585,13 +718,13 @@
   min-height: 3.8rem;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.55rem;
+  gap: 0.5rem;
   padding: 0.58rem var(--device-settings-inset, 1.25rem);
 }
 .device-setting-control--slider {
   width: min(15rem, 52vw);
   align-items: center;
-  gap: 0.7rem;
+  gap: 0.75rem;
 }
 .device-setting-slider { display: block; flex: 1; min-width: 0; }
 /* cladd's thumb slider always lifts a value bubble on drag/focus (no prop to
@@ -604,17 +737,17 @@
 }
 .device-setting-slider-value {
   flex: none;
-  min-width: 2.9rem;
+  min-width: 3rem;
   text-align: right;
   color: var(--muted-foreground);
-  font-size: 0.72rem;
+  font-size: var(--type-small);
   font-variant-numeric: tabular-nums;
 }
 .device-settings-actions {
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.5rem;
   padding: 0.9rem var(--device-settings-inset, 1.25rem);
   border-top: 1px solid var(--border);
 }
@@ -624,38 +757,48 @@
   min-height: 17rem;
   place-items: center;
   align-content: center;
-  gap: 0.55rem;
+  gap: 0.5rem;
   padding: 2rem;
   text-align: center;
 }
-.device-settings-state strong { font-size: 0.82rem; }
+/* A state that stands in for a whole tab (常规 loading / failed / sideload) opens
+   with the form's top rule, so only the bottom edge moves when the form lands. */
+.device-settings-panel > .device-settings-state { margin-top: 1rem; border-top: 1px solid var(--border); }
+.device-settings-state strong { font-size: var(--type-title-sm); font-weight: 600; }
 .device-settings-state > span:last-of-type {
+  max-width: 32rem;
   color: var(--muted-foreground);
-  font-size: 0.68rem;
+  font-size: var(--type-caption);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .device-settings-state.is-error strong { color: var(--destructive); }
 .device-settings-timezone-options { max-height: min(22rem, 55vh); overflow-y: auto; }
-.device-settings-tabs { flex: none; margin: 0.9rem var(--device-settings-inset, 1.25rem) 0; }
+.device-settings-tabs { flex: none; margin: 1rem var(--device-settings-inset, 1.25rem) 0; }
 /* keepMounted 让未激活的面板留在 DOM 里、只带 hidden 属性。这里显式声明，
    别赌 UA 的 [hidden] 规则能压过 flex 容器里 .device-settings-form 的 flex:1。 */
 .device-settings-panel { display: contents; }
 .device-settings-panel[hidden] { display: none; }
-/* 只读信息行复用 .device-setting-field 的栅格与字号，dt 补进标签选择器即可。 */
-.device-setting-copy dt { display: block; font-size: 0.75rem; font-weight: 550; }
+/* 只读信息行复用 .device-setting-field 的栅格与字号（dt 已并进标签那条规则）。 */
 .device-info-list { margin: 0; }
-/* 常规那边的 0.72rem 灰字是滑块旁的注解；这里右侧就是这一行的正文，
-   所以取和标签同号、同色，只靠字重（550 vs 常规）拉出主次。 */
+/* 常规那边的灰字是滑块旁的注解；这里右侧就是这一行的正文，所以取和标签同号、
+   正文色，只靠颜色与字重拉出主次。宽度跟着值走（整包 MD5 一行放得下），
+   上限防止窄屏把标签栏挤没。 */
 .device-info-value {
+  width: auto;
+  max-width: min(20rem, 70vw);
   margin: 0;
-  font-size: 0.75rem;
+  color: var(--foreground);
+  font-size: var(--type-small);
   font-variant-numeric: tabular-nums;
+  text-align: right;
   overflow-wrap: anywhere;
 }
 /* ZOS 的音量/亮度就是系统面板那一对「下发」行本体（zos-send-row.tsx），不是照着
    重画的第二份。放进对话框只需要补齐这一栏的内缩与簇宽——行高、字号、压暗规则
    本来就和 .device-setting-field 同源。 */
 .device-settings-fields .zc-out__row { padding-inline: var(--device-settings-inset, 1.25rem); }
-.device-settings-fields .zc-out__control { width: min(15rem, 52vw); }
+.device-settings-fields .zc-out__control { width: min(15rem, 52vw); gap: 0.75rem; }
 .device-setting-control--host { width: min(23rem, 66vw); align-items: start; gap: 0.5rem; }
 .device-host-input { flex: 1; min-width: 0; }
 /* 一段贴在字段栏里的说明。地址表单先有了这条，ZOS 那两节也要说同样体量的话，
@@ -664,11 +807,16 @@
    两种盒模型要算出同一个左缘，所以两边只能读同一个变量——固件那一节的同意栏与
    「安装到时钟」就是这条规则管的，它们一旦和上面的行错开就读成了另一个容器。 */
 .device-host-note,
-.device-settings-note { margin: 0 var(--device-settings-inset, 1.25rem); color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
-/* 字段栏本身不带内边距，说明落在分节线上会显得挤——只有这条需要留白。 */
-.device-settings-note { padding-bottom: 0.85rem; }
-.device-host-note code { font-family: var(--mono); font-size: 0.68rem; }
-.device-host-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.35rem var(--device-settings-inset, 1.25rem) 0.2rem; }
+.device-settings-note { margin: 0 var(--device-settings-inset, 1.25rem); color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.5; }
+/* 字段栏本身不带内边距，说明落在分节线上会显得挤：上下各留一样的白，
+   不管它跟在行后面、排在栏首，还是两条说明挨着。 */
+.device-settings-note { padding-block: 0.75rem; }
+/* A note followed by rows closes like a row does, so the column keeps one rhythm. */
+.device-settings-note + .device-setting-field,
+.device-settings-note + .device-info-list { border-top: 1px solid var(--border); }
+.device-host-note { padding-top: 0.75rem; }
+.device-host-note code { font-family: var(--mono); font-size: var(--type-caption); }
+.device-host-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.5rem var(--device-settings-inset, 1.25rem) 0.75rem; }
 
 /* --- 固件那一节 -------------------------------------------------------------
    常规设置的最后一节，也是这个对话框里唯一一个会重写闪存的入口。排版一律借
@@ -678,52 +826,59 @@
 .zos-fw__note {
   display: flex;
   align-items: start;
-  gap: 0.45rem;
+  gap: 0.5rem;
   text-wrap: pretty;
 }
-.zos-fw__note svg { flex: none; width: 0.85rem; height: 0.85rem; margin-top: 0.15rem; }
-.zos-fw__note strong { display: block; color: var(--foreground); font-size: 0.72rem; font-weight: 600; }
+/* Direct child only: a descendant rule would also resize cladd Spinner's inner svg. */
+.zos-fw__note > svg { flex: none; width: 0.875rem; height: 0.875rem; margin-top: 0.125rem; }
+/* cladd's sm spinner is 16px — already the height of the 11px × 1.5 line it sits on. */
+.zos-fw__note > .cladd-spinner { flex: none; }
+.zos-fw__note strong { display: block; color: var(--foreground); font-size: var(--type-small); font-weight: 600; }
 .zos-fw__note--error { color: var(--destructive); }
 .zos-fw__note--error strong { color: var(--destructive); }
 .zos-fw__cmd {
-  padding: 0.05rem 0.28rem;
-  border-radius: 0.25rem;
+  padding: 0 0.25rem;
+  border-radius: var(--radius-tile);
   background: color-mix(in oklch, var(--foreground) 8%, transparent);
   font-family: var(--mono);
-  font-size: 0.66rem;
+  font-size: var(--type-caption);
 }
 /* 说明 + 按钮的那种小块：说明自带 1.25rem 的内缩，按钮跟着对齐。 */
 .zos-fw__state { display: grid; justify-items: start; gap: 0.5rem; }
-/* 整包 MD5 要被人逐字比对，所以值走等宽并且允许在任意位置断行。 */
-.zos-fw__value { font-family: var(--mono); font-size: 0.7rem; }
+/* 整包 MD5 与版本号要被人逐字比对，所以走等宽，并且允许在任意位置断行。
+   字号跟着同一张表的其它值走，不另起一档。 */
+.zos-fw__value { font-family: var(--mono); }
 .zos-fw__upload { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+/* Two buttons of one size side by side, not a fixed column that stacks them. */
+.device-setting-control.zos-fw__upload { width: auto; }
 
-.zos-fw__watch-slot { padding-top: 0.85rem; }
-.zos-fw__watch { padding: 0.7rem 0.85rem; }
-.zos-fw__watch p { display: grid; gap: 0.15rem; margin: 0; }
-.zos-fw__watch strong { color: var(--foreground); font-size: 0.75rem; font-weight: 620; }
-.zos-fw__watch span { font-size: 0.66rem; line-height: 1.5; text-wrap: pretty; }
-.zos-fw__watch small { font-family: var(--mono); font-size: 0.58rem; }
+/* The install card's clock ticks every second; fixed-width digits keep the line still. */
+.zos-fw__elapsed { font-variant-numeric: tabular-nums; }
 
 /* 同意栏与它管住的按钮是一个决定，所以贴在一起，与外面的段间距分开。 */
-.zos-fw__decision { display: grid; gap: 0.5rem; padding-top: 0.2rem; }
+.zos-fw__decision { display: grid; gap: 0.5rem; }
+/* Padding and radius match <Callout>: the same kind of box in this dialog. */
 .zos-fw__consent {
   display: grid;
-  grid-template-columns: 1.35rem minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
-  gap: 0.6rem;
-  padding: 0.75rem 0.85rem;
+  gap: 0.75rem;
+  padding: 0.75rem;
   border: 1px solid var(--border);
-  border-radius: 0.55rem;
+  border-radius: var(--radius-card);
   cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out);
 }
-.zos-fw__checkbox { margin-top: 0.04rem; }
-.zos-fw__consent > span { font-size: 0.66rem; line-height: 1.5; text-wrap: pretty; }
+@media (hover: hover) and (pointer: fine) {
+  .zos-fw__consent:hover { border-color: color-mix(in oklch, var(--foreground) 22%, var(--border)); }
+}
+.zos-fw__checkbox { margin-top: 0.0625rem; }
+.zos-fw__consent > span { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.5; text-wrap: pretty; }
 .zos-fw__consent strong {
   display: block;
-  margin-bottom: 0.1rem;
+  margin-bottom: 0.125rem;
   color: var(--foreground);
-  font-size: 0.72rem;
+  font-size: var(--type-small);
   font-weight: 600;
 }
 .zos-fw__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
@@ -733,15 +888,17 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.72rem 0 0.68rem;
+  padding: 1rem 0 0.875rem;
 }
 .page-heading > div:first-child { min-width: 0; }
 /* Scoped to the copy block: the mini player shares this row, and a bare
    `.page-heading span` painted its artist line and cladd's inner button spans
-   brand green at (0,1,1) — over every (0,1,0) rule the widget itself carries. */
-.page-heading > div:first-child > span { color: var(--primary); font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.1em; }
-.page-heading h1 { margin: 0.12rem 0 0; font-size: clamp(1.65rem, 2.4vw, 2.15rem); font-weight: 600; letter-spacing: -0.05em; line-height: 1.05; }
-.page-heading > div:first-child > p { max-width: 42rem; margin: 0.3rem 0 0; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.45; text-wrap: pretty; }
+   brand green at (0,1,1) — over every (0,1,0) rule the widget itself carries.
+   Block with its own line-height: inline, it sat in a 24px strut line and
+   added ~9px of air above the eyebrow that no rule had asked for. */
+.page-heading > div:first-child > span { display: block; color: var(--primary); font-family: var(--mono); font-size: var(--type-micro); letter-spacing: 0.08em; line-height: 1.4; }
+.page-heading h1 { margin: 0.25rem 0 0; font-size: clamp(1.65rem, 2.4vw, 2.15rem); font-weight: 600; letter-spacing: -0.05em; line-height: 1.05; }
+.page-heading > div:first-child > p { max-width: 42rem; margin: 0.25rem 0 0; color: var(--muted-foreground); font-size: var(--type-small); line-height: 1.45; text-wrap: pretty; }
 
 .studio-layout {
   display: grid;
@@ -754,10 +911,24 @@
 .studio-layout.is-game { display: block; min-height: 0; overflow-y: auto; }
 .studio-layout.is-zos { display: block; min-height: 0; overflow-y: auto; }
 .studio-layout.is-vibe { display: block; min-height: 0; overflow-y: auto; }
+/* Arrival of a view the user switched to. The panes remount on every switch,
+   so the shared motion-enter keyframe plays on insert — no re-key, which would
+   also remount the channel sidebar and lose its scroll. The class is set on the
+   first switch only (never on page load); the sidebar and the phone pane tabs
+   are chrome that stays put, so they are left out (at arming time they would
+   otherwise start matching and animate once for no reason). A phone pane swap
+   un-hides a pane, which replays it too — that is a swap the user caused. */
+.studio-layout.has-view-motion > :not(.channel-sidebar, .mobile-console-navigation),
+:is(.canvas-orientation-gate, .game-orientation-gate):has(~ .studio-layout.has-view-motion) { animation: motion-enter var(--motion-slow) var(--ease-out) backwards; }
+/* …unless the sidebar was not there before (arriving from 音乐/游戏/VIBE/系统):
+   then it is new and lands with the rest. The class only ever appears on that
+   switch, and dropping a finished animation repaints nothing, so a sidebar
+   that stays (内容↔画板↔素材库) never replays. */
+.studio-layout.has-view-motion.sidebar-arrives > .channel-sidebar { animation: motion-enter var(--motion-slow) var(--ease-out) backwards; }
 
 /* 游戏厅：顶栏（选游戏 + 上屏）+ 舞台（LED 屏 + HUD + 控制台）。
    LED 屏沿用 .pixel-lyric-screen 的网格质感配方。 */
-.game-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
+.game-shell { min-height: 0; padding: 1rem 0 1.5rem; }
 .game-topbar {
   display: flex;
   width: min(100%, 72rem);
@@ -766,13 +937,12 @@
   gap: 0.75rem 1rem;
   flex-wrap: wrap;
   margin-inline: auto;
-  padding-bottom: 0.8rem;
+  padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--border);
 }
-.game-picker svg { width: 0.95rem; height: 0.95rem; }
-.game-topbar__status { display: inline-flex; align-items: center; gap: 0.85rem; flex-wrap: wrap; }
-.game-screen-toggle { display: inline-flex; flex: none; align-items: center; gap: 0.55rem; cursor: pointer; }
-.game-screen-toggle > span:first-child { color: var(--foreground); font-family: var(--sans); font-size: 0.68rem; letter-spacing: 0; }
+.game-topbar__status { display: inline-flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.game-screen-toggle { display: inline-flex; flex: none; align-items: center; gap: 0.5rem; cursor: pointer; }
+.game-screen-toggle > span:first-child { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
 
 .game-body {
   width: min(100%, 72rem);
@@ -787,7 +957,7 @@
   aspect-ratio: 52 / 16;
   overflow: hidden;
   border: clamp(0.46rem, 0.85vw, 0.65rem) solid #111612;
-  border-radius: 0.72rem;
+  border-radius: var(--radius-card);
   background: #000;
   box-shadow: 0 0.65rem 1.5rem rgb(12 18 12 / 0.12);
   isolation: isolate;
@@ -819,36 +989,37 @@
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  padding-top: 0.42rem;
+  padding-top: 0.5rem;
   color: var(--muted-foreground);
   font-family: var(--mono);
-  font-size: 0.58rem;
+  font-size: var(--type-micro);
 }
 .game-screen__status { color: var(--primary); }
 
-.game-hud { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0.8rem; border-block: 1px solid var(--border); }
-.game-hud > span { display: grid; gap: 0.18rem; min-width: 0; padding: 0.65rem 0.8rem; }
+.game-hud { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0.75rem; border-block: 1px solid var(--border); }
+.game-hud > span { display: grid; gap: 0.25rem; min-width: 0; padding: 0.5rem 0.75rem; }
 .game-hud > span + span { border-left: 1px solid var(--border); }
-.game-hud small { color: var(--muted-foreground); font-size: 0.58rem; font-weight: 500; }
+.game-hud small { color: var(--muted-foreground); font-size: var(--type-micro); font-weight: 500; }
 .game-hud strong {
   overflow: hidden;
   font-family: var(--mono);
-  font-size: 0.86rem;
-  font-weight: 620;
+  font-size: var(--type-title-sm);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.game-console { margin-top: 0.85rem; border-radius: 0.6rem; }
-.game-console__row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; padding: 0.55rem 0.65rem; }
-.game-console__row svg { width: 0.85rem; height: 0.85rem; }
-.game-console__options { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-left: auto; }
-.game-console__options > span { color: var(--muted-foreground); font-size: 0.62rem; }
+.game-console { margin-top: 0.75rem; border-radius: var(--radius-card); }
+.game-console__row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.5rem; }
+.game-console__options { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+.game-console__options > span { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
 
-.game-note { display: flex; align-items: center; gap: 0.4rem; margin: 0.7rem 0 0; padding-top: 0.7rem; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 0.65rem; }
-.game-note svg { width: 0.8rem; height: 0.8rem; }
-.game-note--warning { color: oklch(0.52 0.13 75); }
+/* Icon sits on the first line's centre (11px × 1.45 ≈ 16px line, 12px glyph),
+   not on the middle of a two-line note. */
+.game-note { display: flex; align-items: flex-start; gap: 0.5rem; margin: 0.75rem 0 0; padding-top: 0.75rem; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+.game-note svg { flex: none; width: 0.75rem; height: 0.75rem; margin-top: 0.125rem; }
+.game-note--warning { color: var(--tone-warning); }
 .game-note--error { color: var(--destructive); }
 
 /* 系统固件控制台：左边是固件直出的实时镜像，右边是频道接管 + 设备读数。
@@ -875,22 +1046,24 @@
   padding: 1rem 1.25rem 0 0;
   border-right: 1px solid var(--border);
 }
-.section-kicker { display: flex; gap: 0.6rem; padding: 0 0.35rem 0.75rem; color: var(--primary); font-family: var(--mono); font-size: 0.72rem; }
+/* An in-panel kicker: muted. Primary is the page hero eyebrow's alone. */
+.section-kicker { display: flex; gap: 0.5rem; padding: 0 0.25rem 0.75rem; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; }
 .channel-scroll { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 .channel-list { display: grid; align-content: start; gap: 0.25rem; padding-right: 0.25rem; }
-.channel-entry { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 2.25rem; align-items: center; border-left: 2px solid transparent; transition: background-color 160ms ease, border-color 160ms ease; }
+.channel-entry { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 2.25rem; align-items: center; border-left: 2px solid transparent; transition: background-color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
 .channel-entry.is-active { border-left-color: var(--primary); background: color-mix(in oklch, var(--muted) 82%, transparent); }
 /* user-select:none 是双击跳转的配套:没有它,第二次点击会把频道名当文字选中,
    跳过去之后上一页还留着一段蓝色高亮。 */
 .channel-select { min-width: 0; padding: 0.78rem 0.35rem 0.72rem 0.65rem; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; outline: none; user-select: none; }
 .channel-select:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--ring) 55%, transparent); }
 .channel-title { display: flex; min-width: 0; align-items: center; gap: 0.55rem; }
-.channel-title strong { overflow: hidden; font-size: 0.8rem; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
+.channel-title strong { overflow: hidden; font-size: var(--type-body); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .channel-dot { width: 0.46rem; height: 0.46rem; flex: none; border-radius: 999px; background: var(--border); }
 .channel-dot.is-on { background: var(--green-bright); }
-.channel-meta { display: block; overflow: hidden; margin: 0.3rem 0 0 1rem; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.62rem; text-overflow: ellipsis; white-space: nowrap; }
-.channel-delete { width: 2.15rem; height: 2.15rem; color: var(--muted-foreground); opacity: 0.68; transition: color 160ms ease, opacity 160ms ease; }
-.channel-entry:focus-within .channel-delete { opacity: 0.72; }
+.channel-meta { display: block; overflow: hidden; margin: 0.3rem 0 0 1rem; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); text-overflow: ellipsis; white-space: nowrap; }
+/* Row-level remove buttons (channel + playlist) share one look: muted at rest,
+   red only under a fine pointer's hover. Touch shows them muted, always. */
+.channel-delete, .playlist-remove { justify-self: center; color: var(--muted-foreground); opacity: 0.72; transition: color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out); }
 .add-channel { width: 100%; margin-top: 0.75rem; }
 .add-channel--mobile { display: none !important; }
 
@@ -908,93 +1081,108 @@
   scrollbar-gutter: stable;
 }
 .channel-config { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
-.config-field { display: flex; min-width: 0; min-height: 4.6rem; flex-direction: column; justify-content: center; gap: 0.3rem; padding: 0.55rem 0.75rem; }
+/* 1rem on top: the editor column's first line sits where the sidebar's and
+   the market's do, 1rem under the page rule. */
+.config-field { display: flex; min-width: 0; flex-direction: column; gap: 0.5rem; padding: 1rem 0.75rem 0.75rem; }
 .config-field + .config-field { border-left: 1px solid var(--border); }
 .config-field:first-child { padding-left: 0; }
 .config-field .number-scrubber { width: 100%; }
-.config-field--toggle { flex-direction: row; align-items: center; justify-content: space-between; gap: 0.75rem; }
+/* The switch is shorter than its sibling inputs; a control-height slot puts it
+   on the same centre line, so all four cells read as label-over-control. */
+.config-field__control { display: flex; min-height: var(--spacing-cladd-md); align-items: center; }
 .config-field--toggle, .option-field--boolean, .grid-toggle { cursor: pointer; }
-.config-field input { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.config-field > label, .config-field--toggle .option-label { font-size: 0.67rem; font-weight: 520; }
+.config-field > label, .config-field--toggle .option-label { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
 
 .preview-section { padding-top: 0.75rem; }
 .preview-toolbar { display: flex; align-items: center; gap: 0.75rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border); }
 .preview-copy { min-width: 0; }
-.preview-copy h2 { margin: 0; font-size: 1.18rem; font-weight: 570; letter-spacing: -0.035em; }
-.preview-copy span { display: block; margin-top: 0.22rem; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.63rem; }
+.preview-copy h2 { margin: 0; font-size: var(--type-title); font-weight: 600; letter-spacing: -0.02em; }
+.preview-copy span { display: block; margin-top: 0.25rem; color: var(--muted-foreground); font-size: var(--type-caption); font-variant-numeric: tabular-nums; }
 .preview-scope { flex: none; }
-.workspace-actions { display: flex; align-items: center; gap: 0.45rem; margin-left: auto; }
-.action-status { display: grid; justify-items: end; gap: 0.18rem; margin-right: 0.15rem; color: var(--muted-foreground); font-size: 0.57rem; line-height: 1.2; }
-.action-status span { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
-.action-status svg { width: 0.72rem; height: 0.72rem; }
-.action-status .is-behind { color: oklch(0.5 0.12 75); }
+.workspace-actions { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+.action-status { display: grid; justify-items: end; gap: 0.25rem; margin-right: 0.25rem; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.3; }
+.action-status span { display: inline-flex; align-items: center; gap: 0.25rem; white-space: nowrap; }
+.action-status svg { width: 0.75rem; height: 0.75rem; flex: none; }
+.action-status .is-behind { color: var(--tone-warning); }
 .device-stage { min-width: 0; padding-top: 0.45rem; }
 .clock-device { position: relative; width: min(100%, 34rem); aspect-ratio: 2292 / 1036; margin-inline: auto; background: url("/assets/tc002-frame.png") center / contain no-repeat; filter: drop-shadow(0 0.65rem 0.65rem rgb(12 12 12 / 0.1)); }
 .clock-screen { position: absolute; z-index: 1; top: 13.996%; left: 2.748%; display: flex; width: 94.59%; height: 57.626%; overflow: hidden; background: #000; }
 .clock-screen::after { position: absolute; inset: 0; content: ""; pointer-events: none; background-image: linear-gradient(to right, transparent calc(100% - 1px), rgb(255 255 255 / 0.11) 100%), linear-gradient(to bottom, transparent calc(100% - 1px), rgb(255 255 255 / 0.11) 100%); background-size: calc(100% / 52) calc(100% / 16); opacity: 0.28; }
-.clock-screen img { width: 100%; height: 100%; object-fit: fill; image-rendering: pixelated; transition: opacity 180ms ease; }
-.clock-screen span { margin: auto; color: #7f7f7f; font-family: var(--mono); font-size: 0.68rem; }
+.clock-screen img { width: 100%; height: 100%; object-fit: fill; image-rendering: pixelated; transition: opacity var(--motion-base) var(--ease-out); }
+.clock-screen span { margin: auto; color: #7f7f7f; font-family: var(--mono); font-size: var(--type-caption); }
 .device-stage.is-rendering .clock-screen img { opacity: 0.62; }
-.preview-context { display: flex; width: min(100%, 34rem); align-items: center; justify-content: space-between; gap: 1rem; margin: -0.15rem auto 0; color: var(--muted-foreground); font-size: 0.6rem; }
-.preview-context strong { color: var(--foreground); font-weight: 560; }
+.preview-context { display: flex; width: min(100%, 34rem); align-items: center; justify-content: space-between; gap: 1rem; margin: -0.15rem auto 0; color: var(--muted-foreground); font-size: var(--type-caption); }
+.preview-context strong { color: var(--foreground); font-weight: 600; }
 .preview-context > span:last-child { font-family: var(--mono); }
 .preview-dots { display: flex; justify-content: center; gap: 0.38rem; margin-top: 0.28rem; }
-.preview-dots button { width: 1.25rem; height: 0.28rem; padding: 0; border: 0; border-radius: 999px; background: var(--border); cursor: pointer; transition: width 180ms ease, background-color 180ms ease, transform 180ms ease; }
+.preview-dots button { width: 1.25rem; height: 0.28rem; padding: 0; border: 0; border-radius: 999px; background: var(--border); cursor: pointer; transition: width var(--motion-base) var(--ease-in-out), background-color var(--motion-base) var(--ease-out), transform var(--motion-base) var(--ease-out); }
 .preview-dots button.is-active { width: 2rem; background: var(--foreground); }
 .preview-dots button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 .playlist-section { margin-top: 0.65rem; border-block: 1px solid var(--border); }
 .subsection-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: 0.7rem 0; border-bottom: 1px solid var(--border); }
-.subsection-heading h2, .subsection-heading h3 { margin: 0; font-size: 0.9rem; font-weight: 570; }
-.subsection-heading span, .subsection-heading p { margin: 0; color: var(--muted-foreground); font-size: 0.65rem; }
+.subsection-heading h2, .subsection-heading h3 { margin: 0; font-size: var(--type-title-sm); font-weight: 600; }
+.subsection-heading span, .subsection-heading p { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); font-variant-numeric: tabular-nums; }
 .playlist-heading-copy { display: flex; width: 100%; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .playlist { display: grid; }
-.playlist-item { border-bottom: 1px solid var(--border); transition: background-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease; }
-.playlist-item.is-active { background: color-mix(in oklch, var(--muted) 72%, transparent); box-shadow: inset 2px 0 var(--primary); }
+/* Selecting another row closes one option panel as the next opens; on two clocks the column dipped mid-swap. */
+.playlist .disclosure:not([data-open="true"]) { transition-duration: var(--motion-slow), var(--motion-fast); }
+/* Opaque on purpose: a reorder slides rows across each other for 200ms, and a
+   see-through row would show the other row's text through it. */
+.playlist-item { border-bottom: 1px solid var(--border); background: var(--background); transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out); }
+.playlist-item.is-active { background: color-mix(in oklch, var(--muted) 82%, var(--background)); box-shadow: inset 2px 0 var(--primary); }
 .playlist-item.is-dragging { opacity: 0.42; }
 .playlist-item.is-drop-target { box-shadow: inset 0 2px var(--foreground); }
-.playlist-row { display: grid; grid-template-columns: 2rem minmax(10rem, 1fr) 6.75rem auto; align-items: center; gap: 0.45rem; min-height: 3.65rem; padding: 0.38rem 0.3rem; outline: none; }
+.playlist-item.is-active.is-drop-target { box-shadow: inset 2px 0 var(--primary), inset 0 2px var(--foreground); }
+/* The row's own hover tint paints over the item's inset bar; redrawn on the
+   row, the bar stays one unbroken line from the row down through its options. */
+.playlist-item.is-active > .playlist-row { box-shadow: inset 2px 0 var(--primary); }
+.playlist-row { display: grid; grid-template-columns: 2rem minmax(10rem, 1fr) auto auto; align-items: center; gap: 0.5rem; min-height: 3.75rem; padding: 0.375rem 0.25rem; outline: none; transition: background-color var(--motion-fast) var(--ease-out); }
 .drag-handle { color: var(--muted-foreground); cursor: grab; }
 .drag-handle:active { cursor: grabbing; }
 .playlist-select { display: grid; grid-template-columns: 2.35rem minmax(0, 1fr); align-items: center; gap: 0.65rem; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; outline: none; }
-.playlist-select:focus-visible { border-radius: var(--radius-sm); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 25%, transparent); }
-.content-icon { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; overflow: hidden; border: 1px solid oklch(0.28 0.008 110); border-radius: var(--radius-sm); background: #090b0d; color: var(--green-bright); font-family: var(--mono); font-size: 0.63rem; }
+.playlist-select:focus-visible { border-radius: var(--radius-tile); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 25%, transparent); }
+.content-icon { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; overflow: hidden; border: 1px solid oklch(0.28 0.008 110); border-radius: var(--radius-tile); background: #090b0d; color: var(--green-bright); font-family: var(--mono); font-size: var(--type-micro); }
 .content-icon img { width: 1.82rem; height: 1.82rem; image-rendering: pixelated; }
-.content-icon--compact { width: 1.5rem; height: 1.5rem; font-size: 0.5rem; }
+.content-icon--compact { width: 1.5rem; height: 1.5rem; font-size: var(--type-micro); }
 .content-icon--compact img { width: 1.25rem; height: 1.25rem; }
 .playlist-name { min-width: 0; }
-.playlist-name strong { display: block; overflow: hidden; font-size: 0.76rem; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
-.playlist-name span { display: block; overflow: hidden; margin-top: 0.18rem; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; text-overflow: ellipsis; white-space: nowrap; }
-.duration-field { display: grid; gap: 0.2rem; width: 6.75rem; }
-.duration-field > span { color: var(--muted-foreground); font-size: 0.52rem; }
+.playlist-name strong { display: block; overflow: hidden; font-size: var(--type-body); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-name span { display: block; overflow: hidden; margin-top: 0.25rem; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); text-overflow: ellipsis; white-space: nowrap; }
+/* Label beside the scrubber, not above it: stacked, it pushed the field below
+   the centre line the arrows and the name sit on. */
+.duration-field { display: flex; align-items: center; gap: 0.5rem; }
+.duration-field > span { color: var(--muted-foreground); font-size: var(--type-caption); white-space: nowrap; }
+.duration-field .number-scrubber { width: 6.75rem; }
 .number-scrubber { width: min(100%, 6.75rem); min-width: 4.6rem; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .number-scrubber__content { justify-content: space-between; gap: 0.45rem; padding-inline: 0.45rem; white-space: nowrap; }
 .number-scrubber__input { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.playlist-actions { display: flex; gap: 0.1rem; }
-.playlist-remove { opacity: 0.68; transition: opacity 160ms ease, color 160ms ease; }
-.playlist-item:focus-within .playlist-remove { opacity: 0.72; }
+.playlist-actions { display: flex; gap: 0.125rem; }
 
-.content-options { margin: 0 0.45rem 0.45rem 2.3rem; border: 1px solid var(--border); background: color-mix(in oklch, var(--card) 82%, transparent); animation: option-in 180ms ease-out both; }
+/* Lives inside a .disclosure, so it folds both ways; margins are inside the
+   clipped child and fold away with it. */
+.content-options { margin: 0 0.5rem 0.5rem 2.25rem; border: 1px solid var(--border); background: color-mix(in oklch, var(--card) 82%, transparent); }
 .content-options > .option-grid:last-child { margin-bottom: -1px; }
 .option-grid { display: grid; grid-template-columns: repeat(2, minmax(9rem, 1fr)); }
 .option-field { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 0.35rem 1rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
 .option-field + .option-field { border-left: 1px solid var(--border); }
 .option-field--wide { grid-column: span 2; flex-direction: column; align-items: stretch; }
-.option-copy { display: grid; min-width: 0; gap: 0.2rem; }
-.option-help { color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.35; }
-.option-label { color: var(--foreground); font-size: 0.72rem; }
-.option-empty { margin: 0; padding: 0.6rem 0.75rem; color: var(--muted-foreground); font-size: 0.62rem; }
-.option-field input, .option-field button { font-family: var(--mono); font-size: 0.72rem; }
+/* min-content, not 0: a flexible Select beside it squeezed a two-character
+   label to one character per line (灯 / 色). Help text still wraps. */
+.option-copy { display: grid; min-width: min-content; gap: 0.25rem; }
+.option-help { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+.option-label { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; white-space: nowrap; }
+.option-empty { margin: 0; padding: 0.75rem; color: var(--muted-foreground); font-size: var(--type-caption); }
 .timer-actions { grid-column: 1 / -1; display: flex; gap: 0.45rem; padding: 0.65rem 0.75rem; }
 
-.content-market { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-height: 0; padding: 0.8rem 0 0 1rem; border-left: 1px solid var(--border); }
+.content-market { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-height: 0; padding: 1rem 0 0 1rem; border-left: 1px solid var(--border); }
 .market-heading { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0.25rem 0.65rem; }
-.market-heading h2 { margin: 0; font-size: 1rem; font-weight: 580; letter-spacing: -0.025em; }
-.market-heading span { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.66rem; }
+.market-heading h2 { margin: 0; font-size: var(--type-title); font-weight: 600; letter-spacing: -0.02em; }
+.market-heading span { color: var(--muted-foreground); font-size: var(--type-caption); font-variant-numeric: tabular-nums; }
 /* 分段控件的凹槽轨道：内容分类、手机端工作区切换、预览范围三处共用。
    底色和圆角由 cladd 的 SurfaceCut 负责，这里只管排布——不再各自手搓 background。 */
 .segmented-track { border-radius: 999px; }
-.segmented-track__content { padding: 0.2rem; }
+.segmented-track__content { padding: 0.25rem; }
 .segmented-track__content > * {
   display: grid;
   grid-auto-flow: column;
@@ -1006,149 +1194,211 @@
 .market-filter { margin: 0 0.15rem 0.55rem; }
 .market-tabs button { padding-inline: 0.2rem; }
 .market-scroll { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: transparent transparent; scrollbar-width: thin; }
-.instrument-search { display: grid; gap: 0.65rem; padding: 0.75rem 0.25rem 0.9rem; border-bottom: 1px solid var(--border); }
-.instrument-search__copy { display: grid; gap: 0.22rem; }
-.instrument-search__copy h3 { margin: 0; font-size: 0.78rem; font-weight: 600; }
-.instrument-search__copy p { margin: 0; color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.45; }
-.instrument-search__form { display: grid; grid-template-columns: minmax(0, 1fr) 6.5rem auto; gap: 0.35rem; }
-.instrument-search__input, .instrument-search__kind { min-width: 0; }
-.instrument-search__input-control, .instrument-search__kind { font-family: var(--mono); font-size: 0.64rem; }
-.instrument-search__kind { width: 100%; }
+.instrument-search { display: grid; gap: 0.75rem; padding: 0.75rem 0.25rem 1rem; border-bottom: 1px solid var(--border); }
+.instrument-search__copy { display: grid; gap: 0.25rem; }
+.instrument-search__copy h3 { margin: 0; font-size: var(--type-title-sm); font-weight: 600; }
+.instrument-search__copy p { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+/* Query gets the whole first row (three controls in a ~17rem rail cut the
+   placeholder to 「BTC、1」); the kind filter and the submit share the second. */
+.instrument-search__form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; }
+.instrument-search__input { grid-column: 1 / -1; min-width: 0; }
+.instrument-search__kind { grid-column: 1; width: 100%; min-width: 0; }
 .instrument-search__kind [data-part="value"] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.instrument-search__form button { min-width: 4.6rem; padding-inline: 0.45rem; }
-.instrument-search__form button svg { width: 0.75rem; height: 0.75rem; }
-.instrument-search__notice { margin: 0; padding: 0.45rem 0.55rem; border-radius: 0.4rem; background: var(--muted); color: var(--muted-foreground); font-size: 0.6rem; line-height: 1.4; }
-.instrument-results { display: grid; border-top: 1px solid var(--border); }
+/* An empty result is a status line, not a card; a failed read is a <Callout>. */
+.instrument-search__empty { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+/* Bleeds out of the search section's inset so result rows line up with the
+   catalogue rows below them (each tier's inset is undone in its own block). */
+.instrument-results { display: grid; margin-inline: -0.25rem; border-top: 1px solid var(--border); }
 .instrument-result__identity { display: grid; min-width: 0; gap: 0.12rem; }
-.instrument-result__identity span { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.52rem; text-overflow: ellipsis; white-space: nowrap; }
+.instrument-result__identity span { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); text-overflow: ellipsis; white-space: nowrap; }
 .content-market:hover .market-scroll, .content-market:focus-within .market-scroll { scrollbar-color: var(--border) transparent; }
 .market-scroll::-webkit-scrollbar { width: 0.38rem; }
 .market-scroll::-webkit-scrollbar-thumb { border-radius: 999px; background: transparent; }
 .content-market:hover .market-scroll::-webkit-scrollbar-thumb, .content-market:focus-within .market-scroll::-webkit-scrollbar-thumb { background: var(--border); }
 .market-list { display: grid; align-content: start; }
-.market-item { padding: 0.82rem 0.25rem; border-bottom: 1px solid var(--border); }
+.market-item { padding: 0.75rem 0.25rem; border-bottom: 1px solid var(--border); transition: background-color var(--motion-fast) var(--ease-out); }
 .market-item__title { display: flex; align-items: center; gap: 0.5rem; }
-.market-item h3 { margin: 0; font-size: 0.78rem; font-weight: 570; }
-.market-added { display: inline-flex; align-items: center; gap: 0.18rem; margin-left: auto; color: var(--muted-foreground); font-size: 0.52rem; white-space: nowrap; }
-.market-added svg { width: 0.68rem; height: 0.68rem; }
-.market-item p { min-height: 2.8em; margin: 0.4rem 0 0.65rem; color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.48; }
-.market-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.35rem; }
-.market-actions button { min-width: 0; padding-inline: 0.4rem; }
-.market-actions svg { width: 0.78rem; height: 0.78rem; }
+.market-item h3 { margin: 0; font-size: var(--type-body); font-weight: 500; }
+.market-added { display: inline-flex; align-items: center; gap: 0.25rem; margin-left: auto; color: var(--primary); font-size: var(--type-caption); font-weight: 500; white-space: nowrap; }
+.market-added svg { width: 0.75rem; height: 0.75rem; }
+.market-item p { margin: 0.5rem 0 0.75rem; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+/* Same pair, same pattern as the 素材库 cards: side by side, never stacked. */
+.market-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+.market-actions button { min-width: 0; }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
-.is-spinning { animation: ui-spin 800ms linear infinite; }
+/* Spinners have one clock: cladd's own Spinner period (1.5s, linear). A bare
+   loading state is a cladd <Spinner>; an icon already sitting in a button
+   turns with .is-spinning — so every spinner on screen has one speed. */
+.is-spinning { animation: ui-spin 1.5s linear infinite; }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
 
-.pixel-library { display: grid; min-width: 0; min-height: 0; align-content: start; gap: 0.9rem; padding: 0.85rem 0 1.5rem 1.5rem; overflow-y: auto; scrollbar-gutter: stable; }
+.pixel-library { display: grid; min-width: 0; min-height: 0; align-content: start; gap: 1rem; padding: 1rem 0 1.5rem 1.5rem; overflow-y: auto; scrollbar-gutter: stable; }
 .pixel-library-heading { display: flex; align-items: start; justify-content: space-between; gap: 0.75rem; }
 .pixel-library-heading > div { min-width: 0; }
-.pixel-library-heading h2 { margin: 0; font-size: 1rem; font-weight: 580; letter-spacing: -0.025em; }
-.pixel-library-heading span { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.25rem; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.62rem; }
+.pixel-library-heading > div > span { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .pixel-library-heading span i { color: var(--border); font-style: normal; }
-.pixel-library-heading span strong { color: var(--foreground); font-weight: 550; }
-.pixel-library-heading a { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; color: var(--muted-foreground); font-size: 0.64rem; text-decoration: none; }
-.pixel-library-heading a:hover { color: var(--foreground); }
-.pixel-library-heading a svg { width: 0.72rem; height: 0.72rem; }
-.pixel-library-controls { display: grid; gap: 0.55rem; padding-block: 0.75rem; border-block: 1px solid var(--border); }
-.pixel-library-link, .pixel-library-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.35rem; }
-.pixel-library-link input, .pixel-library-search input { min-width: 0; font-family: var(--mono); font-size: 0.7rem; }
-.pixel-library-link button { min-width: 8.5rem; padding-inline: 0.75rem; }
-.pixel-library-link button svg, .pixel-library-search button svg { width: 0.82rem; height: 0.82rem; }
-.pixel-library-discovery { display: grid; grid-template-columns: minmax(14rem, 1fr) auto; gap: 0.55rem; }
-.pixel-library-filters { display: grid; grid-template-columns: repeat(2, 7rem); gap: 0.35rem; }
-.pixel-library-filters button { width: 100%; min-width: 0; }
-.pixel-library-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; opacity: 1; transition: opacity 140ms ease; }
-.pixel-library-list[aria-busy="true"] { opacity: 0.55; }
-.pixel-library-card { display: grid; align-content: start; gap: 0.6rem; min-width: 0; padding-bottom: 0.9rem; border-bottom: 1px solid var(--border); }
-.pixel-library-preview { position: relative; display: block; aspect-ratio: 52 / 16; overflow: hidden; border: 1px solid var(--border); background: #050607; color: #fff; }
-.pixel-library-preview img { display: block; width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; }
-.pixel-library-preview > span { position: absolute; right: 0.4rem; bottom: 0.38rem; display: inline-flex; align-items: center; gap: 0.22rem; padding: 0.18rem 0.34rem; border-radius: var(--radius-sm); background: rgb(0 0 0 / 0.72); color: #f4f4f4; font-family: var(--mono); font-size: 0.54rem; }
-.pixel-library-preview > span svg { width: 0.68rem; height: 0.68rem; }
-.pixel-library-copy { display: grid; min-width: 0; gap: 0.16rem; }
+.pixel-library-heading span strong { color: var(--foreground); font-weight: 500; }
+.pixel-library-heading a { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; border-radius: var(--radius-tile); color: var(--muted-foreground); font-size: var(--type-caption); text-decoration: none; transition: color var(--motion-fast) var(--ease-out); }
+.pixel-library-heading a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.pixel-library-heading a svg { width: 0.75rem; height: 0.75rem; }
+/* Two groups: bring something in (link, video) and browse what is there. One
+   0.5rem rhythm inside each; the groups part on a hairline. */
+.pixel-library-controls { display: grid; gap: 0.75rem; padding-block: 0.75rem; border-block: 1px solid var(--border); }
+.pixel-library-import { display: grid; gap: 0.5rem; }
+.pixel-library-link, .pixel-library-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; }
+/* Busy labels (导入中, 上传 37%, 转码中…) are shorter than the idle ones, so the
+   button tracks hold the idle width as a floor: a label change must not slide
+   its neighbours. Same 7.5rem on both brand buttons keeps them aligned. */
+.pixel-library-link { grid-template-columns: minmax(0, 1fr) minmax(7.5rem, auto); }
+.pixel-library-link input { font-family: var(--mono); }
+.pixel-library-video-pick { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+.pixel-library-video-pick > button { flex: none; }
+.pixel-library-hint { min-width: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+/* Padding inside the clip keeps cladd's focus rings (≈3px outside a control)
+   whole; the disclosure's negative margin cancels it so the row lines up.
+   The padding sits one level below the clipped child so a closed track
+   still collapses to 0. */
+.pixel-library-video-disclosure { margin-inline: -0.25rem; }
+.pixel-library-video-pending { display: grid; grid-template-columns: minmax(0, 1fr) 7rem minmax(6.5rem, auto) minmax(7.5rem, auto); align-items: center; gap: 0.5rem; padding: 0.5rem 0.25rem 0.25rem; }
+.pixel-library-video-file { display: inline-flex; align-items: center; gap: 0.375rem; min-width: 0; overflow: hidden; color: var(--foreground); font-family: var(--mono); font-size: var(--type-caption); text-overflow: ellipsis; white-space: nowrap; }
+.pixel-library-video-file svg { width: 0.875rem; height: 0.875rem; flex: none; color: var(--muted-foreground); }
+.pixel-library-discovery { display: grid; grid-template-columns: minmax(14rem, 1fr) auto; gap: 0.5rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+.pixel-library-filters { display: grid; grid-template-columns: repeat(2, 7rem); gap: 0.5rem; }
+.pixel-library-filters button, .pixel-library-video-pending button, .pixel-library-link > button { width: 100%; min-width: 0; }
+/* Paging dims the old page quickly, swaps it, then eases back — the exit is
+   the shorter half. Cards keep their size, so nothing reflows mid-fade. */
+.pixel-library-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; opacity: 1; transition: opacity var(--motion-base) var(--ease-out); }
+.pixel-library-list[aria-busy="true"] { opacity: 0.55; transition-duration: var(--motion-fast); }
+.pixel-library-list.is-results { --enter-y: 0; }
+.pixel-library-card { display: grid; align-content: start; gap: 0.5rem; min-width: 0; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.pixel-library-preview { position: relative; display: block; aspect-ratio: 52 / 16; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-control); background: #050607; color: #fff; transition: border-color var(--motion-fast) var(--ease-out); }
+.pixel-library-preview:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.pixel-library-preview img { display: block; width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; opacity: 0; transition: opacity var(--motion-base) var(--ease-out); }
+.pixel-library-preview img[data-loaded="true"] { opacity: 1; }
+.pixel-library-preview > span { position: absolute; right: 0.375rem; bottom: 0.375rem; display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.125rem 0.375rem; border-radius: var(--radius-tile); background: rgb(0 0 0 / 0.72); color: #f4f4f4; font-family: var(--mono); font-size: var(--type-micro); }
+.pixel-library-preview > span svg { width: 0.75rem; height: 0.75rem; }
+.pixel-library-copy { display: grid; min-width: 0; gap: 0.125rem; }
 .pixel-library-copy strong, .pixel-library-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pixel-library-copy strong { font-size: 0.8rem; font-weight: 570; }
-.pixel-library-copy span { color: var(--muted-foreground); font-size: 0.62rem; }
-.pixel-library-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.35rem; }
-.pixel-library-actions button { min-width: 0; padding-inline: 0.45rem; }
-.pixel-library-actions svg { width: 0.78rem; height: 0.78rem; }
-.pixel-library-pagination { display: flex; align-items: center; justify-content: center; gap: 0.55rem; }
-.pixel-library-pagination span { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.62rem; }
-.pixel-library-pagination svg { width: 0.75rem; height: 0.75rem; }
-.pixel-library-note { margin: 0; color: var(--muted-foreground); font-size: 0.58rem; line-height: 1.45; }
-.pixel-library-state { display: grid; min-height: 6rem; place-items: center; align-content: center; gap: 0.35rem; padding: 0.75rem; border: 1px dashed var(--border); color: var(--muted-foreground); text-align: center; }
-.pixel-library-state strong { color: var(--foreground); font-size: 0.68rem; }
-.pixel-library-state span { font-size: 0.56rem; line-height: 1.4; }
-.pixel-asset-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.75rem; padding: 0.65rem 0.75rem; color: var(--muted-foreground); font-size: 0.6rem; }
+.pixel-library-copy strong { font-size: var(--type-body); font-weight: 500; }
+.pixel-library-copy span { color: var(--muted-foreground); font-size: var(--type-caption); }
+.pixel-library-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 0.5rem; }
+.pixel-library-actions button { min-width: 0; }
+.pixel-library-pagination { display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
+/* Fixed width so the arrows stay put when "9 / 10" becomes "10 / 10". */
+.pixel-library-pagination > span { min-width: 4rem; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); font-variant-numeric: tabular-nums; text-align: center; }
+.pixel-library-note { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+.pixel-library-state { display: grid; min-height: 6rem; place-items: center; align-content: center; gap: 0.5rem; padding: 0.75rem; border: 1px dashed var(--border); border-radius: var(--radius-card); color: var(--muted-foreground); text-align: center; }
+.pixel-library-state > strong { color: var(--foreground); font-size: var(--type-body); font-weight: 500; }
+.pixel-library-state > span { font-size: var(--type-caption); line-height: 1.45; }
+/* Placeholder card: same boxes as a real one (title line 20px, author 17px,
+   one sm button row), so the first page lands without moving anything. */
+.pixel-library-list.is-placeholder .pixel-library-preview { border-color: transparent; background: var(--muted); }
+.pixel-library-list.is-placeholder .pixel-library-copy i { display: flex; height: 1.5em; align-items: center; font-size: var(--type-body); }
+.pixel-library-list.is-placeholder .pixel-library-copy i + i { font-size: var(--type-caption); }
+.pixel-library-list.is-placeholder .pixel-library-copy i::before { content: ""; width: 55%; height: 0.625rem; border-radius: var(--radius-tile); background: var(--muted); }
+.pixel-library-list.is-placeholder .pixel-library-copy i + i::before { width: 35%; height: 0.5rem; }
+.pixel-library-list.is-placeholder .pixel-library-actions i { display: block; height: var(--spacing-cladd-sm); border-radius: var(--radius-control); background: var(--muted); }
+.pixel-asset-metadata { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; padding: 0.75rem; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
 .pixel-asset-metadata a { margin-left: auto; color: var(--primary); text-underline-offset: 0.18rem; }
 
 .canvas-orientation-gate,
 .game-orientation-gate { display: none; }
 
 .toast-content { display: flex; align-items: center; gap: 0.75rem; }
-.toast-action { padding: 0; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: var(--foreground); font-weight: 600; cursor: pointer; }
+.toast-action { flex: none; }
 .cladd-toast { right: max(1rem, env(safe-area-inset-right)) !important; bottom: max(1rem, env(safe-area-inset-bottom)) !important; width: max-content; max-width: min(24rem, calc(100vw - 2rem)) !important; z-index: 60 !important; }
 
 /* 「装成应用」提示条：和 toast 一样浮在页面之上，所以规则放在一起看。toast 占了
    右下角，这条就占左下角——两者可以同时出现，谁也别压住谁。 */
-.install-prompt { position: fixed; z-index: 55; bottom: max(1rem, env(safe-area-inset-bottom)); left: max(1rem, env(safe-area-inset-left)); display: flex; align-items: center; gap: 0.6rem; max-width: min(23rem, calc(100vw - 2rem)); padding: 0.55rem 0.6rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); }
-.install-prompt__icon { display: grid; width: 1.85rem; height: 1.85rem; flex: none; place-items: center; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-foreground); }
-.install-prompt__icon svg { width: 0.9rem; height: 0.9rem; }
-.install-prompt__copy { display: grid; min-width: 0; gap: 0.1rem; margin-right: 0.15rem; }
-.install-prompt__copy strong { font-size: 0.68rem; }
-.install-prompt__copy span { color: var(--muted-foreground); font-size: 0.58rem; line-height: 1.45; }
+/* A cladd Surface (fill, outline) like the toast; this only places it. Rises
+   in from below and drops back out the same way (--enter-y). */
+.install-prompt { position: fixed; z-index: 55; bottom: max(1rem, env(safe-area-inset-bottom)); left: max(1rem, env(safe-area-inset-left)); max-width: min(23rem, calc(100vw - 2rem)); border-radius: var(--radius-card); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); --enter-y: 0.5rem; }
+/* Corner 12 = padding 8 + the tile's 4: the icon sits concentric in the card. */
+.install-prompt__content { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; }
+.install-prompt__icon { display: grid; width: 2rem; height: 2rem; flex: none; place-items: center; border-radius: var(--radius-tile); background: var(--accent); color: var(--accent-foreground); }
+.install-prompt__icon svg { width: 1rem; height: 1rem; }
+.install-prompt__copy { display: grid; min-width: 0; flex: 1 1 auto; gap: 0.125rem; }
+.install-prompt__copy strong { font-size: var(--type-small); font-weight: 600; }
+.install-prompt__copy span { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+/* While it is up, the page keeps its bottom clear of it, so the card never
+   sits on the channel sidebar's 新建频道 or the end of a scrolled column. The
+   space is handed back as the exit starts, so it eases out with the card. */
+.studio-page:has(~ .install-prompt:not(.motion-exit)) { padding-bottom: 5rem; }
 
-@keyframes option-in {
-  from { opacity: 0; transform: translateY(-0.25rem); }
-  to { opacity: 1; transform: translateY(0); }
-}
 
 .canvas-workspace { min-width: 0; min-height: 0; padding: 0 1.5rem 1.5rem; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
-.canvas-toolbar { display: flex; align-items: center; gap: 0.65rem; padding: 0.75rem 0 0.6rem; border-bottom: 1px solid var(--border); }
-.canvas-toolbar > div:first-child { margin-right: auto; }
-.canvas-toolbar .workspace-actions { margin-left: 0.15rem; }
-.pixel-canvas-panel { position: relative; margin-top: 0.75rem; padding: 0.55rem; border: 1px solid var(--border); background: #111418; }
+/* Same shape as the content page's preview head: title, its one secondary
+   action beside it, then status and the channel actions pushed right. */
+.canvas-toolbar { display: flex; align-items: center; gap: 0.75rem; padding: 1rem 0 0.5rem; border-bottom: 1px solid var(--border); }
+.canvas-toolbar .workspace-actions { margin-left: auto; }
+/* A screen bezel takes the card radius. The board inside stays square: a
+   rounded <canvas> goes through a clip layer whose 1x resample breaks the
+   1px grid lines into dashes. */
+.pixel-canvas-panel { position: relative; margin-top: 0.75rem; padding: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-card); background: #111418; }
 .pixel-canvas-panel canvas { display: block; width: 100%; aspect-ratio: 52 / 16; background: #000; image-rendering: pixelated; touch-action: none; cursor: crosshair; outline: none; }
 .pixel-canvas-panel canvas:focus-visible { box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 55%, transparent); }
-.canvas-coordinate { position: absolute; right: 0.9rem; bottom: 0.85rem; padding: 0.2rem 0.35rem; border-radius: var(--radius-sm); background: rgb(0 0 0 / 0.72); color: #cfd3d6; font-family: var(--mono); font-size: 0.58rem; }
-.canvas-controls { display: grid; gap: 0.6rem; padding: 0.7rem 0; border-bottom: 1px solid var(--border); }
+/* Same inset and padding as the .pixel-library-preview > span badge: 0.375rem
+   from the board's edge, which sits inside the 0.5rem bezel. */
+.canvas-coordinate { position: absolute; right: calc(0.5rem + 0.375rem); bottom: calc(0.5rem + 0.375rem); padding: 0.125rem 0.375rem; border-radius: var(--radius-tile); background: rgb(0 0 0 / 0.72); color: #cfd3d6; font-family: var(--mono); font-size: var(--type-micro); }
+.canvas-controls { display: grid; gap: 0.5rem; padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
 .canvas-toolset, .canvas-history-actions { display: flex; align-items: center; gap: 0.25rem; }
 .canvas-toolset { flex-wrap: wrap; }
-.canvas-toolset svg { width: 0.88rem; height: 0.88rem; }
-.palette { display: flex; flex-wrap: wrap; align-items: center; gap: 0.28rem; }
-.color-swatch { width: 1.48rem; height: 1.48rem; padding: 0; border: 1px solid oklch(0.62 0 0); border-radius: 0.2rem; cursor: pointer; outline: none; transition: transform 140ms ease, box-shadow 140ms ease; }
+.palette { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; }
+/* Swatches ride the sm control height, so they sit flush with the sm tool
+   buttons above at every breakpoint; touch layouts swap in --swatch-size. */
+.color-swatch { position: relative; flex: none; width: var(--swatch-size, var(--spacing-cladd-sm)); height: var(--swatch-size, var(--spacing-cladd-sm)); padding: 0; border: 1px solid oklch(0.62 0 0); border-radius: var(--radius-tile); cursor: pointer; outline: none; transition: transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out); }
 .color-swatch.is-active { box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--primary); }
-.color-swatch:focus-visible { box-shadow: 0 0 0 3px var(--ring); }
-.custom-color { width: 2.1rem; min-width: 2.1rem; }
-.custom-color input { padding: 0.15rem; cursor: pointer; }
-.grid-toggle { display: flex; align-items: center; gap: 0.45rem; color: var(--foreground); font-size: 0.7rem; }
-.canvas-command-bar { display: flex; align-items: center; gap: 0.55rem; padding: 0.62rem 0; border-bottom: 1px solid var(--border); }
+/* Focus must not read as "selected": a soft outer halo, stacked outside the
+   selection ring when both apply. */
+.color-swatch:focus-visible, .custom-color:has(input:focus-visible) { box-shadow: 0 0 0 2px var(--background), 0 0 0 4px color-mix(in oklch, var(--ring) 55%, transparent); }
+.color-swatch.is-active:focus-visible, .custom-color.is-active:has(input:focus-visible) { box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--primary), 0 0 0 7px color-mix(in oklch, var(--ring) 45%, transparent); }
+/* Rainbow rim = "any colour"; the centre shows the colour in use. */
+.custom-color { border-color: transparent; background: conic-gradient(#ff3b3b, #ffd000, #34c759, #00a4ef, #7b61ff, #ff3bb0, #ff3b3b); }
+.custom-color::after { content: ""; position: absolute; inset: 3px; border-radius: 2px; background: var(--swatch-value); box-shadow: 0 0 0 1px rgb(0 0 0 / 0.18); pointer-events: none; }
+.custom-color input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.grid-toggle { display: flex; align-items: center; gap: 0.5rem; color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.canvas-command-bar { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
 .canvas-command-bar .canvas-history-actions { margin-left: auto; }
-.canvas-status { min-height: 1.4em; margin: 0.55rem 0 0; color: var(--primary); font-family: var(--mono); font-size: 0.6rem; line-height: 1.45; }
-.canvas-inspector { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; padding: 0.8rem 0 0 1rem; border-left: 1px solid var(--border); }
-.canvas-inspector-heading { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0.25rem 0.65rem; border-bottom: 1px solid var(--border); }
-.canvas-inspector-heading h2 { margin: 0; font-size: 1rem; font-weight: 580; letter-spacing: -0.025em; }
-.canvas-inspector-heading span { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.6rem; }
+.canvas-command-bar > button { flex: none; }
+.canvas-status { min-height: 1.45em; margin: 0.5rem 0 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+.canvas-inspector { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; padding: 1rem 0 0 1rem; border-left: 1px solid var(--border); }
+/* Right padding = section padding + the scroller's stable gutter, so the tag
+   ends on the same edge as the controls below it. */
+.canvas-inspector-heading { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0.875rem 0.75rem 0.5rem; border-bottom: 1px solid var(--border); }
+.canvas-inspector-heading h2 { margin: 0; font-size: var(--type-title); font-weight: 600; letter-spacing: -0.02em; }
+.canvas-inspector-heading span { color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-caption); }
 .canvas-inspector-scroll { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: transparent transparent; scrollbar-width: thin; }
 .canvas-inspector:hover .canvas-inspector-scroll, .canvas-inspector:focus-within .canvas-inspector-scroll { scrollbar-color: var(--border) transparent; }
 .canvas-inspector-scroll::-webkit-scrollbar { width: 0.38rem; }
 .canvas-inspector-scroll::-webkit-scrollbar-thumb { border-radius: 999px; background: transparent; }
 .canvas-inspector:hover .canvas-inspector-scroll::-webkit-scrollbar-thumb, .canvas-inspector:focus-within .canvas-inspector-scroll::-webkit-scrollbar-thumb { background: var(--border); }
-.canvas-inspector-section { display: grid; gap: 0.65rem; padding: 0.85rem 0.25rem; border-bottom: 1px solid var(--border); transition: background-color 160ms ease, box-shadow 160ms ease; }
-.canvas-inspector-section.is-active { background: color-mix(in oklch, var(--muted) 62%, transparent); box-shadow: inset 2px 0 var(--primary); }
-.canvas-tool-heading { display: grid; grid-template-columns: 1.45rem minmax(0, 1fr); align-items: start; gap: 0.45rem; }
-.canvas-tool-heading > svg { width: 1rem; height: 1rem; margin-top: 0.06rem; color: var(--muted-foreground); }
-.canvas-tool-heading h3 { margin: 0; font-size: 0.76rem; font-weight: 570; }
-.canvas-tool-heading p { margin: 0.22rem 0 0; color: var(--muted-foreground); font-size: 0.58rem; line-height: 1.4; }
-.canvas-field { display: grid; gap: 0.32rem; color: var(--foreground); font-size: 0.65rem; }
-.canvas-field > button, .canvas-field input { width: 100%; font-family: var(--mono); font-size: 0.68rem; }
+/* Active tool section = the selected-row treatment of .channel-entry. */
+.canvas-inspector-section { display: grid; gap: 0.75rem; padding: 1rem 0.5rem; border-bottom: 1px solid var(--border); transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out); }
+.canvas-inspector-section.is-active { background: color-mix(in oklch, var(--muted) 82%, transparent); box-shadow: inset 2px 0 var(--primary); }
+/* Icon + title on one line, the description under both: every row in the
+   section then starts on the same left edge as the fields below. */
+.canvas-tool-heading { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0.25rem 0.5rem; }
+.canvas-tool-heading > div { display: contents; }
+.canvas-tool-heading > svg { width: 1rem; height: 1rem; color: var(--muted-foreground); }
+.canvas-tool-heading h3 { margin: 0; font-size: var(--type-title-sm); font-weight: 600; }
+.canvas-tool-heading p { grid-column: 1 / -1; margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+.canvas-field { display: grid; gap: 0.375rem; }
+.canvas-field > span { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.canvas-field > button, .canvas-field input { width: 100%; }
+.canvas-help { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+.canvas-help.is-warning { color: var(--tone-warning); }
+/* The clip box is widened by the padding, then the padding (one level down,
+   so the closed track still collapses to 0) keeps the swatches' 4px active
+   rings whole while the row stays on the section's edge. */
+.canvas-disclosure { margin-inline: -0.25rem; }
+.canvas-disclosure-body { padding: 0.75rem 0.25rem 0.25rem; }
 .file-trigger { width: 100%; cursor: pointer; }
-.file-trigger svg { width: 1rem; height: 1rem; }
-.canvas-image-preview { display: grid; height: 9.5rem; place-items: center; overflow: hidden; border: 1px solid var(--border); background: #090b0d; }
-.canvas-image-preview span { color: #7f8589; font-family: var(--mono); font-size: 0.58rem; }
+.canvas-image-preview { display: grid; height: 9.5rem; place-items: center; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-control); background: #090b0d; }
+.canvas-image-preview > span { color: #7f8589; font-size: var(--type-caption); }
 /* The <img> sizes the stage instead of the other way round, so the stage box is
    exactly the picture box and the crop overlay can be positioned in percent of
    source pixels with no contain-fit maths in the pointer handlers. */
-.canvas-crop-stage { position: relative; display: block; line-height: 0; cursor: crosshair; touch-action: none; }
+.canvas-crop-stage { position: relative; display: block; line-height: 0; cursor: crosshair; touch-action: none; --enter-y: 0; }
 .canvas-crop-stage:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .canvas-crop-stage img { display: block; max-width: 100%; max-height: 9.5rem; width: auto; height: auto; user-select: none; }
 /* Everything outside the box is dimmed by the box's own huge shadow — one
@@ -1159,77 +1409,73 @@
 .canvas-crop-handle.is-ne { top: -0.31rem; right: -0.31rem; cursor: nesw-resize; }
 .canvas-crop-handle.is-sw { bottom: -0.31rem; left: -0.31rem; cursor: nesw-resize; }
 .canvas-crop-handle.is-se { bottom: -0.31rem; right: -0.31rem; cursor: nwse-resize; }
-.canvas-file-name { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.56rem; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-file-name { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); text-overflow: ellipsis; white-space: nowrap; }
 .canvas-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; cursor: pointer; }
-.canvas-switch-row > span { display: grid; gap: 0.15rem; }
-.canvas-switch-row strong { font-size: 0.66rem; font-weight: 530; }
-.canvas-switch-row small { color: var(--muted-foreground); font-size: 0.55rem; }
+.canvas-switch-row > span:first-child { display: grid; gap: 0.125rem; }
+.canvas-switch-row strong { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.canvas-switch-row small { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
 
 .loading-state, .load-error { display: grid; place-items: center; align-content: center; min-height: 60vh; text-align: center; }
-.loading-state { gap: 0.4rem; }
-.loading-state strong { margin-top: 0.65rem; font-size: 0.95rem; font-weight: 570; }
-.loading-state > span:last-child, .load-error p { color: var(--muted-foreground); font-size: 0.72rem; }
-.loading-mark { width: 1.6rem; height: 1.6rem; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 999px; animation: spin 0.75s linear infinite; }
-.load-error { gap: 0.9rem; }
-.load-error h1 { margin: 0; font-size: 1.6rem; }
+/* Held back one slow beat: a local load usually lands first, and then the
+   spinner never flashes up just to vanish. */
+.loading-state { gap: 0.25rem; animation-delay: var(--motion-slow); }
+.loading-state strong { margin-top: 0.75rem; font-size: var(--type-title-sm); font-weight: 600; }
+.loading-state > span:last-child, .load-error p { color: var(--muted-foreground); font-size: var(--type-small); }
+.load-error { gap: 1rem; }
+.load-error h1 { margin: 0; font-size: var(--type-headline); }
 .load-error p { max-width: 30rem; margin: 0; }
 
 /* VIBE：AI 编码代理用量。一块面板四段——状态条、代理列表、LED 预览、频道布置。
    类名用 vibe- 前缀（与 ZOS 的 zc- 同精神：与旧规则零交集）。这里只放布局；
    颜色、圆角、控件形状交给 cladd 组件与 token，本段不重画任何一个 cladd 组件。 */
-.vibe-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
-.vibe-panel { width: min(100%, 72rem); margin-inline: auto; border-radius: 0.85rem; }
+.vibe-shell { min-height: 0; padding: 1rem 0 1.5rem; }
+.vibe-panel { width: min(100%, 72rem); margin-inline: auto; border-radius: var(--radius-card); }
 
 .vibe-strip {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.9rem;
-  padding: 0.6rem 1.1rem;
+  gap: 0.5rem 0.75rem;
+  padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--border);
 }
-.vibe-strip__source { display: inline-flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.vibe-strip__source { display: inline-flex; align-items: center; gap: 0.5rem; min-width: 0; }
 .vibe-strip__icon { flex: none; width: 1rem; height: 1rem; color: var(--primary); }
-.vibe-strip__text { display: grid; gap: 0.05rem; min-width: 0; }
-.vibe-strip__text strong { font-size: 0.8rem; font-weight: 620; letter-spacing: -0.01em; line-height: 1.2; }
+.vibe-strip__text { display: grid; gap: 0.125rem; min-width: 0; }
+.vibe-strip__text strong { font-size: var(--type-body); font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
 /* 副标题从「上游 URL」变成一句话说明，所以不再走等宽。 */
-.vibe-strip__text small { color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.35; }
-.vibe-strip__state { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-left: auto; }
-.vibe-strip__age { color: var(--muted-foreground); font-size: 0.62rem; }
+.vibe-strip__text small { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
+.vibe-strip__state { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+.vibe-strip__age { color: var(--muted-foreground); font-size: var(--type-caption); white-space: nowrap; }
 .vibe-strip__refresh { flex: none; }
 
-/* 一台还没登录任何代理的机器看到的引导。没有下载链接可给——要装的东西
-   本来就是各家自己的 CLI，这里只说清楚「登录哪一个都行」。 */
-.vibe-setup {
-  display: flex;
-  gap: 0.7rem;
-  padding: 0.85rem 1.1rem;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in oklch, var(--muted) 55%, transparent);
-}
-/* 「还没登录」是正常首次状态，走弱化墨色；只有真的采集失败才点亮琥珀警示。 */
-.vibe-setup > svg { flex: none; width: 1rem; height: 1rem; margin-top: 0.1rem; color: var(--muted-foreground); }
-.vibe-setup.is-error > svg { color: oklch(0.62 0.15 75); }
-.vibe-setup strong { font-size: 0.78rem; font-weight: 600; }
-.vibe-setup p { max-width: 44rem; margin: 0.25rem 0 0; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.55; text-wrap: pretty; }
-.vibe-setup p.vibe-setup__error { margin-top: 0.4rem; font-family: var(--mono); font-size: 0.62rem; }
+/* 一台还没登录任何代理的机器看到的引导（<Callout>）。没有下载链接可给——要装的东西
+   本来就是各家自己的 CLI，这里只说清楚「登录哪一个都行」。Inset on the body's
+   1rem gutter so its edges line up with the columns below. */
+.vibe-setup { margin: 1rem 1rem 0; }
+.vibe-setup p.vibe-setup__error { font-family: var(--mono); font-size: var(--type-micro); overflow-wrap: anywhere; }
 
 .vibe-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(20rem, 24rem);
-  gap: 0.6rem 1.4rem;
+  gap: 0.75rem 1.5rem;
   align-items: start;
-  padding: 1rem 1.1rem 1.1rem;
+  padding: 1rem;
 }
-.vibe-main { display: grid; align-content: start; gap: 1.2rem; min-width: 0; }
-.vibe-aside { display: grid; gap: 1.2rem; min-width: 0; }
-.vibe-section__head { padding-bottom: 0.55rem; }
-.vibe-section__head h2 { margin: 0; font-size: 0.9rem; font-weight: 570; }
-.vibe-section__head p { margin: 0.2rem 0 0; color: var(--muted-foreground); font-size: 0.65rem; line-height: 1.45; }
-.vibe-note { margin: 0; color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.5; }
+.vibe-main { display: grid; align-content: start; gap: 1.25rem; min-width: 0; }
+.vibe-aside { display: grid; gap: 1.25rem; min-width: 0; }
+.vibe-section__head { padding-bottom: 0.5rem; }
+.vibe-section__head h2 { margin: 0; font-size: var(--type-title); font-weight: 600; letter-spacing: -0.02em; }
+/* One column head per column: 上屏 shares the aside with 屏幕预览, so it reads one step down. */
+.vibe-display .vibe-section__head h2 { font-size: var(--type-title-sm); letter-spacing: 0; }
+.vibe-section__head p { margin: 0.25rem 0 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+.vibe-note { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
 .vibe-note.is-alert { color: var(--destructive); }
+/* Preflight makes svg a block, so an inline icon lands on its own line; flex keeps it beside the first line. */
+.vibe-note.has-icon { display: flex; align-items: flex-start; gap: 0.5rem; }
+.vibe-note.has-icon > svg { flex: none; width: 0.75rem; height: 0.75rem; margin-top: 0.125rem; }
 /* 载入失败标题走 strong：整页只有 app.tsx 的骨架能写 h1。 */
-.vibe-error-title { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.03em; }
+.vibe-error-title { font-size: var(--type-headline); font-weight: 600; letter-spacing: -0.03em; }
 
 /* --- 代理列表（对齐 OpenUsage Customize） -------------------------------- */
 
@@ -1241,101 +1487,122 @@
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 0.65rem;
-  min-height: 3.1rem;
-  padding: 0.4rem 0.3rem;
+  gap: 0.75rem;
+  min-height: 3rem;
+  padding: 0.5rem 0.25rem;
   border: 0;
   background: none;
   color: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
 }
 .vibe-provider__head:disabled { cursor: default; }
 .vibe-provider__head:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .vibe-provider__icon { display: inline-flex; flex: none; width: 1.25rem; height: 1.25rem; color: var(--foreground); }
 .vibe-provider.is-empty .vibe-provider__icon { color: var(--muted-foreground); }
-.vibe-provider__name { display: grid; gap: 0.08rem; min-width: 0; }
-.vibe-provider__name strong { font-size: 0.78rem; font-weight: 570; }
-.vibe-provider__name small { color: var(--muted-foreground); font-size: 0.6rem; }
-.vibe-provider__count { margin-left: auto; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.6rem; white-space: nowrap; }
-.vibe-provider__chevron { flex: none; width: 0.85rem; height: 0.85rem; color: var(--muted-foreground); transition: transform 160ms ease; }
-.vibe-provider__chevron.is-open { transform: rotate(180deg); }
-.vibe-provider__error { display: flex; align-items: center; gap: 0.35rem; margin: 0 0 0.5rem; padding-left: 0.3rem; color: oklch(0.55 0.14 60); font-size: 0.62rem; }
-.vibe-provider__error svg { flex: none; width: 0.75rem; height: 0.75rem; }
+.vibe-provider__name { display: grid; gap: 0.125rem; min-width: 0; }
+.vibe-provider__name strong { font-size: var(--type-body); font-weight: 500; }
+.vibe-provider__name small { color: var(--muted-foreground); font-size: var(--type-micro); }
+.vibe-provider__count { margin-left: auto; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); white-space: nowrap; }
+.vibe-provider__chevron { flex: none; width: 0.875rem; height: 0.875rem; color: var(--muted-foreground); }
+/* Hint and error lines hang off the head's two columns: icon under the
+   provider icon (0.25 + 1.25rem), text under the name (+0.75rem gap). */
+.vibe-provider__error,
+.vibe-provider__note { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); align-items: start; column-gap: 0.75rem; margin: 0 0 0.5rem; padding: 0 0.25rem; font-size: var(--type-caption); line-height: 1.45; }
+.vibe-provider__error { color: var(--tone-warning); }
 /* note 是厂商给的提示（如「重新登录可恢复实时额度」），不是失败：走弱化墨色，
    与上面那条红字明确分开。 */
-.vibe-provider__note { display: flex; align-items: center; gap: 0.35rem; margin: 0 0 0.5rem; padding-left: 0.3rem; color: var(--muted-foreground); font-size: 0.62rem; }
-.vibe-provider__note svg { flex: none; width: 0.75rem; height: 0.75rem; }
-.vibe-provider__detail { display: grid; gap: 0.5rem; padding: 0 0.3rem 0.75rem; }
-.vibe-outdated { margin: 0; color: oklch(0.55 0.14 75); font-size: 0.62rem; }
+.vibe-provider__note { color: var(--muted-foreground); }
+.vibe-provider__error svg,
+.vibe-provider__note svg { justify-self: center; width: 0.75rem; height: 0.75rem; margin-top: 0.125rem; }
+/* No left padding: the 1.75rem star column then centres on the provider icon
+   and the label starts where the name does (0 + 1.75 + 0.5 = 2.25rem). */
+.vibe-provider__detail { display: grid; gap: 0.5rem; padding: 0 0.25rem 0.75rem 0; }
+.vibe-outdated { margin: 0; color: var(--tone-warning); font-size: var(--type-caption); }
+/* Lines that are not metric rows still start in the label column. */
+.vibe-provider__detail > p { padding-left: 2.25rem; }
 
-.vibe-metrics { display: grid; gap: 0.1rem; margin: 0; padding: 0; list-style: none; }
+/* Columns live on the list and each row subgrids them: as separate grids, the
+   auto value column took each row's own width ("5%" vs "46%") and the meters
+   ended at different x. */
+.vibe-metrics { display: grid; grid-template-columns: 1.75rem minmax(4.5rem, 8rem) minmax(3rem, 1fr) auto; gap: 0.25rem 0.5rem; margin: 0; padding: 0; list-style: none; }
 .vibe-metric {
   display: grid;
-  grid-template-columns: 1.6rem minmax(4.5rem, 8rem) minmax(3rem, 1fr) auto;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: 0.5rem;
-  min-height: 2rem;
+  row-gap: 0;
 }
-.vibe-metric__label { min-width: 0; overflow: hidden; font-size: 0.68rem; text-overflow: ellipsis; white-space: nowrap; }
-.vibe-metric__value { font-family: var(--mono); font-size: 0.68rem; font-variant-numeric: tabular-nums; text-align: right; }
+.vibe-metric__label { min-width: 0; overflow: hidden; font-size: var(--type-small); text-overflow: ellipsis; white-space: nowrap; }
+/* Column 4 explicitly: a balance metric has no meter, and auto-placement
+   would pull its value into the meter's column, out of line with the rest. */
+.vibe-metric__value { grid-column: 4; font-family: var(--mono); font-size: var(--type-small); font-variant-numeric: tabular-nums; text-align: right; }
 .vibe-metric__value.is-warning { color: oklch(0.6 0.14 75); }
 .vibe-metric__value.is-critical { color: var(--destructive); }
-/* 重置倒计时是第四列之后的补充说明，窄栏时整行折到下一行仍然读得通。 */
-.vibe-metric__reset { grid-column: 2 / -1; color: var(--muted-foreground); font-size: 0.58rem; }
+/* 重置倒计时是第四列之后的补充说明，窄栏时整行折到下一行仍然读得通。
+   Pulled up into the star row's slack so it reads as its own metric's footnote,
+   not as a heading for the next one. */
+.vibe-metric__reset { grid-column: 2 / -1; margin-top: -0.25rem; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
 .vibe-star {
-  display: inline-flex;
-  place-content: center;
-  width: 1.6rem;
-  height: 1.6rem;
+  /* Grid, not flex + place-content: that left the glyph pinned to the top. */
+  display: inline-grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-cladd-md);
+  border-radius: var(--radius-control);
   background: none;
   color: var(--muted-foreground);
   cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
 }
-.vibe-star svg { width: 0.85rem; height: 0.85rem; }
+.vibe-star svg { width: 0.875rem; height: 0.875rem; }
 .vibe-star.is-on { color: oklch(0.68 0.15 80); }
 .vibe-star.is-on svg { fill: currentColor; }
-.vibe-star:disabled { cursor: default; opacity: 0.5; }
-.vibe-star:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+/* Disabled only while the PUT is in flight. The dim waits 160ms, so a fast
+   local round trip never flashes every star of the row. */
+.vibe-star:disabled { cursor: default; opacity: 0.5; transition-delay: 0s, 0s, 160ms; }
+/* Inset: the star sits on the disclosure's clipped edge. */
+.vibe-star:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 /* meter 的三色 = OpenUsage 的绝对档位（80% 琥珀 / 90% 红）；LED 渲染器用同两个
    阈值，屏上是什么颜色这里就是什么颜色。 */
 .vibe-meter { display: block; overflow: hidden; height: 0.32rem; border-radius: 999px; background: var(--border); }
-.vibe-meter__fill { display: block; height: 100%; border-radius: 999px; background: oklch(0.6 0.17 255); transition: width 200ms ease; }
+.vibe-meter__fill { display: block; height: 100%; border-radius: 999px; background: oklch(0.6 0.17 255); transition: width var(--motion-base) var(--ease-in-out); }
 .vibe-meter.is-warning .vibe-meter__fill { background: oklch(0.72 0.16 80); }
 .vibe-meter.is-critical .vibe-meter__fill { background: oklch(0.6 0.2 25); }
-.vibe-spend { margin: 0.15rem 0 0; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; line-height: 1.5; text-wrap: pretty; }
+.vibe-spend { margin: 0; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); line-height: 1.5; text-wrap: pretty; }
 
 /* --- 屏幕预览（前端自绘：设备那页由固件画，这里复现同一排版） -------------- */
 
-.vibe-preview { display: grid; gap: 0.35rem; }
-.vibe-screen { margin: 0 0 0.4rem; }
+.vibe-preview { display: grid; gap: 0.5rem; }
+.vibe-screen { margin: 0; }
 /* 与 .clock-screen img 同一套：52×16 原生分辨率，靠 pixelated 放大。 */
 .vibe-screen canvas { width: 100%; height: 100%; object-fit: fill; image-rendering: pixelated; }
-.vibe-screen figcaption { padding-top: 0.3rem; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; text-align: center; }
+/* A page turn fades the new page in place (no travel: it is a screen, not a card). */
+.vibe-screen canvas.motion-enter { --enter-y: 0; animation-duration: var(--motion-base); }
+.vibe-screen figcaption { padding-top: 0.5rem; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); text-align: center; }
 .vibe-preview__pager { display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
-.vibe-preview__count { color: var(--muted-foreground); font-family: var(--mono); font-size: 0.6rem; font-variant-numeric: tabular-nums; }
+.vibe-preview__count { color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); font-variant-numeric: tabular-nums; }
 
 /* --- 上屏（VIBE 是 ZOS 根环上的 App，不再是频道） -------------------------- */
 
-.vibe-display { display: grid; gap: 0.55rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
-.vibe-display__actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.vibe-display { display: grid; gap: 0.75rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.vibe-display__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 /* 标签在左、控件在右，说明行跟着标签走——和设备设置里那一排 SettingField 同一个
    读法，只是那个组件没导出，这里不为一处控件把它搬出来。 */
-.vibe-field { display: flex; align-items: start; justify-content: space-between; gap: 0.8rem; }
+.vibe-field { display: flex; align-items: start; justify-content: space-between; gap: 0.75rem; }
 .vibe-field__copy { min-width: 0; }
-.vibe-field__copy label { font-size: 0.72rem; font-weight: 520; }
-.vibe-field__copy p { margin: 0.15rem 0 0; color: var(--muted-foreground); font-size: 0.63rem; line-height: 1.45; }
-.vibe-field__control { flex: none; }
-.vibe-note__icon { width: 0.75rem; height: 0.75rem; margin-right: 0.3rem; vertical-align: -0.1em; }
-.vibe-provider__stale, .vibe-provider__origin { margin-left: 0.35rem; }
+.vibe-field__copy label { display: block; color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; line-height: 1.5; }
+.vibe-field__copy p { margin: 0.25rem 0 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+/* Centre the control on the label's line (12px × 1.5), not on the top of the
+   copy block; the token keeps it right when phones raise the control height. */
+.vibe-field__control { flex: none; margin-top: calc((var(--type-small) * 1.5 - var(--spacing-cladd-md)) / 2); }
 
 /* --- 远程采集（ADR 0013） ------------------------------------------------- */
 
-.vibe-strip__actions { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; }
-.vibe-setup__action { margin-top: 0.55rem; }
+.vibe-strip__actions { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; }
 
 /* Width belongs on the dialog root Surface, not on the inner content wrapper:
    sized on the wrapper the panel keeps its default width and every long command
@@ -1347,17 +1614,19 @@
 }
 .vibe-remote__content { min-width: 0; }
 .vibe-remote__title { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
-.vibe-remote__title span { display: block; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase; }
-.vibe-remote__title strong { display: block; font-size: 0.9rem; font-weight: 640; letter-spacing: -0.01em; }
+.vibe-remote__title span { display: block; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; }
+.vibe-remote__title strong { display: block; font-size: var(--type-title); font-weight: 600; letter-spacing: -0.02em; }
 
 .vibe-remote__body {
   display: grid;
-  gap: 0.95rem;
+  gap: 1rem;
   /* Bounded so the guide scrolls inside the dialog instead of growing past the
      viewport; without a max-height the overflow-y below never engages. */
   max-height: min(70vh, 44rem);
   overflow-y: auto;
-  padding-top: 0.2rem;
+  /* Bottom room for the last fold trigger's focus ring (≈5px below the
+     button): without it a closed guide still scrolls by that much. */
+  padding-block: 0.25rem 0.5rem;
 }
 /* Grid items default to min-width:auto, which lets a long command widen the
    track and defeat the per-block horizontal scroll. Needed at every level. */
@@ -1368,33 +1637,37 @@
 .vibe-remote__code { min-width: 0; }
 .vibe-remote__body code { font-family: var(--mono); font-size: 0.92em; overflow-wrap: anywhere; }
 
-.vibe-remote__lede { margin: 0; color: var(--muted-foreground); font-size: 0.7rem; line-height: 1.65; text-wrap: pretty; }
+.vibe-remote__lede { margin: 0; color: var(--cladd-fg-soft); font-size: var(--type-small); line-height: 1.5; text-wrap: pretty; }
 .vibe-remote__lede strong { color: var(--foreground); font-weight: 600; }
 
-.vibe-remote__machines { display: grid; gap: 0.4rem; padding: 0.6rem 0.75rem; }
-.vibe-remote__machine { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
-.vibe-remote__machine strong { font-family: var(--mono); font-size: 0.7rem; font-weight: 600; }
-.vibe-remote__machine-meta { flex: 1 1 auto; min-width: 0; color: var(--muted-foreground); font-size: 0.63rem; }
-.vibe-remote__dot { flex: none; width: 0.4rem; height: 0.4rem; border-radius: 999px; background: oklch(0.68 0.16 150); }
+.vibe-remote__machines { display: grid; gap: 0.25rem; padding: 0.5rem 0.75rem; }
+.vibe-remote__machine { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.vibe-remote__machine strong { font-family: var(--mono); font-size: var(--type-caption); font-weight: 600; }
+.vibe-remote__machine-meta { flex: 1 1 auto; min-width: 0; color: var(--muted-foreground); font-size: var(--type-micro); }
+.vibe-remote__dot { flex: none; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: oklch(0.68 0.16 150); }
 .vibe-remote__dot.is-stale { background: oklch(0.72 0.16 80); }
 
 .vibe-remote__step { display: grid; gap: 0.5rem; }
-.vibe-remote__step-head { display: grid; gap: 0.4rem; }
-.vibe-remote__step-head h3 { margin: 0; font-size: 0.78rem; font-weight: 620; letter-spacing: -0.01em; }
-.vibe-remote__choices { flex-wrap: wrap; justify-content: flex-start; justify-self: start; }
+.vibe-remote__step-head { display: grid; gap: 0.5rem; }
+.vibe-remote__step-head h3 { margin: 0; font-size: var(--type-title-sm); font-weight: 600; }
+/* Equal columns while they fit; on a phone a long label (就是这台电脑) keeps its
+   width and the short ones give, instead of every label breaking in two. */
+.vibe-remote__choices { justify-self: start; max-width: 100%; }
+.vibe-remote__choices .segmented-track__content > * { grid-auto-columns: minmax(max-content, 1fr); }
+/* Four max-content columns need ~307px; under that the track overflowed the dialog. Go 2×2 instead. */
+@media (max-width: 24rem) { .vibe-remote__choices .segmented-track__content > :has(> :nth-child(4)) { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
-.vibe-remote__done { display: flex; align-items: center; gap: 0.35rem; margin: 0; color: var(--muted-foreground); font-size: 0.66rem; }
-.vibe-remote__done > svg { width: 0.8rem; height: 0.8rem; color: oklch(0.62 0.15 150); }
+.vibe-remote__done { display: flex; align-items: center; gap: 0.5rem; margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); }
+.vibe-remote__done > svg { flex: none; width: 0.75rem; height: 0.75rem; color: oklch(0.62 0.15 150); }
 
 .vibe-remote__field { display: grid; gap: 0.25rem; min-width: 0; }
-.vibe-remote__field > span { color: var(--muted-foreground); font-size: 0.63rem; }
-.vibe-remote__field-row { display: flex; gap: 0.4rem; min-width: 0; }
+.vibe-remote__field > span { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.vibe-remote__field-row { display: flex; gap: 0.5rem; min-width: 0; }
 .vibe-remote__field-row > :first-child { flex: 1 1 auto; min-width: 0; }
 
-.vibe-remote__command { display: grid; gap: 0.3rem; }
-.vibe-remote__command-label { font-size: 0.7rem; font-weight: 600; }
-.vibe-remote__command p { margin: 0; color: var(--muted-foreground); font-size: 0.66rem; line-height: 1.55; text-wrap: pretty; }
-.vibe-remote__note { font-size: 0.62rem !important; opacity: 0.85; }
+.vibe-remote__command { display: grid; gap: 0.25rem; }
+.vibe-remote__command-label { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.vibe-remote__command p { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
 .vibe-remote__file code { color: var(--foreground); }
 
 .vibe-remote__code { position: relative; }
@@ -1405,55 +1678,52 @@
   overflow-y: auto;
   margin: 0;
   /* Top padding clears the pinned copy button, which sits over the first line. */
-  padding: 1.95rem 0.65rem 0.55rem;
+  padding: 2rem 0.75rem 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 0.5rem;
+  border-radius: var(--radius-control);
   background: color-mix(in oklch, var(--muted) 62%, transparent);
+  /* Size and leading live on the <pre>: set only on the inline <code>, every
+     line still took the pre's inherited 16px × 1.5 strut — double spacing. */
+  font-family: var(--mono);
+  font-size: var(--type-micro);
+  line-height: 1.55;
 }
-.vibe-remote__code code { font-family: var(--mono); font-size: 0.62rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.vibe-remote__code code { font-size: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Pinned rather than in flow: the block scrolls horizontally and a button
    inside it would slide out of reach on a long command. Opaque, because the
    command scrolls underneath it. */
-.vibe-remote__copy { position: absolute; top: 0.3rem; right: 0.3rem; background: var(--background); }
+.vibe-remote__copy { position: absolute; top: 0.25rem; right: 0.25rem; background: var(--background); }
 
-.vibe-remote__extras { display: grid; gap: 0.45rem; }
-.vibe-remote__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  justify-self: start;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--muted-foreground);
-  font-size: 0.66rem;
-  cursor: pointer;
-}
-.vibe-remote__toggle:hover { color: var(--foreground); }
-.vibe-remote__toggle > svg { width: 0.75rem; height: 0.75rem; }
-.vibe-remote__fold { display: grid; gap: 0.55rem; padding-left: 1.1rem; border-left: 2px solid var(--border); }
-.vibe-remote__fold > p { margin: 0; color: var(--muted-foreground); font-size: 0.66rem; line-height: 1.55; text-wrap: pretty; }
+/* Each extra is trigger + fold in one wrapper, so a shut (zero-height) fold
+   does not add a second grid gap between the triggers. */
+.vibe-remote__extras { display: grid; gap: 0.25rem; }
+.vibe-remote__extra { display: grid; }
+.vibe-remote__toggle { justify-self: start; }
+/* Margins, not padding: this sits inside the disclosure's clip, and the right
+   and bottom room keeps cladd focus rings from being shaved off. */
+/* 0.875rem left: the rule drops from under the trigger's 16px icon, not the button edge. */
+.vibe-remote__fold { display: grid; gap: 0.5rem; margin: 0.5rem 0.25rem 0.25rem 0.875rem; padding-left: 1rem; border-left: 2px solid var(--border); }
+.vibe-remote__fold > p { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
 
-.vibe-remote__warning { display: flex; gap: 0.65rem; padding: 0.65rem 0.75rem; }
-.vibe-remote__warning > svg { flex: none; width: 0.9rem; height: 0.9rem; margin-top: 0.1rem; color: oklch(0.62 0.15 75); }
-.vibe-remote__warning strong { font-size: 0.7rem; font-weight: 620; }
-.vibe-remote__warning p { margin: 0.2rem 0 0; color: var(--muted-foreground); font-size: 0.64rem; line-height: 1.55; text-wrap: pretty; }
-
-.vibe-remote__advanced { display: grid; gap: 0.4rem; }
-.vibe-remote__advanced summary { color: var(--muted-foreground); font-size: 0.64rem; cursor: pointer; }
-.vibe-remote__advanced p { margin: 0; color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.55; }
 
 @media (hover: hover) and (pointer: fine) {
-  .channel-delete, .playlist-remove { opacity: 0; }
-  .channel-entry:hover { background: color-mix(in oklch, var(--muted) 72%, transparent); }
+  /* The shared list-row hover tint (.channel-entry, .playlist-row, .market-item). */
+  .vibe-provider__head:not(:disabled):hover { background: color-mix(in oklch, var(--muted) 50%, transparent); }
+  .vibe-star:not(:disabled):hover { background: color-mix(in oklch, var(--muted) 50%, transparent); color: var(--foreground); }
+  .vibe-star.is-on:not(:disabled):hover { color: oklch(0.62 0.15 80); }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  /* One hover tint for every list row; it stays well under the 82% selected tint. */
+  .channel-entry:hover, .playlist-row:hover, .market-item:hover { background: color-mix(in oklch, var(--muted) 50%, transparent); }
   .channel-entry.is-active:hover { background: color-mix(in oklch, var(--muted) 94%, transparent); }
-  .channel-entry:hover .channel-delete { opacity: 0.72; }
-  .channel-delete:hover { color: var(--destructive); opacity: 1; }
-  .playlist-row:hover { background: color-mix(in oklch, var(--muted) 72%, transparent); }
-  .playlist-item:hover .playlist-remove { opacity: 0.72; }
-  .playlist-remove:hover { color: var(--destructive); opacity: 1; }
-  .market-item:hover { background: color-mix(in oklch, var(--muted) 50%, transparent); }
+  .channel-delete, .playlist-remove { opacity: 0; }
+  .channel-entry:is(:hover, :focus-within) .channel-delete,
+  .playlist-item:is(:hover, :focus-within) .playlist-remove { opacity: 0.72; }
+  .channel-delete:is(:hover, :focus-visible), .playlist-remove:is(:hover, :focus-visible) { color: var(--destructive); opacity: 1; }
   .color-swatch:hover { transform: translateY(-1px); }
+  .pixel-library-heading a:hover { color: var(--foreground); }
+  .pixel-library-preview:hover { border-color: color-mix(in oklch, var(--foreground) 32%, var(--border)); }
   .preview-dots button:hover { transform: translateY(-1px); background: var(--muted-foreground); }
 }
 
@@ -1463,23 +1733,47 @@
   .workspace-editor { max-height: none; overflow: visible; }
   .content-market { grid-column: 1 / -1; min-height: 24rem; margin-top: 1.5rem; padding-left: 0; border-top: 1px solid var(--border); border-left: 0; }
   .market-scroll { overflow: visible; }
+  .market-heading { padding-inline: 0.75rem; }
+  .market-filter { margin-inline: 0; }
   .instrument-search { padding-inline: 0.75rem; }
-  .instrument-results { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* Full page width: one row again, capped so the kind filter cannot stretch. */
+  .instrument-search__form { grid-template-columns: minmax(0, 1fr) 9rem auto; max-width: 48rem; }
+  .instrument-search__input, .instrument-search__kind { grid-column: auto; }
+  .instrument-results { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-inline: -0.75rem; }
   .market-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .market-item { padding-inline: 0.75rem; border-right: 1px solid var(--border); }
   .market-item:nth-child(3n) { border-right: 0; }
+  /* Three columns side by side: two lines reserved so every card's buttons sit on one line. */
+  .market-item p { min-height: 2.9em; }
   .pixel-library { padding-inline: 0.75rem; }
-  .pixel-library-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .studio-layout.is-canvas { grid-template-columns: 12.5rem minmax(0, 1fr); }
   .studio-layout.is-library { grid-template-columns: 12.5rem minmax(0, 1fr); }
   .pixel-library-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .canvas-workspace { max-height: none; overflow: visible; }
   .canvas-inspector { grid-column: 1 / -1; min-height: 0; margin-top: 1.5rem; padding-left: 0; border-top: 1px solid var(--border); border-left: 0; }
   .canvas-inspector-scroll { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: visible; }
+  .canvas-inspector-heading { padding-inline: 0.75rem; }
   .canvas-inspector-section { align-content: start; padding-inline: 0.75rem; border-right: 1px solid var(--border); }
   .canvas-inspector-section:last-child { border-right: 0; }
   /* 侧栏低于 20rem 时 LED 机身照片会被压到看不清像素，早一档折成单列。 */
   .vibe-body { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Header shedding between the desktop and phone shapes, measured at 1440 with
+   the tokens as they are: brand 260px with its device line, tabs 491px, status
+   group 208px; the two 1fr sides must each hold the wider of their contents.
+   68rem: the device line would truncate to "/ Ulanzi TC0…" — drop it whole.
+   64rem: the status group stops fitting beside the strip (at 62rem, plus room
+   for 设备待更新) — tabs go label-only (-168px) and the firmware chip
+   icon-only (its name stays in aria-label and the tooltip), leaving ~80px of
+   slack at 52rem. Phones (and the landscape shape, which moves the strip to
+   the bottom) are left alone. */
+@media (min-width: 52.01rem) and (max-width: 68rem) {
+  .brand-device { display: none; }
+}
+@media (min-width: 52.01rem) and (max-width: 64rem) and (min-height: 34.01rem) {
+  .main-tab__content > svg { display: none; }
+  .firmware-chip__label { display: none; }
 }
 
 @media (max-width: 52rem) {
@@ -1535,9 +1829,13 @@
   .main-tabs button { min-width: 0; min-height: 2.75rem; justify-content: center; }
   /* 手机上底部归主导航（0.65rem + 3.45rem），提示条整条压在它上面而不是盖住它。 */
   .install-prompt { right: max(0.75rem, env(safe-area-inset-right)); bottom: calc(4.55rem + env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); max-width: none; }
+  /* 页尾让出主导航 + 提示条两层，滚到底时最后一行不被它压住。 */
+  .studio-page:has(~ .install-prompt:not(.motion-exit)) { padding-bottom: calc(9rem + env(safe-area-inset-bottom)); }
+  /* toast 同理压在主导航之上，左右与提示条同一条边。 */
+  .cladd-toast { right: max(0.75rem, env(safe-area-inset-right)) !important; bottom: calc(4.55rem + env(safe-area-inset-bottom)) !important; max-width: calc(100vw - 1.5rem) !important; }
   /* 六个主视图后每列只剩约 1/6 屏宽，横排放不下「素材库」这种三字标签。
      图标上、文字下，标签就永远是一行，触控高度也没变。 */
-  .main-tab__content { flex-direction: column; gap: 0.16rem; padding-inline: 0.15rem; white-space: nowrap; }
+  .main-tab__content { flex-direction: column; gap: 0.25rem; padding-inline: 0.125rem; }
   .header-actions { grid-column: 2; grid-row: 1; }
   .brand-device { display: none; }
   .device-settings-trigger { min-width: 2.75rem; }
@@ -1546,21 +1844,21 @@
      title — the blurred-sleeve backdrop stretched across the whole page with
      nothing in its right half. The kicker and description are hidden below, so
      the row is just h1 + widget, and both centre on the same axis. */
-  .page-heading { align-items: center; padding: 0.7rem 0 0.55rem; }
+  .page-heading { align-items: center; padding: 0.75rem 0; }
   /* Same scoping as the base rule: unscoped, this display:none would erase the
      mini player's artist line and the spans cladd wraps its icons in. */
   .page-heading > div:first-child > span { display: none; }
   /* One line, then ellipsis: the widget's cover and square buttons cannot
      shrink, so all of the give on this row comes out of the title. */
-  .page-heading h1 { overflow: hidden; font-size: 1.12rem; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
+  .page-heading h1 { overflow: hidden; margin-top: 0; font-size: var(--type-title-lg); letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
   .page-heading > div:first-child > p { display: none; }
   .studio-layout, .studio-layout.is-canvas, .studio-layout.is-library, .studio-layout.is-game { display: block; padding-top: 0; }
   .studio-layout.is-zos, .studio-layout.is-vibe { display: block; padding-top: 0; }
   /* 竖屏没有横屏门：VIBE 像 zos 一样直接纵向 reflow，屏幕预览与布置排到列表下面。 */
-  .vibe-body { grid-template-columns: minmax(0, 1fr); padding-inline: 0.9rem; }
-  .vibe-strip, .vibe-setup { padding-inline: 0.9rem; }
-  .vibe-metric { grid-template-columns: 2rem minmax(4rem, 1fr) minmax(2.5rem, 1fr) auto; }
-  .game-shell { padding-top: 0.65rem; }
+  .vibe-body { grid-template-columns: minmax(0, 1fr); padding-inline: 0.75rem; }
+  .vibe-strip { padding-inline: 0.75rem; }
+  .vibe-setup { margin-inline: 0.75rem; }
+  .vibe-metrics { grid-template-columns: 1.75rem minmax(4rem, 1fr) minmax(2.5rem, 1fr) auto; }
   .game-body { padding-top: 0.75rem; }
   .game-stage { width: 100%; }
   .game-console__options { width: 100%; margin-left: 0; }
@@ -1569,10 +1867,12 @@
   .channel-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scrollbar-width: none; }
   .channel-scroll::-webkit-scrollbar { display: none; }
   .channel-list { display: flex; gap: 0.45rem; padding: 0 0 0.05rem; scroll-snap-type: x proximity; }
-  .channel-entry { flex: 0 0 min(56vw, 11rem); min-height: 3rem; overflow: hidden; border: 1px solid var(--border); border-left-width: 1px; border-radius: var(--radius-cladd-md); scroll-snap-align: start; }
-  .channel-entry.is-active { border-color: color-mix(in oklch, var(--primary) 48%, var(--border)); box-shadow: inset 3px 0 var(--primary); }
-  .channel-select { min-height: 3rem; padding-block: 0.45rem; }
-  .channel-delete { width: 2.75rem; height: 2.75rem; opacity: 0.72; }
+  .channel-entry { flex: 0 0 min(56vw, 11rem); grid-template-columns: minmax(0, 1fr) 2.75rem; min-height: 3rem; overflow: hidden; border: 1px solid var(--border); border-left-width: 1px; border-radius: var(--radius-cladd-md); scroll-snap-align: start; }
+  /* A destructive control keeps a 44px touch target without growing the sm
+     button: the hit box fills the 2.75rem column and the 3rem card. */
+  .channel-delete::after { position: absolute; inset: -0.5rem; content: ""; }
+  .channel-entry.is-active { border-color: color-mix(in oklch, var(--primary) 48%, var(--border)); box-shadow: inset 2px 0 var(--primary); }
+  .channel-select { min-height: 3rem; padding-block: 0.5rem; }
   .add-channel--desktop { display: none !important; }
   .add-channel--mobile {
     display: inline-flex !important;
@@ -1598,7 +1898,6 @@
     backdrop-filter: blur(0.9rem);
   }
   .mobile-console-tabs { width: 100%; }
-  .mobile-console-tabs svg { width: 0.86rem; height: 0.86rem; }
   .mobile-pane-compose .content-market { display: none; }
   .mobile-pane-catalog .workspace-editor { display: none; }
   .mobile-pane-catalog .content-market {
@@ -1615,29 +1914,17 @@
     background: var(--background);
   }
   .workspace-editor, .canvas-workspace { padding: 0 0 1.5rem; overflow: visible; }
-  .mobile-channel-settings-trigger {
-    display: flex !important;
-    width: 100%;
-    min-height: 3rem;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-top: 0.5rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-cladd-md);
-    background: color-mix(in oklch, var(--muted) 58%, transparent);
-    text-align: left;
-  }
-  .mobile-channel-settings-trigger__copy { display: grid; min-width: 0; flex: 1; gap: 0.2rem; justify-items: start; text-align: left; }
-  .mobile-channel-settings-trigger__copy > span { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; font-weight: 570; }
-  .mobile-channel-settings-trigger__copy svg { width: 0.85rem; height: 0.85rem; color: var(--primary); }
-  .mobile-channel-settings-trigger__copy small { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: 0.58rem; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-disclosure-chevron { width: 0.95rem; height: 0.95rem; flex: none; color: var(--muted-foreground); transition: transform 160ms ease; }
-  .mobile-disclosure-chevron.is-open { transform: rotate(180deg); }
-  .channel-config { grid-template-columns: 1fr 1fr; }
-  .channel-config.is-mobile-collapsed { display: none; }
-  .channel-config:not(.is-mobile-collapsed) { margin-top: 0.45rem; border: 1px solid var(--border); border-radius: var(--radius-md); }
+  /* A cladd multiline Button: its own surface, radius and press; only the
+     two-line layout inside is ours. */
+  .mobile-channel-settings-trigger { display: block !important; width: 100%; margin-top: 0.5rem; }
+  .mobile-channel-settings-trigger__content { justify-content: space-between; gap: 0.75rem; padding-block: 0.5rem; }
+  .mobile-channel-settings-trigger__copy { display: grid; min-width: 0; flex: 1; gap: 0.25rem; justify-items: start; text-align: left; }
+  .mobile-channel-settings-trigger__copy > span { display: flex; align-items: center; gap: 0.375rem; font-size: var(--type-small); font-weight: 600; }
+  .mobile-channel-settings-trigger__copy svg { width: 0.875rem; height: 0.875rem; color: var(--primary); }
+  .mobile-channel-settings-trigger__copy small { overflow: hidden; color: var(--muted-foreground); font-family: var(--mono); font-size: var(--type-micro); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+  .channel-config { grid-template-columns: 1fr 1fr; margin-top: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-card); }
+  /* Inside its own card here, so the cell padding is even again. */
+  .config-field { padding-top: 0.75rem; }
   .config-field:first-child { padding-left: 0.9rem; }
   .config-field:nth-child(3) { border-left: 0; }
   .preview-section { padding-top: 0.5rem; }
@@ -1648,7 +1935,7 @@
     gap: 0.5rem;
     padding: 0.55rem 0;
   }
-  .canvas-toolbar { align-items: flex-start; flex-wrap: wrap; gap: 0.55rem; }
+  .canvas-toolbar { flex-wrap: wrap; }
   .preview-toolbar .preview-copy { display: none; }
   .preview-scope { grid-column: 1; grid-row: 1; justify-self: start; }
   .mobile-preview-toggle {
@@ -1657,7 +1944,6 @@
     grid-row: 1;
     align-self: center;
   }
-  .mobile-preview-toggle svg { width: 0.85rem; height: 0.85rem; }
   /* 用 flex 而不是三列 grid：预览按钮不存在时，grid 的空列仍会在按钮右侧
      留下一个 gap，导致推送频道比同屏其它按钮少对齐 7.2px。 */
   .workspace-actions { display: flex; width: 100%; align-items: center; margin-left: 0; }
@@ -1666,43 +1952,55 @@
   .action-status { margin-right: auto; justify-items: start; }
   .workspace-actions > button { min-width: 7rem; padding-inline: 0.7rem; }
   .preview-scope button { padding-inline: 0.8rem; }
-  .device-stage.is-mobile-collapsed { display: none; }
-  .device-stage:not(.is-mobile-collapsed) { padding-top: 0.7rem; }
+  /* Bottom room keeps the preview dots' focus ring inside the fold's clip. */
+  .device-stage { padding-block: 0.75rem 0.25rem; }
   .playlist-section { margin-top: 0.45rem; scroll-margin-top: calc(8.25rem + env(safe-area-inset-top)); }
   .playlist-section > .subsection-heading { align-items: center; }
   .playlist-heading-copy { display: grid; width: auto; justify-content: start; gap: 0.18rem; }
   .mobile-add-content { display: inline-flex !important; flex: none; }
   #market-title, [id^="playlist-item-"] { scroll-margin-top: calc(8.25rem + env(safe-area-inset-top)); }
-  /* 激活项左侧有 2px 绿条，内边距太小会让内容图标直接贴上去。 */
-  .playlist-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.4rem; min-height: 3.4rem; padding: 0.4rem 0.55rem; }
+  /* 激活项左侧有 2px 绿条，内边距太小会让内容图标直接贴上去；右侧是透明按钮，
+     自带内边距，所以只留 0.25rem。四个控件共用 358px 一行，名称列靠这些省下的
+     宽度才放得下「BTC · Bitcoin」。 */
+  .playlist-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.25rem; min-height: 3.5rem; padding: 0.5rem 0.25rem 0.5rem 0.75rem; }
   .playlist-row > :first-child { display: none; }
   .playlist-item:not(.is-active) .playlist-row > :last-child { display: none; }
   /* 非 cladd 的自定义行，拿不到 size token，按 sm 档（40px）单独对齐。 */
   .playlist-select { min-height: 2.5rem; }
   .playlist-actions { gap: 0; }
   .playlist-actions button { min-width: 2.4rem; }
-  .playlist-remove { opacity: 0.72; }
-  .duration-field { width: auto; }
   .duration-field > span { display: none; }
-  .content-options { margin-left: 0.35rem; }
+  /* Fits 「900 秒」; the name column keeps the rest of a 358px row. Scoped to
+     the playlist so VIBE's scrubbers keep their spacing. */
+  .duration-field .number-scrubber { width: 5rem; }
+  .duration-field .number-scrubber__content { gap: 0.25rem; padding-inline: 0.5rem; }
+  .content-options { margin-left: 0.5rem; }
   .option-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .option-field--wide { grid-column: span 2; }
   .content-market { min-height: 0; }
   .instrument-search { padding-inline: 0; }
-  .instrument-search__form { grid-template-columns: minmax(0, 1fr) 6.5rem; }
-  .instrument-search__form button { grid-column: 1 / -1; }
-  .instrument-results { grid-template-columns: 1fr; }
+  .instrument-search__form { grid-template-columns: minmax(0, 1fr) auto; max-width: none; }
+  .instrument-search__input { grid-column: 1 / -1; }
+  .instrument-search__kind { grid-column: 1; }
+  .instrument-results { grid-template-columns: 1fr; margin-inline: 0; }
   .market-list { grid-template-columns: 1fr; }
+  /* Single column again: heading, search and items share the page gutter. */
+  .market-heading, .market-item { padding-inline: 0; }
+  .market-filter { margin-inline: 0; }
   .market-item { border-right: 0; }
+  .market-item p { min-height: 0; }
   .pixel-library { padding: 0 0 1.5rem; overflow: visible; }
   .pixel-library-discovery { grid-template-columns: 1fr; }
+  .pixel-library-video-pending { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pixel-library-video-file { grid-column: 1 / -1; }
+  .pixel-library-video-pending .cladd-select { grid-column: 1 / -1; }
   .pixel-library-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pixel-library-list { grid-template-columns: 1fr; }
   .canvas-inspector { display: block; margin-top: 0; padding: 0 0 1.5rem; }
   .canvas-inspector-scroll { display: block; }
-  .canvas-inspector-section { padding-inline: 0.25rem; border-right: 0; }
+  .canvas-inspector-heading { padding-inline: 0.5rem; }
+  .canvas-inspector-section { padding-inline: 0.5rem; border-right: 0; }
   .canvas-toolbar .workspace-actions { margin-left: 0; }
-  .canvas-toolbar > div:first-child { width: 100%; }
   .canvas-command-bar { flex-wrap: wrap; }
   .canvas-command-bar .canvas-history-actions { margin-left: auto; }
   .device-settings-dialog {
@@ -1711,20 +2009,42 @@
     max-height: none !important;
     border-radius: 0 !important;
   }
-  .device-settings-dialog__content { display: flex !important; height: 100%; flex-direction: column; padding-top: env(safe-area-inset-top) !important; }
-  .device-access-trigger { width: auto; padding-inline: 0.7rem 0.75rem; }
+  /* Full-screen here, so cladd's zoom from scale(0.75) shows the page around a
+     shrinking sheet and its 500ms overshoot pushes the edges past the screen.
+     A full-screen sheet rises and settles instead; exit is shorter and quieter.
+     No !important: unlayered already beats cladd's utilities, and the
+     reduced-motion kill-switch's !important must still win. */
+  .device-settings-dialog {
+    /* Centred again: the desktop top anchor (a utility) would push a 100dvh sheet off screen. */
+    top: 50%;
+    scale: 1;
+    translate: -50% calc(-50% + 1.5rem);
+    transition-property: opacity, translate;
+    transition-duration: var(--motion-base);
+  }
+  .device-settings-dialog[data-open] {
+    translate: -50% -50%;
+    transition-duration: var(--motion-slow);
+    transition-timing-function: var(--ease-out);
+  }
+  .device-settings-dialog__content { display: flex !important; height: 100%; max-height: none; flex-direction: column; padding-top: env(safe-area-inset-top) !important; }
   .device-settings-form { min-height: 0; max-height: none; flex: 1; }
+  .device-settings-panel > .device-settings-state { min-height: 0; flex: 1; }
   .device-settings-section { display: block; }
   .device-settings-section__heading { border-right: 0; border-bottom: 1px solid var(--border); }
   .device-setting-field { min-height: 4.25rem; }
   .device-settings-fields .zc-out__row { min-height: 4.25rem; }
   .device-settings-switch { min-height: 2.5rem; }
   .device-settings-actions { padding-bottom: max(0.9rem, env(safe-area-inset-bottom)); background: var(--background); }
-  .color-swatch { width: 2.75rem; height: 2.75rem; }
+  .color-swatch { --swatch-size: 2.75rem; }
 }
 
 @media (max-width: 34rem) {
-  .device-status span { display: none; }
+  /* With no room for words, the link chip would be a box around a lone dot,
+     which reads as an empty control. The dot joins the firmware chip instead
+     (one chip, icon + tone); the link chip stays for screen readers only. */
+  .device-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .firmware-chip__tone { display: block; }
   /* The heading row's arithmetic on a 320px phone: 288px inside the page
      padding, ~108px of six-glyph title, ~180px of widget WITH the spectrum —
      over budget; ~145px without it. The spectrum is the one purely decorative
@@ -1738,8 +2058,17 @@
      因此停在 1.25rem，比它上面每一行都往里 5.6px，右缘同样对不齐。 */
   .device-settings-dialog { --device-settings-inset: 0.9rem; }
   .device-setting-field { grid-template-columns: minmax(0, 1fr) auto; }
-  .device-settings-actions > button:first-child span { font-size: 0; }
+  /* Rows whose control is an input or a pair of buttons stack: side by side the
+     copy column was left ~90px and its help wrapped to four lines. */
+  .device-setting-field:has(> .device-setting-control--host, > .zos-fw__upload) { grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
+  .device-setting-control--host, .device-setting-control.zos-fw__upload { width: 100%; justify-content: flex-start; }
   .device-access-popover { width: calc(100vw - 1.5rem) !important; }
+}
+
+/* 320px: the auto-width MD5 took its whole 32 characters before the label column
+   got any, so 整包 MD5 broke onto two lines and the hash left a lone digit. */
+@media (max-width: 22.5rem) {
+  .device-info-value.zos-fw__value { max-width: 9rem; word-break: break-all; text-wrap: balance; }
 }
 
 @media (max-width: 36rem) {
@@ -1784,11 +2113,11 @@
   .canvas-orientation-gate__icon svg,
   .game-orientation-gate__icon svg { width: 1.5rem; height: 1.5rem; }
   .canvas-orientation-gate div > span,
-  .game-orientation-gate div > span { color: var(--primary); font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em; }
+  .game-orientation-gate div > span { color: var(--primary); font-family: var(--mono); font-size: var(--type-micro); letter-spacing: 0.08em; }
   .canvas-orientation-gate h2,
-  .game-orientation-gate h2 { margin: 0.25rem 0 0; font-size: 1.15rem; }
+  .game-orientation-gate h2 { margin: 0.25rem 0 0; font-size: var(--type-title-lg); font-weight: 600; }
   .canvas-orientation-gate p,
-  .game-orientation-gate p { max-width: 22rem; margin: 0.4rem 0 0; color: var(--muted-foreground); font-size: 0.68rem; line-height: 1.5; }
+  .game-orientation-gate p { max-width: 22rem; margin: 0.5rem 0 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; }
 }
 
 @media (max-width: 60rem) and (max-height: 34rem) and (orientation: landscape) {
@@ -1797,13 +2126,20 @@
   .brand-device, .is-canvas-page .page-heading, .is-game-page .page-heading { display: none; }
   .header-actions { grid-column: 2; grid-row: 1; }
   .device-settings-trigger { min-width: 2.75rem; }
-  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
+  /* justify-self: the base rule's center would shrink this fixed bar to its
+     content between 52 and 60rem; stretched, it shares the game console's edges. */
+  .main-tabs { position: fixed; z-index: 50; right: max(0.75rem, env(safe-area-inset-right)); bottom: max(0.45rem, env(safe-area-inset-bottom)); left: max(0.75rem, env(safe-area-inset-left)); display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); justify-self: stretch; min-height: 3.3rem; padding: 0.25rem; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background) 94%, transparent); box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.14); backdrop-filter: blur(1rem); }
   .main-tabs button { justify-content: center; }
   /* 手机横屏这一档里，主导航上面那条已经归游戏控制台了，装应用的提示不值得再抢
      一层——它是便利提示，下次竖屏打开还会在。 */
   .install-prompt { display: none; }
+  .studio-page:has(~ .install-prompt:not(.motion-exit)) { padding-bottom: calc(4.65rem + env(safe-area-inset-bottom)); }
+  .cladd-toast { right: max(0.75rem, env(safe-area-inset-right)) !important; bottom: calc(4.15rem + env(safe-area-inset-bottom)) !important; }
   .studio-layout.is-canvas { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); }
   .studio-layout.is-game { display: block; }
+  /* The game console is position:fixed here; a translating ancestor would
+     re-parent it to the shell for the length of the arrival. */
+  .studio-layout.has-view-motion.is-game > * { animation: none; }
   .game-shell { padding: 0.35rem 0 1rem; }
   .game-topbar { padding-bottom: 0.5rem; }
   /* 手机横屏：舞台优先撑满，控制台收成主导航上方的悬浮条。 */
@@ -1818,19 +2154,21 @@
     margin-top: 0;
     box-shadow: 0 0.6rem 2rem rgb(12 18 12 / 0.18);
   }
+  /* One line: a row that is still too wide scrolls rather than squeezing the
+     button labels onto two lines; the options drop the portrait full width. */
   .game-console__row { flex-wrap: nowrap; overflow-x: auto; }
-  .game-console__options { flex-wrap: nowrap; }
+  .game-console__row > * { flex: none; }
+  .game-console__options { flex-wrap: nowrap; width: auto; margin-left: auto; }
   .is-canvas-page .channel-sidebar { padding: 0.55rem 0.65rem 0.8rem 0; }
-  .is-canvas-page .section-kicker { padding-bottom: 0.4rem; font-size: 0.6rem; }
+  .is-canvas-page .section-kicker { padding-bottom: 0.4rem; font-size: var(--type-micro); }
   .is-canvas-page .channel-entry { grid-template-columns: minmax(0, 1fr); }
   .is-canvas-page .channel-delete { display: none; }
   .is-canvas-page .channel-select { min-height: 3.2rem; padding: 0.5rem; }
   .canvas-workspace { padding: 0 0.75rem 1rem; overflow: visible; }
-  .canvas-toolbar { align-items: flex-start; flex-wrap: wrap; gap: 0.45rem; }
-  .canvas-toolbar > div:first-child { width: auto; }
+  .canvas-toolbar { flex-wrap: wrap; gap: 0.5rem 0.75rem; }
   .canvas-toolbar .workspace-actions { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto auto; margin-left: 0; }
-  .pixel-canvas-panel { margin-top: 0.55rem; }
-  .color-swatch { width: 2.75rem; height: 2.75rem; }
+  .pixel-canvas-panel { margin-top: 0.5rem; }
+  .color-swatch { --swatch-size: 2.75rem; }
   .canvas-inspector { grid-column: 2; margin-top: 0; padding-left: 0.75rem; border-top: 1px solid var(--border); border-left: 0; }
   .canvas-inspector-scroll { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
@@ -1842,5 +2180,6 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
-  .loading-mark { animation: none; border-top-color: var(--border); }
+  /* A 0.01ms arrival still paints its first (opacity 0) keyframe for a frame: the view blinked. */
+  .motion-enter, .studio-layout.has-view-motion > *, :is(.canvas-orientation-gate, .game-orientation-gate) { animation: none !important; }
 }

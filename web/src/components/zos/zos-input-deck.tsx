@@ -59,6 +59,10 @@ const HOLD_FLASH_MS = 450;
  */
 export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
   const [dialDeg, setDialDeg] = useState(0);
+  // Whether the dial's next move eases. Only a finished gesture does — a tap on
+  // one half, or the drag's snap onto a detent. Drag, wheel and arrow keys set
+  // the angle outright: an eased knob trails the hand that is turning it.
+  const [dialEases, setDialEases] = useState(false);
   const [holdProgress, setHoldProgress] = useState(0);
   const [coreHeld, setCoreHeld] = useState(false);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
@@ -84,13 +88,16 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
     return event;
   }, [onSend]);
 
-  // Discrete inputs (tap, wheel, keyboard, AT buttons) animate the dial one
+  // Discrete inputs (tap, wheel, keyboard, AT buttons) turn the dial one
   // detent per accepted event — the service's answer turns the knob, so the
   // visual is a receipt rather than a hope. Drag is the exception: the dial
   // follows the finger there, which is what direct manipulation means.
-  const dispatchTurn = useCallback(async (action: "cw" | "ccw") => {
+  const dispatchTurn = useCallback(async (action: "cw" | "ccw", eased: boolean) => {
     const event = await dispatch(action);
-    if (event) setDialDeg((deg) => deg + (action === "cw" ? ZOS_KNOB_DETENT_DEG : -ZOS_KNOB_DETENT_DEG));
+    if (!event) return;
+    // A drag that began while this answer was in flight owns the dial now.
+    setDialEases(eased && dragRef.current === null);
+    setDialDeg((deg) => deg + (action === "cw" ? ZOS_KNOB_DETENT_DEG : -ZOS_KNOB_DETENT_DEG));
   }, [dispatch]);
 
   const emitSteps = useCallback((steps: number) => {
@@ -110,6 +117,7 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
     const rect = dial.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
+    setDialEases(false);
     dragRef.current = {
       pointerId: event.pointerId,
       centerX,
@@ -141,10 +149,11 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
     // A down-up with no meaningful travel is a tap on one half of the dial:
     // one detent toward that side, the mouse equivalent of flicking the knob.
     if (!cancelled && drag.travelDeg < 4) {
-      void dispatchTurn(event.clientX >= drag.centerX ? "cw" : "ccw");
+      void dispatchTurn(event.clientX >= drag.centerX ? "cw" : "ccw", true);
       return;
     }
     // Rest on a detent, like the hardware's spring does.
+    setDialEases(true);
     setDialDeg((deg) => Math.round(deg / ZOS_KNOB_DETENT_DEG) * ZOS_KNOB_DETENT_DEG);
   }, [dispatchTurn]);
 
@@ -164,7 +173,7 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
       const { steps, carry } = accumulateDetents(wheelCarryRef.current, px, ZOS_WHEEL_DETENT_PX);
       wheelCarryRef.current = carry;
       for (let index = 0; index < Math.min(Math.abs(steps), MAX_STEPS_PER_GESTURE); index += 1) {
-        void dispatchTurn(steps > 0 ? "cw" : "ccw");
+        void dispatchTurn(steps > 0 ? "cw" : "ccw", false);
       }
     };
     knob.addEventListener("wheel", onWheel, { passive: false });
@@ -248,7 +257,7 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
       event.preventDefault();
       if (action === "hold") flashHeld();
       if (action === "cw" || action === "ccw") {
-        void dispatchTurn(action);
+        void dispatchTurn(action, false);
       } else {
         void dispatch(action);
       }
@@ -286,7 +295,7 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
         <div className="zc-knob" ref={knobRef}>
           <div
             ref={dialRef}
-            className="zc-knob__dial"
+            className={dialEases ? "zc-knob__dial is-easing" : "zc-knob__dial"}
             style={{ transform: `rotate(${dialDeg}deg)` }}
             aria-hidden="true"
             onPointerDown={onDialPointerDown}
@@ -320,10 +329,10 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
           {/* The dial itself is pointer furniture; these carry its semantics
               for assistive tech, which cannot drag a circle. */}
           <span className="sr-only">
-            <button type="button" disabled={!live} onClick={() => void dispatchTurn("ccw")}>
+            <button type="button" disabled={!live} onClick={() => void dispatchTurn("ccw", true)}>
               旋钮左旋一格
             </button>
-            <button type="button" disabled={!live} onClick={() => void dispatchTurn("cw")}>
+            <button type="button" disabled={!live} onClick={() => void dispatchTurn("cw", true)}>
               旋钮右旋一格
             </button>
           </span>
@@ -353,7 +362,7 @@ export function ZosInputDeck({ live, onSend }: ZosInputDeckProps) {
         <span><Shortcut size="sm" variant="transparent" keyClassName="zc-hintkey">left right</Shortcut>旋钮</span>
         <span><Shortcut size="sm" variant="transparent" keyClassName="zc-hintkey">enter</Shortcut>确认</span>
         <span><Shortcut size="sm" variant="transparent" keyClassName="zc-hintkey">backspace</Shortcut>返回</span>
-        <span className="zc-deck__hints-free">拖动、滚轮或点按旋钮两侧也可换台</span>
+        <span>拖动、滚轮或点按旋钮两侧也可换台</span>
       </div>
 
       <p className="zc-deck__receipt" role="status" aria-live="polite">

@@ -140,8 +140,7 @@ export function VibeDisplay({
             <div className="vibe-field__copy">
               <label id="vibe-reset-dwell-label" htmlFor="vibe-reset-dwell">倒计时停留</label>
               <p id="vibe-reset-dwell-help">
-                然后倒计时占这一格多久，之后换回数值。拖到 0 就一直显示数值、不显示倒计时。
-                （厂商没给重置时间的指标本来就没有倒计时。）
+                然后倒计时占这一格多久，之后换回数值。拖到 0 就一直显示数值、不显示倒计时。（厂商没给重置时间的指标本来就没有倒计时。）
               </p>
             </div>
             <div className="vibe-field__control">
@@ -187,11 +186,11 @@ export function VibeDisplay({
         // 不做半吊子降级：把用量塞回频道正是这次要去掉的东西（设计 §6）。
         // 只说实话——这一页在官方固件与两个侧载固件上不存在。用 info 不用警告色：
         // 这是「还没装」，不是「坏了」，跟左边那条未接入提示同一个道理。
-        <p className="vibe-note" role="status">
-          <Info aria-hidden="true" className="vibe-note__icon" />
-          「VIBE」需要 ZOS 系统固件。时钟当前是{firmwareModeLabel(firmwareMode)}，上面没有这一页，
-          自动翻页也无处可翻（设置会存下来，刷了 ZOS 就生效）；刷 ZOS 请到「系统」页。
-          左边的数字与星标在任何固件下都照常可用。
+        <p className="vibe-note has-icon" role="status">
+          <Info aria-hidden="true" />
+          <span>
+            「VIBE」需要 ZOS 系统固件。时钟当前是{firmwareModeLabel(firmwareMode)}，上面没有这一页，自动翻页也无处可翻（设置会存下来，刷了 ZOS 就生效）；刷 ZOS 请到「系统」页。左边的数字与星标在任何固件下都照常可用。
+          </span>
         </p>
       )}
     </section>

@@ -224,10 +224,11 @@ describe("zos menu accessibility", () => {
   test("每一行都在发指令,所以写入在飞的时候整张菜单都停手", () => {
     const html = render({ open: "carousel", busy: true });
     // 服务只保留一个 focus,第二次点击只会和第一次赛跑。
-    expect(button(html, "比特币")).toContain("disabled");
-    expect(button(html, "设置")).toContain("disabled");
-    expect(button(html, "音乐")).toContain("disabled");
-    expect(button(html, "VIBE")).toContain("disabled");
+    // aria-disabled 加点击守卫,不是 disabled:后者会让整列在每次写入时闪到 40%。
+    expect(button(html, "比特币")).toContain('aria-disabled="true"');
+    expect(button(html, "设置")).toContain('aria-disabled="true"');
+    expect(button(html, "音乐")).toContain('aria-disabled="true"');
+    expect(button(html, "VIBE")).toContain('aria-disabled="true"');
   });
 
   test("菜单里再没有「打开这台浏览器里的向导」那种行", () => {

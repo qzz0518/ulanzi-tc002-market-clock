@@ -1,5 +1,6 @@
 import { Chip } from "@cladd-ui/react";
 import { ChevronDown, Info, Star, TriangleAlert } from "lucide-react";
+import { Disclosure } from "@/components/disclosure";
 import { cn } from "@/lib/utils";
 import {
   formatVibeReset,
@@ -137,7 +138,7 @@ export function VibeProviderList({
                 </Chip>
               )}
               {usage && <span className="vibe-provider__count">{usage.metrics.length} 项指标</span>}
-              {usage && <ChevronDown className={cn("vibe-provider__chevron", open && "is-open")} aria-hidden="true" />}
+              {usage && <ChevronDown className="vibe-provider__chevron disclosure-chevron" aria-hidden="true" />}
             </button>
 
             {/* A vendor note is a hint the adapter chose to pass on ("re-login
@@ -157,8 +158,8 @@ export function VibeProviderList({
               </p>
             )}
 
-            {open && usage && (
-              <div className="vibe-provider__detail">
+            {usage && (
+              <Disclosure open={open} bodyClassName="vibe-provider__detail">
                 {outdated && (
                   <p className="vibe-outdated" role="status">
                     数据已过时{outdatedAge ? `（${outdatedAge}）` : ""}
@@ -185,7 +186,7 @@ export function VibeProviderList({
                     {usage.spendLines.map((line) => `${line.label}: ${line.value}`).join(" · ")}
                   </p>
                 )}
-              </div>
+              </Disclosure>
             )}
           </li>
         );

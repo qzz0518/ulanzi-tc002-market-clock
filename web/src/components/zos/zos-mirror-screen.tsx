@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ZOS_SCREEN_HEIGHT,
   ZOS_SCREEN_WIDTH,
@@ -25,6 +25,16 @@ interface ZosMirrorScreenProps {
  */
 export function ZosMirrorScreen({ rgbBase64, status }: ZosMirrorScreenProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // The notice stays mounted and fades, so offline → live is a cross-fade over
+  // the first frame rather than the scrim vanishing in one paint. While it fades
+  // out it keeps saying what it last said instead of going blank mid-fade.
+  const [notice, setNotice] = useState(
+    status.notice === null ? null : { label: status.label, text: status.notice },
+  );
+  if (status.notice !== null && (notice?.label !== status.label || notice?.text !== status.notice)) {
+    setNotice({ label: status.label, text: status.notice });
+  }
+  const noticeShown = status.notice !== null;
 
   useEffect(() => {
     const context = canvasRef.current?.getContext("2d");
@@ -54,10 +64,15 @@ export function ZosMirrorScreen({ rgbBase64, status }: ZosMirrorScreenProps) {
           role="img"
           aria-label={`时钟面板 52 × 16 实时镜像；${status.label}`}
         />
-        {status.notice && (
-          <p className="zc-screen__notice" role="status">
-            <strong>{status.label}</strong>
-            <span>{status.notice}</span>
+        {notice && (
+          <p
+            className="zc-screen__notice"
+            data-shown={noticeShown}
+            role="status"
+            aria-hidden={noticeShown ? undefined : true}
+          >
+            <strong>{notice.label}</strong>
+            <span>{notice.text}</span>
           </p>
         )}
       </div>

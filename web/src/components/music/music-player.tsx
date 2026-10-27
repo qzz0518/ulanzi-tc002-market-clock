@@ -19,6 +19,7 @@ import {
   Shuffle,
   Sparkles,
   Speaker,
+  TriangleAlert,
   Wifi,
 } from "lucide-react";
 import {
@@ -33,7 +34,7 @@ import {
   Select,
   Slider,
   Spinner,
-  Surface,
+  SurfaceCut,
 } from "@cladd-ui/react";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -42,7 +43,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type SVGProps,
 } from "react";
+import { Callout } from "@/components/callout";
 import {
   isMusicMode,
   type MusicMode,
@@ -181,6 +184,36 @@ function artistLabel(track: MusicTrack | undefined): string {
   return track?.artists.join(" / ") || "未知音乐人";
 }
 
+/**
+ * The `.motion-enter` class for a block keyed on `key`, but only once `key`
+ * has changed since this view mounted: results the user just asked for arrive,
+ * while whatever is already there when the tab opens (a restored queue, the
+ * track still playing) simply is. Pair it with `key={key}` so each change
+ * remounts the block and replays the one-shot animation.
+ */
+function useEnterOnChange(key: string): string {
+  const firstKeyRef = useRef<string | null>(key);
+  if (firstKeyRef.current !== null && firstKeyRef.current !== key) firstKeyRef.current = null;
+  return firstKeyRef.current === null ? "motion-enter" : "";
+}
+
+// For a block nested inside one that enters on its own: it swaps only when its
+// key moves from one non-empty value to another. Arriving from "" means the
+// parent is arriving in the same commit, and two enters multiply — the inner
+// block's opacity trailed the rest of the console on the first pick. Decided
+// once per key, so the class never lands on an element already on screen.
+function useSwapOnChange(key: string): string {
+  const ref = useRef({ key, swap: false });
+  if (ref.current.key !== key) ref.current = { key, swap: ref.current.key !== "" && key !== "" };
+  return ref.current.swap ? "motion-enter" : "";
+}
+
+// Callout takes an icon component; the sync notice's icon is the one spinner
+// look, cladd's, sized and coloured by the callout's icon slot.
+function SyncSpinnerIcon({ className }: SVGProps<SVGSVGElement>) {
+  return <Spinner size="xs" className={className} />;
+}
+
 // The guidance block moved into the shared firmware panel; the re-export
 // keeps this module the historical import site.
 export { DeviceReconnectGuidance } from "@/components/firmware-panel";
@@ -233,6 +266,12 @@ function MusicCoverArt({ track, fallback, className }: {
           loading="lazy"
           decoding="async"
           draggable={false}
+          // Fades in over the glyph once decoded instead of popping in. The ref
+          // covers an image the cache had already finished before React could
+          // listen; either way the flag is set straight on the node, so a load
+          // never costs a re-render.
+          ref={(image) => { if (image?.complete && image.naturalWidth > 0) image.dataset.loaded = "true"; }}
+          onLoad={(event) => { event.currentTarget.dataset.loaded = "true"; }}
           onError={(event) => { event.currentTarget.hidden = true; }}
         />
       )}
@@ -293,7 +332,12 @@ export function MusicPlayer({
   const [query, setQuery] = useState("");
   const [playlists, setPlaylists] = useState<MusicPlaylist[]>([]);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | "">("");
-  const [trackPage, setTrackPage] = useState(0);
+  // Opens on the page holding the playing track. Starting at 0 and letting the
+  // follow effect below correct it re-keyed the list after mount, so coming
+  // back to this tab replayed the results' arrival.
+  const [trackPage, setTrackPage] = useState(() => (
+    playback.queueIndex >= 0 ? Math.floor(playback.queueIndex / TRACKS_PER_PAGE) : 0
+  ));
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [searchBusy, setSearchBusy] = useState(false);
   // 哪一个发现按钮正在跑——两个按钮各转各的圈，而不是一起变灰。
@@ -1087,6 +1131,18 @@ export function MusicPlayer({
   const currentTrackPage = Math.min(trackPage, totalTrackPages - 1);
   const pageStart = currentTrackPage * TRACKS_PER_PAGE;
   const pageTracks = tracks.slice(pageStart, pageStart + TRACKS_PER_PAGE);
+  // What re-keys each block that the user swaps wholesale. The console body is
+  // keyed on loaded/empty only — keying it per track would remount the
+  // transport under the 下一首 button the user just pressed and drop focus; the
+  // identity block (no focusables) carries the per-track cross-fade instead.
+  const trackListKey = `${sourceLabel}:${currentTrackPage}:${pageTracks[0]?.id ?? ""}`;
+  const trackListEnter = useEnterOnChange(trackListKey);
+  const consoleKey = selected ? "track" : "empty";
+  const consoleEnter = useEnterOnChange(consoleKey);
+  const identityKey = selected?.track.id ?? "";
+  const identityEnter = useSwapOnChange(identityKey);
+  const lyricTapeKey = selected?.track.id ?? "";
+  const lyricTapeEnter = useEnterOnChange(lyricTapeKey);
 
   return (
     // `has-track` drives the stacked-layout section order (music-player.css):
@@ -1104,25 +1160,32 @@ export function MusicPlayer({
         </header>
 
         <div className="music-source-bar">
-        <Segmented
-          className="music-source-switch"
-          aria-label="音乐来源"
-          size="sm"
-          disabled={providerBusy}
-          activeColor="brand"
+        <SurfaceCut
+          className="segmented-track music-source-track"
+          color="neutral"
+          outline={false}
+          contentClassName="segmented-track__content"
         >
-          {(["netease", "spotify"] as const).map((provider) => (
-            <SegmentedButton
-              key={provider}
-              type="button"
-              active={activeProviderId === provider}
-              aria-label={`切换到 ${PROVIDER_COPY[provider].label}`}
-              onClick={() => void switchProvider(provider)}
-            >
-              {PROVIDER_COPY[provider].label}
-            </SegmentedButton>
-          ))}
-        </Segmented>
+          <Segmented
+            className="music-source-switch"
+            aria-label="音乐来源"
+            size="sm"
+            disabled={providerBusy}
+            activeColor="brand"
+          >
+            {(["netease", "spotify"] as const).map((provider) => (
+              <SegmentedButton
+                key={provider}
+                type="button"
+                active={activeProviderId === provider}
+                aria-label={`切换到 ${PROVIDER_COPY[provider].label}`}
+                onClick={() => void switchProvider(provider)}
+              >
+                {PROVIDER_COPY[provider].label}
+              </SegmentedButton>
+            ))}
+          </Segmented>
+        </SurfaceCut>
 
         <div className="music-account-strip">
           {session?.loggedIn ? (
@@ -1162,86 +1225,93 @@ export function MusicPlayer({
         </div>
         </div>
 
+        {/* A not-signed-in notice with its remedy attached: the shared card,
+            with the setup form as its action. */}
         {remoteMode && !session?.loggedIn && (
-          <div className="music-spotify-setup">
-            <div className="music-spotify-setup__head">
-              <span><KeyRound aria-hidden="true" />SPOTIFY 应用</span>
-              <p>
-                Spotify 不发放公共密钥，需要你在开发者后台自建一个应用（免费），
-                把它的 Client ID 填在这里。授权走 PKCE，无需 Client Secret。
-              </p>
-            </div>
-            <ol className="music-spotify-steps">
-              <li>
-                打开
-                {" "}
-                <a href={SPOTIFY_DASHBOARD_URL} target="_blank" rel="noreferrer noopener">
-                  Spotify 开发者后台<ExternalLink aria-hidden="true" />
-                </a>
-                ，新建一个 App
-              </li>
-              <li>
-                在 Redirect URI 里精确填入：
-                <code>{spotifyApp?.redirectUri ?? "http://127.0.0.1:43820/api/music/spotify/callback"}</code>
-              </li>
-              <li>勾选 Web API，保存后把 Client ID 复制过来</li>
-            </ol>
-            <label className="music-spotify-field">
-              <span>Client ID</span>
-              <Input
-                inputId="music-spotify-client-id"
-                value={clientIdDraft}
-                placeholder="32 位十六进制字符"
-                maxLength={64}
-                size="md"
-                spellCheck={false}
-                onChange={setClientIdDraft}
-              />
-            </label>
-            <div className="music-spotify-actions">
-              <Button
-                type="button"
-                size="sm"
-                color="brand"
-                loading={spotifyBusy}
-                disabled={spotifyBusy || clientIdDraft.trim().length === 0}
-                onClick={() => void saveSpotifyClientId()}
-              >
-                <Check aria-hidden="true" />{spotifyReady ? "更新 Client ID" : "保存 Client ID"}
-              </Button>
-            </div>
-            {spotifyWaiting && (
-              <div className="music-spotify-paste">
-                <p>
-                  如果这台设备不是运行服务的电脑，回调会停在打不开的 127.0.0.1 页面——
-                  把浏览器地址栏里的完整链接粘贴到这里即可完成登录。
-                </p>
+          <Callout
+            className="music-spotify-setup"
+            icon={KeyRound}
+            title="Spotify 应用"
+            action={(
+              <div className="music-spotify-setup__form">
+                <ol className="music-spotify-steps">
+                  <li>
+                    打开
+                    {" "}
+                    <a href={SPOTIFY_DASHBOARD_URL} target="_blank" rel="noreferrer noopener">
+                      Spotify 开发者后台<ExternalLink aria-hidden="true" />
+                    </a>
+                    ，新建一个 App
+                  </li>
+                  <li>
+                    在 Redirect URI 里精确填入：
+                    <code>{spotifyApp?.redirectUri ?? "http://127.0.0.1:43820/api/music/spotify/callback"}</code>
+                  </li>
+                  <li>勾选 Web API，保存后把 Client ID 复制过来</li>
+                </ol>
                 <label className="music-spotify-field">
-                  <span>回调链接</span>
+                  <span>Client ID</span>
                   <Input
-                    inputId="music-spotify-redirect"
-                    value={redirectDraft}
-                    placeholder="http://127.0.0.1:43820/api/music/spotify/callback?code=…"
-                    maxLength={2048}
+                    inputId="music-spotify-client-id"
+                    value={clientIdDraft}
+                    placeholder="32 位十六进制字符"
+                    maxLength={64}
                     size="md"
                     spellCheck={false}
-                    onChange={setRedirectDraft}
+                    onChange={setClientIdDraft}
                   />
                 </label>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="transparent"
-                  outline
-                  loading={spotifyBusy}
-                  disabled={spotifyBusy || redirectDraft.trim().length === 0}
-                  onClick={() => void completeSpotifyLogin()}
-                >
-                  <Check aria-hidden="true" />用链接完成登录
-                </Button>
+                <div className="music-spotify-actions">
+                  <Button
+                    type="button"
+                    size="sm"
+                    color="brand"
+                    loading={spotifyBusy}
+                    disabled={spotifyBusy || clientIdDraft.trim().length === 0}
+                    onClick={() => void saveSpotifyClientId()}
+                  >
+                    <Check aria-hidden="true" />{spotifyReady ? "更新 Client ID" : "保存 Client ID"}
+                  </Button>
+                </div>
+                {spotifyWaiting && (
+                  <div className="music-spotify-paste">
+                    <p>
+                      如果这台设备不是运行服务的电脑，回调会停在打不开的 127.0.0.1 页面——
+                      把浏览器地址栏里的完整链接粘贴到这里即可完成登录。
+                    </p>
+                    <label className="music-spotify-field">
+                      <span>回调链接</span>
+                      <Input
+                        inputId="music-spotify-redirect"
+                        value={redirectDraft}
+                        placeholder="http://127.0.0.1:43820/api/music/spotify/callback?code=…"
+                        maxLength={2048}
+                        size="md"
+                        spellCheck={false}
+                        onChange={setRedirectDraft}
+                      />
+                    </label>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="transparent"
+                      outline
+                      loading={spotifyBusy}
+                      disabled={spotifyBusy || redirectDraft.trim().length === 0}
+                      onClick={() => void completeSpotifyLogin()}
+                    >
+                      <Check aria-hidden="true" />用链接完成登录
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
-          </div>
+          >
+            <p>
+              Spotify 不发放公共密钥，需要你在开发者后台自建一个应用（免费），
+              把它的 Client ID 填在这里。授权走 PKCE，无需 Client Secret。
+            </p>
+          </Callout>
         )}
 
         {qrLogin && !session?.loggedIn && !remoteMode && (
@@ -1258,7 +1328,9 @@ export function MusicPlayer({
             </div>
           </div>
         )}
-        {sessionError && <p className="music-inline-error" role="alert">{sessionError}</p>}
+        {sessionError && (
+          <Callout icon={TriangleAlert} tone="error" title="账号操作失败" role="alert"><p>{sessionError}</p></Callout>
+        )}
 
         <form className="music-search" onSubmit={(event) => void runSearch(event)}>
           <label htmlFor="music-search-input">搜索歌曲、歌手或专辑</label>
@@ -1266,6 +1338,8 @@ export function MusicPlayer({
             <SearchField
               inputId="music-search-input"
               className="music-search-field"
+              size="md"
+              rounded={false}
               value={query}
               icon={<Search aria-hidden="true" />}
               placeholder={searchLocked ? "登录 Spotify 后即可搜索" : providerCopy.searchHint}
@@ -1284,8 +1358,7 @@ export function MusicPlayer({
             <Button
               type="submit"
               className="music-search-submit"
-              size="lg"
-              color="brand"
+              size="md"
               loading={searchBusy}
               disabled={searchBusy || searchLocked || query.trim().length === 0}
             >
@@ -1355,17 +1428,25 @@ export function MusicPlayer({
 
         <div className="music-track-list">
           <div className="music-track-list__heading"><span>{sourceLabel}</span><small>{tracks.length} 首</small></div>
-          {libraryError && <p className="music-inline-error" role="alert">{libraryError}</p>}
-          <List className="music-track-list__viewport" aria-busy={libraryBusy}>
+          {libraryError && (
+            <Callout icon={TriangleAlert} tone="error" title="加载歌曲失败" role="alert"><p>{libraryError}</p></Callout>
+          )}
+          <List
+            key={trackListKey}
+            className={"music-track-list__viewport" + (trackListEnter ? ` ${trackListEnter}` : "")}
+            aria-busy={libraryBusy}
+          >
             {tracks.length === 0 && !libraryBusy ? (
               <div className="music-empty-state">
-                <Search />
-                <strong>先找一首歌</strong>
-                <span>
-                  {remoteMode
-                    ? "登录 Spotify 后可以搜索、打开歌单，并把播放投到任意 Connect 设备。"
-                    : "无需登录也可以搜索；登录后还能打开你的歌单。"}
-                </span>
+                <span className="music-empty-icon" aria-hidden="true"><Search /></span>
+                <div className="music-empty-copy">
+                  <strong>先找一首歌</strong>
+                  <span>
+                    {remoteMode
+                      ? "登录 Spotify 后可以搜索、打开歌单，并把播放投到任意 Connect 设备。"
+                      : "无需登录也可以搜索；登录后还能打开你的歌单。"}
+                  </span>
+                </div>
               </div>
             ) : pageTracks.map((track, index) => {
               const active = selected?.track.id === track.id;
@@ -1440,47 +1521,52 @@ export function MusicPlayer({
           {/* The console leads the column: what's playing and how to control it
               come before the preview and every configuration concern. */}
           <section
-            className={"music-now-playing" + (selected ? "" : " is-empty")}
+            className="music-now-playing"
             aria-label={selected ? undefined : "播放控制台"}
             aria-labelledby={selected ? "music-current-track-title" : undefined}
           >
+            {/* The head row is there in both states, so the column always
+                opens on the same kicker line as the library beside it. */}
+            <header className="music-now-playing__header">
+              <div className="music-now-playing__label">
+                <span>NOW PLAYING</span>
+                {selected && (
+                  <strong>
+                    {selectedTrackIndex >= 0
+                      ? `TRACK ${String(selectedTrackIndex + 1).padStart(2, "0")} / ${String(tracks.length).padStart(2, "0")}`
+                      : remoteMode
+                        ? "SPOTIFY CONNECT"
+                        : deviceOnline
+                          ? "TC002 DIRECT"
+                          : "WEB AUDIO"}
+                  </strong>
+                )}
+              </div>
+              {selected && (
+                <Chip
+                  className="music-output-chip"
+                  size="sm"
+                  color={playing ? "brand" : "neutral"}
+                  variant="transparent"
+                  icon={remoteMode ? Speaker : Wifi}
+                  iconProps={{ "aria-hidden": true }}
+                  aria-live="polite"
+                >
+                  {remoteMode
+                    ? activeRemoteDevice?.name ?? "Spotify Connect"
+                    : playing ? "网页试听中" : "网页试听"}
+                </Chip>
+              )}
+            </header>
             {selected ? (
-              <>
-                <header className="music-now-playing__header">
-                  <div className="music-now-playing__label">
-                    <span>NOW PLAYING</span>
-                    <strong>
-                      {selectedTrackIndex >= 0
-                        ? `TRACK ${String(selectedTrackIndex + 1).padStart(2, "0")} / ${String(tracks.length).padStart(2, "0")}`
-                        : remoteMode
-                          ? "SPOTIFY CONNECT"
-                          : deviceOnline
-                            ? "TC002 DIRECT"
-                            : "WEB AUDIO"}
-                    </strong>
-                  </div>
-                  <Chip
-                    className="music-output-chip"
-                    size="sm"
-                    color={playing ? "brand" : "neutral"}
-                    variant="transparent"
-                    icon={remoteMode ? Speaker : Wifi}
-                    iconProps={{ "aria-hidden": true }}
-                    aria-live="polite"
-                  >
-                    {remoteMode
-                      ? activeRemoteDevice?.name ?? "Spotify Connect"
-                      : playing ? "网页试听中" : "网页试听"}
-                  </Chip>
-                </header>
-
+              <div key={consoleKey} className={"music-now-playing__body" + (consoleEnter ? ` ${consoleEnter}` : "")}>
                 <div className="music-now-playing__main">
                   <MusicCoverArt
                     track={selected.track}
                     fallback={Array.from(selected.track.title.trim())[0] ?? "歌"}
                     className="music-cover--console"
                   />
-                  <div className="music-now-playing__identity">
+                  <div key={identityKey} className={"music-now-playing__identity" + (identityEnter ? ` ${identityEnter}` : "")}>
                     <span>当前曲目</span>
                     <h3 id="music-current-track-title">{selected.track.title}</h3>
                     <p>{artistLabel(selected.track)} · {selected.track.album || "未知专辑"}</p>
@@ -1570,11 +1656,11 @@ export function MusicPlayer({
                     />
                   </label>
                 </div>
-              </>
+              </div>
             ) : (
-              <div className="music-player-empty">
-                <span aria-hidden="true"><Music2 /></span>
-                <div><strong>还没有选择歌曲</strong><p>从歌曲列表选一首，这里就是播放与进度的控制台。</p></div>
+              <div key={consoleKey} className={"music-player-empty" + (consoleEnter ? ` ${consoleEnter}` : "")}>
+                <span className="music-empty-icon" aria-hidden="true"><Music2 /></span>
+                <div className="music-empty-copy"><strong>还没有选择歌曲</strong><p>从歌曲列表选一首，这里就是播放与进度的控制台。</p></div>
               </div>
             )}
 
@@ -1624,7 +1710,9 @@ export function MusicPlayer({
               </div>
             )}
 
-            {playbackError && <p className="music-inline-error" role="alert">{playbackError}</p>}
+            {playbackError && (
+              <Callout icon={TriangleAlert} tone="error" title="播放失败" role="alert"><p>{playbackError}</p></Callout>
+            )}
             {/* No <audio> here on purpose. The element used to hang off this
                 section, so leaving the 音乐 tab destroyed the player mid-song;
                 it belongs to the page now (lib/music-playback-store.ts). Spotify
@@ -1708,7 +1796,6 @@ export function MusicPlayer({
                 <Button
                   type="button"
                   className="music-device-trigger"
-                  contentClassName="music-device-trigger__content"
                   size="sm"
                   color="neutral"
                   variant="transparent"
@@ -1739,10 +1826,7 @@ export function MusicPlayer({
             />
 
             {loadingTrack && (
-              <div className="music-sync-hint" role="status" aria-live="polite">
-                <span aria-hidden="true"><Spinner size="xs" color="brand" /></span>
-                <span>正在同步到设备，请稍候…</span>
-              </div>
+              <Callout className="motion-enter" icon={SyncSpinnerIcon} title="正在同步到设备，请稍候…" role="status" />
             )}
 
             {/* The sync hint that used to sit here explained which side owns
@@ -1753,10 +1837,13 @@ export function MusicPlayer({
                 something the panel demonstrates by doing it. */}
 
             {zos && zosFocus.error && (
-              <p className="music-inline-error" role="alert">切换时钟界面失败：{zosFocus.error}</p>
+              // One line, worded as on 游戏 and VIBE: the same button fails the same way there.
+              <Callout icon={TriangleAlert} tone="error" title={`切换时钟界面失败：${zosFocus.error}`} role="alert" />
             )}
 
-            {mirrorError && <p className="music-inline-error" role="alert">同屏推送失败：{mirrorError}</p>}
+            {mirrorError && (
+              <Callout icon={TriangleAlert} tone="error" title={`同屏推送失败：${mirrorError}`} role="alert" />
+            )}
 
           </section>
 
@@ -1820,13 +1907,17 @@ export function MusicPlayer({
                 <small>{selected ? "点击歌词可跳转" : "选择歌曲后显示"}</small>
               </header>
               {visibleLyricRows.length > 0 ? (
-                <List className="music-lyric-tape" aria-label="歌词时间轴">
+                <List
+                  key={lyricTapeKey}
+                  className={"music-lyric-tape" + (lyricTapeEnter ? ` ${lyricTapeEnter}` : "")}
+                  aria-label="歌词时间轴"
+                >
                   {visibleLyricRows}
                 </List>
               ) : (
                 <div className="music-lyrics-empty">
-                  <Music2 aria-hidden="true" />
-                  <div>
+                  <span className="music-empty-icon" aria-hidden="true"><Music2 /></span>
+                  <div className="music-empty-copy">
                     <strong>{selected ? "当前歌曲暂无可用歌词" : "歌词会在这里跟随播放"}</strong>
                     <span>{selected ? "仍可使用上方进度条试听歌曲。" : "选择歌曲后，可点击任意歌词跳转。"}</span>
                   </div>
@@ -1848,19 +1939,12 @@ export function MusicPlayer({
         {zos && (
           // 与游戏页同一段事实；恢复承诺归面板正文的 restoresTo 说，这里只讲
           // 侧载期间会中断什么。
-          <Surface
-            color="orange"
-            variant="solid"
-            outline
-            className="rounded-lg"
-            contentClassName="flex flex-col gap-1 px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
-          >
-            <strong className="text-cladd-fg">时钟当前运行 ZOS，两套固件不能同时跑。</strong>
-            <span>
+          <Callout icon={TriangleAlert} tone="warning" title="时钟当前运行 ZOS，两套固件不能同时跑。">
+            <p>
               侧载会把 ZOS 顶下去，控制台的频道拉取、画面镜像与固定旋钮在这期间都会中断；
               结束侧载或断电重启后回到的是 ZOS，不是 Ulanzi 官方固件。
-            </span>
-          </Surface>
+            </p>
+          </Callout>
         )}
       </FirmwarePanel>
     </div>

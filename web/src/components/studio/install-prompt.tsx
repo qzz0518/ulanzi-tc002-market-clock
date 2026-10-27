@@ -1,6 +1,6 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore, type AnimationEvent } from "react";
 import { Download, X } from "lucide-react";
-import { Button } from "@cladd-ui/react";
+import { Button, Surface } from "@cladd-ui/react";
 import {
   INSTALL_RECORD_KEY,
   detectInstallPlatform,
@@ -52,6 +52,7 @@ export function InstallPrompt() {
   const deferred = useSyncExternalStore(subscribeInstallPrompt, getDeferredInstallPrompt, () => null);
   const [record, setRecord] = useState<InstallRecord>(readRecord);
   const [standalone, setStandalone] = useState<boolean>(readStandalone);
+  const [leaving, setLeaving] = useState<InstallRecord | null>(null);
 
   useEffect(() => {
     const media = window.matchMedia("(display-mode: standalone)");
@@ -82,9 +83,22 @@ export function InstallPrompt() {
     nowMs: Date.now(),
   });
 
+  // A dismissal is remembered at once but shown on the card's own clock: it
+  // plays .motion-exit and unmounts on that animation's end. The timer is the
+  // fallback for when no animation runs (the card is display:none on a
+  // landscape phone), so a dismissal can never strand it on screen.
+  useEffect(() => {
+    if (leaving === null) return;
+    const timer = window.setTimeout(() => setRecord(leaving), 400);
+    return () => window.clearTimeout(timer);
+  }, [leaving]);
+
   if (!state.visible) return null;
 
-  const dismiss = () => setRecord(writeRecord({ installed: false, dismissedAtMs: Date.now() }));
+  const dismiss = () => {
+    if (leaving) return;
+    setLeaving(writeRecord({ installed: false, dismissedAtMs: Date.now() }));
+  };
   const install = async () => {
     const outcome = await runDeferredInstallPrompt();
     // 用户在系统框里点了取消：那份事件已经作废，提示留着也调不起第二次，
@@ -93,7 +107,18 @@ export function InstallPrompt() {
   };
 
   return (
-    <aside className="install-prompt" aria-label="安装为应用">
+    <Surface
+      as="aside"
+      className={"install-prompt " + (leaving ? "motion-exit" : "motion-enter")}
+      contentClassName="install-prompt__content"
+      variant="gradient"
+      outline
+      level={1}
+      aria-label="安装为应用"
+      onAnimationEnd={(event: AnimationEvent<HTMLElement>) => {
+        if (leaving && event.target === event.currentTarget && event.animationName === "motion-exit") setRecord(leaving);
+      }}
+    >
       <span className="install-prompt__icon" aria-hidden="true"><Download /></span>
       <div className="install-prompt__copy">
         <strong>{state.title}</strong>
@@ -114,6 +139,6 @@ export function InstallPrompt() {
       >
         <X />
       </Button>
-    </aside>
+    </Surface>
   );
 }

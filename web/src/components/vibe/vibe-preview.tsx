@@ -38,6 +38,10 @@ export function VibePreview({ catalog, snapshot, starred }: VibePreviewProps) {
     [catalog, snapshot, starred],
   );
   const [index, setIndex] = useState(0);
+  // Counts pager presses only. It re-keys the canvas so .motion-enter replays
+  // on a turn the user asked for — never on load, nor when a refresh or a star
+  // repaints the page in place.
+  const [turns, setTurns] = useState(0);
   // Signing into one more agent grows the ring; a star change can shrink it.
   // Clamping here rather than resetting keeps the page the user was reading.
   const page = pages[Math.min(index, pages.length - 1)]!;
@@ -51,14 +55,17 @@ export function VibePreview({ catalog, snapshot, starred }: VibePreviewProps) {
     const image = context.createImageData(VIBE_SCREEN_WIDTH, VIBE_SCREEN_HEIGHT);
     image.data.set(drawVibeScreen(page));
     context.putImageData(image, 0, 0);
-  }, [page]);
+  }, [page, turns]);
 
   const caption = vibeScreenPageLabel(page);
-  const step = (delta: number) => setIndex((current) => {
-    const clamped = Math.min(current, pages.length - 1);
-    // A ring, like the knob: past the last page is the first one again.
-    return (clamped + delta + pages.length) % pages.length;
-  });
+  const step = (delta: number) => {
+    setTurns((count) => count + 1);
+    setIndex((current) => {
+      const clamped = Math.min(current, pages.length - 1);
+      // A ring, like the knob: past the last page is the first one again.
+      return (clamped + delta + pages.length) % pages.length;
+    });
+  };
 
   return (
     <div className="vibe-preview">
@@ -66,6 +73,8 @@ export function VibePreview({ catalog, snapshot, starred }: VibePreviewProps) {
         <div className="clock-device">
           <div className="clock-screen">
             <canvas
+              key={turns}
+              className={turns > 0 ? "motion-enter" : undefined}
               ref={canvasRef}
               width={VIBE_SCREEN_WIDTH}
               height={VIBE_SCREEN_HEIGHT}

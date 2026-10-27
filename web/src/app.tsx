@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListOrdered, Plus, RefreshCw, RotateCw } from "lucide-react";
-import { Button, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
+import { Button, Spinner, SurfaceCut, Tab, Tabs, TabsList } from "@cladd-ui/react";
 import { api, jsonApi } from "@/lib/api";
 import { describeFirmware, type FirmwareOsState } from "@/lib/firmware-mode";
 import { createLatestTaskRunner } from "@/lib/latest-task-runner";
@@ -146,6 +146,11 @@ function newChannel(
   };
 }
 
+// The workspace views share one channel sidebar (it persists between them).
+function hasChannelSidebar(view: StudioView): boolean {
+  return view === "console" || view === "canvas" || view === "library";
+}
+
 export function App() {
   const toast = useAppToast();
   const [catalog, setCatalog] = useState<ContentCatalogEntry[]>([]);
@@ -160,6 +165,12 @@ export function App() {
   const [musicFirmwareOnline, setMusicFirmwareOnline] = useState(false);
   const [osState, setOsState] = useState<FirmwareOsState | null>(null);
   const [mobileConsolePane, setMobileConsolePane] = useState<MobileConsolePane>("compose");
+  // Arrival motion is armed by the user's first switch, never by page load (or
+  // by the effect below that drops a sideloaded clock straight onto 音乐). The
+  // hero only replays on a view switch; the layout also on a phone pane swap.
+  const [viewMotion, setViewMotion] = useState(false);
+  const [paneMotion, setPaneMotion] = useState(false);
+  const [sidebarArrives, setSidebarArrives] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -210,9 +221,12 @@ export function App() {
 
   const scrollToMobileSection = useCallback((id: string) => {
     if (!window.matchMedia("(max-width: 52rem)").matches) return;
+    // An explicit behavior overrides the stylesheet's reduced-motion
+    // scroll-behavior, so the preference has to be read here.
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        document.getElementById(id)?.scrollIntoView({ behavior, block: "start" });
       });
     });
   }, []);
@@ -792,7 +806,7 @@ export function App() {
     musicPlaybackStore().setNowPlayingReporting(firmwareMode === "zos");
   }, [firmwareMode]);
 
-  const changeView = (nextView: StudioView) => {
+  const changeView = (nextView: StudioView, viaKeyboard = false) => {
     // 系统固件页与音乐/游戏页一样不受侧载锁定影响：它读的是 tc002-os 自己的
     // 拉取链路，官方固件通道在不在都不影响它如实显示设备状态。
     if (firmwareOnline && nextView !== "music" && nextView !== "game" && nextView !== "zos") return;
@@ -809,6 +823,16 @@ export function App() {
       }
     }
     if (nextView === "console") setMobileConsolePane("compose");
+    if (nextView !== view) {
+      // Per switch, not sticky: an arrow-key step through the tabs lands still.
+      // paneMotion is dropped with it, or a phone pane swap made earlier would
+      // keep the layout animating on keyboard switches.
+      setViewMotion(!viaKeyboard);
+      if (viaKeyboard) setPaneMotion(false);
+      // The channel sidebar stays put across 内容/画板/素材库 and is left out of
+      // the arrival; coming from a view without it, it is new and arrives too.
+      setSidebarArrives(!hasChannelSidebar(view) && hasChannelSidebar(nextView));
+    }
     setView(nextView);
   };
 
@@ -868,7 +892,7 @@ export function App() {
     });
   };
 
-  // 写入为单独 APP：把当前画布做成一个新频道，而不是写进选中的那个。
+  // 写入为独立 App：把当前画布做成一个新频道，而不是写进选中的那个。
   //
   // The canvas is the one place in this console where a user draws something
   // from nothing, and the existing action folds that into whatever channel
@@ -907,8 +931,8 @@ export function App() {
     return (
       <div className="studio-page">
         <StudioHeader view={view} onViewChange={setView} runtime={runtime} firmwareStatus={firmwareStatus} />
-        <div className="loading-state" role="status">
-          <span className="loading-mark" aria-hidden="true" />
+        <div className="loading-state motion-enter" role="status">
+          <Spinner size="lg" />
           <strong>正在载入内容工作台</strong>
           <span>连接本机时钟服务…</span>
         </div>
@@ -1000,6 +1024,11 @@ export function App() {
     : view === "library"
       ? "studio-layout is-library"
       : `studio-layout mobile-pane-${mobileConsolePane}`;
+  // See .has-view-motion in globals.css: the panes remount per view, so the
+  // arrival plays on insert without re-keying (and remounting) the sidebar.
+  const layoutMotionClassName = (viewMotion || paneMotion ? " has-view-motion" : "")
+    + (viewMotion && sidebarArrives ? " sidebar-arrives" : "");
+  const viewEnterClassName = viewMotion ? "motion-enter" : undefined;
 
   return (
     <div className={pageClassName}>
@@ -1011,7 +1040,9 @@ export function App() {
         firmwareLocked={firmwareOnline}
       />
       <div className="page-heading">
-        <div>
+        {/* Keyed on the copy alone: the mini player beside it must not remount
+            (it would lose its sleeve tint) just because the title changed. */}
+        <div key={view} className={viewEnterClassName}>
           <span>{pageCopy.kicker}</span>
           <h1>{pageCopy.title}</h1>
           <p>{pageCopy.description}</p>
@@ -1022,7 +1053,7 @@ export function App() {
             collapse tiers; here the right half of the row is empty on every
             page, so the widget keeps its artwork, title and all three controls
             at any width the app supports. */}
-        <MiniPlayer view={view} onOpen={() => changeView("music")} />
+        <MiniPlayer view={view} arrive={viewMotion} onOpen={() => changeView("music")} />
       </div>
 
       {view === "canvas" && (
@@ -1047,8 +1078,8 @@ export function App() {
         </section>
       )}
 
-      <div className={layoutClassName}>
-        {view !== "music" && view !== "game" && view !== "zos" && view !== "vibe" && (
+      <div className={layoutClassName + layoutMotionClassName}>
+        {hasChannelSidebar(view) && (
           <ChannelSidebar
             channels={workspace.channels}
             selectedChannelId={selectedChannel.id}
@@ -1060,10 +1091,15 @@ export function App() {
         )}
 
         {view === "console" && (
-          <nav className="mobile-console-navigation" aria-label="手机端内容工作区">
+          // Mounts on every switch to 内容 and stays through its pane swaps, so
+          // like the hero it takes the arrival class straight from the switch.
+          <nav className={"mobile-console-navigation" + (viewMotion ? " motion-enter" : "")} aria-label="手机端内容工作区">
             <Tabs
               value={mobileConsolePane}
-              onValueChange={(value) => showMobileConsolePane(value as MobileConsolePane)}
+              onValueChange={(value) => {
+                if (value !== mobileConsolePane) setPaneMotion(true);
+                showMobileConsolePane(value as MobileConsolePane);
+              }}
             >
               <SurfaceCut
                 className="segmented-track mobile-console-tabs"

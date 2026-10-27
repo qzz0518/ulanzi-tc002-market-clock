@@ -251,8 +251,9 @@ describe("music player UI", () => {
 
     expect(playerSource).not.toContain("selected={");
     expect(css).toMatch(/\.music-lyric-row \*\s*\{\s*border-radius:\s*0 !important;/s);
-    expect(css).toMatch(/\.music-track-row\.is-active\s*\{[^}]*color-mix\(in oklab, var\(--music-acid\) 9%, transparent\)/s);
-    expect(css).toMatch(/\.music-lyric-row\.is-active\s*\{[^}]*color-mix\(in oklab, var\(--music-acid\) 9%, transparent\)/s);
+    // Selected rows wear the console's one selected tint (.channel-entry.is-active).
+    expect(css).toMatch(/\.music-track-row\.is-active\s*\{[^}]*color-mix\(in oklch, var\(--muted\) 82%, transparent\)/s);
+    expect(css).toMatch(/\.music-lyric-row\.is-active\s*\{[^}]*color-mix\(in oklch, var\(--muted\) 82%, transparent\)/s);
     expect(css).toMatch(/\.music-track-row__after svg\s*\{[^}]*opacity:\s*0;/s);
     expect(css).toMatch(/\.music-track-row:hover \.music-track-row__after svg/);
   });

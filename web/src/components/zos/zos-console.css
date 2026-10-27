@@ -2,36 +2,44 @@
    诊断抽屉。这里只放布局——尺寸、栅格、断点；颜色、圆角、控件形状全部由 cladd
    组件和 token 负责，本文件不重画任何一个 cladd 组件。
    类名用 zc- 前缀：globals.css 里还留着旧版 zos- 规则（那份文件不归本组件管），
-   新旧选择器必须零交集，样式才不会隔着文件打架。 */
+   新旧选择器必须零交集，样式才不会隔着文件打架。
+   间距一律走 4px 栅格；横向内缩全面板只有一个值（1rem，窄屏 0.75rem）。 */
 
-.zc-shell { min-height: 0; padding: 0.9rem 0 1.5rem; }
+/* 每一页的第一块内容都在页头分隔线下 1rem，窄屏也一样。 */
+.zc-shell { min-height: 0; padding: 1rem 0 1.5rem; }
 
 /* --- 面板 ------------------------------------------------------------------ */
 
-.zc-panel { width: min(100%, 72rem); margin-inline: auto; border-radius: 0.85rem; }
+.zc-panel { width: min(100%, 72rem); margin-inline: auto; border-radius: var(--radius-card); }
 
-/* 状态条：一行说完「谁在开、设备怎么样」。设备离线时概况整段消失，不留旧数字。 */
+/* 状态条：一行说完「谁在开、设备怎么样」。与 VIBE 的状态条同一套（globals.css
+   .vibe-strip*）：左边图标＋标题／说明，右边状态芯片。设备离线时概况整段消失，
+   不留旧数字。 */
 .zc-strip {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.9rem;
-  padding: 0.6rem 1.1rem;
+  gap: 0.5rem 0.75rem;
+  padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--border);
 }
-.zc-driver { display: inline-flex; align-items: center; gap: 0.55rem; min-width: 0; }
+/* 可伸缩、文字在自己里面换行：说明一长，整块不会被挤到芯片下面另起一行。 */
+.zc-driver { display: inline-flex; flex: 1 1 12rem; align-items: center; gap: 0.5rem; min-width: 0; }
 .zc-driver__icon { flex: none; width: 1rem; height: 1rem; color: var(--primary); }
-.zc-driver__text { display: grid; gap: 0.05rem; min-width: 0; }
-.zc-driver__text strong { font-size: 0.8rem; font-weight: 620; letter-spacing: -0.01em; line-height: 1.2; }
-.zc-driver__text small { color: var(--muted-foreground); font-size: 0.62rem; line-height: 1.35; }
-.zc-strip__vitals { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-left: auto; }
+.zc-driver__text { display: grid; gap: 0.125rem; min-width: 0; }
+.zc-driver__text strong { font-size: var(--type-body); font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
+/* balance：两行时对半分，不在第二行留下「效。」这种两三个字的孤行。 */
+.zc-driver__text small { color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: balance; }
+.zc-strip__state { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+/* 概况芯片与在线芯片排成同一串：窄屏换行时一枚一枚地换，不会让「设备在线」独占一行。 */
+.zc-strip__vitals { display: contents; }
 
 .zc-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(19rem, 21.5rem);
-  gap: 0.6rem 1.4rem;
+  gap: 1rem 1.5rem;
   align-items: start;
-  padding: 1rem 1.1rem 1.1rem;
+  padding: 1rem;
 }
 
 /* 整数倍放大：一个 LED 像素恒等于 N × N 个屏幕像素，边缘不会出现半像素糊边。
@@ -54,7 +62,7 @@
   max-width: 100%;
   overflow: hidden;
   border: var(--zc-bezel, 0.55rem) solid #111612;
-  border-radius: 0.72rem;
+  border-radius: var(--radius-card);
   background: #000;
   box-shadow: 0 0.65rem 1.5rem rgb(12 18 12 / 0.12);
   isolation: isolate;
@@ -71,7 +79,8 @@
   image-rendering: crisp-edges;
 }
 /* 画面不可信时盖在屏幕上的说明——空黑屏和「在工作的黑屏」在视觉上没有区别，
-   所以永远不留一个没有说明的黑框。 */
+   所以永远不留一个没有说明的黑框。常驻、靠透明度进出：上线时它淡出、第一帧
+   从底下透上来，而不是一帧之内整块消失。 */
 .zc-screen__notice {
   position: absolute;
   inset: 0;
@@ -83,9 +92,15 @@
   padding: 0.5rem 1rem;
   background: color-mix(in oklch, #000 72%, transparent);
   text-align: center;
+  transition: opacity var(--motion-base) var(--ease-out);
 }
-.zc-screen__notice strong { color: oklch(0.92 0.02 110); font-size: 0.78rem; font-weight: 620; }
-.zc-screen__notice span { color: oklch(0.76 0.015 110); font-size: 0.64rem; line-height: 1.45; text-wrap: pretty; }
+.zc-screen__notice[data-shown="false"] {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: var(--motion-fast);
+}
+.zc-screen__notice strong { color: oklch(0.92 0.02 110); font-size: var(--type-title-sm); font-weight: 600; }
+.zc-screen__notice span { color: oklch(0.76 0.015 110); font-size: var(--type-caption); line-height: 1.45; text-wrap: balance; }
 .zc-screen__frame::after {
   position: absolute;
   inset: 0;
@@ -102,34 +117,35 @@
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
-  padding-top: 0.42rem;
+  padding-top: 0.5rem;
   color: var(--muted-foreground);
   font-family: var(--mono);
-  font-size: 0.58rem;
+  font-size: var(--type-micro);
 }
+.zc-screen__state { transition: color var(--motion-fast) var(--ease-out); }
 .zc-screen__state.is-live { color: var(--primary); }
 
 /* --- 遥控甲板 -------------------------------------------------------------- */
 
-.zc-deck { margin-top: 0.85rem; border-radius: 0.6rem; }
-.zc-deck__content { display: grid; gap: 0.75rem; padding: 0.9rem 1rem 0.75rem; }
+.zc-deck { margin-top: 0.75rem; border-radius: var(--radius-card); }
+.zc-deck__content { display: grid; gap: 0.75rem; padding: 1rem 1rem 0.75rem; }
 
 .zc-deck__cluster {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: clamp(0.9rem, 4vw, 2rem);
+  gap: clamp(1rem, 4vw, 2rem);
 }
-.zc-deck__cluster.is-off { opacity: 0.55; }
 
-.zc-sidekey { display: grid; justify-items: center; gap: 0.4rem; }
+.zc-sidekey { display: grid; justify-items: center; gap: 0.5rem; }
+/* 甲板上的提示（侧键说明、下方操作提示）是同一种说明文字：caption、无衬线、muted。 */
 .zc-sidekey__hint {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.25rem;
   color: var(--muted-foreground);
-  font-family: var(--mono);
-  font-size: 0.58rem;
+  font-size: var(--type-caption);
+  line-height: 1.45;
   white-space: nowrap;
 }
 
@@ -154,10 +170,11 @@
     0 0.45rem 1.1rem rgb(0 0 0 / 0.35);
   cursor: grab;
   touch-action: none;
-  /* 一格 24°，过渡略短于连续两次触发的最短间隔，转起来是「咔哒」而不是「滑」。 */
-  transition: transform 110ms cubic-bezier(0.2, 0.8, 0.3, 1);
   user-select: none;
 }
+/* 只有「松手之后」才缓动：点按半边转一格、拖完回弹到最近的档位。拖动、滚轮、
+   方向键直接落角度——带过渡的旋钮会落在手后面，连按时还会一格追一格。 */
+.zc-knob__dial.is-easing { transition: transform var(--motion-fast) var(--ease-out); }
 .zc-knob__dial:active { cursor: grabbing; }
 /* 旋钮外缘的防滑齿：repeating-conic 画 15 齿（360/24），用径向 mask 只留轮圈。 */
 .zc-knob__dial::before {
@@ -183,6 +200,7 @@
   height: 0.62rem;
   border-radius: 999px;
   background: var(--primary);
+  transition: background-color var(--motion-fast) var(--ease-out);
   pointer-events: none;
 }
 .zc-knob__cue {
@@ -192,10 +210,9 @@
   height: 0.9rem;
   color: var(--muted-foreground);
   opacity: 0.4;
-  transition: opacity 150ms ease;
+  transition: opacity var(--motion-fast) var(--ease-out);
   pointer-events: none;
 }
-.zc-knob:hover .zc-knob__cue { opacity: 0.85; }
 .zc-knob__cue--ccw { left: -1.25rem; }
 .zc-knob__cue--cw { right: -1.25rem; }
 
@@ -216,7 +233,7 @@
   inset: 24%;
   display: grid;
   place-content: center;
-  gap: 0.1rem;
+  gap: 0.125rem;
   border: 0;
   border-radius: 50%;
   background:
@@ -227,11 +244,11 @@
   cursor: pointer;
   touch-action: none;
   user-select: none;
-  transition: background-color 120ms ease, box-shadow 120ms ease;
+  transition: background-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
 }
-.zc-knob__core:hover:not(:disabled) { box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 55%, var(--border)); }
 .zc-knob__core:active:not(:disabled) { background-color: #14171a; }
 .zc-knob__core:disabled { cursor: default; }
+.zc-knob__core:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 /* 长按触发的一瞬：环已满、语义换成「返回」，核心闪一下主题色作为确认。 */
 .zc-knob__core.is-held {
   box-shadow: inset 0 0 0 1.5px var(--primary);
@@ -239,55 +256,90 @@
 }
 /* 盘面是硬件式的深色，与页面主题无关，文字颜色必须自带——继承页面前景色
    在浅色主题下就是深字压深盘，第一版截图里「确认」直接隐形。 */
-.zc-knob__corelabel { color: oklch(0.9 0.012 110); font-size: 0.78rem; font-weight: 620; letter-spacing: 0.02em; }
-.zc-knob__coresub { color: oklch(0.62 0.015 110); font-family: var(--mono); font-size: 0.52rem; }
+.zc-knob__corelabel { color: oklch(0.9 0.012 110); font-size: var(--type-small); font-weight: 600; letter-spacing: 0.02em; }
+.zc-knob__coresub { color: oklch(0.62 0.015 110); font-family: var(--mono); font-size: var(--type-micro); }
+.zc-knob__corelabel,
+.zc-knob__coresub { transition: color var(--motion-fast) var(--ease-out); }
 .zc-knob__core.is-held .zc-knob__corelabel,
 .zc-knob__core.is-held .zc-knob__coresub { color: var(--primary); }
+
+/* 离线：与 cladd 按钮的禁用同一个说法——外壳不动、内容退到 40%。以前整簇再压
+   一层 0.55，两侧按钮就被压了两遍，旋钮也从深色硬件褪成一块灰盘。 */
+.zc-deck__cluster.is-off .zc-knob__dial { cursor: default; }
+.zc-deck__cluster.is-off .zc-knob__marker { background-color: oklch(0.62 0.015 110); }
+.zc-deck__cluster.is-off .zc-knob__cue { opacity: 0.2; }
+.zc-knob__core:disabled > span { opacity: 0.4; }
+
+@media (hover: hover) and (pointer: fine) {
+  .zc-deck__cluster:not(.is-off) .zc-knob:hover .zc-knob__cue { opacity: 0.85; }
+  .zc-knob__core:hover:not(:disabled) { box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 55%, var(--border)); }
+}
 
 .zc-deck__hints {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0.35rem 0.9rem;
+  gap: 0.25rem 1rem;
   color: var(--muted-foreground);
-  font-size: 0.62rem;
+  font-size: var(--type-caption);
+  line-height: 1.45;
 }
-.zc-deck__hints > span { display: inline-flex; align-items: center; gap: 0.3rem; }
-.zc-deck__hints-free { font-family: var(--mono); font-size: 0.56rem; }
+.zc-deck__hints > span { display: inline-flex; align-items: center; gap: 0.25rem; }
 .zc-hintkey { font-weight: 500; }
 
+/* 回执是一句话，不是日志：说明文字的字号与颜色，数字用等宽数位免得跳。 */
 .zc-deck__receipt {
   margin: 0;
-  padding-top: 0.6rem;
+  padding-top: 0.75rem;
   border-top: 1px solid var(--border);
   color: var(--muted-foreground);
-  font-family: var(--mono);
-  font-size: 0.6rem;
-  line-height: 1.5;
+  font-size: var(--type-caption);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
   text-align: center;
-  text-wrap: pretty;
+  text-wrap: balance;
 }
+
+/* 甲板下面只有一种卡：离线、刷了 ZOS 但掉线、读状态失败都用共享的 <Callout>。 */
+.zc-callout { margin-top: 0.75rem; }
 
 /* --- 设备菜单 -------------------------------------------------------------- */
 
-/* 右列与设备根环同构：五个目的地，内容挂在下一层的手风琴里。 */
+/* 右列与设备根环同构：五个目的地，内容挂在下一层的展开块里。 */
 .zc-menu { display: flex; flex-direction: column; min-width: 0; }
-.zc-menu > .cladd-section-title { padding: 0.15rem 0.5rem 0.1rem; }
-.zc-menu__title { padding-top: 0.7rem; }
+/* 栏头：h2 一行、说明一行占满整宽，「交还旋钮」在 h2 右边。h2 那一行恒为一个
+   sm 控件高：按钮出现或消失时栏头高度不变，下面整列菜单不会上下跳。 */
+.zc-menu__head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 0.75rem; padding-inline: 0.5rem; }
+.zc-menu__head > h2 { display: flex; min-height: var(--spacing-cladd-sm); align-items: center; }
+.zc-menu__head > p { grid-column: 1 / -1; grid-row: 2; }
+.zc-menu__head > .cladd-button { grid-column: 2; grid-row: 1; }
+.zc-menu__heading { min-width: 0; }
+.zc-menu__heading h2 { margin: 0; font-size: var(--type-title); font-weight: 600; letter-spacing: -0.02em; }
+.zc-menu__heading h3 { margin: 0; font-size: var(--type-title-sm); font-weight: 600; }
+.zc-menu__heading p { margin: 0.25rem 0 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+.zc-out-section { padding-top: 1rem; }
+.zc-out-section > .zc-menu__heading { padding-inline: 0.5rem; }
 /* List 自带 p-2，这里只收掉横向内缩，让行与上面的小标题左对齐。 */
 .zc-menu__list { padding-inline: 0; }
-.zc-menu__after { display: inline-flex; align-items: center; gap: 0.4rem; }
-/* 子项缩进到与父项文字对齐——「下一层」要看得见。 */
-.zc-sub { display: flex; flex-direction: column; padding: 0.1rem 0 0.35rem 1.75rem; }
+.zc-menu__after { display: inline-flex; align-items: center; gap: 0.5rem; }
+.zc-menu__chevron { flex: none; width: 0.875rem; height: 0.875rem; color: var(--muted-foreground); }
+/* 子项缩进到与父项文字对齐——「下一层」要看得见。.disclosure 会裁切子块，所以
+   上下右各留一点，cladd 焦点环（约 3px 外扩）不会被切掉。 */
+.zc-sub { display: flex; flex-direction: column; padding: 0.5rem 0.25rem 0.5rem 2rem; }
+/* 单开手风琴：一块收起的同时另一块展开，两块必须走同一个时钟。全站默认「收起比
+   展开快」，放在这里会让两块高度之和中途跌到终值以下，下面整列先上冲再落回。
+   只改行高的时长；收起时的淡出仍走 fast，退场照旧更轻。 */
+.zc-menu__list .disclosure:not([data-open="true"]) { transition-duration: var(--motion-slow), var(--motion-fast); }
+.zc-menu__list .zc-menu__chevron { transition-duration: var(--motion-slow); }
 
 /* --- 下发（音量 / 亮度） ---------------------------------------------------
    一整块照「常规设置 → 显示与声音」抄过来：标签在左、控件簇靠右，簇内是滑块
-   加一个右对齐读数，行与行之间一条发丝线。数值（min-height / padding / gap /
-   字号）全部与 globals.css 里的 .device-setting-field 一族同值，两处并排看是
-   同一种行；只有横向内缩收到 0.5rem，好让这两行与上面的小标题和菜单行左对齐。 */
+   加一个右对齐读数，行与行之间一条发丝线。数值（min-height / padding / gap）
+   与 globals.css 里的 .device-setting-field 一族同值，两处并排看是同一种行；
+   只有横向内缩收到 0.5rem，好让这两行与上面的小标题和菜单行左对齐。 */
 
-.zc-out { display: grid; padding-top: 0.15rem; }
+.zc-out { display: grid; padding-top: 0.25rem; }
 .zc-out__row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -298,11 +350,11 @@
   border-bottom: 1px solid var(--border);
 }
 .zc-out__row:last-child { border-bottom: 0; }
-.zc-out__label { font-size: 0.75rem; font-weight: 550; }
+.zc-out__label { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
 /* 参考实现是 min(15rem, 52vw)；这一列只有对话框的一半宽，簇宽跟着收，簇内
    滑块与读数的比例不变。 */
-.zc-out__control { display: flex; width: min(11rem, 52vw); align-items: center; gap: 0.7rem; }
-.zc-out__slider { display: block; flex: 1; min-width: 0; }
+.zc-out__control { display: flex; width: min(11rem, 52vw); align-items: center; gap: 0.75rem; }
+.zc-out__slider { display: block; flex: 1; min-width: 0; transition: opacity var(--motion-base) var(--ease-out); }
 /* cladd 的滑块在拖动/聚焦时会顶起一个数值气泡（没有开关可以关掉），说的和右边
    读数是同一件事，藏掉；焦点环本来长在气泡里，得补回滑块本体。与参考实现同解。 */
 .zc-out__slider [data-part="value"] { display: none; }
@@ -315,28 +367,31 @@
 .zc-out__row.is-unsent .zc-out__slider { opacity: 0.5; }
 .zc-out__value {
   flex: none;
-  min-width: 2.9rem;
+  min-width: 3rem;
   color: var(--muted-foreground);
-  font-size: 0.72rem;
+  font-size: var(--type-small);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
-/* --- 其它 ------------------------------------------------------------------ */
-
-.zc-note {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0.7rem 0 0;
-  padding-top: 0.7rem;
-  border-top: 1px solid var(--border);
-  color: var(--muted-foreground);
-  font-size: 0.65rem;
-  line-height: 1.5;
-}
-.zc-note svg { flex: none; width: 0.8rem; height: 0.8rem; }
-.zc-note--error { color: var(--destructive); }
+/* --- 蓝牙配网对话框（zos-provision-dialog.tsx） ----------------------------
+   正文与全站对话框同一套：标题下的导语是 cladd 的描述位（字号随 kit，颜色与
+   常规设置一样退到 muted）；每一步自己的说明 small/fg-soft；旁注 caption/muted。
+   换步是同一个框里换内容：只淡入，不位移。 */
+.zc-provision__content > [data-part="text"] { color: var(--muted-foreground); }
+/* 上沿锚定后，最高的一步（选网络）在矮屏上会把底部按钮推出视口：整个对话框封顶
+   在视口里，只让这一步的正文在里面滚。左右各让出 0.25rem，cladd 的焦点环（约 3px
+   外扩）不会被滚动容器切掉。 */
+.zc-provision__content { max-height: calc(100dvh - max(1rem, 8vh) - 1rem); }
+.zc-provision__step { min-height: 0; margin-inline: -0.25rem; padding-inline: 0.25rem; overflow-y: auto; overscroll-behavior: contain; }
+.zc-provision__step.motion-enter { --enter-y: 0; animation-duration: var(--motion-base); }
+.zc-provision__lede { margin: 0; color: var(--cladd-fg-soft); font-size: var(--type-small); line-height: 1.5; text-wrap: pretty; }
+.zc-provision__lede.is-reached { color: var(--foreground); }
+.zc-provision__lede.is-pending { color: var(--cladd-fg-softest); }
+.zc-provision__label { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.zc-provision__help { margin: 0; color: var(--muted-foreground); font-size: var(--type-caption); line-height: 1.45; text-wrap: pretty; }
+.zc-provision__help.is-warning { color: var(--tone-warning); }
+.zc-provision__error { margin: 0; color: var(--destructive); font-size: var(--type-small); line-height: 1.45; }
 
 /* --- 响应式 ---------------------------------------------------------------- */
 
@@ -344,9 +399,9 @@
   .zc-body { grid-template-columns: minmax(0, 1fr) minmax(17rem, 19rem); }
 }
 @media (max-width: 60rem) {
-  .zc-shell { padding-top: 0.65rem; }
-  .zc-body { grid-template-columns: minmax(0, 1fr); }
-  .zc-strip__vitals { margin-left: 0; }
+  /* 单列时菜单接在设备列下面：一道分隔线代替原来的分栏，两块不会读成一块。 */
+  .zc-body { grid-template-columns: minmax(0, 1fr); row-gap: 1.5rem; }
+  .zc-menu { padding-top: 1rem; border-top: 1px solid var(--border); }
   /* 单列下设备列就是整页宽度，整数倍缩放必然剩下 avail mod 52 的余量——最多
      51px。412px 宽的手机上量到 47px，右侧一条 13% 的空带，看着像页面没画完。
      手机和平板 DPR ≥ 2，光栅化落在设备像素上：放弃整数倍带来的列宽差不足一个
@@ -360,7 +415,7 @@
   .zc-knob { width: 7rem; }
   .zc-knob__cue--ccw { left: -1.05rem; }
   .zc-knob__cue--cw { right: -1.05rem; }
-  .zc-deck__cluster { gap: 0.6rem; }
+  .zc-deck__cluster { gap: 0.5rem; }
   /* 窄屏下旋转箭头会挤进侧键提示里；点按换台的教学由下方文字承担。 */
   .zc-knob__cue { display: none; }
   /* 侧键提示在窄屏换行而不是把整张卡撑出视口（390px 实测右键的 D 被裁掉）。 */
@@ -371,6 +426,6 @@
     white-space: normal;
     text-align: center;
   }
-  .zc-strip { padding-inline: 0.8rem; }
-  .zc-body { padding-inline: 0.8rem; }
+  .zc-strip { padding-inline: 0.75rem; }
+  .zc-body { padding-inline: 0.75rem; }
 }

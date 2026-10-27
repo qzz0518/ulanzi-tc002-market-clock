@@ -154,7 +154,7 @@ export function WorkspaceActions({
             onClick={() => pin(channelAppName)}
           >
             {pinBusy
-              ? <LoaderCircle className="animate-spin" aria-hidden="true" />
+              ? <LoaderCircle className="is-spinning" aria-hidden="true" />
               : pinnedHere ? <PinOff /> : <Pin />}
             {pinnedHere ? "交还旋钮" : "在时钟上显示"}
           </Button>
@@ -168,7 +168,7 @@ export function WorkspaceActions({
           aria-busy={pushing}
           onClick={onPush}
         >
-          {pushing ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <Send />}
+          {pushing ? <LoaderCircle className="is-spinning" aria-hidden="true" /> : <Send />}
           {pushing ? "推送中" : "推送频道"}
         </Button>
       )}

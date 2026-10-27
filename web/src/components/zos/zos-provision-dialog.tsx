@@ -25,7 +25,6 @@ import {
   ListTitle,
   OTPField,
   Spinner,
-  Surface,
   SurfaceCut,
 } from "@cladd-ui/react";
 import {
@@ -48,6 +47,7 @@ import {
   probeBleAdapter,
   readBleEnvironment,
 } from "@/components/zos/web-bluetooth-transport";
+import { Callout } from "@/components/callout";
 import { useAppToast } from "@/lib/use-app-toast";
 
 const CODE_LENGTH = 6;
@@ -56,13 +56,17 @@ const CODE_LENGTH = 6;
 // else here changes without a device event.
 const COUNTDOWN_TICK_MS = 500;
 
+// Prose in this dialog follows the console's dialog roles: the step's own
+// instruction is the lede (small, fg-soft), asides and notes are help (caption,
+// muted). Boxed messages are the shared <Callout>. Paragraphs are single
+// literals: a JSX line break between CJK sentences renders as a stray space.
+
 /** The one place the console admits what the no-Chrome path actually costs. */
 function PortalFallback() {
   return (
-    <p className="text-cladd-fg-softer text-cladd-xs leading-relaxed">
-      兜底方案：时钟自带的配网页在设备地址的 <code className="font-mono">8080</code> 端口，
-      Safari 和 Firefox 都能打开——但它要求时钟已经在网上，
-      所以它只能救「换了路由器密码」这类情况，救不了一台完全连不上的时钟。
+    <p className="zc-provision__help">
+      兜底方案：时钟自带的配网页在设备地址的 <code className="font-mono">8080</code>{" "}
+      {"端口，Safari 和 Firefox 都能打开——但它要求时钟已经在网上，所以它只能救「换了路由器密码」这类情况，救不了一台完全连不上的时钟。"}
     </p>
   );
 }
@@ -100,7 +104,13 @@ function StepStrip({ step }: StepStripProps) {
       {strip.map((entry, index) => (
         <li key={entry.label} className="flex items-center gap-1.5">
           <span
-            className={index <= current ? "text-cladd-primary text-cladd-xs" : "text-cladd-fg-softest text-cladd-xs"}
+            className={
+              index === current
+                ? "font-semibold text-cladd-fg text-cladd-xs"
+                : index < current
+                  ? "text-cladd-fg-soft text-cladd-xs"
+                  : "text-cladd-fg-softest text-cladd-xs"
+            }
             aria-current={index === current ? "step" : undefined}
           >
             {entry.label}
@@ -147,13 +157,9 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
   if (!support.ok) {
     return (
       <div className="flex flex-col gap-3">
-        <Surface variant="solid" outline color="neutral" contentClassName="flex flex-col gap-2 p-4">
-          <span className="flex items-center gap-2 text-cladd-fg">
-            <CircleAlert aria-hidden="true" className="size-4" />
-            <strong>{support.title}</strong>
-          </span>
-          <p className="text-cladd-fg-soft text-cladd-sm leading-relaxed">{support.detail}</p>
-        </Surface>
+        <Callout icon={CircleAlert} title={support.title}>
+          <p>{support.detail}</p>
+        </Callout>
         <PortalFallback />
       </div>
     );
@@ -163,12 +169,12 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
     return (
       <div className="flex flex-col gap-3">
         <StepStrip step={state.step} />
-        <p className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
+        <p className="zc-provision__lede">
           点下面的按钮后，系统会弹出蓝牙设备列表。选名字以
           {" "}<code className="font-mono">{ZOS_BLE_NAME_PREFIX}</code>{" "}
           开头的那一台——时钟面板上正显示同一个名字，两边对上就不会选错。
         </p>
-        <p className="text-cladd-fg-softer text-cladd-xs leading-relaxed">
+        <p className="zc-provision__help">
           配网走蓝牙，时钟的无线网卡全程留在station模式，所以它能一边跟这里说话一边扫描和连接。
         </p>
       </div>
@@ -179,13 +185,13 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
     return (
       <div className="flex flex-col gap-3">
         <StepStrip step={state.step} />
-        <div className="flex items-center gap-2.5" role="status">
-          <Spinner size="md" color="brand" />
-          <span className="text-cladd-fg-soft text-cladd-sm">
+        <div className="flex items-center gap-2" role="status">
+          <Spinner size="sm" color="brand" />
+          <span className="zc-provision__lede">
             {state.connectStage === null ? "正在准备" : BLE_CONNECT_STAGE_LABELS[state.connectStage]}
           </span>
         </div>
-        <p className="text-cladd-fg-softer text-cladd-xs leading-relaxed">
+        <p className="zc-provision__help">
           每一行只在浏览器真的走到那一步时才前进，不按秒数走。
         </p>
       </div>
@@ -204,22 +210,15 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
           device being difficult. Naming the capability is what makes the ask
           land as a safeguard instead of a toll booth.
         */}
-        <Surface variant="solid" outline color="neutral" contentClassName="flex flex-col gap-1.5 p-3">
-          <span className="flex items-center gap-2 text-cladd-fg">
-            <ShieldAlert aria-hidden="true" className="size-4" />
-            <strong>这一步会把时钟指向另一个控制台</strong>
-          </span>
-          <span className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
-            之后频道、镜像、升级都只从那一台来。让时钟换个网络不用验证码，
-            改它听谁的要——所以它要你先证明人就在它面前。
-          </span>
-        </Surface>
-        <p className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
+        <Callout icon={ShieldAlert} title="这一步会把时钟指向另一个控制台">
+          <p>{"之后频道、镜像、升级都只从那一台来。让时钟换个网络不用验证码，改它听谁的要——所以它要你先证明人就在它面前。"}</p>
+        </Callout>
+        <p className="zc-provision__lede">
           输入面板上正在显示的六位数字。密码不用重填：验证通过后，刚才那条配网指令会原样再发一次。
         </p>
         <OTPField
           maxLength={CODE_LENGTH}
-          size="lg"
+          size="md"
           value={props.code}
           valid={state.codeError === null}
           disabled={state.busy || lockedOut}
@@ -236,10 +235,10 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
           </div>
         ) : null}
         {state.codeError ? (
-          <p className="text-cladd-red text-cladd-sm" role="alert">{state.codeError}</p>
+          <p className="zc-provision__error" role="alert">{state.codeError}</p>
         ) : null}
         {lockedOut ? (
-          <p className="text-cladd-fg-softer text-cladd-xs" role="status" aria-live="polite">
+          <p className="zc-provision__help tabular-nums" role="status" aria-live="polite">
             时钟暂停接受验证码，还剩 {props.lockoutSeconds} 秒。
           </p>
         ) : null}
@@ -255,12 +254,11 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
     return (
       <div className="flex flex-col gap-3">
         <StepStrip step={state.step} />
-        <p className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
-          这里只显示时钟自己扫到的 2.4G 网络——时钟没有 5G 射频，
-          手机上看得到的 5G 网络在这里不会出现，也连不上。
+        <p className="zc-provision__lede">
+          {"这里只显示时钟自己扫到的 2.4G 网络——时钟没有 5G 射频，手机上看得到的 5G 网络在这里不会出现，也连不上。"}
         </p>
         {state.scanCached ? (
-          <p className="text-cladd-yellow text-cladd-xs" role="status">
+          <p className="zc-provision__help is-warning" role="status">
             这份列表来自时钟上一次扫描的缓存，可能已经过期。可以点「重新扫描」要一份新的。
           </p>
         ) : null}
@@ -274,7 +272,6 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
             <ListButton
               key={network.ssid}
               size="md"
-              color="brand"
               icon={network.secured ? <Lock aria-hidden="true" /> : <LockOpen aria-hidden="true" />}
               footer={`${securityLabel(network.sec)} · 信号${signalLabel(network.rssi)}`}
               after={(
@@ -302,8 +299,10 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
             </ListItem>
           ) : null}
         </List>
-        <SurfaceCut color="neutral" contentClassName="flex flex-col gap-2 p-3">
-          <span className="text-cladd-fg-soft text-cladd-sm">找不到？直接输入网络名称</span>
+        {/* gap-3, not 2: cladd hangs an invalid Input's message on its top
+            edge, and at 2 it touched the label above. */}
+        <SurfaceCut color="neutral" contentClassName="flex flex-col gap-3 p-3">
+          <label className="zc-provision__label" htmlFor="zos-provision-manual-ssid">找不到？直接输入网络名称</label>
           <div className="flex flex-wrap items-end gap-2">
             <Input
               inputId="zos-provision-manual-ssid"
@@ -326,11 +325,11 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
             </Button>
           </div>
           {state.credentialError !== null ? (
-            <span className="text-cladd-red text-cladd-xs" role="alert">{state.credentialError}</span>
+            <p className="zc-provision__error" role="alert">{state.credentialError}</p>
           ) : null}
-          <span className="text-cladd-fg-softest text-cladd-xs">
+          <p className="zc-provision__help">
             隐藏 SSID 不会出现在扫描结果里；名称要一字不差，包括大小写。
-          </span>
+          </p>
         </SurfaceCut>
       </div>
     );
@@ -345,13 +344,13 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
         <StepStrip step={state.step} />
         <SurfaceCut color="neutral" contentClassName="flex items-center gap-2 p-3">
           <Wifi aria-hidden="true" className="size-4 text-cladd-fg-soft" />
-          <span className="font-mono text-cladd-fg">{state.ssid}</span>
+          <span className="font-mono text-cladd-fg text-cladd-sm">{state.ssid}</span>
           {state.manualSsid ? <Chip size="sm" color="neutral" variant="transparent">手动输入</Chip> : null}
         </SurfaceCut>
         <Input
           inputId="zos-provision-psk"
           type={props.revealPsk ? "text" : "password"}
-          size="lg"
+          size="md"
           value={props.psk}
           placeholder={state.secured ? "Wi-Fi 密码" : "这个网络不需要密码"}
           disabled={!state.secured}
@@ -373,19 +372,16 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
           )}
           onChange={props.onPskChange}
         />
-        <p className="text-cladd-fg-softer text-cladd-xs leading-relaxed">
-          从时钟那一头看，名字打错和密码打错是同一件事——都只是「连不上」。
-          所以能在本地核对的那一半，这里让你看得见。
+        <p className="zc-provision__help">
+          {"从时钟那一头看，名字打错和密码打错是同一件事——都只是「连不上」。所以能在本地核对的那一半，这里让你看得见。"}
         </p>
         {state.credentialError !== null ? (
           // The session refused it, not the input. Both validate; only this one
           // is on the path every caller takes.
-          <p className="text-cladd-red text-cladd-xs" role="alert">{state.credentialError}</p>
+          <p className="zc-provision__error" role="alert">{state.credentialError}</p>
         ) : null}
-        <p className="text-cladd-fg-softest text-cladd-xs leading-relaxed">
-          密码只经蓝牙发给时钟，不写日志、不回显、也不经过服务。
-          这一版蓝牙链路没有加密，靠的是「人得在时钟旁边」——原厂固件也是这样，它连验证码都没有。
-          只有把时钟改指到另一个控制台才会另外要面板上的六位数字：那一步交出去的是整台设备，不只是一个网络。
+        <p className="zc-provision__help">
+          {"密码只经蓝牙发给时钟，不写日志、不回显、也不经过服务。这一版蓝牙链路没有加密，靠的是「人得在时钟旁边」——原厂固件也是这样，它连验证码都没有。只有把时钟改指到另一个控制台才会另外要面板上的六位数字：那一步交出去的是整台设备，不只是一个网络。"}
         </p>
       </div>
     );
@@ -404,9 +400,11 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
               ) : step.state === "active" ? (
                 <Spinner size="sm" color="brand" />
               ) : (
-                <span aria-hidden="true" className="size-4 text-center text-cladd-fg-softest">·</span>
+                // inline-flex so size-4 applies: a plain inline span ignores it and
+                // the dot fell to the baseline instead of the icon column's centre.
+                <span aria-hidden="true" className="inline-flex size-4 shrink-0 items-center justify-center text-cladd-fg-softest">·</span>
               )}
-              <span className={step.state === "pending" ? "text-cladd-fg-softest text-cladd-sm" : "text-cladd-fg text-cladd-sm"}>
+              <span className={step.state === "pending" ? "zc-provision__lede is-pending" : "zc-provision__lede is-reached"}>
                 {step.label}
               </span>
             </li>
@@ -415,20 +413,12 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
         {state.bleDropped ? (
           // The single most important sentence in this flow: on this hardware the
           // BLE link usually dies at exactly the moment the join succeeds.
-          <Surface variant="solid" outline color="neutral" contentClassName="flex flex-col gap-1.5 p-3">
-            <span className="flex items-center gap-2 text-cladd-fg">
-              <BluetoothSearching aria-hidden="true" className="size-4" />
-              <strong>蓝牙断开了，这在连上 Wi-Fi 时是正常的</strong>
-            </span>
-            <span className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
-              时钟的 Wi-Fi 和蓝牙共用同一颗芯片，连上网络的那一刻蓝牙掉线是预期内的。
-              现在改从局域网上等它出现，最多再等约 40 秒。
-            </span>
-          </Surface>
+          <Callout icon={BluetoothSearching} title="蓝牙断开了，这在连上 Wi-Fi 时是正常的">
+            <p>{"时钟的 Wi-Fi 和蓝牙共用同一颗芯片，连上网络的那一刻蓝牙掉线是预期内的。现在改从局域网上等它出现，最多再等约 40 秒。"}</p>
+          </Callout>
         ) : (
-          <p className="text-cladd-fg-softer text-cladd-xs leading-relaxed">
-            每一步只在时钟自己报告到那一步时才点亮。关联和获取地址是两件事，
-            路由器认了密码不等于已经发了地址。
+          <p className="zc-provision__help">
+            {"每一步只在时钟自己报告到那一步时才点亮。关联和获取地址是两件事，路由器认了密码不等于已经发了地址。"}
           </p>
         )}
       </div>
@@ -439,22 +429,19 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
     return (
       <div className="flex flex-col gap-3">
         <StepStrip step={state.step} />
-        <Surface variant="solid" outline color="brand" contentClassName="flex flex-col gap-1.5 p-4">
-          <span className="flex items-center gap-2 text-cladd-fg">
-            <Check aria-hidden="true" className="size-4" />
-            <strong>时钟已经连上{state.ssid ? `「${state.ssid}」` : "网络"}</strong>
-          </span>
+        <Callout
+          icon={Check}
+          tone="success"
+          title={`时钟已经连上${state.ssid ? `「${state.ssid}」` : "网络"}`}
+        >
           {state.ip ? (
-            <span className="font-mono text-cladd-fg-soft text-cladd-sm">{state.ip}</span>
+            <p className="font-mono">{state.ip}</p>
           ) : (
-            <span className="text-cladd-fg-soft text-cladd-sm">
-              时钟已经回到局域网上，地址稍后会出现在设备状态里。
-            </span>
+            <p>时钟已经回到局域网上，地址稍后会出现在设备状态里。</p>
           )}
-        </Surface>
-        <p className="text-cladd-fg-softer text-cladd-xs leading-relaxed">
-          局域网上没有任何东西会广播控制台地址。时钟还看不到频道的话，
-          到「设备信息」里确认它拉取的服务地址填对了。
+        </Callout>
+        <p className="zc-provision__help">
+          {"局域网上没有任何东西会广播控制台地址。时钟还看不到频道的话，到「设备信息」里确认它拉取的服务地址填对了。"}
         </p>
       </div>
     );
@@ -463,18 +450,12 @@ export function ZosProvisionBody(props: ProvisionBodyProps) {
   const failure = state.failure;
   return (
     <div className="flex flex-col gap-3">
-      <Surface variant="solid" outline color="red" contentClassName="flex flex-col gap-1.5 p-4">
-        <span className="flex items-center gap-2 text-cladd-fg">
-          <TriangleAlert aria-hidden="true" className="size-4" />
-          <strong>{failure?.title ?? "配网没有完成"}</strong>
-        </span>
-        <span className="text-cladd-fg-soft text-cladd-sm leading-relaxed">
-          {failure?.detail ?? "时钟没有说明原因。"}
-        </span>
-      </Surface>
-      <p className="text-cladd-fg-softest text-cladd-xs leading-relaxed">
-        这一轮的完整过程写在时钟的 <code className="font-mono">/data/zos-provision.log</code> 里，
-        断电也还在——面板上的那句话和这里说的是同一个状态。
+      <Callout icon={TriangleAlert} tone="error" title={failure?.title ?? "配网没有完成"}>
+        <p>{failure?.detail ?? "时钟没有说明原因。"}</p>
+      </Callout>
+      <p className="zc-provision__help">
+        这一轮的完整过程写在时钟的 <code className="font-mono">/data/zos-provision.log</code>{" "}
+        {"里，断电也还在——面板上的那句话和这里说的是同一个状态。"}
       </p>
     </div>
   );
@@ -532,6 +513,9 @@ export function ZosProvisionDialog({
   // reconnect, so a device handle from a closed session is worth nothing.
   useEffect(() => {
     if (!open) return;
+    // close() resets the session to its first screen and emits that. Rendering
+    // it would swap the body mid exit-fade, so a closing session is detached first.
+    let attached = true;
     const session = createProvisionSession({
       transport: createWebBluetoothTransport(),
       pageProtocol: window.location.protocol,
@@ -564,7 +548,9 @@ export function ZosProvisionDialog({
           reportSeq: body.telemetry?.seq ?? 0,
         };
       },
-      onChange: setState,
+      onChange: (next) => {
+        if (attached) setState(next);
+      },
     });
     sessionRef.current = session;
     setState(session.getState());
@@ -573,6 +559,7 @@ export function ZosProvisionDialog({
     setRevealPsk(false);
     setManualDraft("");
     return () => {
+      attached = false;
       session.close();
       sessionRef.current = null;
     };
@@ -605,13 +592,30 @@ export function ZosProvisionDialog({
     void sessionRef.current?.submitCode(code);
   }, [code]);
 
-  const requestClose = (next: boolean) => {
-    if (!next) sessionRef.current?.close();
-    onOpenChange(next);
-  };
+  // The session is closed by the effect's cleanup once `open` drops, detached
+  // first; closing it here as well would render its reset into the exit fade.
+  const requestClose = (next: boolean) => onOpenChange(next);
 
   const step = state?.step ?? "ready";
   const busy = state?.busy === true;
+
+  // Which screen the dialog opened on, so only later screens replay the enter.
+  const bodyKey = support.ok ? step : "unsupported";
+  const [firstBodyKey, setFirstBodyKey] = useState<string | null>(null);
+  // Reset on the opening edge, not the closing one: the last screen stays put
+  // through the exit fade, and a reopened dialog must neither show it nor take
+  // it for its first screen before the new session lands.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setState(null);
+      setFirstBodyKey(null);
+    }
+  } else if (open && state !== null && firstBodyKey === null) {
+    setFirstBodyKey(bodyKey);
+  }
+  const stepEnters = open && firstBodyKey !== null && bodyKey !== firstBodyKey;
 
   const footer = (() => {
     if (!support.ok) {
@@ -623,7 +627,6 @@ export function ZosProvisionDialog({
           <Button type="button" color="neutral" onClick={() => requestClose(false)}>取消</Button>
           <Button
             type="button"
-            size="lg"
             color="brand"
             onClick={() => void sessionRef.current?.start()}
           >
@@ -712,10 +715,18 @@ export function ZosProvisionDialog({
       onOpenChange={requestClose}
       title="蓝牙配网"
       text="给时钟换一个 Wi-Fi，或者让一台还没联网的时钟第一次上网。"
-      className="zos-provision-dialog"
+      // Top-anchored, as 常规设置: steps differ in height, and a centred dialog
+      // re-centred on every step, jumping the title. Now only the bottom edge
+      // moves. cladd merges classes, so these replace its top-1/2 -translate-y-1/2.
+      className="zc-provision top-[max(1rem,8vh)] translate-y-0"
+      contentClassName="zc-provision__content"
       buttons={<div className="flex w-full flex-wrap items-center justify-end gap-2">{footer}</div>}
     >
+      {/* Re-keyed per step: each new screen fades in where the last one was,
+          instead of swapping in one paint under the same title. The screen the
+          dialog opens on does not — the dialog's own entrance is already moving it. */}
       {state && (
+        <div key={bodyKey} className={stepEnters ? "zc-provision__step motion-enter" : "zc-provision__step"}>
         <ZosProvisionBody
           support={support}
           state={state}
@@ -748,6 +759,7 @@ export function ZosProvisionDialog({
           onBackToNetworks={() => sessionRef.current?.backToNetworks()}
           onRetry={() => void sessionRef.current?.retry()}
         />
+        </div>
       )}
     </Dialog>
   );

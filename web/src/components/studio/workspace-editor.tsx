@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -13,9 +13,11 @@ import {
   Search,
   Settings2,
   Trash2,
+  TriangleAlert,
   Webhook,
 } from "lucide-react";
 import {
+  type ButtonProps,
   Button,
   ColorPicker,
   Dialog,
@@ -24,7 +26,6 @@ import {
   ListButton,
   NumberScrubber,
   Select,
-  Surface,
   SurfaceCut,
   Switch,
   Tab,
@@ -33,8 +34,11 @@ import {
   Tooltip,
   Spinner,
 } from "@cladd-ui/react";
+import { Callout } from "@/components/callout";
+import { Disclosure } from "@/components/disclosure";
 import { jsonApi } from "@/lib/api";
 import { useAppToast } from "@/lib/use-app-toast";
+import { usePhoneTier } from "@/lib/use-phone-tier";
 import { cn, errorMessage, seconds } from "@/lib/utils";
 import type { FirmwareMode } from "@/lib/firmware-mode";
 import type {
@@ -61,6 +65,19 @@ const LED_COLOR_SWATCHES = [
   "#5b8cff",
   "#ffffff",
 ];
+
+// Recessed, the scrubber matches the Inputs beside it and the Input it turns
+// into on click — raised, every click was a visible jump. NumberScrubber has no
+// `surface` prop: this relies on cladd 0.18.5's NumberScrubber spreading
+// `...rest` onto its idle Button. Typed against Button so a rename there fails tsc.
+const CUT_SURFACE: Pick<ButtonProps, "surface"> = { surface: "cut" };
+
+// Built CSS is minified, which rewrites 200ms as ".2s" — honour the unit.
+function motionMs(style: CSSStyleDeclaration, token: string, fallback: number): number {
+  const value = style.getPropertyValue(token).trim();
+  return (parseFloat(value) * (value.endsWith("ms") ? 1 : 1000)) || fallback;
+}
+const FLIP_ANIMATION = "playlist-flip";
 
 function contentTitle(
   item: ContentItemConfig,
@@ -147,6 +164,7 @@ function NumberInput({
 }: NumberInputProps) {
   return (
     <NumberScrubber
+      {...CUT_SURFACE}
       id={id}
       className={cn("number-scrubber", className)}
       contentClassName="number-scrubber__content"
@@ -218,34 +236,25 @@ function NoticeWebhookHint({ firmwareMode }: { firmwareMode: FirmwareMode }) {
         confirmButtonText="复制 curl 示例"
         onConfirm={() => void copy()}
       >
-        <div className="flex min-w-0 flex-col gap-2 text-sm">
+        <div className="flex min-w-0 flex-col gap-2">
           {zos && (
-            <Surface
-              color="orange"
-              variant="solid"
-              outline
-              className="rounded-lg"
-              contentClassName="px-3 py-2 text-xs leading-relaxed text-cladd-fg-soft"
-            >
-              <strong className="text-cladd-fg">时钟正在运行 ZOS，这条 Webhook 暂时不会上屏。</strong>
-              它写的是官方固件的 Custom App 接收端，ZOS 上没有这个接口，服务因此直接
-              拒绝，返回 HTTP 503。恢复官方固件后即刻恢复。
-            </Surface>
+            <Callout icon={TriangleAlert} tone="warning" title="时钟正在运行 ZOS，这条 Webhook 暂时不会上屏。">
+              {/* One line per sentence run: a JSX line break between two CJK
+                  characters renders as a stray space. */}
+              <p>它写的是官方固件的 Custom App 接收端，ZOS 上没有这个接口，服务因此直接拒绝，返回 HTTP 503。恢复官方固件后即刻恢复。</p>
+            </Callout>
           )}
-          <p className="m-0">
-            与频道里的通知板内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的
-            地址 POST 一条消息，时钟即刻收到，显示 holdSeconds 秒后自动消失，支持中文。
-            它写进名为 notify 的 Custom App——什么时候轮到它上屏，仍由设备的自动翻页决定。
+          <p className="m-0 text-[length:var(--type-small)] leading-normal text-cladd-fg-soft">
+            与频道里的通知板内容无关：任何设备（curl、iOS 快捷指令、Home Assistant）向下面的地址 POST 一条消息，时钟即刻收到，显示 holdSeconds 秒后自动消失，支持中文。它写进名为 notify 的 Custom App——什么时候轮到它上屏，仍由设备的自动翻页决定。
           </p>
           <code
-            className="overflow-x-auto whitespace-nowrap rounded bg-cladd-surface-minus px-2 py-1.5 font-mono text-xs"
+            className="overflow-x-auto whitespace-nowrap rounded-[var(--radius-control)] bg-cladd-surface-minus px-2 py-1.5 font-mono text-[length:var(--type-caption)]"
             style={{ width: 0, minWidth: "100%" }}
           >
             {command}
           </code>
-          <p className="m-0 text-xs text-cladd-fg-soft">
-            手机打开控制台时，示例地址会自动换成局域网 IP。可选 NOTIFY_TOKEN 鉴权与全部字段
-            见技术参考「Webhook 通知」。
+          <p className="m-0 text-[length:var(--type-caption)] leading-[1.45] text-cladd-fg-softer">
+            手机打开控制台时，示例地址会自动换成局域网 IP。可选 NOTIFY_TOKEN 鉴权与全部字段见技术参考「Webhook 通知」。
           </p>
         </div>
       </Dialog>
@@ -329,12 +338,12 @@ function PlaceSearchField({ controlId, label, value, onChange }: PlaceSearchFiel
         }}
       />
       {searching && (
-        <p className="place-search__status m-0 flex items-center gap-1.5 text-sm text-cladd-fg-soft" role="status">
+        <p className="place-search__status m-0 flex items-center gap-1.5 text-[length:var(--type-caption)] text-cladd-fg-softer" role="status">
           <Spinner size="sm" aria-hidden="true" />正在搜索地点…
         </p>
       )}
       {searched && !searching && results.length === 0 && (
-        <p className="place-search__status m-0 text-sm text-cladd-fg-soft" role="status">
+        <p className="place-search__status m-0 text-[length:var(--type-caption)] text-cladd-fg-softer" role="status">
           没有找到匹配的地点，换个写法再试。
         </p>
       )}
@@ -436,6 +445,9 @@ function OptionEditor({
                   <Select
                     id={controlId}
                     aria-label={field.label}
+                    // Every value control in the panel is recessed, like the
+                    // Input and the scrubbers beside it.
+                    surface="cut"
                     value={String(value)}
                     options={(field.choices ?? []).map((choice) => choice.value)}
                     renderOption={({ value: choiceValue }) => (
@@ -461,7 +473,8 @@ function OptionEditor({
                   />
                 ) : field.type === "color" ? (
                   <ColorPicker
-                    size="sm"
+                    surface="cut"
+                    className="font-mono"
                     alpha={false}
                     inputs={false}
                     debounce={200}
@@ -568,19 +581,99 @@ export function WorkspaceEditor({
     ? selectedItem ? contentTitle(selectedItem, selectedDefinition, instrumentFor(selectedItem)) : "所选内容"
     : `完整轮播 · ${channel.items.length} 个内容`;
 
+  // Below the 52rem tier the channel settings and the device preview fold away behind their own toggles.
+  const phone = usePhoneTier();
+  const settingsOpen = !phone || mobileSettingsOpen;
+  const previewOpen = !phone || mobilePreviewOpen;
+
   useEffect(() => {
     setMobileSettingsOpen(false);
     setMobilePreviewOpen(false);
   }, [channel.id]);
+
+  // FLIP for ↑↓, drop and remove: rows are measured just before the change is
+  // requested, then slid from there to where the new order put them. Measuring
+  // at the moment of intent (not on the previous render) keeps a scroll or an
+  // options panel opening in between from turning into a bogus offset.
+  // Keyboard activation (event.detail 0) skips the capture: no motion for
+  // keyboard-driven actions, and a held Enter would otherwise queue slides.
+  const playlistRef = useRef<HTMLDivElement>(null);
+  const rowTopsBeforeMove = useRef<{ movedId: string; tops: Map<string, number> } | null>(null);
+  const rowsSeen = useRef<{ channelId: string; ids: Set<string> } | null>(null);
+  const itemOrder = channel.items.map((item) => item.id).join("|");
+  const captureRowTops = (movedItemId: string, event?: { detail: number }) => {
+    const list = playlistRef.current;
+    if (!list || event?.detail === 0) return;
+    rowTopsBeforeMove.current = {
+      movedId: `playlist-item-${movedItemId}`,
+      tops: new Map([...list.children].map((row) => [row.id, row.getBoundingClientRect().top])),
+    };
+    // A move that changed nothing (first row up) must not leave a stale capture
+    // for some later, unrelated reorder; the commit lands before the next frame.
+    requestAnimationFrame(() => { rowTopsBeforeMove.current = null; });
+  };
+  useLayoutEffect(() => {
+    const before = rowTopsBeforeMove.current;
+    rowTopsBeforeMove.current = null;
+    const seen = rowsSeen.current;
+    rowsSeen.current = { channelId: channel.id, ids: new Set(channel.items.map((item) => `playlist-item-${item.id}`)) };
+    const list = playlistRef.current;
+    if (!list) return;
+    // `before` was read where each row was SEEN, mid-slide included; a slide
+    // still applied here would make the new layout read wrong by its offset
+    // and the next slide start a row away — the jump on a quick second ↓.
+    const interrupted = new Set<Element>();
+    for (const row of list.children) {
+      for (const animation of row.getAnimations()) {
+        if (animation.id !== FLIP_ANIMATION) continue;
+        animation.cancel();
+        interrupted.add(row);
+      }
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const tokens = getComputedStyle(list);
+    if (before) {
+      const duration = motionMs(tokens, "--motion-base", 200);
+      const easeInOut = tokens.getPropertyValue("--ease-in-out").trim() || "ease-in-out";
+      // A row caught mid-slide is already moving: ease-out keeps its speed,
+      // where ease-in-out would park it at rest for a beat first.
+      const easeOut = tokens.getPropertyValue("--ease-out").trim() || "ease-out";
+      for (const row of list.children) {
+        const top = before.tops.get(row.id);
+        if (top === undefined) continue;
+        const delta = top - row.getBoundingClientRect().top;
+        if (Math.abs(delta) < 1) continue;
+        // The row the user moved travels over the ones it displaces.
+        const zIndex = row.id === before.movedId ? 1 : 0;
+        row.animate(
+          [{ transform: `translateY(${delta}px)`, zIndex }, { transform: "none", zIndex }],
+          { id: FLIP_ANIMATION, duration, easing: interrupted.has(row) ? easeOut : easeInOut },
+        );
+      }
+    }
+    // A row the user just added (same channel, new id) arrives like .motion-enter.
+    // WAAPI rather than the class: the row's className changes as it becomes
+    // the selected item, and React rewriting it would cut the class short.
+    if (seen?.channelId !== channel.id) return;
+    const duration = motionMs(tokens, "--motion-slow", 280);
+    const easing = tokens.getPropertyValue("--ease-out").trim() || "ease-out";
+    for (const row of list.children) {
+      if (seen.ids.has(row.id)) continue;
+      row.animate(
+        [{ opacity: 0, transform: "translateY(0.25rem)" }, { opacity: 1, transform: "none" }],
+        { duration, easing, fill: "backwards" },
+      );
+    }
+  }, [itemOrder, channel.id]);
 
   return (
     <main className="workspace-editor" id="workspace-editor">
       <Button
         type="button"
         color="neutral"
-        variant="transparent"
-        outline={false}
+        multiline
         className="mobile-channel-settings-trigger"
+        contentClassName="mobile-channel-settings-trigger__content"
         aria-expanded={mobileSettingsOpen}
         aria-controls="channel-settings-panel"
         onClick={() => setMobileSettingsOpen((current) => !current)}
@@ -589,56 +682,62 @@ export function WorkspaceEditor({
           <span><Settings2 />频道设置</span>
           <small>{channel.appName} · {channel.enabled ? "已启用" : "未启用"} · 刷新 {seconds(channel.refreshIntervalMs)} 秒</small>
         </span>
-        <ChevronDown className={cn("mobile-disclosure-chevron", mobileSettingsOpen && "is-open")} />
+        <ChevronDown className="disclosure-chevron text-cladd-fg-softer" data-open={mobileSettingsOpen} aria-hidden="true" />
       </Button>
 
-      <section
-        id="channel-settings-panel"
-        className={cn("channel-config", !mobileSettingsOpen && "is-mobile-collapsed")}
-        aria-label="频道设置"
-      >
-        <div className="config-field config-field--name">
-          <label htmlFor="channel-name">频道名称</label>
-          <Input
-            inputId="channel-name"
-            value={channel.name}
-            maxLength={48}
-            onChange={(nextValue) => onChannelChange({ name: nextValue })}
-          />
-        </div>
-        <div className="config-field">
-          <label htmlFor="channel-app">时钟旋钮名称</label>
-          <Input
-            inputId="channel-app"
-            value={channel.appName}
-            maxLength={32}
-            inputComponentProps={{ spellCheck: false, autoCapitalize: "none" }}
-            onChange={(nextValue) => onChannelChange({ appName: nextValue })}
-          />
-        </div>
-        <div className="config-field config-field--refresh">
-          <label htmlFor="channel-refresh">内容刷新间隔</label>
-          <NumberInput
-            id="channel-refresh"
-            value={seconds(channel.refreshIntervalMs)}
-            minimum={1}
-            maximum={900}
-            step={1}
-            unit="秒"
-            ariaLabel="内容刷新间隔（秒）"
-            onCommit={(nextValue) => onChannelChange({ refreshIntervalMs: Math.round(nextValue * 1_000) })}
-          />
-        </div>
-        <label className="config-field config-field--toggle" title="启用后显示在时钟旋钮列表中">
-          <span className="option-label">启用频道</span>
-          <Switch
-            as="span"
-            input
-            checked={channel.enabled}
-            onChange={(checked) => onChannelChange({ enabled: checked })}
-          />
-        </label>
-      </section>
+      {/* Desktop always shows the row; only phones fold it. */}
+      <Disclosure animated={phone} open={settingsOpen}>
+        <section
+          id="channel-settings-panel"
+          className="channel-config"
+          aria-label="频道设置"
+        >
+          <div className="config-field config-field--name">
+            <label htmlFor="channel-name">频道名称</label>
+            <Input
+              inputId="channel-name"
+              value={channel.name}
+              maxLength={48}
+              onChange={(nextValue) => onChannelChange({ name: nextValue })}
+            />
+          </div>
+          <div className="config-field">
+            <label htmlFor="channel-app">时钟旋钮名称</label>
+            <Input
+              inputId="channel-app"
+              inputClassName="font-mono"
+              value={channel.appName}
+              maxLength={32}
+              inputComponentProps={{ spellCheck: false, autoCapitalize: "none" }}
+              onChange={(nextValue) => onChannelChange({ appName: nextValue })}
+            />
+          </div>
+          <div className="config-field config-field--refresh">
+            <label htmlFor="channel-refresh">内容刷新间隔</label>
+            <NumberInput
+              id="channel-refresh"
+              value={seconds(channel.refreshIntervalMs)}
+              minimum={1}
+              maximum={900}
+              step={1}
+              unit="秒"
+              ariaLabel="内容刷新间隔（秒）"
+              onCommit={(nextValue) => onChannelChange({ refreshIntervalMs: Math.round(nextValue * 1_000) })}
+            />
+          </div>
+          <label className="config-field config-field--toggle" title="启用后显示在时钟旋钮列表中">
+            <span className="option-label">启用频道</span>
+            <span className="config-field__control">
+              <Switch
+                as="span"
+                input
+                checked={channel.enabled}
+                onChange={(checked) => onChannelChange({ enabled: checked })}
+              />
+            </span>
+          </label>
+        </section>
+      </Disclosure>
 
       <section className="preview-section" aria-labelledby="preview-title">
         <div className="preview-toolbar">
@@ -686,68 +785,66 @@ export function WorkspaceEditor({
           />
         </div>
 
-        <div
-          id="channel-device-preview"
-          className={cn(
-            "device-stage",
-            previewing && "is-rendering",
-            !mobilePreviewOpen && "is-mobile-collapsed",
-          )}
-          aria-busy={previewing}
-        >
-          <div className="clock-device" aria-label="Ulanzi TC002 预览">
-            <div className="clock-screen">
-              {previewUrl
-                ? <img src={previewUrl} alt={`${previewLabel}动画预览`} />
-                : <span title={previewError ?? undefined}>
-                    {previewing
-                      ? "正在生成所选内容预览…"
-                      : previewError
-                        ? "预览生成失败，修改设置后将自动重试"
-                        : "等待生成预览…"}
-                  </span>}
+        <Disclosure animated={phone} open={previewOpen}>
+          <div
+            id="channel-device-preview"
+            className={cn("device-stage", previewing && "is-rendering")}
+            aria-busy={previewing}
+          >
+            <div className="clock-device" aria-label="Ulanzi TC002 预览">
+              <div className="clock-screen">
+                {previewUrl
+                  ? <img src={previewUrl} alt={`${previewLabel}动画预览`} />
+                  : <span title={previewError ?? undefined}>
+                      {previewing
+                        ? "正在生成所选内容预览…"
+                        : previewError
+                          ? "预览生成失败，修改设置后将自动重试"
+                          : "等待生成预览…"}
+                    </span>}
+              </div>
             </div>
-          </div>
-          <div className="preview-context" aria-live="polite">
-            <span>正在预览：<strong>{previewLabel}</strong></span>
-            <span>{previewing
-              ? "更新中…"
-              : previewError
-                ? "预览失败"
-                : previewFrameCount
-                  ? `${previewFrameCount} 帧`
-                  : "自动预览"}</span>
-          </div>
-          {channel.items.length > 1 && (
-            <div className="preview-dots" aria-label="选择要预览的内容">
-              {channel.items.map((item, index) => {
-                const definition = catalog.find((entry) => entry.id === item.contentId);
-                const title = contentTitle(item, definition, instrumentFor(item));
-                const active = item.id === selectedItem?.id && previewScope === "item";
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={cn(active && "is-active")}
-                    aria-label={`预览第 ${index + 1} 项：${title}`}
-                    aria-pressed={active}
-                    title={title}
-                    onClick={() => {
-                      onSelectItem(item.id);
-                      onPreviewScopeChange("item");
-                    }}
-                  />
-                );
-              })}
+            <div className="preview-context" aria-live="polite">
+              <span>正在预览：<strong>{previewLabel}</strong></span>
+              <span>{previewing
+                ? "更新中…"
+                : previewError
+                  ? "预览失败"
+                  : previewFrameCount
+                    ? `${previewFrameCount} 帧`
+                    : "自动预览"}</span>
             </div>
-          )}
-        </div>
+            {channel.items.length > 1 && (
+              <div className="preview-dots" aria-label="选择要预览的内容">
+                {channel.items.map((item, index) => {
+                  const definition = catalog.find((entry) => entry.id === item.contentId);
+                  const title = contentTitle(item, definition, instrumentFor(item));
+                  const active = item.id === selectedItem?.id && previewScope === "item";
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={cn(active && "is-active")}
+                      aria-label={`预览第 ${index + 1} 项：${title}`}
+                      aria-pressed={active}
+                      title={title}
+                      onClick={() => {
+                        onSelectItem(item.id);
+                        onPreviewScopeChange("item");
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </Disclosure>
       </section>
 
       <section className="playlist-section" aria-labelledby="playlist-title">
         <div className="subsection-heading">
           <div className="playlist-heading-copy">
-            <h2 id="playlist-title">播放顺序</h2>
+            <h3 id="playlist-title">播放顺序</h3>
             <span>{channel.items.length} 个内容 · 共 {seconds(totalDuration)} 秒</span>
           </div>
           <Button
@@ -759,7 +856,7 @@ export function WorkspaceEditor({
             <Plus />添加内容
           </Button>
         </div>
-        <div className="playlist">
+        <div className="playlist" ref={playlistRef}>
           {channel.items.map((item, index) => {
             const definition = catalog.find((entry) => entry.id === item.contentId);
             const instrument = instrumentFor(item);
@@ -786,6 +883,7 @@ export function WorkspaceEditor({
                   if (!draggingId || draggingId === item.id) return;
                   const bounds = event.currentTarget.getBoundingClientRect();
                   const position = event.clientY > bounds.top + bounds.height / 2 ? "after" : "before";
+                  captureRowTops(draggingId);
                   onReorderItem(draggingId, item.id, position);
                   setDraggingId(null);
                   setDragOverId(null);
@@ -846,33 +944,37 @@ export function WorkspaceEditor({
                   </div>
                   <div className="playlist-actions">
                     <Tooltip tooltip="上移">
-                      <Button type="button" variant="transparent" outline={false} size="sm" square disabled={index === 0} onClick={() => onMoveItem(item.id, -1)} aria-label={`上移 ${title}`}>
+                      <Button type="button" variant="transparent" outline={false} size="sm" square disabled={index === 0} onClick={(event) => { captureRowTops(item.id, event); onMoveItem(item.id, -1); }} aria-label={`上移 ${title}`}>
                         <ArrowUp />
                       </Button>
                     </Tooltip>
                     <Tooltip tooltip="下移">
-                      <Button type="button" variant="transparent" outline={false} size="sm" square disabled={index === channel.items.length - 1} onClick={() => onMoveItem(item.id, 1)} aria-label={`下移 ${title}`}>
+                      <Button type="button" variant="transparent" outline={false} size="sm" square disabled={index === channel.items.length - 1} onClick={(event) => { captureRowTops(item.id, event); onMoveItem(item.id, 1); }} aria-label={`下移 ${title}`}>
                         <ArrowDown />
                       </Button>
                     </Tooltip>
                     <Tooltip tooltip="从频道移除">
-                      <Button type="button" className="playlist-remove" color="red" variant="transparent" outline={false} size="sm" square onClick={() => onRemoveItem(item.id)} aria-label={`从频道移除 ${title}`}>
+                      <Button type="button" className="playlist-remove" color="red" variant="transparent" outline={false} size="sm" square onClick={(event) => { captureRowTops(item.id, event); onRemoveItem(item.id); }} aria-label={`从频道移除 ${title}`}>
                         <Trash2 />
                       </Button>
                     </Tooltip>
                   </div>
                 </div>
 
-                {active && definition && (
-                  <OptionEditor
-                    item={item}
-                    definition={definition}
-                    instrument={instrument}
-                    firmwareMode={firmwareMode}
-                    onChange={(key, value) => onOptionChange(item.id, key, value)}
-                    onTimerStart={() => onTimerStart(item.id)}
-                    onTimerPause={() => onTimerPause(item.id)}
-                  />
+                {/* Mounted on first open, then kept, so closing animates too —
+                    without 48 inert editors for rows nobody opened. */}
+                {definition && (
+                  <Disclosure lazy open={active}>
+                    <OptionEditor
+                      item={item}
+                      definition={definition}
+                      instrument={instrument}
+                      firmwareMode={firmwareMode}
+                      onChange={(key, value) => onOptionChange(item.id, key, value)}
+                      onTimerStart={() => onTimerStart(item.id)}
+                      onTimerPause={() => onTimerPause(item.id)}
+                    />
+                  </Disclosure>
                 )}
               </div>
             );

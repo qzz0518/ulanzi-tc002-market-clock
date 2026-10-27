@@ -23,10 +23,10 @@ import {
 } from "./pixel-lyric-modes";
 
 export const MUSIC_SKINS = [
-  { id: "signal", name: "信号绿", note: "终端荧光", color: "lime" },
-  { id: "tape", name: "磁带橙", note: "暖色录音", color: "orange" },
-  { id: "blueprint", name: "蓝晒", note: "冷蓝电台", color: "cyan" },
-  { id: "arcade", name: "街机红", note: "红白像素", color: "red" },
+  { id: "signal", name: "信号绿", note: "终端荧光" },
+  { id: "tape", name: "磁带橙", note: "暖色录音" },
+  { id: "blueprint", name: "蓝晒", note: "冷蓝电台" },
+  { id: "arcade", name: "街机红", note: "红白像素" },
 ] as const;
 
 export type MusicSkin = typeof MUSIC_SKINS[number]["id"];
@@ -853,10 +853,12 @@ export function MusicThemePanel({
       <div className="music-theme-panel__groups">
         <div className="music-theme-panel__group">
           <span className="music-theme-panel__label" id="music-theme-mode-label">显示形式</span>
+          {/* `xl`: each tile carries a name and a note, which a `lg` tile
+              could only fit at 10px with no air above or below. */}
           <ToggleGroup
             className="music-theme-options"
             value={mode}
-            size="lg"
+            size="xl"
             rounded={false}
             variant="transparent"
             outline
@@ -876,7 +878,7 @@ export function MusicThemePanel({
                   value={item.id}
                   className="music-theme-option"
                   contentClassName="music-theme-option__content"
-                  activeColor="lime"
+                  activeColor="brand"
                   aria-label={item.name + "，" + item.note}
                 >
                   <Icon aria-hidden="true" />
@@ -884,7 +886,7 @@ export function MusicThemePanel({
                     <strong>{item.name}</strong>
                     <small>{item.note}</small>
                   </span>
-                  {mode === item.id && <Check className="music-theme-option__check" aria-hidden="true" />}
+                  <Check className="music-theme-option__check" data-on={mode === item.id} aria-hidden="true" />
                 </ToggleButton>
               );
             })}
@@ -896,7 +898,7 @@ export function MusicThemePanel({
           <ToggleGroup
             className="music-theme-options"
             value={skin}
-            size="lg"
+            size="xl"
             rounded={false}
             variant="transparent"
             outline
@@ -916,7 +918,10 @@ export function MusicThemePanel({
                   value={item.id}
                   className="music-theme-option"
                   contentClassName="music-theme-option__content"
-                  activeColor={item.color}
+                  // One accent for a selected tile in both groups. The skin's
+                  // own colour already sits in its swatch; tinting the tile
+                  // with it too made four selected states for one control.
+                  activeColor="brand"
                   aria-label={item.name + "，" + item.note}
                 >
                   <span className="music-theme-swatch" aria-hidden="true">
@@ -928,7 +933,7 @@ export function MusicThemePanel({
                     <strong>{item.name}</strong>
                     <small>{item.note}</small>
                   </span>
-                  {skin === item.id && <Check className="music-theme-option__check" aria-hidden="true" />}
+                  <Check className="music-theme-option__check" data-on={skin === item.id} aria-hidden="true" />
                 </ToggleButton>
               );
             })}
