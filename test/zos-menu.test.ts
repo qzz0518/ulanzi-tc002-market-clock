@@ -229,6 +229,14 @@ describe("zos menu accessibility", () => {
     expect(button(html, "设置")).toContain('aria-disabled="true"');
     expect(button(html, "音乐")).toContain('aria-disabled="true"');
     expect(button(html, "VIBE")).toContain('aria-disabled="true"');
+    // 光挡住不够,还得看得出在忙——但不是整列变淡:只有被点、而且写得慢的那一行转圈。
+    const spinner = 'class="cladd-spinner';
+    expect(html).not.toContain(spinner);
+    const slow = render({ open: "carousel", busy: true, pending: "btc" });
+    expect(button(slow, "比特币")).toContain(spinner);
+    expect(button(slow, "比特币")).toContain('aria-busy="true"');
+    expect(count(slow, spinner)).toBe(1);
+    expect(button(slow, "大字天气钟")).not.toContain("aria-busy");
   });
 
   test("菜单里再没有「打开这台浏览器里的向导」那种行", () => {

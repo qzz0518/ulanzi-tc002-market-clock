@@ -6,6 +6,7 @@ import {
   BatteryWarning,
   Bluetooth,
   CircleDot,
+  LoaderCircle,
   Pin,
   PinOff,
   Radio,
@@ -48,6 +49,14 @@ import "./zos-console.css";
 // updated when a frame arrived could never say "the frames stopped arriving".
 const AGE_TICK_MS = 500;
 
+// A write answered inside this reads as instant; only past it does the control
+// that asked show a spinner, so the usual few-ms LAN write never flickers one.
+const BUSY_SPINNER_DELAY_MS = 200;
+// Who asked for the write in flight, when it was 交还旋钮 rather than a menu
+// row (rows are keyed by their focus). Starts with ":" so it can never equal
+// one: channel ids are [A-Za-z0-9_-] and game rows are "game:<id>".
+const RELEASE_KEY = ":release";
+
 const BATTERY_ICONS = {
   ok: BatteryFull,
   low: BatteryLow,
@@ -69,8 +78,11 @@ export function ZosPanel() {
   const [now, setNow] = useState(() => Date.now());
   // One display write at a time, and while it is in flight the menu stops
   // taking commands: the service keeps a single focus, so a second click would
-  // only race the first.
-  const [busy, setBusy] = useState(false);
+  // only race the first. The value is who asked (a row's focus or RELEASE_KEY),
+  // so the wait can show on that one control.
+  const [pending, setPending] = useState<string | null>(null);
+  const busy = pending !== null;
+  const [slowPending, setSlowPending] = useState<string | null>(null);
   const [provisionOpen, setProvisionOpen] = useState(false);
   // The gate is read here, not only in the dialog: a browser that cannot do
   // Web Bluetooth must never be offered the button in the first place.
@@ -99,7 +111,20 @@ export function ZosPanel() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (pending === null) return;
+    const timer = window.setTimeout(() => setSlowPending(pending), BUSY_SPINNER_DELAY_MS);
+    return () => {
+      window.clearTimeout(timer);
+      setSlowPending(null);
+    };
+  }, [pending]);
+  // Read through `pending`: the effect's reset lands a frame after the write
+  // settles, and the spinner must not outlive the busy state by that frame.
+  const waitingOn = slowPending === pending ? pending : null;
+
   const applyDisplay = useCallback(async (
+    from: string,
     focus: string | null,
     pinned: boolean,
     label: string,
@@ -107,7 +132,7 @@ export function ZosPanel() {
   ) => {
     const link = linkRef.current;
     if (!link) return;
-    setBusy(true);
+    setPending(from);
     try {
       const display = await link.setDisplay(focus, pinned);
       // Echo the service's own answer instead of the click's intent: it is the
@@ -118,7 +143,7 @@ export function ZosPanel() {
     } catch (error) {
       toast.error("设备控制失败", { description: errorMessage(error) });
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   }, [toast]);
 
@@ -185,12 +210,13 @@ export function ZosPanel() {
       ? { color: "brand" as const, icon: Radio, label: "设备在线" }
       : { color: "neutral" as const, icon: WifiOff, label: "设备离线" };
 
-  const release = () => void applyDisplay(null, false, "已交还旋钮");
+  const release = () => void applyDisplay(RELEASE_KEY, null, false, "已交还旋钮");
 
-  // 点一行菜单：固定，或者——同一行再点一次——交还。指令和回执由 pinIntent 决定。
+  // 点一行菜单：固定，或者——同一行再点一次——交还。指令和回执由 pinIntent 决定；
+  // 转圈挂在被点的那一行上（取消固定时指令的 focus 是 null，所以按行算，不按指令算）。
   const pin = (target: ZosPinTarget) => {
     const intent = pinIntent(target);
-    void applyDisplay(intent.focus, intent.pinned, intent.title, intent.detail ?? undefined);
+    void applyDisplay(target.focus, intent.focus, intent.pinned, intent.title, intent.detail ?? undefined);
   };
 
   return (
@@ -298,7 +324,9 @@ export function ZosPanel() {
                     if (!busy) release();
                   }}
                 >
-                  <PinOff aria-hidden="true" />交还旋钮
+                  {waitingOn === RELEASE_KEY
+                    ? <LoaderCircle className="is-spinning" aria-hidden="true" />
+                    : <PinOff aria-hidden="true" />}交还旋钮
                 </Button>
               )}
             </div>
@@ -308,6 +336,7 @@ export function ZosPanel() {
               open={openSection}
               onOpenChange={setOpenSection}
               busy={busy}
+              pending={waitingOn}
               emptyLabel={linkError ? "菜单不可用" : "正在读取设备菜单…"}
               onPin={pin}
             />

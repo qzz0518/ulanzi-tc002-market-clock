@@ -6,25 +6,17 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
-  Bird,
-  Blocks,
-  Car,
   Gamepad2,
-  Grid2x2,
   MonitorCog,
   Pause,
   PinOff,
   Play,
   QrCode,
   Radio,
-  Rocket,
   RotateCcw,
-  Swords,
   TriangleAlert,
   TvMinimal,
   WifiOff,
-  Worm,
-  type LucideIcon,
 } from "lucide-react";
 import {
   Button,
@@ -70,16 +62,15 @@ interface GameRegistryEntry {
   id: GameEngine["meta"]["id"];
   /** Duplicate of engine.meta.title so the picker renders without an instance. */
   title: string;
-  icon: LucideIcon;
   create: () => GameEngine;
 }
 
 // The arcade's catalogue: one row per engine, shell stays generic.
 const GAME_REGISTRY: GameRegistryEntry[] = [
-  { id: "breakout", title: "时间打砖块", icon: Blocks, create: () => new BreakoutEngine() },
-  { id: "flappy", title: "像素小鸟", icon: Bird, create: () => createFlappyGame() },
-  { id: "snake", title: "贪吃蛇", icon: Worm, create: () => createSnakeGame() },
-  { id: "pong", title: "双人 Pong", icon: Swords, create: () => createPongGame() },
+  { id: "breakout", title: "时间打砖块", create: () => new BreakoutEngine() },
+  { id: "flappy", title: "像素小鸟", create: () => createFlappyGame() },
+  { id: "snake", title: "贪吃蛇", create: () => createSnakeGame() },
+  { id: "pong", title: "双人 Pong", create: () => createPongGame() },
   // The last three were written for the firmware's knob first and ported back
   // here, so the console now carries the same seven games the device does. Their
   // simulations are asserted byte-identical against the C++ (test/racer.test.ts,
@@ -90,9 +81,9 @@ const GAME_REGISTRY: GameRegistryEntry[] = [
   // lets a console session and a device session be lined up. A lockstep driver
   // must pass the SAME seed to both sides; the device seeds from time(0), so it
   // is the device that has to be told, not this side.
-  { id: "racer", title: "像素赛车", icon: Car, create: () => createRacerGame() },
-  { id: "shooter", title: "太空射击", icon: Rocket, create: () => createShooterGame() },
-  { id: "tetris", title: "俄罗斯方块", icon: Grid2x2, create: () => createTetrisGame() },
+  { id: "racer", title: "像素赛车", create: () => createRacerGame() },
+  { id: "shooter", title: "太空射击", create: () => createShooterGame() },
+  { id: "tetris", title: "俄罗斯方块", create: () => createTetrisGame() },
 ];
 
 // Pads join with a human-typeable 4-character room code; look-alike glyphs are
@@ -516,28 +507,29 @@ export function GameShell({
   return (
     <main className="game-shell">
       <div className="game-topbar">
-        <ToggleGroup
-          className="game-picker"
-          value={gameId}
-          size="md"
-          variant="transparent"
-          outline
-          role="group"
-          aria-label="选择游戏"
-          onValueChange={(next) => {
-            if (typeof next === "string") switchGame(next as GameRegistryEntry["id"]);
-          }}
+        <SurfaceCut
+          className="segmented-track game-picker"
+          color="neutral"
+          outline={false}
+          contentClassName="segmented-track__content"
         >
-          {GAME_REGISTRY.map((entry) => {
-            const Icon = entry.icon;
-            return (
-              <ToggleButton key={entry.id} value={entry.id}>
-                <Icon aria-hidden="true" />
-                {entry.title}
-              </ToggleButton>
-            );
-          })}
-        </ToggleGroup>
+          <ToggleGroup
+            value={gameId}
+            size="md"
+            activeColor="brand"
+            role="group"
+            aria-label="选择游戏"
+            onValueChange={(next) => {
+              if (typeof next === "string") switchGame(next as GameRegistryEntry["id"]);
+            }}
+          >
+            {/* Text only: with icons the seven segments plus the status chip and
+                switch outgrow the 45rem stage this bar is aligned to. */}
+            {GAME_REGISTRY.map((entry) => (
+              <ToggleButton key={entry.id} value={entry.id}>{entry.title}</ToggleButton>
+            ))}
+          </ToggleGroup>
+        </SurfaceCut>
         <div className="game-topbar__status">
           <Chip
             size="md"
@@ -610,7 +602,12 @@ export function GameShell({
               {hud.phase === "playing" && !paused
                 ? <Pause aria-hidden="true" />
                 : <Play aria-hidden="true" />}
-              {startLabel}
+              <span className="game-start-label">
+                <span>{startLabel}</span>
+                {/* The longest label, invisible in the same cell: the button keeps
+                    one width through 开始 → 再来一局, so 重开 beside it never moves. */}
+                <span aria-hidden="true">再来一局</span>
+              </span>
             </Button>
             <Button type="button" size="md" variant="transparent" onClick={restart}>
               <RotateCcw aria-hidden="true" />重开

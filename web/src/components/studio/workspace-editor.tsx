@@ -632,23 +632,26 @@ export function WorkspaceEditor({
     }
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const tokens = getComputedStyle(list);
+    const flipDuration = motionMs(tokens, "--motion-base", 200);
+    const easeInOut = tokens.getPropertyValue("--ease-in-out").trim() || "ease-in-out";
+    // A row caught mid-slide is already moving: ease-out keeps its speed,
+    // where ease-in-out would park it at rest for a beat first.
+    const easeOut = tokens.getPropertyValue("--ease-out").trim() || "ease-out";
+    const slide = (row: Element, delta: number, zIndex: number, timing: KeyframeAnimationOptions) => row.animate(
+      [{ transform: `translateY(${delta}px)`, zIndex }, { transform: "none", zIndex }],
+      { id: FLIP_ANIMATION, ...timing },
+    );
     if (before) {
-      const duration = motionMs(tokens, "--motion-base", 200);
-      const easeInOut = tokens.getPropertyValue("--ease-in-out").trim() || "ease-in-out";
-      // A row caught mid-slide is already moving: ease-out keeps its speed,
-      // where ease-in-out would park it at rest for a beat first.
-      const easeOut = tokens.getPropertyValue("--ease-out").trim() || "ease-out";
       for (const row of list.children) {
         const top = before.tops.get(row.id);
         if (top === undefined) continue;
         const delta = top - row.getBoundingClientRect().top;
         if (Math.abs(delta) < 1) continue;
         // The row the user moved travels over the ones it displaces.
-        const zIndex = row.id === before.movedId ? 1 : 0;
-        row.animate(
-          [{ transform: `translateY(${delta}px)`, zIndex }, { transform: "none", zIndex }],
-          { id: FLIP_ANIMATION, duration, easing: interrupted.has(row) ? easeOut : easeInOut },
-        );
+        slide(row, delta, row.id === before.movedId ? 1 : 0, {
+          duration: flipDuration,
+          easing: interrupted.has(row) ? easeOut : easeInOut,
+        });
       }
     }
     // A row the user just added (same channel, new id) arrives like .motion-enter.
@@ -656,12 +659,23 @@ export function WorkspaceEditor({
     // the selected item, and React rewriting it would cut the class short.
     if (seen?.channelId !== channel.id) return;
     const duration = motionMs(tokens, "--motion-slow", 280);
-    const easing = tokens.getPropertyValue("--ease-out").trim() || "ease-out";
+    // 撤销 puts a row back mid-list from a toast outside this list, so nothing
+    // measured the rows first; each row below was pushed down by exactly the
+    // newcomers above it (rows have no gap). The restored row also takes the
+    // selection, so another row's options fold in the same commit: the slide
+    // rides that fold's clock and curve, making every row's net travel one
+    // curve — on the reorder clock the fold won the first 60ms and the rows
+    // below rose 32px before sliding down.
+    let pushedBy = 0;
     for (const row of list.children) {
-      if (seen.ids.has(row.id)) continue;
+      if (seen.ids.has(row.id)) {
+        if (!before && pushedBy) slide(row, -pushedBy, 0, { duration, easing: easeOut });
+        continue;
+      }
+      pushedBy += (row as HTMLElement).offsetHeight;
       row.animate(
-        [{ opacity: 0, transform: "translateY(0.25rem)" }, { opacity: 1, transform: "none" }],
-        { duration, easing, fill: "backwards" },
+        [{ opacity: 0, transform: "translateY(0.25rem)", zIndex: 1 }, { opacity: 1, transform: "none", zIndex: 1 }],
+        { duration, easing: easeOut, fill: "backwards" },
       );
     }
   }, [itemOrder, channel.id]);
@@ -862,6 +876,11 @@ export function WorkspaceEditor({
             const instrument = instrumentFor(item);
             const title = contentTitle(item, definition, instrument);
             const active = item.id === selectedItem?.id;
+            const first = index === 0;
+            const last = index === channel.items.length - 1;
+            const moveUp = (event: { detail: number }) => { captureRowTops(item.id, event); onMoveItem(item.id, -1); };
+            const moveDown = (event: { detail: number }) => { captureRowTops(item.id, event); onMoveItem(item.id, 1); };
+            const remove = (event: { detail: number }) => { captureRowTops(item.id, event); onRemoveItem(item.id); };
             return (
               <div
                 key={item.id}
@@ -942,38 +961,57 @@ export function WorkspaceEditor({
                       onCommit={(nextValue) => onDurationChange(item.id, Math.round(nextValue * 1_000))}
                     />
                   </div>
-                  <div className="playlist-actions">
-                    <Tooltip tooltip="上移">
-                      <Button type="button" variant="transparent" outline={false} size="sm" square disabled={index === 0} onClick={(event) => { captureRowTops(item.id, event); onMoveItem(item.id, -1); }} aria-label={`上移 ${title}`}>
-                        <ArrowUp />
-                      </Button>
-                    </Tooltip>
-                    <Tooltip tooltip="下移">
-                      <Button type="button" variant="transparent" outline={false} size="sm" square disabled={index === channel.items.length - 1} onClick={(event) => { captureRowTops(item.id, event); onMoveItem(item.id, 1); }} aria-label={`下移 ${title}`}>
-                        <ArrowDown />
-                      </Button>
-                    </Tooltip>
-                    <Tooltip tooltip="从频道移除">
-                      <Button type="button" className="playlist-remove" color="red" variant="transparent" outline={false} size="sm" square onClick={(event) => { captureRowTops(item.id, event); onRemoveItem(item.id); }} aria-label={`从频道移除 ${title}`}>
-                        <Trash2 />
-                      </Button>
-                    </Tooltip>
-                  </div>
+                  {!phone && (
+                    <div className="playlist-actions">
+                      <Tooltip tooltip="上移">
+                        <Button type="button" variant="transparent" outline={false} size="sm" square disabled={first} onClick={moveUp} aria-label={`上移 ${title}`}>
+                          <ArrowUp />
+                        </Button>
+                      </Tooltip>
+                      <Tooltip tooltip="下移">
+                        <Button type="button" variant="transparent" outline={false} size="sm" square disabled={last} onClick={moveDown} aria-label={`下移 ${title}`}>
+                          <ArrowDown />
+                        </Button>
+                      </Tooltip>
+                      <Tooltip tooltip="从频道移除">
+                        <Button type="button" className="playlist-remove" color="red" variant="transparent" outline={false} size="sm" square onClick={remove} aria-label={`从频道移除 ${title}`}>
+                          <Trash2 />
+                        </Button>
+                      </Tooltip>
+                    </div>
+                  )}
                 </div>
 
                 {/* Mounted on first open, then kept, so closing animates too —
                     without 48 inert editors for rows nobody opened. */}
-                {definition && (
+                {(definition || phone) && (
                   <Disclosure lazy open={active}>
-                    <OptionEditor
-                      item={item}
-                      definition={definition}
-                      instrument={instrument}
-                      firmwareMode={firmwareMode}
-                      onChange={(key, value) => onOptionChange(item.id, key, value)}
-                      onTimerStart={() => onTimerStart(item.id)}
-                      onTimerPause={() => onTimerPause(item.id)}
-                    />
+                    {/* A phone row has room for the name and the duration only; the
+                        arrows and remove open with the selected row's options instead. */}
+                    {phone && (
+                      <div className="playlist-panel-actions">
+                        <Button type="button" size="sm" disabled={first} onClick={moveUp} aria-label={`上移 ${title}`}>
+                          <ArrowUp />上移
+                        </Button>
+                        <Button type="button" size="sm" disabled={last} onClick={moveDown} aria-label={`下移 ${title}`}>
+                          <ArrowDown />下移
+                        </Button>
+                        <Button type="button" className="playlist-remove" color="red" variant="transparent" outline={false} size="sm" onClick={remove} aria-label={`从频道移除 ${title}`}>
+                          <Trash2 />移除
+                        </Button>
+                      </div>
+                    )}
+                    {definition && (
+                      <OptionEditor
+                        item={item}
+                        definition={definition}
+                        instrument={instrument}
+                        firmwareMode={firmwareMode}
+                        onChange={(key, value) => onOptionChange(item.id, key, value)}
+                        onTimerStart={() => onTimerStart(item.id)}
+                        onTimerPause={() => onTimerPause(item.id)}
+                      />
+                    )}
                   </Disclosure>
                 )}
               </div>

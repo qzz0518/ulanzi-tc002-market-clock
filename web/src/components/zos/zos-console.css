@@ -324,6 +324,10 @@
 .zc-menu__list { padding-inline: 0; }
 .zc-menu__after { display: inline-flex; align-items: center; gap: 0.5rem; }
 .zc-menu__chevron { flex: none; width: 0.875rem; height: 0.875rem; color: var(--muted-foreground); }
+/* 写入在飞时菜单行和「交还旋钮」是 aria-disabled + 点击守卫：外观不变（不淡化整列），
+   只把光标换成 progress；写入超过 200ms 时，被点的那一个再出一个转圈，淡入、不位移。 */
+.zc-menu .cladd-button[aria-disabled="true"] { cursor: progress; }
+.zc-menu__spinner.motion-enter { --enter-y: 0; animation-duration: var(--motion-base); }
 /* 子项缩进到与父项文字对齐——「下一层」要看得见。.disclosure 会裁切子块，所以
    上下右各留一点，cladd 焦点环（约 3px 外扩）不会被切掉。 */
 .zc-sub { display: flex; flex-direction: column; padding: 0.5rem 0.25rem 0.5rem 2rem; }

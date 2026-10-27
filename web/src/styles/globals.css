@@ -616,6 +616,9 @@
 .device-access-popover__url { max-width: 16rem; font-family: var(--mono); font-size: var(--type-micro); overflow-wrap: anywhere; }
 .device-access-popover__state.is-error > svg { color: var(--muted-foreground); }
 .device-settings-form {
+  /* Containing block for the switches' sr-only labels: otherwise they hang off the
+     dialog content at their unscrolled offset and make the clipped box scrollable. */
+  position: relative;
   max-height: min(74vh, 46rem);
   margin-top: 1rem;
   overflow-y: auto;
@@ -762,8 +765,11 @@
   text-align: center;
 }
 /* A state that stands in for a whole tab (常规 loading / failed / sideload) opens
-   with the form's top rule, so only the bottom edge moves when the form lands. */
-.device-settings-panel > .device-settings-state { margin-top: 1rem; border-top: 1px solid var(--border); }
+   with the form's top rule, so only the bottom edge moves when the form lands.
+   It also takes the form's role as the scroller when the cap squeezes it; safe
+   centring, since a centred grid that overflows puts its top out of scroll reach
+   (start first: a browser without `safe` drops that line and keeps the top). */
+.device-settings-panel > .device-settings-state { margin-top: 1rem; border-top: 1px solid var(--border); overflow-y: auto; overscroll-behavior: contain; align-content: start; align-content: safe center; }
 .device-settings-state strong { font-size: var(--type-title-sm); font-weight: 600; }
 .device-settings-state > span:last-of-type {
   max-width: 32rem;
@@ -773,6 +779,10 @@
   overflow-wrap: anywhere;
 }
 .device-settings-state.is-error strong { color: var(--destructive); }
+/* Short screens (a landscape phone leaves the body ~140px under the cap): the 17rem
+   reserve alone outgrew the dialog and pushed the footer out of it. Below ~34rem
+   it stops fitting; 36rem is the margin. */
+@media (max-height: 36rem) { .device-settings-state { min-height: 0; padding-block: 1rem; } }
 .device-settings-timezone-options { max-height: min(22rem, 55vh); overflow-y: auto; }
 .device-settings-tabs { flex: none; margin: 1rem var(--device-settings-inset, 1.25rem) 0; }
 /* keepMounted 让未激活的面板留在 DOM 里、只带 hidden 属性。这里显式声明，
@@ -929,18 +939,27 @@
 /* 游戏厅：顶栏（选游戏 + 上屏）+ 舞台（LED 屏 + HUD + 控制台）。
    LED 屏沿用 .pixel-lyric-screen 的网格质感配方。 */
 .game-shell { min-height: 0; padding: 1rem 0 1.5rem; }
+/* Same width as .game-stage in every block below, so the bar and the screen
+   share both edges. One row: the picker gives way, the status never wraps. */
 .game-topbar {
   display: flex;
-  width: min(100%, 72rem);
+  width: min(100%, 45rem);
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem 1rem;
-  flex-wrap: wrap;
+  gap: 0.75rem;
   margin-inline: auto;
   padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--border);
 }
-.game-topbar__status { display: inline-flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.game-topbar__status { display: inline-flex; flex: none; align-items: center; gap: 0.75rem; }
+/* Segments sized to their names; when the row is short (phone landscape) the
+   track scrolls inside itself instead of wrapping a name or the page. The
+   scroller reaches 2px past the track (padding out, margin back) so cladd's
+   6px focus ring is not clipped by it. */
+.game-picker { min-width: 0; }
+.game-picker .segmented-track__content { margin: -0.125rem; padding: 0.375rem; overflow-x: auto; border-radius: inherit; overscroll-behavior-inline: contain; scrollbar-width: none; }
+.game-picker .segmented-track__content::-webkit-scrollbar { display: none; }
+.game-picker .segmented-track__content > * { grid-auto-columns: max-content; width: max-content; }
 .game-screen-toggle { display: inline-flex; flex: none; align-items: center; gap: 0.5rem; cursor: pointer; }
 .game-screen-toggle > span:first-child { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
 
@@ -1014,6 +1033,9 @@
 .game-console__row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.5rem; }
 .game-console__options { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
 .game-console__options > span { color: var(--cladd-fg-soft); font-size: var(--type-small); font-weight: 500; }
+.game-start-label { display: inline-grid; }
+.game-start-label > * { grid-area: 1 / 1; }
+.game-start-label > [aria-hidden] { visibility: hidden; }
 
 /* Icon sits on the first line's centre (11px × 1.45 ≈ 16px line, 12px glyph),
    not on the middle of a two-line note. */
@@ -1860,7 +1882,7 @@
   .vibe-setup { margin-inline: 0.75rem; }
   .vibe-metrics { grid-template-columns: 1.75rem minmax(4rem, 1fr) minmax(2.5rem, 1fr) auto; }
   .game-body { padding-top: 0.75rem; }
-  .game-stage { width: 100%; }
+  .game-topbar, .game-stage { width: 100%; }
   .game-console__options { width: 100%; margin-left: 0; }
   .channel-sidebar { display: block; padding: 0.5rem 0 0.45rem; border-right: 0; border-bottom: 0; }
   .section-kicker { display: none; }
@@ -1959,16 +1981,16 @@
   .playlist-heading-copy { display: grid; width: auto; justify-content: start; gap: 0.18rem; }
   .mobile-add-content { display: inline-flex !important; flex: none; }
   #market-title, [id^="playlist-item-"] { scroll-margin-top: calc(8.25rem + env(safe-area-inset-top)); }
-  /* 激活项左侧有 2px 绿条，内边距太小会让内容图标直接贴上去；右侧是透明按钮，
-     自带内边距，所以只留 0.25rem。四个控件共用 358px 一行，名称列靠这些省下的
-     宽度才放得下「BTC · Bitcoin」。 */
-  .playlist-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 0.25rem; min-height: 3.5rem; padding: 0.5rem 0.25rem 0.5rem 0.75rem; }
+  /* 激活项左侧有 2px 绿条，内边距太小会让内容图标直接贴上去。The row is name +
+     duration only (↑↓ and remove open in the selected row's panel), so selecting a
+     row never narrows its name: 「USD/CNY · 美元 / 人民币」 needs the whole column. */
+  .playlist-row { grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem; min-height: 3.5rem; padding: 0.5rem 0.25rem 0.5rem 0.75rem; }
   .playlist-row > :first-child { display: none; }
-  .playlist-item:not(.is-active) .playlist-row > :last-child { display: none; }
   /* 非 cladd 的自定义行，拿不到 size token，按 sm 档（40px）单独对齐。 */
   .playlist-select { min-height: 2.5rem; }
-  .playlist-actions { gap: 0; }
-  .playlist-actions button { min-width: 2.4rem; }
+  /* Sides line up with .content-options below; the top room keeps focus rings inside the fold's clip. */
+  .playlist-panel-actions { display: flex; gap: 0.5rem; padding: 0.25rem 0.5rem 0.5rem; }
+  .playlist-panel-actions .playlist-remove { margin-left: auto; }
   .duration-field > span { display: none; }
   /* Fits 「900 秒」; the name column keeps the rest of a 358px row. Scoped to
      the playlist so VIBE's scrubbers keep their spacing. */
@@ -2144,7 +2166,7 @@
   .game-topbar { padding-bottom: 0.5rem; }
   /* 手机横屏：舞台优先撑满，控制台收成主导航上方的悬浮条。 */
   .game-body { padding-top: 0.6rem; padding-bottom: 4.9rem; }
-  .game-stage { width: min(100%, 42rem); }
+  .game-topbar, .game-stage { width: min(100%, 42rem); }
   .game-console {
     position: fixed;
     z-index: 40;
@@ -2159,6 +2181,11 @@
   .game-console__row { flex-wrap: nowrap; overflow-x: auto; }
   .game-console__row > * { flex: none; }
   .game-console__options { flex-wrap: nowrap; width: auto; margin-left: auto; }
+  /* Above 52rem the sidebar keeps its desktop column and 24px sm button, but
+     this is still a finger: the portrait recipe, a hit box that fills a 2.75rem
+     column, sized from the token so it holds in either tier. */
+  .channel-entry { grid-template-columns: minmax(0, 1fr) 2.75rem; }
+  .channel-delete::after { position: absolute; inset: calc((var(--spacing-cladd-sm) - 2.75rem) / 2); content: ""; }
   .is-canvas-page .channel-sidebar { padding: 0.55rem 0.65rem 0.8rem 0; }
   .is-canvas-page .section-kicker { padding-bottom: 0.4rem; font-size: var(--type-micro); }
   .is-canvas-page .channel-entry { grid-template-columns: minmax(0, 1fr); }

@@ -295,7 +295,9 @@ describe("zos panel", () => {
       new URL("../web/src/components/zos/zos-send-row.tsx", import.meta.url),
     ).text();
     expect(sendRowSource).toContain("throttle={SETTINGS_THROTTLE_MS}");
-    expect(panelSource).not.toContain("setTimeout");
+    // 面板里唯一的计时器是「写入慢过 200ms 才转圈」那一个,不是给滑块的防抖。
+    expect(panelSource.split("setTimeout").length - 1).toBe(1);
+    expect(panelSource).toContain("setTimeout(() => setSlowPending(pending), BUSY_SPINNER_DELAY_MS)");
     expect(panelSource).toContain("<ZosSendRows");
     // multiple 不传:一次开一个,与设备一次只显示一环同构。
     expect(menuSource).not.toContain("multiple");
