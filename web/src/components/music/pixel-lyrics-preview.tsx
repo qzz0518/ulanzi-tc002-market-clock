@@ -1,5 +1,5 @@
-import { Button, Chip, ColorPicker, ToggleButton, ToggleGroup } from "@cladd-ui/react";
-import { AudioLines, Check, Monitor, MoveHorizontal, Radar, Radio, Rows3 } from "lucide-react";
+import { Button, Chip, ColorPicker, Switch, ToggleButton, ToggleGroup } from "@cladd-ui/react";
+import { AudioLines, Check, Monitor, MoveHorizontal, Quote, Radar, Radio, Rows3, Target } from "lucide-react";
 import { useEffect, useRef } from "react";
 import {
   lyricCursorAt,
@@ -13,10 +13,26 @@ import {
   beatKick,
   cascadeBandY,
   cascadePhase,
+  haloRadius,
+  haloTier,
+  INTERLUDE_BREATH_MS,
+  INTERLUDE_DOT_X,
+  INTERLUDE_DOT_Y,
+  interludeDotTier,
+  interludeProgress,
   isMusicMode,
   MUSIC_MODES,
   musicModeNote,
+  ringsHopPx,
   SKYLINE_BARS,
+  SPARK_COUNT,
+  SPARK_COUNT_LAST,
+  sparkPixels,
+  sparkTier,
+  tiltLeanOffset,
+  tiltLeanUnit,
+  tiltStage,
+  tiltUnits,
   skylineBarLevel,
   spotlightOffsetForFocusPx,
   type MusicMode,
@@ -303,6 +319,8 @@ export interface PixelLyricLine {
   untilMs: number;
   /** One entry per codepoint of the text, when the source carries word timings. */
   cells?: readonly LyricCell[] | undefined;
+  /** The line belongs to the chorus; every mode then ripples the glyph being sung. */
+  chorus?: boolean | undefined;
 }
 
 /**
@@ -338,12 +356,16 @@ export function pixelLyricCursor(
   text: string,
   line: PixelLyricLine,
   playheadMs: number,
-): { cursor: LyricCursor; windowProgress: number } {
-  if (!hasLyricWindow(line)) return { cursor: IDLE_CURSOR, windowProgress: 0 };
+): { cursor: LyricCursor; windowProgress: number; interlude: number; sinceLineMs: number } {
+  if (!hasLyricWindow(line)) {
+    return { cursor: IDLE_CURSOR, windowProgress: 0, interlude: -1, sinceLineMs: Number.POSITIVE_INFINITY };
+  }
   const cellCount = bitmapForText(text).cells.length;
   return {
     cursor: lyricCursorAt({ ...line, cellCount }, playheadMs),
     windowProgress: lyricWindowProgress(line, playheadMs),
+    interlude: interludeProgress(line.endMs, line.untilMs, playheadMs),
+    sinceLineMs: playheadMs - line.startMs,
   };
 }
 
@@ -365,7 +387,9 @@ export interface PixelLyricsFrameInput {
    *
    * Only the cascade choreography reads it. Flying the line out on the sung
    * progress would clear the panel the instant the singer stops and leave it
-   * blank for the whole 13-second break.
+   * blank for the whole 13-second break. (A break that long now shows the
+   * interlude dots instead — see `interlude` below — but a shorter hold still
+   * keeps the line up.)
    */
   windowProgress: number;
   trackProgress: number;
@@ -374,6 +398,22 @@ export interface PixelLyricsFrameInput {
   timeMs: number;
   spectrum?: SpectrumLookup;
   reducedMotion: boolean;
+  /**
+   * How far through the instrumental after this line, 0..1, or -1 (the
+   * default) while the line owns the panel. See `interludeProgress`.
+   */
+  interlude?: number;
+  /** The line belongs to the chorus: every mode ripples the glyph being sung. */
+  chorus?: boolean;
+  /**
+   * The line's start in track ms, seeding which 倾诉 phrase leans and where each
+   * spark flies, and how far into the line the playhead is (倾诉's glyphs
+   * surface one by one from it). Absent: no lean, every glyph already shown.
+   */
+  lineStartMs?: number;
+  sinceLineMs?: number;
+  /** 火花: each glyph throws sparks as it is sung. */
+  sparks?: boolean;
 }
 
 function lineStartX(bitmapWidth: number, offsetPx: number): number {
@@ -411,9 +451,10 @@ function blitLine(
  * rest waiting.
  *
  * `held` paints the WHOLE line in the sung colour with no focus glyph. That is
- * what the panel shows for the seconds between the last word of a verse and the
- * first word of the next one — the line stays up, complete and finished,
- * instead of one character glowing for thirteen seconds or the row going dark.
+ * what the panel shows between the last word of a line and the next one — the
+ * line stays up, complete and finished, instead of one character glowing or the
+ * row going dark — until the gap is long enough to be an instrumental, when the
+ * interlude dots take the row (`interludeProgress`).
  */
 function karaokeColorAt(
   palette: PixelPalette,
@@ -432,6 +473,106 @@ function karaokeColorAt(
 function focusSpanOf(bitmap: PixelTextBitmap, cursor: LyricCursor): PixelGlyphSpan | undefined {
   if (cursor.index < 0 || cursor.index >= bitmap.cells.length) return undefined;
   return bitmap.cells[cursor.index];
+}
+
+/** The glyph actually being sung, or -1 before the line, after it, or on a space. */
+function singingIndex(bitmap: PixelTextBitmap, cursor: LyricCursor): number {
+  if (cursor.phase !== "singing") return -1;
+  const cell = bitmap.cells[cursor.index];
+  return cell?.lit ? cursor.index : -1;
+}
+
+/** True when a glyph other than `focusIndex` has ink within one pixel of (x, y). */
+function neighbourInkNear(
+  bitmap: PixelTextBitmap,
+  focusIndex: number,
+  lineX: number,
+  lineY: number,
+  x: number,
+  y: number,
+): boolean {
+  // Only the two neighbours can reach: the ring goes at most two columns past
+  // its own cell and the gutter one more, and the narrowest cell is six wide.
+  for (const index of [focusIndex - 1, focusIndex + 1]) {
+    const span = bitmap.cells[index];
+    if (!span) continue;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      const row = y + dy - lineY;
+      if (row < 0 || row >= bitmap.height) continue;
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const column = x + dx - lineX;
+        if (column < span.start || column >= span.end) continue;
+        if (bitmap.on[row * bitmap.width + column] === 1) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * One ring around the glyph being sung: every pixel at exactly `radius`
+ * (Chebyshev) from its ink, drawn before the row so text and cues land on top.
+ *
+ * The glyph's own cell stays clear — a ring in its counters reads as a bolder
+ * glyph, not as light leaving it — and so does a one-pixel gutter around every
+ * other glyph's strokes, so the ring can run down the gaps between characters
+ * without fattening a neighbour. On a full line that gap and the rows above and
+ * below are all the room there is; anything less and the ring was invisible.
+ *
+ * Mirrored by `paintHalo` in ZOS's ui/MusicScreen.cpp, pixel for pixel.
+ */
+function paintHalo(
+  context: CanvasRenderingContext2D,
+  palette: PixelPalette,
+  bitmap: PixelTextBitmap,
+  focusIndex: number,
+  lineX: number,
+  lineY: number,
+  hopPx: number,
+  radius: number,
+): void {
+  const span = bitmap.cells[focusIndex];
+  if (!span) return;
+  const glyphY = lineY - hopPx;
+  const ink: number[] = [];
+  for (let row = 0; row < bitmap.height; row += 1) {
+    for (let column = span.start; column < span.end; column += 1) {
+      if (bitmap.on[row * bitmap.width + column] === 1) ink.push(lineX + column, glyphY + row);
+    }
+  }
+  if (ink.length === 0) return;
+  const glyphLeft = lineX + span.start;
+  const glyphRight = lineX + span.end;
+  context.fillStyle = palette[haloTier(radius)];
+  for (let y = glyphY - radius; y < glyphY + bitmap.height + radius; y += 1) {
+    if (y < 0 || y > 15) continue;
+    for (let x = glyphLeft - radius; x < glyphRight + radius; x += 1) {
+      if (x < 0 || x > 51) continue;
+      if (y >= glyphY && y < glyphY + bitmap.height && x >= glyphLeft && x < glyphRight) continue;
+      let distance = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < ink.length && distance >= radius; index += 2) {
+        distance = Math.min(distance, Math.max(Math.abs(x - ink[index]!), Math.abs(y - ink[index + 1]!)));
+      }
+      if (distance !== radius) continue;
+      if (neighbourInkNear(bitmap, focusIndex, lineX, lineY, x, y)) continue;
+      context.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
+/** The chorus ripple the four classic modes share: no lift, row where the mode put it. */
+function paintChorusHalo(
+  context: CanvasRenderingContext2D,
+  palette: PixelPalette,
+  bitmap: PixelTextBitmap,
+  input: PixelLyricsFrameInput,
+  lineX: number,
+  lineY: number,
+): void {
+  if (!input.chorus) return;
+  const focus = singingIndex(bitmap, input.cursor);
+  if (focus < 0) return;
+  paintHalo(context, palette, bitmap, focus, lineX, lineY, 0, haloRadius(input.cursor.frac));
 }
 
 function paintCueRow(
@@ -461,6 +602,7 @@ function paintTicker(
   bitmap: PixelTextBitmap,
   input: PixelLyricsFrameInput,
 ): void {
+  paintChorusHalo(context, palette, bitmap, input, lineStartX(bitmap.width, input.scrollOffsetPx), PIXEL_TEXT_Y);
   paintCueRow(context, palette, 0, input.cursor.progress, 2);
   paintCueRow(context, palette, 15, input.trackProgress, 1);
 
@@ -490,6 +632,7 @@ function paintSkyline(
   // that showed it — and what it showed was the user's own complaint, 频谱挡字,
   // with the words gone entirely rather than merely covered.
   const maxLevel = 3;
+  paintChorusHalo(context, palette, bitmap, input, lineStartX(bitmap.width, input.scrollOffsetPx), 0);
   const animated = !input.reducedMotion;
   const kick = animated
     ? beatKick(input.playing, input.hasLyric, input.cursor.frac, input.timeMs)
@@ -535,6 +678,7 @@ function paintSpotlight(
   bitmap: PixelTextBitmap,
   input: PixelLyricsFrameInput,
 ): void {
+  paintChorusHalo(context, palette, bitmap, input, input.scrollOffsetPx, PIXEL_TEXT_Y);
   context.fillStyle = palette.muted;
   context.fillRect(19, 1, 1, 1);
   context.fillRect(32, 1, 1, 1);
@@ -583,6 +727,12 @@ function paintCascade(
   bitmap: PixelTextBitmap,
   input: PixelLyricsFrameInput,
 ): void {
+  // Only while the line holds still: a ring left behind by a row in flight
+  // would mark where the row was, not where the singer is. Before the track
+  // fill, so a ring off a right-edge glyph never punches a hole in column 51.
+  if (cascadePhase(input.windowProgress, input.reducedMotion) === "hold") {
+    paintChorusHalo(context, palette, bitmap, input, lineStartX(bitmap.width, input.scrollOffsetPx), cascadeBandY(input.windowProgress, input.reducedMotion));
+  }
   const fill = Math.round(unit(input.trackProgress) * 16);
   for (let step = 0; step < fill; step += 1) {
     context.fillStyle = step === fill - 1 ? palette.primary : palette.muted;
@@ -596,7 +746,9 @@ function paintCascade(
   // verse would fly off the panel the instant the voice stopped and leave the
   // screen blank for the whole thirteen-second instrumental that follows. The
   // line has to stay up until its successor is due, which is what the window
-  // means, while the karaoke wipe finishes when the singer does.
+  // means, while the karaoke wipe finishes when the singer does. A break of 3 s
+  // or more is the exception: drawPixelLyricsFrame hands the row to the
+  // interlude dots before this painter runs (`interludeProgress`).
   const phase = cascadePhase(input.windowProgress, input.reducedMotion);
   const colorAt = phase === "enter"
     ? () => palette.secondary
@@ -612,6 +764,142 @@ function paintCascade(
     PIXEL_TEXT_VIEWPORT_WIDTH,
     colorAt,
   );
+}
+
+/**
+ * 年轮: the karaoke row of 走带, with each glyph lifting a pixel as it is sung
+ * and throwing a ring outward (folia's 52Hz, on a 52 × 16 grid). No cue rows at
+ * all: rows 0–1 and 14–15 are where the ring has room on a full line, and a cue
+ * drawn over them hid most of it.
+ */
+function paintRings(
+  context: CanvasRenderingContext2D,
+  palette: PixelPalette,
+  bitmap: PixelTextBitmap,
+  input: PixelLyricsFrameInput,
+): void {
+  const lineX = lineStartX(bitmap.width, input.scrollOffsetPx);
+  const focus = singingIndex(bitmap, input.cursor);
+  const hop = focus >= 0 ? ringsHopPx(input.cursor.frac) : 0;
+  if (focus >= 0) {
+    paintHalo(context, palette, bitmap, focus, lineX, PIXEL_TEXT_Y, hop, haloRadius(input.cursor.frac));
+  }
+  const colorAt = karaokeColorAt(palette, focusSpanOf(bitmap, input.cursor), input.cursor.phase === "held");
+  const span = focus >= 0 ? bitmap.cells[focus] : undefined;
+  const inFocus = (bitmapX: number) => span !== undefined && bitmapX >= span.start && bitmapX < span.end;
+  blitLine(context, bitmap, lineX, PIXEL_TEXT_Y, PIXEL_TEXT_VIEWPORT_X, PIXEL_TEXT_VIEWPORT_WIDTH,
+    (bitmapX) => (inFocus(bitmapX) ? null : colorAt(bitmapX)));
+  if (span) {
+    blitLine(context, bitmap, lineX, PIXEL_TEXT_Y - hop, PIXEL_TEXT_VIEWPORT_X, PIXEL_TEXT_VIEWPORT_WIDTH,
+      (bitmapX) => (inFocus(bitmapX) ? colorAt(bitmapX) : null));
+  }
+}
+
+/**
+ * 倾诉 (mygo/folia's tilt, on one 16-row line): the glyphs surface one after
+ * another from just below the row, the one being sung lifts a pixel, and one
+ * phrase — chosen per line, the same on every replay — is set in the focus
+ * colour with its glyphs up and down by turns. The track cue sits under it on
+ * row 15.
+ */
+function paintTilt(
+  context: CanvasRenderingContext2D,
+  palette: PixelPalette,
+  bitmap: PixelTextBitmap,
+  input: PixelLyricsFrameInput,
+): void {
+  paintCueRow(context, palette, 15, input.trackProgress, 1);
+  const lineX = lineStartX(bitmap.width, input.scrollOffsetPx);
+  const since = input.hasLyric ? (input.sinceLineMs ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
+  const codepoints = Array.from(normalizedCopy(input.currentText)).map((c) => c.codePointAt(0)!);
+  const units = tiltUnits(codepoints);
+  const lean = input.hasLyric && input.lineStartMs !== undefined
+    ? tiltLeanUnit(input.lineStartMs, units.length)
+    : -1;
+  const [leanFrom, leanTo] = lean >= 0 ? units[lean]! : [-1, -1];
+  const focus = singingIndex(bitmap, input.cursor);
+  const hop = focus >= 0 ? ringsHopPx(input.cursor.frac) : 0;
+  const colorAt = karaokeColorAt(palette, focusSpanOf(bitmap, input.cursor), input.cursor.phase === "held");
+  bitmap.cells.forEach((span, index) => {
+    const stage = tiltStage(index, since);
+    if (stage === 0) return;
+    const leaning = index >= leanFrom && index < leanTo;
+    let y = PIXEL_TEXT_Y;
+    if (leaning) y += tiltLeanOffset(index - leanFrom, stage);
+    else if (stage === 1) y += 1;
+    if (index === focus) y -= hop;
+    blitLine(context, bitmap, lineX, y, PIXEL_TEXT_VIEWPORT_X, PIXEL_TEXT_VIEWPORT_WIDTH, (bitmapX) => {
+      if (bitmapX < span.start || bitmapX >= span.end) return null;
+      if (stage === 1) return palette.muted;
+      return leaning ? palette.primary : colorAt(bitmapX);
+    });
+  });
+}
+
+const DIMMER: Record<"primary" | "secondary" | "context", "secondary" | "context" | "muted"> = {
+  primary: "secondary",
+  secondary: "context",
+  context: "muted",
+};
+
+/**
+ * 火花: sparks off the glyph being sung, drawn first so everything the mode
+ * paints lands on top of them. Where the glyph sits is the mode's own row —
+ * skyline's row 0, cascade's band, spotlight's lock — without the pixel a lift
+ * or a lean adds, which no spark this size can show. Mirrored by `paintSparks`
+ * in ZOS's ui/MusicScreen.cpp.
+ */
+function paintSparks(
+  context: CanvasRenderingContext2D,
+  palette: PixelPalette,
+  bitmap: PixelTextBitmap,
+  input: PixelLyricsFrameInput,
+): void {
+  if (!input.sparks || !input.hasLyric || input.lineStartMs === undefined) return;
+  const focus = singingIndex(bitmap, input.cursor);
+  if (focus < 0) return;
+  let lineY = PIXEL_TEXT_Y;
+  if (input.mode === "skyline") lineY = 0;
+  if (input.mode === "cascade") {
+    if (cascadePhase(input.windowProgress, input.reducedMotion) !== "hold") return;
+    lineY = cascadeBandY(input.windowProgress, input.reducedMotion);
+  }
+  const lineX = input.mode === "spotlight" ? input.scrollOffsetPx : lineStartX(bitmap.width, input.scrollOffsetPx);
+  const span = bitmap.cells[focus]!;
+  const hw = (span.end - span.start) / 2;
+  const cx = lineX + span.start + hw - 0.5;
+  const cy = lineY + bitmap.height / 2 - 0.5;
+  const last = focus === bitmap.cells.length - 1;
+  const count = last ? SPARK_COUNT_LAST : SPARK_COUNT;
+  const seed = (input.lineStartMs + focus * 7919) >>> 0;
+  const t = input.cursor.frac;
+  if (t >= 1) return;
+  const tier = sparkTier(t);
+  for (let spark = 0; spark < count; spark += 1) {
+    const { head, tail } = sparkPixels(cx, cy, hw, bitmap.height / 2, seed, spark, count, last, t);
+    context.fillStyle = palette[DIMMER[tier]];
+    if (tail[0] >= 0 && tail[0] < 52 && tail[1] >= 0 && tail[1] < 16) context.fillRect(tail[0], tail[1], 1, 1);
+    context.fillStyle = palette[tier];
+    if (head[0] >= 0 && head[0] < 52 && head[1] >= 0 && head[1] < 16) context.fillRect(head[0], head[1], 1, 1);
+  }
+}
+
+/**
+ * The instrumental after a line, the same in every mode: three dots filling as
+ * the next line nears, and the track cue on row 15. Mirrored by
+ * `paintInterlude` in ZOS's ui/MusicScreen.cpp.
+ */
+function paintInterlude(
+  context: CanvasRenderingContext2D,
+  palette: PixelPalette,
+  progress: number,
+  input: PixelLyricsFrameInput,
+): void {
+  paintCueRow(context, palette, 15, input.trackProgress, 1);
+  INTERLUDE_DOT_X.forEach((x, dot) => {
+    context.fillStyle = palette[interludeDotTier(dot, progress, input.timeMs)];
+    context.fillRect(x, INTERLUDE_DOT_Y, 2, 2);
+  });
 }
 
 export function drawPixelLyricsFrame(
@@ -634,8 +922,16 @@ export function drawPixelLyricsFrame(
     trackProgress: unit(input.trackProgress),
     scrollOffsetPx: Math.round(input.scrollOffsetPx),
   };
+  const interlude = safeInput.interlude ?? -1;
+  if (safeInput.hasLyric && interlude >= 0) {
+    paintInterlude(context, palette, interlude, safeInput);
+    return;
+  }
   const bitmap = bitmapForText(safeInput.currentText);
-  if (safeInput.mode === "skyline") paintSkyline(context, palette, bitmap, safeInput);
+  paintSparks(context, palette, bitmap, safeInput);
+  if (safeInput.mode === "rings") paintRings(context, palette, bitmap, safeInput);
+  else if (safeInput.mode === "tilt") paintTilt(context, palette, bitmap, safeInput);
+  else if (safeInput.mode === "skyline") paintSkyline(context, palette, bitmap, safeInput);
   else if (safeInput.mode === "spotlight") paintSpotlight(context, palette, bitmap, safeInput);
   else if (safeInput.mode === "cascade") paintCascade(context, palette, bitmap, safeInput);
   else paintTicker(context, palette, bitmap, safeInput);
@@ -654,6 +950,8 @@ interface PixelLyricsPreviewProps {
   accent: string | null;
   mode: MusicMode;
   spectrum?: SpectrumLookup;
+  /** 火花. */
+  sparks?: boolean;
 }
 
 export function PixelLyricsPreview({
@@ -667,6 +965,7 @@ export function PixelLyricsPreview({
   accent,
   mode,
   spectrum,
+  sparks = false,
 }: PixelLyricsPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const latestFrameRef = useRef({
@@ -680,6 +979,7 @@ export function PixelLyricsPreview({
     accent,
     mode,
     spectrum,
+    sparks,
   });
   const trackClockRef = useRef({ timeMs, receivedAt: 0 });
   latestFrameRef.current = {
@@ -693,6 +993,7 @@ export function PixelLyricsPreview({
     accent,
     mode,
     spectrum,
+    sparks,
   };
 
   useEffect(() => {
@@ -724,7 +1025,7 @@ export function PixelLyricsPreview({
         0,
         projectedPlayheadMs(trackClock.timeMs, now - trackClock.receivedAt, frame.playing),
       );
-      const { cursor, windowProgress } = pixelLyricCursor(
+      const { cursor, windowProgress, interlude, sinceLineMs } = pixelLyricCursor(
         frame.currentText,
         frame.line,
         smoothTimeMs,
@@ -745,13 +1046,24 @@ export function PixelLyricsPreview({
         scrollOffsetPx,
         cursor.index,
         cursor.phase,
-        Math.round(cursor.frac * 12),
+        // Sparks fly through the glyph's own span, so they need a finer step.
+        Math.round(cursor.frac * (frame.sparks ? 48 : 12)),
+        frame.sparks,
+        // 倾诉's glyphs surface 50 ms apart; past the last one nothing moves.
+        frame.mode === "tilt" && Number.isFinite(sinceLineMs)
+          ? Math.min(Math.floor(sinceLineMs / 40), 4_000)
+          : 0,
         Math.round(frame.trackProgress * 52),
         frame.mode === "skyline" && !reducedMotion ? Math.floor(smoothTimeMs / 125) : 0,
         frame.mode === "skyline" && frame.spectrum && !reducedMotion
           ? Math.floor(smoothTimeMs / SPECTRUM_HOP_MS)
           : 0,
         frame.mode === "cascade" ? cascadeBandY(windowProgress, reducedMotion) : 0,
+        frame.line.chorus === true,
+        // Nothing else moves through an instrumental, so the dots have to be
+        // in the signature or the canvas would never redraw them.
+        interlude >= 0 ? Math.floor(interlude * INTERLUDE_DOT_X.length) : -1,
+        interlude >= 0 ? Math.floor(smoothTimeMs / INTERLUDE_BREATH_MS) : 0,
       ].join(":");
       if (signature !== lastSignature) {
         drawPixelLyricsFrame(context, {
@@ -768,6 +1080,11 @@ export function PixelLyricsPreview({
           timeMs: smoothTimeMs,
           spectrum: frame.spectrum,
           reducedMotion,
+          interlude,
+          chorus: frame.line.chorus === true,
+          lineStartMs: frame.line.startMs,
+          sinceLineMs,
+          sparks: frame.sparks,
         });
         lastSignature = signature;
       }
@@ -809,6 +1126,8 @@ interface MusicThemePanelProps {
   onModeChange: (mode: MusicMode) => void;
   onSkinChange: (skin: MusicSkin) => void;
   onAccentChange: (accent: string | null) => void;
+  sparks: boolean;
+  onSparksChange: (sparks: boolean) => void;
   syncsToDevice: boolean;
   simulatedSpectrum: boolean;
 }
@@ -818,6 +1137,8 @@ const MODE_ICON: Record<MusicMode, typeof MoveHorizontal> = {
   skyline: AudioLines,
   spotlight: Radar,
   cascade: Rows3,
+  rings: Target,
+  tilt: Quote,
 };
 
 // One consolidated theme card — display form + palette + accent in a single
@@ -830,6 +1151,8 @@ export function MusicThemePanel({
   onModeChange,
   onSkinChange,
   onAccentChange,
+  sparks,
+  onSparksChange,
   syncsToDevice,
   simulatedSpectrum,
 }: MusicThemePanelProps) {
@@ -856,7 +1179,7 @@ export function MusicThemePanel({
           {/* `xl`: each tile carries a name and a note, which a `lg` tile
               could only fit at 10px with no air above or below. */}
           <ToggleGroup
-            className="music-theme-options"
+            className="music-theme-options music-theme-options--modes"
             value={mode}
             size="xl"
             rounded={false}
@@ -968,6 +1291,16 @@ export function MusicThemePanel({
         >
           还原预设
         </Button>
+      </div>
+      <div className="music-theme-panel__toggle">
+        <span className="music-theme-panel__label" id="music-theme-sparks-label">火花</span>
+        <Switch
+          size="sm"
+          checked={sparks}
+          onChange={(checked) => onSparksChange(checked)}
+          aria-labelledby="music-theme-sparks-label"
+        />
+        <span className="music-theme-panel__hint">每个字开唱时迸出像素火花</span>
       </div>
       {simulatedSpectrum && (
         <p className="music-theme-panel__spectrum-note">此音源为模拟律动</p>

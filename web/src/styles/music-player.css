@@ -1091,6 +1091,13 @@
   }
 }
 
+/* 显示形式有六种：窄时 2×3，够宽时 3×2，都不留半行空缺。 */
+@container (min-width: 38rem) {
+  .music-theme-options--modes {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .music-theme-option {
   min-width: 0;
 }
@@ -1172,6 +1179,18 @@
 .music-theme-swatch i:nth-child(1) { height: 45%; }
 .music-theme-swatch i:nth-child(2) { height: 90%; }
 .music-theme-swatch i:nth-child(3) { height: 65%; }
+
+.music-theme-panel__toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.music-theme-panel__hint {
+  color: var(--music-ink-soft);
+  font-size: var(--type-caption);
+}
 
 .music-theme-panel__accent {
   display: flex;

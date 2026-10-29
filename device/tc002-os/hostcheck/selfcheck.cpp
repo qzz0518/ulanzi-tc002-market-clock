@@ -247,6 +247,16 @@ int glyphBits(uint32_t cp) {
   return n;
 }
 
+// The first cell row carrying ink, or 12 for a blank glyph.
+int glyphTopRow(uint32_t cp) {
+  const tcos::glyphs::Bitmap bitmap = tcos::glyphs::lookup(cp);
+  if (bitmap.rows == 0) return 12;
+  for (int row = 0; row < tcos::glyphs::kCellHeight; ++row) {
+    if (bitmap.rows[row] != 0) return row;
+  }
+  return 12;
+}
+
 // Skyline's 17 bars sit at x = 1 + 3b and the column beside it, so columns 0 and
 // 51 are never part of the spectrum and every third column is a gap.
 bool isSkylineBarColumn(int x) {
@@ -6074,11 +6084,16 @@ void checkMusicTheme() {
       // and nothing else — no equaliser cell, no decoration. Equality rather
       // than "> 0" is what makes that a claim: a stray lit pixel anywhere in the
       // band fails, and so does a clipped line.
+      // 年轮 and 倾诉 are exempt by design: they lift the sung glyph a pixel out of
+      // the band (and 倾诉 sets a phrase up and down by turns). checkLyricRings
+      // asserts both.
       const int bandY = mode == MusicScreen::kModeSkyline ? 0 : 2;
-      std::snprintf(label, sizeof(label),
-                    "mode %d skin %d lands the font's ink and nothing else in rows %d..%d",
-                    mode, skin, bandY, bandY + 11);
-      check(litPixelsInRows(frame, bandY, bandY + 11) == expectedInk, label);
+      if (mode != MusicScreen::kModeRings && mode != MusicScreen::kModeTilt) {
+        std::snprintf(label, sizeof(label),
+                      "mode %d skin %d lands the font's ink and nothing else in rows %d..%d",
+                      mode, skin, bandY, bandY + 11);
+        check(litPixelsInRows(frame, bandY, bandY + 11) == expectedInk, label);
+      }
 
       if (mode != MusicScreen::kModeSkyline) continue;
 
@@ -6206,6 +6221,235 @@ void checkMusicTheme() {
               tierPixels(frame, kSkinTiers[1].muted) > 0,
           "while the skin keeps the other three tiers — an accent is a focus colour, "
           "not a repaint");
+  }
+}
+
+// 年轮, the instrumental dots and the chorus ripple (visual/LyricRings.h).
+//
+// One CJK glyph on its own, so the line is a single 12 px cell centred at
+// x = 20..31 with room on every side: the ring is then visible wherever the
+// glyph's ink comes within one or two pixels of its cell, and no other glyph
+// can contribute a pixel of the tier being counted.
+void checkLyricRings() {
+  using tcos::MusicScreen;
+  using tcos::StateDoc;
+  static const char* kOne = "\xE4\xBD\xA0";  // 你
+  const int ink = glyphBits(0x4F60);
+  check(ink > 0, "the ring sample glyph has ink");
+  const SkinTiers& tiers = kSkinTiers[0];
+
+  // Count a tier outside the glyph's cell, at either height it can sit at.
+  struct Outside {
+    static int count(const Surface& s, uint32_t rgb, int rowsTo) {
+      int n = 0;
+      for (int y = 0; y <= rowsTo; ++y) {
+        for (int x = 0; x < 52; ++x) {
+          if (x >= 20 && x < 32 && y >= 1 && y < 14) continue;
+          if (s.getPixel(x, y).toRGB888() == rgb) ++n;
+        }
+      }
+      return n;
+    }
+    // The lifted glyph's own cell, rows 1..12: the row it vacated below is
+    // open to the ring by design.
+    static int inside(const Surface& s, uint32_t rgb) {
+      int n = 0;
+      for (int y = 1; y < 13; ++y) {
+        for (int x = 20; x < 32; ++x) {
+          if (s.getPixel(x, y).toRGB888() == rgb) ++n;
+        }
+      }
+      return n;
+    }
+  };
+
+  // First half of the glyph (window 4000..8000, playhead 4400: frac 0.1): the
+  // glyph is lifted a pixel and rung at distance 1, in the trailing tier.
+  {
+    MusicScreen screen;
+    Surface frame(52, 16);
+    screen.onEnter(0);
+    screen.setTheme(MusicScreen::kModeRings, MusicScreen::kSkinSignal, 0, false);
+    screen.setNowPlaying(true, "T", "A", kOne, true, 4400, 200000, 0, 4000, 8000);
+    screen.render(frame, 0);
+    check(tierPixels(frame, tiers.primary) >= ink,
+          "年轮 draws the sung glyph whole, in the focus tier");
+    int liftedTop = 16;
+    for (int y = 0; y < 16 && liftedTop == 16; ++y) {
+      for (int x = 20; x < 32; ++x) {
+        if (frame.getPixel(x, y).toRGB888() == tiers.primary) { liftedTop = y; break; }
+      }
+    }
+    check(liftedTop == glyphTopRow(0x4F60) + 1, "年轮 lifts the sung glyph a pixel");
+    // 年轮 draws no cue rows, so every sung-tier pixel off the glyph is ring.
+    check(Outside::count(frame, tiers.secondary, 15) > 0,
+          "年轮 rings the sung glyph at distance 1 in the sung tier");
+    check(Outside::inside(frame, tiers.secondary) == 0,
+          "and never inside the glyph's own cell");
+    check(Outside::count(frame, tiers.context, 15) == 0, "no outer ring in the first half");
+  }
+  // Second half (playhead 6400: frac 0.6): back on its row, rung at distance 2.
+  {
+    MusicScreen screen;
+    Surface frame(52, 16);
+    screen.onEnter(0);
+    screen.setTheme(MusicScreen::kModeRings, MusicScreen::kSkinSignal, 0, false);
+    screen.setNowPlaying(true, "T", "A", kOne, true, 6400, 200000, 0, 4000, 8000);
+    screen.render(frame, 0);
+    int restingTop = 16;
+    for (int y = 0; y < 16 && restingTop == 16; ++y) {
+      for (int x = 20; x < 32; ++x) {
+        if (frame.getPixel(x, y).toRGB888() == tiers.primary) { restingTop = y; break; }
+      }
+    }
+    check(restingTop == glyphTopRow(0x4F60) + 2,
+          "年轮 sets the glyph back down for the second half");
+    check(Outside::count(frame, tiers.secondary, 15) == 0, "the inner ring is gone");
+    check(Outside::count(frame, tiers.context, 15) > 0,
+          "年轮 rings the glyph at distance 2 in the trailing tier");
+  }
+
+  // The chorus ripple in a reference mode, and only on a chorus line.
+  for (int chorus = 0; chorus < 2; ++chorus) {
+    MusicScreen screen;
+    Surface frame(52, 16);
+    screen.onEnter(0);
+    screen.setTheme(MusicScreen::kModeTicker, MusicScreen::kSkinSignal, 0, false);
+    // Second half of the glyph, where the ring is the trailing tier — the one
+    // tier a one-glyph 走带 line never lights on its own.
+    screen.setNowPlaying(true, "T", "A", kOne, true, 6400, 200000, 0, 4000, 8000, -1, 0, 0,
+                         chorus == 1);
+    screen.render(frame, 0);
+    const int rings = tierPixels(frame, tiers.context);
+    check(chorus == 1 ? rings > 0 : rings == 0,
+          chorus == 1 ? "a chorus line ripples in 走带" : "a verse line does not");
+    check(tierPixels(frame, tiers.primary) > 0, "and the line is still drawn");
+  }
+
+  // The instrumental: sung 4000..5000, next line at 10000 — a 5 s gap.
+  {
+    for (int at = 0; at < 3; ++at) {
+      const int positions[3] = {5300, 8000, 8000};
+      const int untils[3] = {10000, 10000, 7500};
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(MusicScreen::kModeSpotlight, MusicScreen::kSkinSignal, 0, false);
+      screen.setNowPlaying(true, "T", "A", kOne, true, positions[at], 200000, 0, 4000, 5000,
+                           untils[at]);
+      screen.render(frame, 0);
+      const int band = litPixelsInRows(frame, 2, 13);
+      if (at == 1) {
+        check(band == 12, "an instrumental gives the row up to three 2x2 dots");
+        check(frame.getPixel(19, 7).toRGB888() == tiers.secondary,
+              "the first dot has filled, in the sung tier");
+        check(frame.getPixel(31, 7).toRGB888() == tiers.muted, "the last one is waiting");
+      } else {
+        check(band == ink, at == 0 ? "the line stays up for 0.6 s after its last word"
+                                   : "a gap under 3 s is a breath, not an instrumental");
+      }
+    }
+    // An older service sends no `lyricuntil`, so it cannot say there is a break.
+    MusicScreen legacy;
+    Surface frame(52, 16);
+    legacy.onEnter(0);
+    legacy.setTheme(MusicScreen::kModeSpotlight, MusicScreen::kSkinSignal, 0, false);
+    legacy.setNowPlaying(true, "T", "A", kOne, true, 8000, 200000, 0, 4000, 10000);
+    legacy.render(frame, 0);
+    check(litPixelsInRows(frame, 2, 13) == ink, "no lyricuntil, no interlude");
+  }
+
+  // On a full line the ring finds room between the glyphs, never on a stroke of
+  // a neighbour or within a pixel of one. 你好世界 fills the 48 px window; at
+  // frac 0.6 of 好 (window 4000..8000, four cells: 好 is 5000..6000) the ring
+  // is at distance 2.
+  {
+    static const char* kFull = "\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C";  // 你好世界
+    MusicScreen screen;
+    Surface frame(52, 16);
+    screen.onEnter(0);
+    screen.setTheme(MusicScreen::kModeRings, MusicScreen::kSkinSignal, 0, false);
+    screen.setNowPlaying(true, "T", "A", kFull, true, 5600, 200000, 0, 4000, 8000);
+    screen.render(frame, 0);
+    // The unsung glyphs are trailing tier too, so count ring pixels as trailing
+    // tier pixels that are not a neighbour's ink: rows 0-1 and 14-15 hold no ink.
+    int above = 0;
+    for (int y = 0; y < 2; ++y) {
+      for (int x = 0; x < 52; ++x) {
+        if (frame.getPixel(x, y).toRGB888() == tiers.context) ++above;
+      }
+    }
+    int below = 0;
+    for (int y = 14; y < 16; ++y) {
+      for (int x = 0; x < 52; ++x) {
+        if (frame.getPixel(x, y).toRGB888() == tiers.context) ++below;
+      }
+    }
+    check(above + below > 0, "on a full line the ring still shows above or below the row");
+  }
+
+  // 倾诉: nothing before the line, glyphs surfacing in the muted tier, and once
+  // settled and sung out (held, gap under 3 s) a phrase in the focus tier — on a
+  // line of two phrases, and none on a line of one.
+  {
+    static const char* kTwo = "\xE4\xBD\xA0\xEF\xBC\x8C\xE5\xA5\xBD";  // 你，好
+    static const char* kOnePhrase = "\xE4\xBD\xA0\xE5\xA5\xBD";               // 你好
+    const int positions[3] = {3990, 4050, 8500};
+    for (int at = 0; at < 3; ++at) {
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(MusicScreen::kModeTilt, MusicScreen::kSkinSignal, 0, false);
+      screen.setNowPlaying(true, "T", "A", kTwo, true, positions[at], 200000, 0, 4000, 8000, 9000);
+      screen.render(frame, 0);
+      const int text = litPixelsInRows(frame, 0, 14);
+      if (at == 0) check(text == 0, "倾诉 shows nothing before the line starts");
+      if (at == 1) {
+        check(tierPixels(frame, tiers.muted) > 0, "倾诉 glyphs surface in the muted tier");
+      }
+      if (at == 2) {
+        check(tierPixels(frame, tiers.primary) > 0,
+              "倾诉 sets one phrase of a two-phrase line in the focus tier");
+      }
+    }
+    MusicScreen single;
+    Surface frame(52, 16);
+    single.onEnter(0);
+    single.setTheme(MusicScreen::kModeTilt, MusicScreen::kSkinSignal, 0, false);
+    single.setNowPlaying(true, "T", "A", kOnePhrase, true, 8500, 200000, 0, 4000, 8000, 9000);
+    single.render(frame, 0);
+    check(tierPixels(frame, tiers.primary) <= 1, "and leans nothing on a one-phrase line");
+  }
+
+  // 火花: sparks off the sung glyph while 火花 is on, none while it is off.
+  {
+    int lit[2];
+    for (int on = 0; on < 2; ++on) {
+      MusicScreen screen;
+      Surface frame(52, 16);
+      screen.onEnter(0);
+      screen.setTheme(MusicScreen::kModeSpotlight, MusicScreen::kSkinSignal, 0, false, on == 1);
+      screen.setNowPlaying(true, "T", "A", kOne, true, 4800, 200000, 0, 4000, 8000);
+      screen.render(frame, 0);
+      lit[on] = litPixelsInRows(frame, 0, 15);
+    }
+    check(lit[1] > lit[0], "火花 adds sparks around the sung glyph");
+  }
+
+  // The wire: `mode rings` is index 4, and `lyricchorus` reaches the snapshot.
+  {
+    StateDoc doc;
+    doc.parse("seq\t3\nmode\trings\nnp\t1\nlyric\tx\nlyricat\t0\nlyricend\t900\n"
+              "lyricchorus\t1\n");
+    check(doc.lyricMode() == MusicScreen::kModeRings, "mode rings parses to 年轮");
+    check(doc.lyricChorus(), "lyricchorus 1 parses as a chorus line");
+    doc.parse("seq\t4\nnp\t1\nlyric\tx\n");
+    check(!doc.lyricChorus(), "and its absence as a verse");
+    doc.parse("seq\t5\nmode\ttilt\nsparks\t1\n");
+    check(doc.lyricMode() == MusicScreen::kModeTilt, "mode tilt parses to 倾诉");
+    check(doc.lyricSparks(), "sparks 1 parses as 火花 on");
+    doc.parse("seq\t6\nmode\ttilt\n");
+    check(!doc.lyricSparks(), "and a document without it turns 火花 off");
   }
 }
 
@@ -6753,6 +6997,8 @@ void checkLyricLegacyFrames() {
   using tcos::MusicScreen;
 
   const int kStampMs = 4000;
+  // 年轮 did not exist in that build, so there is no frame of it to pin.
+  const int kLegacyModes = MusicScreen::kModeRings;
 
   // 1. A legacy line window: `lyricend` is the next line's start, the old
   //    meaning, and neither new key is present.
@@ -6763,7 +7009,7 @@ void checkLyricLegacyFrames() {
       {0xd80ea5b3u, 0xc0b44af2u, 0x85f540bdu, 0x5d5f5dbbu, 0x706a221cu, 0x79b3f6ebu, 0x435a40a7u},
       {0x7a5b4debu, 0x3727b46bu, 0x76a2bb47u, 0xffe5bccau, 0x8d0527fau, 0x92813d4du, 0x6a4a8249u},
   };
-  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+  for (int mode = 0; mode < kLegacyModes; ++mode) {
     for (int i = 0; i < 7; ++i) {
       MusicScreen screen;
       Surface frame(52, 16);
@@ -6788,7 +7034,7 @@ void checkLyricLegacyFrames() {
       {0x01abf30bu, 0x2ca45852u, 0xaf42f793u, 0x17794d2au},
       {0x3f44ebb5u, 0x4f919085u, 0xdd22d0cdu, 0xc7f36200u},
   };
-  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+  for (int mode = 0; mode < kLegacyModes; ++mode) {
     for (int i = 0; i < 4; ++i) {
       MusicScreen screen;
       Surface frame(52, 16);
@@ -6813,7 +7059,7 @@ void checkLyricLegacyFrames() {
       {0xddf7fbbau, 0x86c608a1u, 0x18c32ac6u, 0xf5ed2e8fu},
       {0xaf451f5eu, 0x89bb7516u, 0x7ebcea26u, 0x0f1ba5e6u},
   };
-  for (int mode = 0; mode < MusicScreen::kModeCount; ++mode) {
+  for (int mode = 0; mode < kLegacyModes; ++mode) {
     for (int i = 0; i < 4; ++i) {
       MusicScreen screen;
       Surface frame(52, 16);
@@ -6967,17 +7213,21 @@ void checkWordLyricScreen() {
     walked.render(withCells, kAt113000);
     sweptScreen.render(withoutCells, kAt113000);
 
-    std::snprintf(label, sizeof(label),
-                  "mode %d lights the glyph being SUNG at 113000, not the one an even "
-                  "sweep would", mode);
-    check(tierPixelsInBox(withCells, primary, bandX0, bandX1, bandY, bandY + 11) ==
-              glyphBits(kSung),
-          label);
-    std::snprintf(label, sizeof(label),
-                  "mode %d without a table still lights the swept glyph, unchanged", mode);
-    check(tierPixelsInBox(withoutCells, primary, bandX0, bandX1, bandY, bandY + 11) ==
-              glyphBits(kSwept),
-          label);
+    // 倾诉 sets one whole phrase in the focus tier as well, so "the primary ink
+    // is exactly one glyph" is not its claim; the frames still differ below.
+    if (mode != MusicScreen::kModeTilt) {
+      std::snprintf(label, sizeof(label),
+                    "mode %d lights the glyph being SUNG at 113000, not the one an even "
+                    "sweep would", mode);
+      check(tierPixelsInBox(withCells, primary, bandX0, bandX1, bandY, bandY + 11) ==
+                glyphBits(kSung),
+            label);
+      std::snprintf(label, sizeof(label),
+                    "mode %d without a table still lights the swept glyph, unchanged", mode);
+      check(tierPixelsInBox(withoutCells, primary, bandX0, bandX1, bandY, bandY + 11) ==
+                glyphBits(kSwept),
+            label);
+    }
     std::snprintf(label, sizeof(label), "mode %d therefore draws a different panel", mode);
     check(surfacesDiffer(withCells, withoutCells), label);
 
@@ -6998,20 +7248,20 @@ void checkWordLyricScreen() {
       check(!surfacesDiffer(frame, withoutCells), label);
     }
 
-    // --- sung out and holding ---------------------------------------------
-    // 4.4 s past the last word, with 13 s of instrumental still to run. The line
-    // stays up, complete, with no glyph left glowing — and the panel is not
-    // frozen: the whole-track cue keeps moving under it.
+    // --- sung out: the instrumental ------------------------------------------
+    // 4.4 s past the last word, with 9 s of instrumental still to run. The line
+    // used to stay up, complete, for the whole break — a frozen row that read as
+    // a stuck panel — and now gives way to the three interlude dots
+    // (visual/LyricRings.h): no glyph left on the panel, and not frozen, since
+    // the dots fill and the whole-track cue keeps moving.
     Surface held(52, 16);
     Surface laterHeld(52, 16);
     walked.render(held, kAt120000);
     walked.render(laterHeld, kAt120000 + 6000);
-    std::snprintf(label, sizeof(label), "mode %d keeps the finished line on the panel", mode);
-    check(litPixelsInRows(held, bandY, bandY + 11) > 0, label);
     std::snprintf(label, sizeof(label),
-                  "mode %d stops lighting a focus glyph once the line is sung out", mode);
-    check(tierPixelsInBox(held, primary, bandX0, bandX1, bandY, bandY + 11) == 0, label);
-    std::snprintf(label, sizeof(label), "mode %d is still animating while it holds", mode);
+                  "mode %d gives the row up to the three interlude dots in the break", mode);
+    check(litPixelsInRows(held, bandY, bandY + 11) == 12, label);
+    std::snprintf(label, sizeof(label), "mode %d is still animating through the break", mode);
     check(surfacesDiffer(held, laterHeld), label);
   }
 
@@ -10629,6 +10879,7 @@ int main() {
   checkMusicScreen();
   std::printf("  music screen ok\n");
   checkMusicTheme();
+  checkLyricRings();
   std::printf("  music theme ok\n");
   checkMusicPath();
   std::printf("  music path ok\n");

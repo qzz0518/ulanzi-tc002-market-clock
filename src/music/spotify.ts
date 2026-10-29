@@ -24,6 +24,7 @@ import {
   type UnknownRecord,
 } from "./core.ts";
 import type { LyricsLookup } from "./lyrics.ts";
+import { markChorusLines } from "./chorus.ts";
 
 const ACCOUNTS_ORIGIN = "https://accounts.spotify.com";
 const API_ORIGIN = "https://api.spotify.com";
@@ -397,7 +398,8 @@ export class SpotifyMusicService implements MusicProvider, MusicRemoteControl {
     const body = await this.apiRequest("GET", `/v1/tracks/${assertMediaId(id, "歌曲")}`);
     const track = parseTrack(body);
     if (!track) throw new MusicServiceError("没有找到这首歌曲", 404);
-    return { track, lyrics: await this.options.lyrics.lyrics(track) };
+    // No chorus range for a Spotify track: the repetition rule decides.
+    return { track, lyrics: markChorusLines(await this.options.lyrics.lyrics(track)) };
   }
 
   async avatar(): Promise<Response> {

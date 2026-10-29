@@ -21,6 +21,7 @@ import {
 } from "./music/core.ts";
 import { buildLyricLines, parseLrc, type LyricsLookup } from "./music/lyrics.ts";
 import { parseLrcEndMarkers, parseYrc } from "./music/lyric-timing.ts";
+import { markChorusLines, type ChorusRange } from "./music/chorus.ts";
 import type { MusicLyricLine } from "./music/core.ts";
 
 export { MusicServiceError } from "./music/core.ts";
@@ -68,6 +69,8 @@ export interface NeteaseGateway {
   search(input: { keywords: string; limit: number; cookie?: string }): Promise<GatewayResponse>;
   songDetail(input: { ids: string; cookie?: string }): Promise<GatewayResponse>;
   lyric(input: { id: number; cookie?: string }): Promise<GatewayResponse>;
+  // 副歌时间段（网易云自己标的，只给第一段）。可选：拿不到就按重复次数兜底。
+  songChorus?(input: { id: number; cookie?: string }): Promise<GatewayResponse>;
   songUrl(input: { id: number; level: "standard"; cookie?: string }): Promise<GatewayResponse>;
   // 每日推荐歌曲。没有 uid 参数——推荐是按登录 Cookie 算的，所以它必须带凭据。
   recommendSongs(input: { cookie: string }): Promise<GatewayResponse>;
@@ -85,6 +88,10 @@ export const defaultNeteaseGateway: NeteaseGateway = {
   search: (input) => neteaseApi.cloudsearch({ ...input, type: 1 }),
   songDetail: (input) => neteaseApi.song_detail(input),
   lyric: (input) => neteaseApi.lyric_new(input),
+  // Shipped by the package but missing from its typings.
+  songChorus: (input) => (neteaseApi as unknown as {
+    song_chorus(input: { id: number; cookie?: string }): Promise<GatewayResponse>;
+  }).song_chorus(input),
   songUrl: (input) => neteaseApi.song_url_v1(
     input as Parameters<typeof neteaseApi.song_url_v1>[0],
   ),
@@ -377,15 +384,25 @@ export class NeteaseMusicService implements MusicProvider {
   async trackDetail(id: string): Promise<MusicTrackDetail> {
     const numericId = neteaseId(id, "歌曲");
     const auth = this.cookie ? { cookie: this.cookie } : {};
-    const [detailResponse, lyricResponse] = await Promise.all([
+    const [detailResponse, lyricResponse, chorusRanges] = await Promise.all([
       this.gateway.songDetail({ ids: String(numericId), ...auth }),
       this.gateway.lyric({ id: numericId, ...auth }),
+      // Decoration, not data: a failed or missing answer falls back to the
+      // repetition rule rather than failing the track.
+      this.gateway.songChorus
+        ? this.gateway.songChorus({ id: numericId, ...auth })
+          .then((response) => parseChorusRanges(asRecord(response.body)))
+          .catch(() => [])
+        : Promise.resolve([]),
     ]);
     const track = parseTrack(arrayAt(asRecord(detailResponse.body), ["songs"])[0]);
     if (!track) throw new MusicServiceError("没有找到这首歌曲", 404);
     return {
       track,
-      lyrics: parseLyricResponse(asRecord(lyricResponse.body), track.durationMs),
+      lyrics: markChorusLines(
+        parseLyricResponse(asRecord(lyricResponse.body), track.durationMs),
+        chorusRanges,
+      ),
     };
   }
 
@@ -576,6 +593,18 @@ function parseTrack(value: unknown): MusicTrack | null {
  * translation on most lines (measured: 5% of `tlyric` starts land on a yrc
  * line, versus 100% of `ytlrc`).
  */
+/** `/song/chorus`: `{ chorus: [{ startTime, endTime }] }`, in track ms. */
+function parseChorusRanges(body: UnknownRecord): ChorusRange[] {
+  const ranges: ChorusRange[] = [];
+  for (const entry of arrayAt(body, ["chorus"])) {
+    const record = asRecord(entry);
+    const startMs = Number(record.startTime);
+    const endMs = Number(record.endTime);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) ranges.push({ startMs, endMs });
+  }
+  return ranges;
+}
+
 function parseLyricResponse(body: UnknownRecord, trackDurationMs: number): MusicLyricLine[] {
   const wordTimed = parseYrc(stringAt(body, ["yrc", "lyric"]));
   if (wordTimed.length > 0) {

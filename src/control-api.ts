@@ -242,7 +242,7 @@ export interface ControlApiOptions {
 // /select); the device polls /state and applies changes; the device reports its
 // own key-press changes back via /report. Single-device service, so module state
 // is fine. `seq` bumps on every change so both sides can detect "something moved".
-type LyricMode = "ticker" | "skyline" | "spotlight" | "cascade";
+type LyricMode = "ticker" | "skyline" | "spotlight" | "cascade" | "rings" | "tilt";
 type LyricSkin = "signal" | "tape" | "blueprint" | "arcade";
 interface DeviceMusicState {
   // Which music source the selection belongs to. NetEase IDs are decimal and
@@ -253,10 +253,14 @@ interface DeviceMusicState {
   mode: LyricMode;
   skin: LyricSkin;
   accent: string | null; // "RRGGBB" hex overriding the skin's primary, or null
+  sparks: boolean;        // 火花: glyphs throw sparks as they are sung (ZOS + preview)
   seekMs: number;         // last web-requested seek target (ms), or -1 for none
   seq: number;
 }
-const LYRIC_MODES: readonly LyricMode[] = ["ticker", "skyline", "spotlight", "cascade"];
+// 年轮 and 倾诉 are ZOS and the browser preview only. The sideloaded player
+// receives no changes; its lyricsLogic.cc maps any name it does not know to 走带,
+// so picking either there shows 走带 rather than failing.
+const LYRIC_MODES: readonly LyricMode[] = ["ticker", "skyline", "spotlight", "cascade", "rings", "tilt"];
 const LYRIC_SKINS: readonly LyricSkin[] = ["signal", "tape", "blueprint", "arcade"];
 const sDeviceState: DeviceMusicState = {
   provider: "netease",
@@ -265,6 +269,7 @@ const sDeviceState: DeviceMusicState = {
   mode: "spotlight",
   skin: "signal",
   accent: null,
+  sparks: false,
   seekMs: -1,
   seq: 0,
 };
@@ -326,6 +331,11 @@ function applyControlPatch(input: unknown): void {
     }
     changed = true;
   }
+  if ("sparks" in patch) {
+    if (typeof patch.sparks !== "boolean") throw new SettingsValidationError("sparks must be boolean");
+    next.sparks = patch.sparks;
+    changed = true;
+  }
   if ("trackId" in patch) {
     next.trackId = patch.trackId === null ? null : mediaId(patch.trackId, "trackId");
     changed = true;
@@ -368,6 +378,7 @@ export function restoreDeviceLyricTheme(theme: unknown): void {
   else if (typeof record.accent === "string" && /^[0-9a-fA-F]{6}$/.test(record.accent)) {
     sDeviceState.accent = record.accent.toLowerCase();
   }
+  if (typeof record.sparks === "boolean") sDeviceState.sparks = record.sparks;
 }
 
 // The device's reported live status (from /heartbeat): what it is actually
@@ -1078,6 +1089,7 @@ export function createControlHandler(
       mode: sDeviceState.mode,
       skin: sDeviceState.skin,
       accent: sDeviceState.accent,
+      sparks: sDeviceState.sparks,
     };
     options.osLink?.setLyricTheme(theme);
     options.lyricThemeStore?.save(theme);
@@ -1676,6 +1688,7 @@ export function createControlHandler(
           `MODE\t${s.mode}\n` +
           `SKIN\t${s.skin}\n` +
           `ACCENT\t${s.accent ?? "-"}\n` +
+          `SPARKS\t${s.sparks ? 1 : 0}\n` +
           `SEEK\t${s.seekMs}\n` +
           // Remote-player status; only meaningful while RMT is 1.
           `RPOS\t${remote ? Math.round(remote.positionMs) : -1}\n` +
@@ -2602,6 +2615,7 @@ export function createControlHandler(
           // predates it sends nothing and the hub treats the two as equal.
           lyricUntilMs: ms("lyricUntilMs") || ms("lyricEndMs"),
           ...(words ? { lyricWords: words } : {}),
+          ...(input.lyricChorus === true ? { lyricChorus: true } : {}),
         }, "console");
         return jsonResponse({
           nowPlaying: options.osLink.getNowPlaying(),

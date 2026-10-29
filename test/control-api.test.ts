@@ -1200,7 +1200,7 @@ describe("tc002-os console routes", () => {
     }));
     expect(control.status).toBe(200);
     expect(osLink.getLyricTheme()).toEqual({
-      mode: "cascade", skin: "tape", accent: "ff8844",
+      mode: "cascade", skin: "tape", accent: "ff8844", sparks: false,
     });
     const doc = osLink.serialize().split("\n");
     expect(doc).toContain("mode\tcascade");
@@ -1219,7 +1219,7 @@ describe("tc002-os console routes", () => {
     // and these tests need.
     const state = await handler(new Request(`${origin}/api/os/state`));
     expect((await state.json() as { lyricTheme: unknown }).lyricTheme).toEqual({
-      mode: "cascade", skin: "arcade", accent: "ff8844",
+      mode: "cascade", skin: "arcade", accent: "ff8844", sparks: false,
     });
 
     // An invalid patch is refused at the handler and must not reach the device:
@@ -1249,7 +1249,7 @@ describe("tc002-os console routes", () => {
     const sideload = await handler(new Request(`${origin}/api/music/device/state`));
     expect(await sideload.text()).toContain("MODE\tcascade");
     expect(osLink.getLyricTheme()).toEqual({
-      mode: "cascade", skin: "arcade", accent: "ff8844",
+      mode: "cascade", skin: "arcade", accent: "ff8844", sparks: false,
     });
 
     // sDeviceState is module state shared by every test in this file.
@@ -1404,7 +1404,7 @@ describe("tc002-os console routes", () => {
     restoreDeviceLyricTheme(await new LyricThemeStore(path).load());
     createControlHandler(fakeWorkspaceController(), { osLink: rebooted });
     expect(rebooted.getLyricTheme()).toEqual({
-      mode: "cascade", skin: "tape", accent: "ff8844",
+      mode: "cascade", skin: "tape", accent: "ff8844", sparks: false,
     });
     expect(rebooted.serialize().split("\n")).toContain("skin\ttape");
 
@@ -1415,7 +1415,7 @@ describe("tc002-os console routes", () => {
     const salvaged = new OsLinkHub();
     createControlHandler(fakeWorkspaceController(), { osLink: salvaged });
     expect(salvaged.getLyricTheme()).toEqual({
-      mode: "cascade", skin: "signal", accent: "ff8844",
+      mode: "cascade", skin: "signal", accent: "ff8844", sparks: false,
     });
 
     // sDeviceState is module state shared by every test in this file.

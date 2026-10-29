@@ -133,6 +133,7 @@ SettingsPlan planSettings(const SettingsRequest& request, int appliedSeq,
  *   lyricend\t21500
  *   lyricuntil\t34800
  *   lyricw\t0,420,420,380,800,300,…
+ *   lyricchorus\t1
  *   vibeauto\t15
  *   vibedwell\t3200\t1600
  *   vibe\t2
@@ -448,8 +449,10 @@ class StateDoc {
    * clocks coincide and `lyricEndMs` answers both questions. It also means an
    * older service, which is the same situation from the panel's side.
    *
-   * Only the 升降 choreography may read it. Every other part of the screen —
-   * colouring, focus glyph, fill bar, beat, scroll — runs on the sung clock.
+   * Two readers only: the 升降 choreography, and the instrumental dots, which
+   * take the row once the gap after the sung end is a real break
+   * (visual/LyricRings.h). Every other part of the screen — colouring, focus
+   * glyph, fill bar, beat, scroll — runs on the sung clock.
    */
   int lyricUntilMs() const { return mLyricUntilMs; }
 
@@ -463,6 +466,9 @@ class StateDoc {
    * before the key existed.
    */
   const LyricCellTable& lyricCells() const { return mLyricCells; }
+
+  /** `lyricchorus`: the line belongs to the chorus. Absent means a verse. */
+  bool lyricChorus() const { return mLyricChorus; }
 
   /**
    * The console's 主题设置, as wire integers.
@@ -486,6 +492,8 @@ class StateDoc {
   /** Only meaningful when hasAccent(); replaces the skin's primary tier. */
   uint32_t accentRgb() const { return mAccentRgb; }
   bool hasAccent() const { return mHasAccent; }
+  /** 火花: each sung glyph throws sparks. Absent means off. */
+  bool lyricSparks() const { return mLyricSparks; }
 
  private:
   int mSeq;
@@ -512,11 +520,13 @@ class StateDoc {
   int mLyricStartMs;
   int mLyricEndMs;
   int mLyricUntilMs;
+  bool mLyricChorus;
   LyricCellTable mLyricCells;
   int mLyricMode;
   int mLyricSkin;
   uint32_t mAccentRgb;
   bool mHasAccent;
+  bool mLyricSparks;
 };
 
 /**

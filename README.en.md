@@ -16,7 +16,7 @@ service that pushes them to the clock.
 - **Tools**: notice board (one POST from curl / iOS Shortcuts / Home Assistant puts a message on the clock), interval timer, pomodoro, countdown days.
 - **Visual**: twenty-odd pixel animations and clock faces — aquarium, fire, flip clock, pixel pet, Game of Life, fireworks, Nyan Cat, weather clocks, a sunrise/sunset color clock and more.
 - **Creative**: a 52×16 canvas, image pixelization, QR-code collaborative doodling; import Ulanzi community assets (PNG / GIF) or local videos.
-- **Music**: NetEase and Spotify, karaoke-style per-word lyric highlighting, a live 52×16 preview, four display modes × four palettes.
+- **Music**: NetEase and Spotify, karaoke-style per-word lyric highlighting, a live 52×16 preview, six display modes × four palettes, with optional sparks off each word as it is sung; long instrumentals become three filling dots, and the word being sung ripples during the chorus.
 - **Games**: Breakout, Flappy, Snake, two-player Pong, Racer, Shooter and Tetris, played in the browser and streamed to the clock; Pong can use a phone as the second gamepad via QR code.
 - **VIBE**: shows the quota of AI coding agents such as Claude Code and Codex on the clock (needs ZOS, below).
 

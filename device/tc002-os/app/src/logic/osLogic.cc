@@ -439,6 +439,7 @@ int sPersistedMode = -1;
 int sPersistedSkin = -1;
 // -1 means "no accent", which is why this cannot be a uint32_t.
 int sPersistedAccent = -2;
+int sPersistedSparks = -1;
 
 /**
  * Reads the last adopted 主题设置 back off /data.
@@ -456,9 +457,10 @@ void restoreLyricTheme() {
 	sPersistedMode = tcos::prefs::getInt("music.mode", tcos::MusicScreen::kModeSpotlight);
 	sPersistedSkin = tcos::prefs::getInt("music.skin", tcos::MusicScreen::kSkinSignal);
 	sPersistedAccent = tcos::prefs::getInt("music.accent", -1);
+	sPersistedSparks = tcos::prefs::getInt("music.sparks", 0);
 	sMusic.setTheme(sPersistedMode, sPersistedSkin,
 	                sPersistedAccent >= 0 ? (uint32_t)sPersistedAccent : 0,
-	                sPersistedAccent >= 0);
+	                sPersistedAccent >= 0, sPersistedSparks == 1);
 }
 
 /**
@@ -474,13 +476,16 @@ void restoreLyricTheme() {
  * rather than on the first click after boot. A theme cycle added later must
  * arrive with its own `themeseq` and rising-edge gating.
  */
-void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
-	sMusic.setTheme(mode, skin, accentRgb, hasAccent);
+void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent, bool sparks) {
+	sMusic.setTheme(mode, skin, accentRgb, hasAccent, sparks);
 	const int accent = hasAccent ? (int)(accentRgb & 0xffffffu) : -1;
-	if (mode == sPersistedMode && skin == sPersistedSkin && accent == sPersistedAccent) return;
+	const int sparksFlag = sparks ? 1 : 0;
+	if (mode == sPersistedMode && skin == sPersistedSkin && accent == sPersistedAccent &&
+	    sparksFlag == sPersistedSparks) return;
 	sPersistedMode = mode;
 	sPersistedSkin = skin;
 	sPersistedAccent = accent;
+	sPersistedSparks = sparksFlag;
 	// STAGED, not written. /data is jffs2 on raw NAND; the commit is debounced
 	// by DeviceControls::flushIfDue, which the tick already calls once a frame.
 	// Committing here would put a flash erase on the poll path, which is the
@@ -488,6 +493,7 @@ void applyLyricTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
 	tcos::prefs::setInt("music.mode", mode);
 	tcos::prefs::setInt("music.skin", skin);
 	tcos::prefs::setInt("music.accent", accent);
+	tcos::prefs::setInt("music.sparks", sparksFlag);
 }
 
 /**
@@ -1963,7 +1969,8 @@ static bool onUI_Timer(int id) {
 		// once adopted, a theme never expires. There is nothing for it to go
 		// stale against.
 		if (sLink.online) {
-			applyLyricTheme(sLink.lyricMode, sLink.lyricSkin, sLink.accentRgb, sLink.hasAccent);
+			applyLyricTheme(sLink.lyricMode, sLink.lyricSkin, sLink.accentRgb, sLink.hasAccent,
+			                sLink.lyricSparks);
 		}
 
 		// Settings the console asked for. The whole rule — apply only on a rising
@@ -2330,7 +2337,8 @@ static bool onUI_Timer(int id) {
 		                     // The per-glyph table, whose count is 0 for the ~80% of
 		                     // tracks with no word timings — the screen falls back to
 		                     // the even sweep on its own.
-		                     sLink.lyricCells.cells, sLink.lyricCells.count);
+		                     sLink.lyricCells.cells, sLink.lyricCells.count,
+		                     sLink.lyricChorus);
 		switch (sMusic.takeAction()) {
 		case tcos::MusicScreen::kToggle:
 			// When this clock is the player, the press is answered here and

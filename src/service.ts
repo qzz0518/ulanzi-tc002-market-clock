@@ -422,6 +422,7 @@ interface OsLyricWindow {
   /** When the next line takes over. */
   untilMs: number;
   words?: MusicLyricWord[];
+  chorus?: boolean;
 }
 
 function lyricAt(
@@ -461,6 +462,7 @@ function lyricAt(
     endMs,
     untilMs,
     ...(current.words ? { words: current.words } : {}),
+    ...(current.chorus ? { chorus: true } : {}),
   };
 }
 
@@ -516,6 +518,7 @@ async function publishOsNowPlaying(): Promise<void> {
     lyricEndMs: line.endMs,
     lyricUntilMs: line.untilMs,
     ...(line.words ? { lyricWords: line.words } : {}),
+    ...(line.chorus ? { lyricChorus: true } : {}),
   }, "remote");
 }
 

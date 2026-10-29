@@ -72,7 +72,9 @@ export function renderMirrorFrames(input: {
    * the sung span would replay the whole karaoke wipe two or three times over a
    * thirteen-second instrumental, which is the same defect the sung end exists
    * to remove, only faster. The wipe finishing early inside a longer loop is
-   * exactly right: the trailing frames hold the finished line, still.
+   * exactly right: the trailing frames hold the finished line, still — or, once
+   * the gap after it is a real instrumental, the interlude dots filling toward
+   * the next line (`interludeProgress`).
    */
   line: PixelLyricLine;
   mode: MusicMode;
@@ -80,6 +82,7 @@ export function renderMirrorFrames(input: {
   trackProgress: number;
   playing: boolean;
   spectrum?: SpectrumLookup;
+  sparks?: boolean;
 }): MirrorFrame[] {
   const canvas = document.createElement("canvas");
   canvas.width = SCREEN_WIDTH;
@@ -101,7 +104,7 @@ export function renderMirrorFrames(input: {
     // lets a word-timed line reach the panel: the cursor needs a real playhead
     // to compare its cell table against.
     const playheadMs = startMs + index * delayMs;
-    const { cursor, windowProgress } = pixelLyricCursor(input.text, input.line, playheadMs);
+    const { cursor, windowProgress, interlude, sinceLineMs } = pixelLyricCursor(input.text, input.line, playheadMs);
     drawPixelLyricsFrame(context, {
       skin: input.skin,
       mode: input.mode,
@@ -115,6 +118,11 @@ export function renderMirrorFrames(input: {
       timeMs: playheadMs,
       spectrum: input.spectrum,
       reducedMotion: false,
+      interlude,
+      chorus: input.line.chorus === true,
+      lineStartMs: input.line.startMs,
+      sinceLineMs,
+      sparks: input.sparks === true,
     });
     frames.push({ delayMs, pixels: frameToBase64Rgb(context) });
   }

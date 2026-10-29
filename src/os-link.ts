@@ -237,11 +237,11 @@ export const OS_VIBE_DEFAULT_RESET_DWELL_MS = 1_600;
  * own visual/Palette.h. Renumbering any one of them repaints the panel in a
  * colour the console is not showing, silently and with nothing to fail.
  */
-export type OsLyricMode = "ticker" | "skyline" | "spotlight" | "cascade";
+export type OsLyricMode = "ticker" | "skyline" | "spotlight" | "cascade" | "rings" | "tilt";
 export type OsLyricSkin = "signal" | "tape" | "blueprint" | "arcade";
 
 export const OS_LYRIC_MODES: readonly OsLyricMode[] = [
-  "ticker", "skyline", "spotlight", "cascade",
+  "ticker", "skyline", "spotlight", "cascade", "rings", "tilt",
 ];
 export const OS_LYRIC_SKINS: readonly OsLyricSkin[] = [
   "signal", "tape", "blueprint", "arcade",
@@ -252,6 +252,8 @@ export interface OsLyricTheme {
   skin: OsLyricSkin;
   /** "rrggbb" replacing the skin's primary tier only, or null for the skin's own. */
   accent: string | null;
+  /** 火花. Optional so a theme written before it existed still reads as off. */
+  sparks?: boolean;
 }
 
 export interface OsNowPlaying {
@@ -303,6 +305,8 @@ export interface OsNowPlaying {
    * means line-level timing only and the panel sweeps as it always did.
    */
   lyricWords?: MusicLyricWord[];
+  /** The line belongs to the chorus; the panel ripples the glyph being sung. */
+  lyricChorus?: boolean;
 }
 
 /**
@@ -587,7 +591,7 @@ export class OsLinkHub {
   private settings: OsDeviceSettings = { volume: null, brightness: null };
   // Defaults identical to sDeviceState's in src/control-api.ts, so the two
   // agree before the first write rather than only after one.
-  private theme: OsLyricTheme = { mode: "spotlight", skin: "signal", accent: null };
+  private theme: OsLyricTheme = { mode: "spotlight", skin: "signal", accent: null, sparks: false };
   // Every console write bumps this. The device applies a setting only when the
   // sequence is HIGHER than the last one it applied, which is what lets the
   // knob win afterwards: the document still carries the console's old value,
@@ -864,6 +868,7 @@ export class OsLinkHub {
         lyricStartMs,
         lyricEndMs,
         lyricUntilMs: Math.max(0, Math.round(now.lyricUntilMs)),
+        ...(now.lyricChorus === true ? { lyricChorus: true } : {}),
         lyricCells: encodeLabelCells(
           sanitizeField(now.lyric),
           lyric,
@@ -889,7 +894,8 @@ export class OsLinkHub {
         // reports on a 4 s timer and a track switch can land a wordless report
         // first. Without this the refinement never reaches the device and the
         // panel keeps sweeping a line it could have been walking word by word.
-        before.lyricCells !== next.lyricCells
+        before.lyricCells !== next.lyricCells ||
+        before.lyricChorus !== next.lyricChorus
       ));
     this.nowPlaying = next;
     this.nowPlayingStampedAt = this.now();
@@ -1097,6 +1103,10 @@ export class OsLinkHub {
         this.theme.accent = accent;
       }
     }
+    if (typeof next.sparks === "boolean") {
+      if (this.theme.sparks !== next.sparks) changed = true;
+      this.theme.sparks = next.sparks;
+    }
     // No-op writes must not bump: the console primes this on every handler
     // construction and re-sends it after each poll echo, and waking every parked
     // long poll for a value that did not move is a broadcast storm on a LAN.
@@ -1266,6 +1276,8 @@ export class OsLinkHub {
     lines.push(`mode\t${this.theme.mode}`);
     lines.push(`skin\t${this.theme.skin}`);
     if (this.theme.accent !== null) lines.push(`accent\t${this.theme.accent}`);
+    // Only when on: a firmware that predates it ignores the key, and off is its absence.
+    if (this.theme.sparks === true) lines.push(`sparks\t1`);
     if (this.settingsSeq > 0) {
       lines.push(`setseq\t${this.settingsSeq}`);
       // Each level travels with the sequence at which the console last asked
@@ -1347,6 +1359,9 @@ export class OsLinkHub {
             // every document, for a renderer that cannot read it.
             if (np.lyricCells !== "") lines.push(`lyricw\t${np.lyricCells}`);
           }
+          // A new key, sent only when true: a firmware that predates it ignores
+          // unknown keys by design, and an absent key is the ordinary verse.
+          if (np.lyricChorus === true) lines.push(`lyricchorus\t1`);
         }
       }
     }

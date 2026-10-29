@@ -251,6 +251,8 @@ export interface MusicLyricLine {
   words?: MusicLyricWord[];
   /** How endMs was decided; drives the 逐字 / 估算 badge. */
   endSource: LyricEndSource;
+  /** Part of the chorus — the service decides (NetEase's own range, else repetition). */
+  chorus?: boolean;
 }
 
 export interface MusicTrackDetail {

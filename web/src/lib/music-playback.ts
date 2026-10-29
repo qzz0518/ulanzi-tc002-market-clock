@@ -68,6 +68,7 @@ export function lyricWindowAt(detail: MusicTrackDetail | null, index: number): P
     endMs,
     untilMs,
     ...(cells.length > 0 ? { cells } : {}),
+    ...(lyric.chorus ? { chorus: true } : {}),
   };
 }
 
@@ -107,5 +108,6 @@ export function nowPlayingBody(input: {
     lyricEndMs: line.endMs,
     lyricUntilMs: line.untilMs,
     ...(lyric?.words?.length ? { lyricWords: lyric.words } : {}),
+    ...(lyric?.chorus ? { lyricChorus: true } : {}),
   };
 }

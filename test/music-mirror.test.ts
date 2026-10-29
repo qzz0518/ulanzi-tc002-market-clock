@@ -166,16 +166,21 @@ describe("mirrored lyric frames", () => {
     expect(totalMs).toBeLessThanOrEqual(19_000);
   });
 
-  test("the wipe finishes with the singer and the rest of the loop holds still", () => {
+  test("the wipe finishes with the singer, holds, then hands the break to the dots", () => {
     const frames = render(LINE);
     const delayMs = frames[0]!.delayMs;
-    // 115620 − 110330 = 5290 ms of singing.
+    // 115620 − 110330 = 5290 ms of singing, then the finished line holds for
+    // the 0.6 s interlude lead before the dots take the row.
     const sungFrames = Math.ceil((115_620 - 110_330) / delayMs);
-    const tail = frames.slice(sungFrames + 1);
-    expect(tail.length).toBeGreaterThan(100);
-    for (const frame of tail) {
-      expect(frame.pixels).toBe(tail[0]!.pixels);
-    }
+    const leadFrames = Math.floor(600 / delayMs);
+    const held = frames.slice(sungFrames + 1, sungFrames + leadFrames);
+    expect(held.length).toBeGreaterThan(3);
+    for (const frame of held) expect(frame.pixels).toBe(held[0]!.pixels);
+    // The 13 s instrumental is the dots, and they move: they fill and breathe.
+    const interlude = frames.slice(sungFrames + leadFrames + 2);
+    expect(interlude.length).toBeGreaterThan(100);
+    expect(interlude[0]!.pixels).not.toBe(held[0]!.pixels);
+    expect(new Set(interlude.map((frame) => frame.pixels)).size).toBeGreaterThan(3);
     // And it really did animate before that, so this is not a blank GIF.
     expect(new Set(frames.slice(0, sungFrames).map((frame) => frame.pixels)).size)
       .toBeGreaterThan(3);

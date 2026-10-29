@@ -292,7 +292,7 @@ describe("music player UI", () => {
     }
   });
 
-  test("offers four rendering modes in the order that IS the wire protocol", () => {
+  test("offers six rendering modes in the order that IS the wire protocol", () => {
     // The index is what crosses the link to both firmwares — ticker=0 …
     // cascade=3 — matching LYRIC_MODES / OS_LYRIC_MODES on the service side and
     // MusicScreen::Mode on the device. Reordering this list for looks would
@@ -303,6 +303,8 @@ describe("music player UI", () => {
       "skyline",
       "spotlight",
       "cascade",
+      "rings",
+      "tilt",
     ]);
   });
 
@@ -405,6 +407,8 @@ describe("music player UI", () => {
       onModeChange: () => {},
       onSkinChange: () => {},
       onAccentChange: () => {},
+      sparks: false,
+      onSparksChange: () => {},
       syncsToDevice: false,
       simulatedSpectrum: true,
     }));

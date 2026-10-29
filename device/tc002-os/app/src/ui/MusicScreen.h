@@ -60,7 +60,11 @@ class MusicScreen : public Screen {
     kModeSkyline = 1,    // 天际
     kModeSpotlight = 2,  // 聚光
     kModeCascade = 3,    // 升降
-    kModeCount = 4
+    // 年轮 is this firmware's own and the browser preview's; the sideloaded
+    // player has no such mode (its tree receives no changes) and shows 走带.
+    kModeRings = 4,      // 年轮
+    kModeTilt = 5,       // 倾诉, the same story as 年轮
+    kModeCount = 6
   };
   enum Skin {
     kSkinSignal = 0,     // 信号绿
@@ -101,7 +105,8 @@ class MusicScreen : public Screen {
                      const std::string& lyric, bool playing, int positionMs,
                      int durationMs, int stampMs, int lyricStartMs = -1,
                      int lyricEndMs = -1, int lyricUntilMs = -1,
-                     const LyricCell* cells = 0, int cellCount = 0);
+                     const LyricCell* cells = 0, int cellCount = 0,
+                     bool lyricChorus = false);
 
   /**
    * The console's 主题设置, applied unconditionally on every document.
@@ -114,7 +119,7 @@ class MusicScreen : public Screen {
    * `accentRgb` replaces the palette's primary tier ONLY; the skin keeps the
    * other three, which is what makes an accent a focus colour and not a repaint.
    */
-  void setTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent);
+  void setTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent, bool sparks = false);
 
   /**
    * What the console link is doing, so the empty state can say which emptiness
@@ -188,6 +193,8 @@ class MusicScreen : public Screen {
   // looks like. See StateDoc::lyricUntilMs: the absence is the message.
   int mLyricUntilMs;
   LyricCellTable mLyricCells;
+  // `lyricchorus`: every mode ripples the glyph being sung (paintHalo).
+  bool mLyricChorus;
   int mEnteredMs;
   int mLyricChangedMs;
   int mFlashMs;
@@ -199,6 +206,8 @@ class MusicScreen : public Screen {
   int mSkin;
   uint32_t mAccentRgb;
   bool mHasAccent;
+  // 火花: each sung glyph throws sparks (paintSparks).
+  bool mSparks;
   // Optimistic transport state: the panel flips the moment the button is
   // pressed rather than a round trip later, because a play button that takes
   // 300 ms to look pressed reads as a dropped input.

@@ -51,6 +51,7 @@ export class LyricThemeStore {
       else if (typeof record.accent === "string" && /^[0-9a-fA-F]{6}$/.test(record.accent)) {
         theme.accent = record.accent.toLowerCase();
       }
+      if (typeof record.sparks === "boolean") theme.sparks = record.sparks;
       // Only what was actually read counts as "already saved": a file missing a
       // field must not stop the first write from adding it.
       this.lastSaved = signature(theme);
@@ -95,5 +96,5 @@ export class LyricThemeStore {
 }
 
 function signature(theme: Partial<OsLyricTheme>): string {
-  return `${theme.mode ?? "-"}\t${theme.skin ?? "-"}\t${theme.accent ?? "-"}`;
+  return `${theme.mode ?? "-"}\t${theme.skin ?? "-"}\t${theme.accent ?? "-"}\t${theme.sparks === true ? 1 : 0}`;
 }

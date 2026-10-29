@@ -651,6 +651,7 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   mSnapshot.lyricStartMs = doc.lyricStartMs();
   mSnapshot.lyricEndMs = doc.lyricEndMs();
   mSnapshot.lyricUntilMs = doc.lyricUntilMs();
+  mSnapshot.lyricChorus = doc.lyricChorus();
   mSnapshot.lyricCells = doc.lyricCells();
   mSnapshot.stampMonoMs = stampMonoMs;
   // The theme, copied with everything else. StateDoc has already resolved an
@@ -660,6 +661,7 @@ void HostLink::adoptDocument(const StateDoc& doc, uint64_t stampMonoMs) {
   mSnapshot.lyricSkin = doc.lyricSkin();
   mSnapshot.accentRgb = doc.accentRgb();
   mSnapshot.hasAccent = doc.hasAccent();
+  mSnapshot.lyricSparks = doc.lyricSparks();
   // Console -> device. Copied here with everything else for the same reason the
   // now-playing fields are: a snapshot assembled in two places is a snapshot
   // that will one day disagree with itself.

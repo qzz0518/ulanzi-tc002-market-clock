@@ -36,7 +36,7 @@ int indexOfName(const std::string& name, const char* const* table, int count, in
   return fallback;
 }
 
-const char* const kModeNames[4] = {"ticker", "skyline", "spotlight", "cascade"};
+const char* const kModeNames[6] = {"ticker", "skyline", "spotlight", "cascade", "rings", "tilt"};
 const char* const kSkinNames[4] = {"signal", "tape", "blueprint", "arcade"};
 
 // Exactly six hex digits, or nothing. A half-parsed colour is worse than none:
@@ -166,8 +166,8 @@ StateDoc::StateDoc()
       mVibeAutoSec(0), mVibeValueDwellMs(-1), mVibeResetDwellMs(-1),
       mHasNowPlaying(false),
       mPlaying(false), mPositionMs(0), mDurationMs(0), mLyricStartMs(-1),
-      mLyricEndMs(-1), mLyricUntilMs(-1), mLyricMode(kDefaultMode),
-      mLyricSkin(kDefaultSkin), mAccentRgb(0), mHasAccent(false) {}
+      mLyricEndMs(-1), mLyricUntilMs(-1), mLyricChorus(false), mLyricMode(kDefaultMode),
+      mLyricSkin(kDefaultSkin), mAccentRgb(0), mHasAccent(false), mLyricSparks(false) {}
 
 bool StateDoc::parse(const std::string& body) {
   mSeq = -1;
@@ -202,6 +202,7 @@ bool StateDoc::parse(const std::string& body) {
   mLyricStartMs = -1;
   mLyricEndMs = -1;
   mLyricUntilMs = -1;
+  mLyricChorus = false;
   mLyricCells.clear();
   // Reset to the defaults rather than to "keep the last": a document is a whole
   // picture, and a service that stopped sending a theme (an older build, or a
@@ -211,6 +212,7 @@ bool StateDoc::parse(const std::string& body) {
   mLyricSkin = kDefaultSkin;
   mAccentRgb = 0;
   mHasAccent = false;
+  mLyricSparks = false;
 
   std::vector<Annotation> annotations;
   std::vector<VibeRecord> vibeRecords;
@@ -324,6 +326,9 @@ bool StateDoc::parse(const std::string& body) {
       // absence is the statement "these two clocks coincide" rather than a gap
       // in the document. -1 keeps that distinguishable from a zero.
       mLyricUntilMs = atoi(fields[1].c_str());
+    } else if (fields[0] == "lyricchorus") {
+      // Sent only for a chorus line; absent is the ordinary verse.
+      mLyricChorus = (fields[1] == "1");
     } else if (fields[0] == "lyricw") {
       // ONE comma-separated field, not tab-separated columns: splitTabs above
       // stops after three tabs and would hand this loop a truncated table. That
@@ -331,12 +336,16 @@ bool StateDoc::parse(const std::string& body) {
       // src/music/lyric-timing.ts.
       lyricTable = fields[1];
     } else if (fields[0] == "mode") {
-      mLyricMode = indexOfName(fields[1], kModeNames, 4, kDefaultMode);
+      mLyricMode = indexOfName(fields[1], kModeNames, 6, kDefaultMode);
     } else if (fields[0] == "skin") {
       mLyricSkin = indexOfName(fields[1], kSkinNames, 4, kDefaultSkin);
     } else if (fields[0] == "accent") {
       mHasAccent = parseAccent(fields[1], &mAccentRgb);
       if (!mHasAccent) mAccentRgb = 0;
+    } else if (fields[0] == "sparks") {
+      // 火花, sent only when on: absent is off, like every theme field a whole
+      // document resets.
+      mLyricSparks = (fields[1] == "1");
     } else if (fields[0] == "item" && n == 4) {
       Item item;
       // An unknown kind is skipped rather than guessed: rendering a settings

@@ -124,6 +124,7 @@ const PROVIDER_COPY: Record<MusicProviderId, {
 const MUSIC_SKIN_STORAGE_KEY = "pixel-market.music-skin";
 const MUSIC_MODE_STORAGE_KEY = "pixel-market.music-mode";
 const MUSIC_ACCENT_STORAGE_KEY = "pixel-market.music-accent";
+const MUSIC_SPARKS_STORAGE_KEY = "pixel-market.music-sparks";
 
 /**
  * Custom property `music-player.css` flips inside its `@container` query.
@@ -367,6 +368,7 @@ export function MusicPlayer({
   const [skin, setSkin] = useState<MusicSkin>("signal");
   const [mode, setMode] = useState<MusicMode>("spotlight");
   const [accent, setAccent] = useState<string | null>(null);
+  const [sparks, setSparks] = useState(false);
   const [dragMs, setDragMs] = useState<number | null>(null);
   // Mirrors dragMs so the pointer-up commit never reads a stale value while a
   // continuous slider onChange is still flushing through React state.
@@ -501,6 +503,7 @@ export function MusicPlayer({
       if (isMusicMode(storedMode)) setMode(storedMode);
       const storedAccent = window.localStorage.getItem(MUSIC_ACCENT_STORAGE_KEY);
       if (storedAccent && /^[0-9a-fA-F]{6}$/.test(storedAccent)) setAccent(storedAccent);
+      setSparks(window.localStorage.getItem(MUSIC_SPARKS_STORAGE_KEY) === "1");
     } catch {
       // Private browsing or a locked-down WebView may disable local storage.
     }
@@ -531,6 +534,8 @@ export function MusicPlayer({
     if (isMusicSkin(fields.SKIN ?? null)) setSkin(fields.SKIN as MusicSkin);
     if (isMusicMode(fields.MODE ?? null)) setMode(fields.MODE as MusicMode);
     setAccent(fields.ACCENT && fields.ACCENT !== "-" ? fields.ACCENT : null);
+    // An older service sends no SPARKS line; that is off, which is what it means.
+    setSparks(fields.SPARKS === "1");
   }), [loadSession, store]);
 
   // Keep the library list on the page holding whatever is playing — the store
@@ -691,9 +696,10 @@ export function MusicPlayer({
       trackProgress: trackProgressRef.current,
       playing,
       spectrum: activeSpectrum,
+      sparks,
     });
     if (frames.length > 0) void mirrorRunnerRef.current?.enqueue({ frames });
-  }, [activeLine, activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin, zos]);
+  }, [activeLine, activeLyric, activeSpectrum, mirrorOn, mode, playing, selected, skin, sparks, zos]);
   const effectiveDurationMs = playbackDurationMs(playback);
   const timelineDisplayMs = Math.min(dragMs ?? currentMs, effectiveDurationMs);
   const selectedTrackIndex = playback.queueIndex;
@@ -953,6 +959,16 @@ export function MusicPlayer({
       // Non-persistent is fine; the control still reaches the device.
     }
     postControl({ accent: hex });
+  }, [postControl]);
+
+  const chooseSparks = useCallback((on: boolean) => {
+    setSparks(on);
+    try {
+      window.localStorage.setItem(MUSIC_SPARKS_STORAGE_KEY, on ? "1" : "0");
+    } catch {
+      // Non-persistent is fine; the control still reaches the device.
+    }
+    postControl({ sparks: on });
   }, [postControl]);
 
   // The pager follows the store's queue index (see the effect above), so this
@@ -1823,6 +1839,7 @@ export function MusicPlayer({
               accent={accent}
               mode={mode}
               spectrum={activeSpectrum}
+              sparks={sparks}
             />
 
             {loadingTrack && (
@@ -1856,6 +1873,8 @@ export function MusicPlayer({
             onModeChange={chooseMode}
             onSkinChange={chooseSkin}
             onAccentChange={chooseAccent}
+            sparks={sparks}
+            onSparksChange={chooseSparks}
             // `deviceOnline` is the SIDELOADED music firmware's heartbeat, so on
             // a ZOS device it is false and this panel used to say「仅影响预览」—
             // which was true, and was the complaint. ZOS reads the same three

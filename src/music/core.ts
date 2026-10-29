@@ -99,6 +99,11 @@ export interface MusicLyricLine {
    * measured and which are estimated.
    */
   endSource: LyricEndSource;
+  /**
+   * Part of the chorus. Decided once per track by `markChorusLines`
+   * (src/music/chorus.ts); absent means a verse, or a song we could not tell.
+   */
+  chorus?: boolean;
 }
 
 export interface MusicTrackDetail {

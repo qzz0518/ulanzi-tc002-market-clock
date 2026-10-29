@@ -701,7 +701,7 @@ describe("device settings requested from the console", () => {
     const lines = hub.serialize().split("\n");
     // The defaults are sDeviceState's, so the two agree before the first write
     // rather than only after one.
-    expect(hub.getLyricTheme()).toEqual({ mode: "spotlight", skin: "signal", accent: null });
+    expect(hub.getLyricTheme()).toEqual({ mode: "spotlight", skin: "signal", accent: null, sparks: false });
     expect(lines).toContain("mode\tspotlight");
     expect(lines).toContain("skin\tsignal");
     expect(lines.some((line) => line.startsWith("accent\t"))).toBe(false);
@@ -746,7 +746,7 @@ describe("device settings requested from the console", () => {
     hub.setLyricTheme({ accent: "ff88" });
     hub.setLyricTheme({ accent: "ff8844aa" });
     hub.setLyricTheme({ accent: 0xff8844 as never });
-    expect(hub.getLyricTheme()).toEqual({ mode: "spotlight", skin: "tape", accent: null });
+    expect(hub.getLyricTheme()).toEqual({ mode: "spotlight", skin: "tape", accent: null, sparks: false });
     expect(hub.currentSeq()).toBe(before);
   });
 

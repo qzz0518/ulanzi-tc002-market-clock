@@ -109,6 +109,8 @@ class HostLink {
     int lyricStartMs;
     int lyricEndMs;
     int lyricUntilMs;
+    // The line belongs to the chorus; every mode then ripples the sung glyph.
+    bool lyricChorus;
     // One entry per glyph of `lyric`, when the source really carries word
     // timings. Empty for the ~80% of tracks that do not, which is the shape the
     // panel has always rendered.
@@ -128,6 +130,7 @@ class HostLink {
     int lyricSkin;
     uint32_t accentRgb;
     bool hasAccent;
+    bool lyricSparks;
 
     // upgradeSeq is initialised HERE and not only where it is parsed: an
     // uninitialised int on the one field that ends in an erase of mtd3 is a
@@ -140,8 +143,9 @@ class HostLink {
                  nowPlaying(false), playing(false),
                  positionMs(0), durationMs(0), stampMonoMs(0),
                  lyricStartMs(-1), lyricEndMs(-1), lyricUntilMs(-1),
+                 lyricChorus(false),
                  lyricMode(StateDoc::kDefaultMode), lyricSkin(StateDoc::kDefaultSkin),
-                 accentRgb(0), hasAccent(false) {}
+                 accentRgb(0), hasAccent(false), lyricSparks(false) {}
   };
 
   HostLink();

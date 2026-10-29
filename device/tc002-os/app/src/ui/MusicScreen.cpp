@@ -5,6 +5,7 @@
 #include "core/Ease.h"
 #include "core/Text.h"
 #include "visual/Glyphs.h"
+#include "visual/LyricRings.h"
 #include "visual/LyricVisuals.h"
 
 namespace tcos {
@@ -81,6 +82,16 @@ struct FrameCtx {
   float track;  // progress through the whole track, 0..1
   float animMs;
   bool playing;
+  // The line belongs to the chorus: every mode ripples the glyph being sung.
+  bool chorus;
+  // 火花, from the theme.
+  bool sparks;
+  // The line's start in track ms, or -1 when it has no window: seeds which 倾诉
+  // phrase leans and where each spark flies.
+  int lineStartMs;
+  // How far into the line the playhead is, for 倾诉's surfacing glyphs; a large
+  // number (everything shown) when the row is not a timed lyric.
+  long sinceLineMs;
   // "This row is a timed lyric line", and nothing more. It is the beat input —
   // beatKick snaps on each glyph when it is set and falls back to a 120 BPM
   // pulse when it is not. It deliberately does NOT mean "there is a row to
@@ -202,6 +213,158 @@ void cueRow(Surface& s, const Palette& pal, int y, float progress, int trailPx) 
   s.setPixel(cursorX, y, pal.primary);
 }
 
+// ---- ripple and interlude ---------------------------------------------------
+
+const Color& tierColor(const Palette& pal, lyricrings::Tier tier) {
+  switch (tier) {
+    case lyricrings::kTierPrimary: return pal.primary;
+    case lyricrings::kTierSecondary: return pal.secondary;
+    case lyricrings::kTierContext: return pal.context;
+    default: return pal.muted;
+  }
+}
+
+// The glyph actually being sung, or -1 before the line and after it. A space
+// has no ink, so the ripple and the lift find nothing to draw there on their own.
+//
+// Before the line's start, too. An untimed line's cursor reads a playhead before
+// the window as progress 0 — glyph 0 "singing" — which the reference modes keep
+// for their colouring, but a ring or a spark thrown before the first word is
+// sung would be the panel getting ahead of the singer, and the browser (whose
+// cursor says "pending" there) draws none.
+int singingCell(const FrameCtx& f) {
+  if (f.cursor.phase != kLyricSinging) return -1;
+  if (f.sinceLineMs < 0) return -1;
+  if (f.cursor.index < 0 || f.cursor.index >= f.n) return -1;
+  return f.cursor.index;
+}
+
+// Where every mode but 聚光 puts the row's left edge.
+int lineStartX(const FrameCtx& f, int mode) {
+  return f.totalW <= kViewW ? (kPanelWidth - f.totalW) / 2
+                            : kViewX - scrollOffsetFor(f.totalW, f.prog, mode);
+}
+
+// 聚光's sung column, in bitmap pixels. Without a table this is the old
+// arithmetic untouched; with one it is the cursor's own cell, walked at the rate
+// the words were sung (the browser's focusPixelAt).
+float spotlightFocusPx(const FrameCtx& f) {
+  if (f.timedCells) {
+    int at = f.cursor.index;
+    if (at < 0) at = 0;
+    if (at >= f.n) at = f.n - 1;
+    const Cell& cell = f.cells[at];
+    float focusPx = (float)cell.startX;
+    if (f.cursor.index >= 0) focusPx += lm_unit(f.cursor.frac) * (float)cell.width;
+    return focusPx;
+  }
+  return lm_unit(f.prog) * f.totalW;
+}
+
+// Screen x of 聚光's bitmap left edge. The lock is the same 26 - focusPx either
+// way; the legacy branch keeps the literal expression it always had so no float
+// round trip can move a rounded pixel.
+int spotlightLineX(const FrameCtx& f, float focusPx) {
+  return f.timedCells && f.totalW > 0 ? spotlightOffsetPx(f.totalW, focusPx / (float)f.totalW)
+                                      : spotlightOffsetPx(f.totalW, f.prog);
+}
+
+// True when a glyph other than `focus` has ink within one pixel of (x, y). Only
+// the two neighbours can reach: the ring goes at most two columns past its own
+// cell and the gutter one more, and the narrowest cell is six wide.
+bool neighbourInkNear(const FrameCtx& f, int focus, int lineX, int lineY, int x, int y) {
+  for (int side = -1; side <= 1; side += 2) {
+    const int index = focus + side;
+    if (index < 0 || index >= f.n) continue;
+    const Cell& cell = f.cells[index];
+    const glyphs::Bitmap bitmap = glyphs::lookup(cell.cp);
+    if (bitmap.rows == 0) continue;
+    for (int dy = -1; dy <= 1; ++dy) {
+      const int row = y + dy - lineY;
+      if (row < 0 || row >= glyphs::kCellHeight) continue;
+      for (int dx = -1; dx <= 1; ++dx) {
+        const int col = x + dx - lineX - cell.startX;
+        if (col < 0 || col >= cell.width || col >= bitmap.width) continue;
+        if (bitmap.rows[row] & (1 << (bitmap.width - 1 - col))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// One ring around the glyph being sung: every pixel at exactly `radius`
+// (Chebyshev) from its ink. Painted before the row, so text and cues land on
+// top. The glyph's own cell stays clear — a ring in its counters reads as a
+// bolder glyph — and so does a one-pixel gutter around every other glyph's
+// strokes, so the ring can run down the gaps between characters without
+// fattening a neighbour. On a full line that gap and the rows above and below
+// are all the room there is. The browser's paintHalo, pixel for pixel.
+void paintHalo(Surface& s, const FrameCtx& f, int focus, int lineX, int lineY, int hopPx,
+               int radius) {
+  const Cell& cell = f.cells[focus];
+  const glyphs::Bitmap bitmap = glyphs::lookup(cell.cp);
+  if (bitmap.rows == 0) return;
+  const int glyphY = lineY - hopPx;
+  const int glyphLeft = lineX + cell.startX;
+  const int glyphRight = glyphLeft + cell.width;
+  int inkX[glyphs::kCellHeight * 16];
+  int inkY[glyphs::kCellHeight * 16];
+  int ink = 0;
+  for (int row = 0; row < glyphs::kCellHeight; ++row) {
+    const uint16_t mask = bitmap.rows[row];
+    for (int col = 0; col < bitmap.width && col < 16; ++col) {
+      if ((mask & (1 << (bitmap.width - 1 - col))) == 0) continue;
+      inkX[ink] = glyphLeft + col;
+      inkY[ink] = glyphY + row;
+      ++ink;
+    }
+  }
+  if (ink == 0) return;
+  const Color& c = tierColor(*f.pal, lyricrings::haloTier(radius));
+  for (int y = glyphY - radius; y < glyphY + glyphs::kCellHeight + radius; ++y) {
+    if (y < 0 || y >= kPanelHeight) continue;
+    for (int x = glyphLeft - radius; x < glyphRight + radius; ++x) {
+      if (x < 0 || x >= kPanelWidth) continue;
+      if (y >= glyphY && y < glyphY + glyphs::kCellHeight && x >= glyphLeft && x < glyphRight) continue;
+      int distance = 1 << 20;
+      for (int i = 0; i < ink && distance >= radius; ++i) {
+        const int dx = x > inkX[i] ? x - inkX[i] : inkX[i] - x;
+        const int dy = y > inkY[i] ? y - inkY[i] : inkY[i] - y;
+        const int d = dx > dy ? dx : dy;
+        if (d < distance) distance = d;
+      }
+      if (distance != radius) continue;
+      if (neighbourInkNear(f, focus, lineX, lineY, x, y)) continue;
+      s.setPixel(x, y, c);
+    }
+  }
+}
+
+// The chorus ripple the four reference modes share: no lift, row where the mode
+// put it.
+void paintChorusHalo(Surface& s, const FrameCtx& f, int lineX, int lineY) {
+  if (!f.chorus) return;
+  const int focus = singingCell(f);
+  if (focus < 0) return;
+  paintHalo(s, f, focus, lineX, lineY, 0, lyricrings::haloRadius(f.cursor.frac));
+}
+
+// The instrumental after a line, the same in every mode: three dots filling as
+// the next line nears, and the track cue on row 15. The browser's
+// paintInterlude.
+void paintInterlude(Surface& s, const Palette& pal, float progress, float track, float animMs) {
+  cueRow(s, pal, 15, track, 1);
+  for (int dot = 0; dot < lyricrings::kInterludeDots; ++dot) {
+    const Color& c = tierColor(pal, lyricrings::interludeDotTier(dot, progress, animMs));
+    const int x = lyricrings::kInterludeDotX[dot];
+    const int y = lyricrings::kInterludeDotY;
+    s.setPixel(x, y, c);
+    s.setPixel(x + 1, y, c);
+    s.setPixel(x, y + 1, c);
+    s.setPixel(x + 1, y + 1, c);
+  }
+}
+
 // ---- per-mode painters -----------------------------------------------------
 
 // LyricsPage's karaokeColorAt: sung glyphs behind the cursor, the focus glyph
@@ -222,6 +385,7 @@ const Color& karaokeColor(const Palette& pal, int index, int focus) {
 // karaoke rather than as a marquee.
 void paintTicker(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
+  paintChorusHalo(s, f, lineStartX(f, MusicScreen::kModeTicker), 2);
   cueRow(s, pal, 0, f.prog, 2);
   cueRow(s, pal, 15, f.track, 1);
   const int focus = focusCell(f);
@@ -261,6 +425,7 @@ void paintSkyline(Surface& s, const FrameCtx& f) {
   // therefore woke the dead branch and answered "频谱动画挡字" with a stronger
   // version of it — a 12-row spectrum and not one word.
   const int maxLevel = 3;
+  paintChorusHalo(s, f, lineStartX(f, MusicScreen::kModeSkyline), 0);
   float kick = beatKick(f.playing, beatIsTimed(f), f.prog, f.n, f.animMs);
   for (int bar = 0; bar < SKYLINE_BARS; ++bar) {
     int x = 1 + bar * 3;
@@ -295,24 +460,7 @@ void paintSkyline(Surface& s, const FrameCtx& f) {
 // and the line stops gliding while a held note is held.
 void paintSpotlight(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
-  s.setPixel(19, 1, pal.muted);
-  s.setPixel(32, 1, pal.muted);
-  cueRow(s, pal, 15, f.track, 1);
-
-  // The sung column, in bitmap pixels. Without a table this is the old
-  // arithmetic untouched; with one it is the cursor's own cell, walked at the
-  // rate the words were sung (the browser's focusPixelAt).
-  float focusPx;
-  if (f.timedCells) {
-    int at = f.cursor.index;
-    if (at < 0) at = 0;
-    if (at >= f.n) at = f.n - 1;
-    const Cell& cell = f.cells[at];
-    focusPx = (float)cell.startX;
-    if (f.cursor.index >= 0) focusPx += lm_unit(f.cursor.frac) * (float)cell.width;
-  } else {
-    focusPx = lm_unit(f.prog) * f.totalW;
-  }
+  const float focusPx = spotlightFocusPx(f);
 
   int spanStarts[kMaxCells];
   int limit = f.n < kMaxCells ? f.n : kMaxCells;
@@ -324,12 +472,14 @@ void paintSpotlight(Surface& s, const FrameCtx& f) {
   int focusIndex = f.timedCells ? f.cursor.index : spanIndexAtPx(spanStarts, limit, (int)focusPx);
   if (f.split && f.cursor.phase != kLyricSinging) focusIndex = -1;
 
-  // Screen x of the bitmap's left edge. The lock is the same 26 - focusPx either
-  // way; the legacy branch keeps the literal expression it always had so no float
-  // round trip can move a rounded pixel.
-  const int offset = f.timedCells && f.totalW > 0
-                         ? spotlightOffsetPx(f.totalW, focusPx / (float)f.totalW)
-                         : spotlightOffsetPx(f.totalW, f.prog);
+  const int offset = spotlightLineX(f, focusPx);
+  // The ripple first and the brackets and cue after it, as the browser draws
+  // them; none of the three overlaps the glyph rows, so moving the brackets
+  // below the offset arithmetic changes no pixel of the frame without it.
+  paintChorusHalo(s, f, offset, 2);
+  s.setPixel(19, 1, pal.muted);
+  s.setPixel(32, 1, pal.muted);
+  cueRow(s, pal, 15, f.track, 1);
   for (int i = 0; i < f.n; ++i) {
     Color c;
     if (focusIndex < 0) {
@@ -362,16 +512,23 @@ void paintSpotlight(Surface& s, const FrameCtx& f) {
 // the panel the instant the voice stopped and leave 升降 blank for the whole
 // 13.3 s instrumental that follows (ADR 0008). The line has to stay up until its
 // successor is due — that is what the window means — while the karaoke wipe
-// finishes when the singer does.
+// finishes when the singer does. A break of 3 s or more is the exception: there
+// render() hands the row to the interlude dots before this painter runs.
 void paintCascade(Surface& s, const FrameCtx& f) {
   const Palette& pal = *f.pal;
+  int phase = cascadePhase(f.windowProg, false);
+  int bandY = cascadeBandY(f.windowProg, false);
+  // Only while the line holds still: a ring left behind by a row in flight
+  // would mark where the row was, not where the singer is. Before the track
+  // fill, so a ring off a right-edge glyph never punches a hole in column 51.
+  if (phase == lyricsvisual::CASCADE_HOLD) {
+    paintChorusHalo(s, f, lineStartX(f, MusicScreen::kModeCascade), bandY);
+  }
   int fill = (int)lroundf(lm_unit(f.track) * 16.f);
   for (int step = 0; step < fill; ++step) {
     const Color& c = (step == fill - 1) ? pal.primary : pal.muted;
     s.setPixel(51, 15 - step, c);
   }
-  int phase = cascadePhase(f.windowProg, false);
-  int bandY = cascadeBandY(f.windowProg, false);
   const int focus = focusCell(f);
   int startX = f.totalW <= kViewW ? (kPanelWidth - f.totalW) / 2
                                   : kViewX - scrollOffsetFor(f.totalW, f.prog, MusicScreen::kModeCascade);
@@ -381,6 +538,97 @@ void paintCascade(Surface& s, const FrameCtx& f) {
     else if (phase == CASCADE_EXIT) c = pal.context;
     else c = karaokeColor(pal, i, focus);
     blitGlyph(s, f.cells[i], startX + f.cells[i].startX, bandY, c, kViewX, kViewW);
+  }
+}
+
+// 年轮: the karaoke row of 走带, with each glyph lifting a pixel as it is sung
+// and throwing a ring outward (folia's 52Hz, on a 52 x 16 grid). No cue rows at
+// all: rows 0-1 and 14-15 are where the ring has room on a full line, and a cue
+// drawn over them hid most of it. The browser's paintRings.
+void paintRings(Surface& s, const FrameCtx& f) {
+  const Palette& pal = *f.pal;
+  const int lineX = lineStartX(f, MusicScreen::kModeRings);
+  const int singing = singingCell(f);
+  const int hop = singing >= 0 ? lyricrings::ringsHopPx(f.cursor.frac) : 0;
+  if (singing >= 0) {
+    paintHalo(s, f, singing, lineX, 2, hop, lyricrings::haloRadius(f.cursor.frac));
+  }
+  const int focus = focusCell(f);
+  for (int i = 0; i < f.n; ++i) {
+    const int y = i == singing ? 2 - hop : 2;
+    blitGlyph(s, f.cells[i], lineX + f.cells[i].startX, y, karaokeColor(pal, i, focus), kViewX,
+              kViewW);
+  }
+}
+
+// 倾诉 (mygo/folia's tilt, on one 16-row line): the glyphs surface one after
+// another from just below the row, the one being sung lifts a pixel, and one
+// phrase — chosen per line, the same on every replay — is set in the focus
+// colour with its glyphs up and down by turns. Track cue under it on row 15.
+// The browser's paintTilt.
+void paintTilt(Surface& s, const FrameCtx& f) {
+  const Palette& pal = *f.pal;
+  cueRow(s, pal, 15, f.track, 1);
+  const int lineX = lineStartX(f, MusicScreen::kModeTilt);
+  uint32_t cps[kMaxCells];
+  for (int i = 0; i < f.n; ++i) cps[i] = f.cells[i].cp;
+  int unitFrom[kMaxCells];
+  int unitTo[kMaxCells];
+  const int units = lyricrings::tiltUnits(cps, f.n, unitFrom, unitTo, kMaxCells);
+  const int lean = f.hasLyric && f.lineStartMs >= 0 ? lyricrings::tiltLeanUnit(f.lineStartMs, units)
+                                                    : -1;
+  const int leanFrom = lean >= 0 ? unitFrom[lean] : -1;
+  const int leanTo = lean >= 0 ? unitTo[lean] : -1;
+  const int singing = singingCell(f);
+  const int hop = singing >= 0 ? lyricrings::ringsHopPx(f.cursor.frac) : 0;
+  const int focus = focusCell(f);
+  for (int i = 0; i < f.n; ++i) {
+    const int stage = lyricrings::tiltStage(i, f.sinceLineMs);
+    if (stage == 0) continue;
+    const bool leaning = i >= leanFrom && i < leanTo;
+    int y = 2;
+    if (leaning) y += lyricrings::tiltLeanOffset(i - leanFrom, stage);
+    else if (stage == 1) y += 1;
+    if (i == singing) y -= hop;
+    const Color& c = stage == 1 ? pal.muted : (leaning ? pal.primary : karaokeColor(pal, i, focus));
+    blitGlyph(s, f.cells[i], lineX + f.cells[i].startX, y, c, kViewX, kViewW);
+  }
+}
+
+// 火花: sparks off the glyph being sung, drawn first so everything the mode
+// paints lands on top. Where the glyph sits is the mode's own row — skyline's
+// row 0, cascade's band, spotlight's lock — without the pixel a lift or a lean
+// adds, which no spark this size can show. The browser's paintSparks.
+void paintSparks(Surface& s, const FrameCtx& f, int mode) {
+  if (!f.sparks || !f.hasLyric || f.lineStartMs < 0) return;
+  const int focus = singingCell(f);
+  if (focus < 0) return;
+  int lineY = 2;
+  if (mode == MusicScreen::kModeSkyline) lineY = 0;
+  if (mode == MusicScreen::kModeCascade) {
+    if (cascadePhase(f.windowProg, false) != lyricsvisual::CASCADE_HOLD) return;
+    lineY = cascadeBandY(f.windowProg, false);
+  }
+  const int lineX = mode == MusicScreen::kModeSpotlight ? spotlightLineX(f, spotlightFocusPx(f))
+                                                        : lineStartX(f, mode);
+  const Cell& cell = f.cells[focus];
+  const double hw = (double)cell.width / 2.0;
+  const double cx = (double)(lineX + cell.startX) + hw - 0.5;
+  const double cy = (double)lineY + (double)glyphs::kCellHeight / 2.0 - 0.5;
+  const bool last = focus == f.n - 1;
+  const int count = last ? lyricrings::kSparkCountLast : lyricrings::kSparkCount;
+  const uint32_t seed = (uint32_t)(f.lineStartMs + focus * 7919);
+  const double t = (double)f.cursor.frac;
+  if (t >= 1.0) return;
+  const lyricrings::Tier tier = lyricrings::sparkTier(t);
+  const Color& headColor = tierColor(*f.pal, tier);
+  const Color& tailColor = tierColor(*f.pal, lyricrings::dimmerTier(tier));
+  for (int spark = 0; spark < count; ++spark) {
+    int hx, hy, tx, ty;
+    lyricrings::sparkPixels(cx, cy, hw, (double)glyphs::kCellHeight / 2.0, seed, spark, count, last,
+                            t, &hx, &hy, &tx, &ty);
+    if (tx >= 0 && tx < kPanelWidth && ty >= 0 && ty < kPanelHeight) s.setPixel(tx, ty, tailColor);
+    if (hx >= 0 && hx < kPanelWidth && hy >= 0 && hy < kPanelHeight) s.setPixel(hx, hy, headColor);
   }
 }
 
@@ -429,9 +677,9 @@ void paintIdle(Surface& s, const Palette& pal, float animMs, const char* word, f
 MusicScreen::MusicScreen()
     : mPresent(false), mLinkConfigured(true), mLinkOnline(true), mPlaying(false),
       mPositionMs(0), mDurationMs(0), mStampMs(0), mLyricStartMs(-1), mLyricEndMs(-1),
-      mLyricUntilMs(-1),
+      mLyricUntilMs(-1), mLyricChorus(false),
       mEnteredMs(0), mLyricChangedMs(0), mFlashMs(-1), mAction(kNone),
-      mMode(kModeSpotlight), mSkin(kSkinSignal), mAccentRgb(0), mHasAccent(false),
+      mMode(kModeSpotlight), mSkin(kSkinSignal), mAccentRgb(0), mHasAccent(false), mSparks(false),
       mOptimisticUntilMs(-1), mOptimisticPlaying(false) {}
 
 void MusicScreen::setLink(bool configured, bool online) {
@@ -439,11 +687,12 @@ void MusicScreen::setLink(bool configured, bool online) {
   mLinkOnline = online;
 }
 
-void MusicScreen::setTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent) {
+void MusicScreen::setTheme(int mode, int skin, uint32_t accentRgb, bool hasAccent, bool sparks) {
   if (mode >= 0 && mode < kModeCount) mMode = mode;
   if (skin >= 0 && skin < kSkinCount) mSkin = skin;
   mAccentRgb = accentRgb;
   mHasAccent = hasAccent;
+  mSparks = sparks;
 }
 
 void MusicScreen::setNowPlaying(bool present, const std::string& track,
@@ -451,7 +700,7 @@ void MusicScreen::setNowPlaying(bool present, const std::string& track,
                                 bool playing, int positionMs, int durationMs,
                                 int stampMs, int lyricStartMs, int lyricEndMs,
                                 int lyricUntilMs, const LyricCell* cells,
-                                int cellCount) {
+                                int cellCount, bool lyricChorus) {
   // Keyed on the window when there is one, on the text only when there is not.
   // A chorus that repeats a line verbatim leaves `lyric` unchanged, so keying on
   // equality alone would keep animating the previous line's window with progress
@@ -469,6 +718,7 @@ void MusicScreen::setNowPlaying(bool present, const std::string& track,
   mLyricStartMs = lyricStartMs;
   mLyricEndMs = lyricEndMs;
   mLyricUntilMs = lyricUntilMs;
+  mLyricChorus = lyricChorus;
   // Assigned every time, including to nothing. The table belongs to ONE line, so
   // keeping the previous one through a document that carries none would walk the
   // new line's glyphs at the old line's rate — the wrong-character failure, with
@@ -698,11 +948,32 @@ void MusicScreen::render(Surface& out, int nowMs) {
   f.animMs = animMs;
   f.playing = playing;
   f.hasLyric = hasLyric;
+  f.chorus = hasLyric && mLyricChorus;
+  f.sparks = mSparks;
+  f.lineStartMs = windowed ? mLyricStartMs : -1;
+  // The browser's sinceLineMs: playhead minus the line's start when the line has
+  // a window, everything shown otherwise (a title, or an older service's line).
+  f.sinceLineMs = windowed ? (long)playheadMs(nowMs) - (long)mLyricStartMs : 1L << 30;
 
-  if (mMode == kModeSkyline) paintSkyline(out, f);
-  else if (mMode == kModeSpotlight) paintSpotlight(out, f);
-  else if (mMode == kModeCascade) paintCascade(out, f);
-  else paintTicker(out, f);
+  // An instrumental long enough to be one gives the row up to the dots, in
+  // every mode. Only a service that separates the sung end from the window can
+  // say so (`lyricuntil`), so an older one keeps the held line it always had.
+  float interlude = -1.f;
+  if (windowed && mLyricUntilMs > mLyricEndMs) {
+    interlude = lyricrings::lyricInterludeProgress(mLyricEndMs, mLyricUntilMs, playheadMs(nowMs));
+  }
+
+  if (interlude >= 0.f) {
+    paintInterlude(out, pal, interlude, track, animMs);
+  } else {
+    paintSparks(out, f, mMode);
+    if (mMode == kModeRings) paintRings(out, f);
+    else if (mMode == kModeTilt) paintTilt(out, f);
+    else if (mMode == kModeSkyline) paintSkyline(out, f);
+    else if (mMode == kModeSpotlight) paintSpotlight(out, f);
+    else if (mMode == kModeCascade) paintCascade(out, f);
+    else paintTicker(out, f);
+  }
 
   if (mFlashMs >= 0) {
     const float p = ease::progress(nowMs, mFlashMs, kFlashMs);
