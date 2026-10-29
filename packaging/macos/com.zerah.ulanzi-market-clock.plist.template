@@ -50,8 +50,13 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
 
+  <!-- Standard, not Background: the clock long-polls this service and live
+       frames stream through it at 25 fps. Background is the lowest scheduling
+       tier, and on a busy Mac (load ~37 on 10 cores, measured) it starved the
+       process into 8 s stalls with the CPU idle — the console and the clock
+       both read that as "disconnected". -->
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 
   <key>StandardOutPath</key>
   <string>@@STDOUT_XML@@</string>
